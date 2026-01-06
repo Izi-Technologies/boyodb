@@ -1,0 +1,24 @@
+[package]
+name = "boyodb-ingestor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "boyodb-ingestor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+arrow = { version = "53", features = ["ipc"] }
+chrono = { version = "0.4", features = ["serde"] }
+notify = "6.1"
+walkdir = "2.4"
+base64 = "0.22"

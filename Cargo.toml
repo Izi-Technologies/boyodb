@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "crates/boyodb-core",
+  "bindings/node",
+  "crates/boyodb-cli",
+  "crates/boyodb-server",
+  "crates/boyodb-ingestor",
+  "crates/boyodb-bench",
+]
+exclude = [
+  "drivers/rust/boyodb",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["boyodb authors"]
+
+# Release build optimizations for maximum performance
+[profile.release]
+opt-level = 3           # Maximum optimization
+lto = "thin"            # Link-time optimization (thin for faster builds)
+codegen-units = 1       # Single codegen unit for better optimization
+strip = true            # Strip symbols for smaller binaries
+
+# Profile for profiling (release with debug info)
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false
+
+# Bench profile with maximum performance
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

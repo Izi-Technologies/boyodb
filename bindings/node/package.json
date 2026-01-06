@@ -1,0 +1,17 @@
+{
+  "name": "boyodb-node",
+  "version": "0.1.0",
+  "description": "Node binding for the boyodb Rust core",
+  "main": "index.js",
+  "scripts": {
+    "build": "napi build --release",
+    "build:debug": "napi build",
+    "cli": "node cli.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "apache-arrow": "^13.0.0"
+  }
+}

@@ -1,0 +1,21 @@
+name: bench-core
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"  # weekly, Monday 05:00 UTC
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run core benchmark (release)
+        run: |
+          make bench-core | tee bench.log
+      - name: Upload bench log
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-core-log
+          path: bench.log
