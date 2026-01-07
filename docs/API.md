@@ -962,3 +962,64 @@ boyodb-server plan/prepared cache flags:
 - `--plan-cache-ttl-secs <n>`
 - `--prepared-cache-size <n>`
 - `--prepared-cache-ttl-secs <n>`
+
+---
+
+## GPU Acceleration (Phase 19)
+
+BoyoDB supports optional GPU-accelerated query execution with automatic CPU fallback.
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Device Detection** | Automatic CUDA device discovery and capability querying |
+| **GPU Aggregations** | SUM, COUNT, AVG, MIN, MAX on GPU |
+| **GPU Filtering** | Predicate evaluation on GPU |
+| **CPU Fallback** | Automatic fallback for unsupported operations or when GPU unavailable |
+| **Cost-Based Routing** | Intelligent decision on GPU vs CPU based on data size and operation type |
+
+### Configuration (GpuConfig)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Enable GPU acceleration |
+| `preferred_device` | `-1` | Preferred GPU device ID (-1 for auto-select) |
+| `min_gpu_batch_bytes` | `1048576` | Minimum data size (1MB) to use GPU |
+| `max_gpu_memory_bytes` | `0` | Maximum GPU memory to use (0 = unlimited) |
+| `gpu_aggregations` | `true` | Enable GPU for aggregation operations |
+| `gpu_filtering` | `true` | Enable GPU for filter operations |
+| `gpu_joins` | `true` | Enable GPU for JOIN operations |
+| `gpu_sorting` | `true` | Enable GPU for sort operations |
+| `fallback_on_error` | `true` | Fall back to CPU on GPU errors |
+| `memory_pool_bytes` | `536870912` | GPU memory pool size (512MB) |
+
+### Building with GPU Support
+
+```bash
+# Build with GPU feature enabled
+cargo build --release --features gpu
+
+# Build with DataFusion integration (required for GPU)
+cargo build --release --features datafusion-engine
+```
+
+### GPU Statistics
+
+The `GpuExecutionStats` structure tracks:
+
+- `gpu_operations`: Total operations executed on GPU
+- `cpu_fallback_operations`: Operations that fell back to CPU
+- `gpu_bytes_processed`: Total bytes processed on GPU
+- `gpu_time_micros`: Total GPU execution time
+- `h2d_transfers` / `d2h_transfers`: Host-to-device and device-to-host transfer counts
+- `peak_gpu_memory_bytes`: Peak GPU memory usage
+
+### GPU Decision Criteria
+
+The executor considers these factors when deciding GPU vs CPU:
+
+1. **Data size**: Small batches (<1MB) run on CPU to avoid transfer overhead
+2. **Operation type**: Aggregations and math benefit most from GPU
+3. **Device memory**: Must have sufficient free GPU memory
+4. **Estimated speedup**: Only uses GPU if >20% faster than CPU

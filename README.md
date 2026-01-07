@@ -143,6 +143,7 @@ boyodb-server /data 0.0.0.0:8765 \
 - **Admission Control**: Query queue management
 
 ### Advanced Features
+- **GPU Acceleration**: Optional CUDA-based query execution with automatic CPU fallback
 - **Materialized Views**: Automatic refresh with CDC support
 - **Streaming Ingestion**: Kafka and Pulsar consumers
 - **Data Lake Integration**: Delta Lake-style transactions
@@ -362,8 +363,8 @@ cd bindings/go && go build ./...
 - [x] Phase 15: High availability, automatic failover
 - [x] Phase 16: Resource governance, workload isolation
 - [x] Phase 17: Tooling (boyodb-local, import/export)
-- [ ] Phase 18: Distributed query execution
-- [ ] Phase 19: GPU acceleration (DataFusion integration)
+- [x] Phase 18: Distributed query execution
+- [x] Phase 19: GPU acceleration (DataFusion integration)
 - [ ] Phase 20: Kubernetes operator
 
 ## Contributing
