@@ -9,6 +9,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use rand::rngs::OsRng;
+use rand::RngCore;
+
 // ============================================================================
 // Row-Level Security (RLS)
 // ============================================================================
@@ -1025,51 +1030,78 @@ impl EncryptedValue {
             return Err(EncryptionError::InvalidData("Empty data".to_string()));
         }
 
+        fn read_u8(data: &[u8], pos: &mut usize) -> Result<u8, EncryptionError> {
+            if *pos >= data.len() {
+                return Err(EncryptionError::InvalidData(
+                    "Unexpected end of data".to_string(),
+                ));
+            }
+            let value = data[*pos];
+            *pos += 1;
+            Ok(value)
+        }
+
+        fn read_slice<'a>(
+            data: &'a [u8],
+            pos: &mut usize,
+            len: usize,
+        ) -> Result<&'a [u8], EncryptionError> {
+            if *pos + len > data.len() {
+                return Err(EncryptionError::InvalidData(
+                    "Encrypted value is truncated".to_string(),
+                ));
+            }
+            let slice = &data[*pos..*pos + len];
+            *pos += len;
+            Ok(slice)
+        }
+
         let mut pos = 0;
 
         // Version
-        let _version = data[pos];
-        pos += 1;
+        let _version = read_u8(data, &mut pos)?;
 
         // Key ID
-        let key_id_len = data[pos] as usize;
-        pos += 1;
-        let key_id = String::from_utf8(data[pos..pos + key_id_len].to_vec())
+        let key_id_len = read_u8(data, &mut pos)? as usize;
+        let key_id_bytes = read_slice(data, &mut pos, key_id_len)?;
+        let key_id = String::from_utf8(key_id_bytes.to_vec())
             .map_err(|_| EncryptionError::InvalidData("Invalid key ID".to_string()))?;
-        pos += key_id_len;
 
         // Key version
-        let key_version = u32::from_le_bytes(data[pos..pos + 4].try_into()
-            .map_err(|_| EncryptionError::InvalidData("Invalid key version".to_string()))?);
-        pos += 4;
+        let key_version_bytes = read_slice(data, &mut pos, 4)?;
+        let key_version = u32::from_le_bytes(
+            key_version_bytes
+                .try_into()
+                .map_err(|_| EncryptionError::InvalidData("Invalid key version".to_string()))?,
+        );
 
         // Algorithm
-        let algorithm = match data[pos] {
+        let algorithm = match read_u8(data, &mut pos)? {
             1 => EncryptionAlgorithm::Aes256Gcm,
             2 => EncryptionAlgorithm::Aes256CbcHmac,
             3 => EncryptionAlgorithm::ChaCha20Poly1305,
             4 => EncryptionAlgorithm::DeterministicAes256,
             _ => return Err(EncryptionError::InvalidData("Unknown algorithm".to_string())),
         };
-        pos += 1;
 
         // IV
-        let iv_len = data[pos] as usize;
-        pos += 1;
-        let iv = data[pos..pos + iv_len].to_vec();
-        pos += iv_len;
+        let iv_len = read_u8(data, &mut pos)? as usize;
+        let iv = read_slice(data, &mut pos, iv_len)?.to_vec();
 
         // Tag
-        let tag_len = data[pos] as usize;
-        pos += 1;
+        let tag_len = read_u8(data, &mut pos)? as usize;
         let tag = if tag_len > 0 {
-            Some(data[pos..pos + tag_len].to_vec())
+            Some(read_slice(data, &mut pos, tag_len)?.to_vec())
         } else {
             None
         };
-        pos += tag_len;
 
         // Ciphertext
+        if pos > data.len() {
+            return Err(EncryptionError::InvalidData(
+                "Encrypted value is truncated".to_string(),
+            ));
+        }
         let ciphertext = data[pos..].to_vec();
 
         Ok(Self {
@@ -1110,14 +1142,8 @@ impl ColumnEncryptionManager {
     /// Create a new encryption key
     pub fn create_key(&self, id: &str, algorithm: EncryptionAlgorithm) -> Result<EncryptionKey, EncryptionError> {
         // Generate random key material (32 bytes for AES-256)
-        let key_material: Vec<u8> = (0..32).map(|i| {
-            // Simple PRNG for demo (use proper crypto RNG in production)
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            ((seed.wrapping_mul(i as u64 + 1).wrapping_add(i as u64)) % 256) as u8
-        }).collect();
+        let mut key_material = vec![0u8; 32];
+        OsRng.fill_bytes(&mut key_material);
 
         let key = EncryptionKey::new(id, algorithm, key_material);
 
@@ -1155,13 +1181,8 @@ impl ColumnEncryptionManager {
         }
 
         // Generate new key material
-        let key_material: Vec<u8> = (0..32).map(|i| {
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            ((seed.wrapping_mul(i as u64 + 7).wrapping_add(new_version as u64)) % 256) as u8
-        }).collect();
+        let mut key_material = vec![0u8; 32];
+        OsRng.fill_bytes(&mut key_material);
 
         let mut new_key = EncryptionKey::new(id, algorithm, key_material);
         new_key.version = new_version;
@@ -1210,34 +1231,40 @@ impl ColumnEncryptionManager {
         let key = self.get_key(key_id)
             .ok_or_else(|| EncryptionError::KeyNotFound(key_id.to_string()))?;
 
-        // Generate IV/nonce
-        let iv: Vec<u8> = (0..12).map(|i| {
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            ((seed.wrapping_mul(i as u64 + 3)) % 256) as u8
-        }).collect();
+        match key.algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                let cipher = Aes256Gcm::new_from_slice(&key.key_material)
+                    .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
 
-        // Simple XOR "encryption" for demo (use proper crypto in production)
-        let ciphertext: Vec<u8> = plaintext.iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ key.key_material[i % key.key_material.len()] ^ iv[i % iv.len()])
-            .collect();
+                let mut iv = [0u8; 12];
+                OsRng.fill_bytes(&mut iv);
+                let nonce = Nonce::from_slice(&iv);
 
-        // Generate tag (simplified)
-        let tag: Vec<u8> = (0..16).map(|i| {
-            ciphertext.get(i).unwrap_or(&0) ^ key.key_material[i % key.key_material.len()]
-        }).collect();
+                let ciphertext_and_tag = cipher
+                    .encrypt(nonce, plaintext)
+                    .map_err(|e| EncryptionError::EncryptionFailed(e.to_string()))?;
+                if ciphertext_and_tag.len() < 16 {
+                    return Err(EncryptionError::EncryptionFailed(
+                        "ciphertext too short".to_string(),
+                    ));
+                }
+                let tag_start = ciphertext_and_tag.len() - 16;
+                let ciphertext = ciphertext_and_tag[..tag_start].to_vec();
+                let tag = ciphertext_and_tag[tag_start..].to_vec();
 
-        Ok(EncryptedValue {
-            key_id: key.id,
-            key_version: key.version,
-            algorithm: key.algorithm,
-            iv,
-            ciphertext,
-            tag: Some(tag),
-        })
+                Ok(EncryptedValue {
+                    key_id: key.id,
+                    key_version: key.version,
+                    algorithm: key.algorithm,
+                    iv: iv.to_vec(),
+                    ciphertext,
+                    tag: Some(tag),
+                })
+            }
+            _ => Err(EncryptionError::EncryptionFailed(
+                "unsupported encryption algorithm".to_string(),
+            )),
+        }
     }
 
     /// Decrypt a value
@@ -1251,13 +1278,37 @@ impl ColumnEncryptionManager {
             .find(|k| k.version == encrypted.key_version)
             .ok_or_else(|| EncryptionError::KeyVersionNotFound(encrypted.key_id.clone(), encrypted.key_version))?;
 
-        // Simple XOR "decryption" for demo
-        let plaintext: Vec<u8> = encrypted.ciphertext.iter()
-            .enumerate()
-            .map(|(i, &b)| b ^ key.key_material[i % key.key_material.len()] ^ encrypted.iv[i % encrypted.iv.len()])
-            .collect();
+        match key.algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                if encrypted.iv.len() != 12 {
+                    return Err(EncryptionError::DecryptionFailed(
+                        "invalid nonce length".to_string(),
+                    ));
+                }
+                let tag = encrypted
+                    .tag
+                    .as_ref()
+                    .ok_or_else(|| EncryptionError::DecryptionFailed("missing tag".to_string()))?;
+                if tag.len() != 16 {
+                    return Err(EncryptionError::DecryptionFailed(
+                        "invalid tag length".to_string(),
+                    ));
+                }
+                let mut ciphertext_and_tag = Vec::with_capacity(encrypted.ciphertext.len() + tag.len());
+                ciphertext_and_tag.extend_from_slice(&encrypted.ciphertext);
+                ciphertext_and_tag.extend_from_slice(tag);
 
-        Ok(plaintext)
+                let cipher = Aes256Gcm::new_from_slice(&key.key_material)
+                    .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))?;
+                let nonce = Nonce::from_slice(&encrypted.iv);
+                cipher
+                    .decrypt(nonce, ciphertext_and_tag.as_ref())
+                    .map_err(|e| EncryptionError::DecryptionFailed(e.to_string()))
+            }
+            _ => Err(EncryptionError::DecryptionFailed(
+                "unsupported encryption algorithm".to_string(),
+            )),
+        }
     }
 
     /// Encrypt with column policy

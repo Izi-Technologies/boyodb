@@ -28,8 +28,58 @@ impl TieredStorage {
             if let Some(endpoint) = &cfg.s3_endpoint {
                 builder = builder.with_endpoint(endpoint);
             }
+            if cfg.s3_access_key.is_some() ^ cfg.s3_secret_key.is_some() {
+                return Err(EngineError::Configuration(
+                    "s3_access_key and s3_secret_key must be provided together".into(),
+                ));
+            }
             if let (Some(ak), Some(sk)) = (&cfg.s3_access_key, &cfg.s3_secret_key) {
-                builder = builder.with_access_key_id(ak).with_secret_access_key(sk);
+                let ak_trimmed = ak.trim();
+                let sk_trimmed = sk.trim();
+                if ak_trimmed.is_empty() || sk_trimmed.is_empty() {
+                    return Err(EngineError::Configuration(
+                        "s3_access_key and s3_secret_key must be non-empty".into(),
+                    ));
+                }
+                // Check for common placeholder/weak credentials
+                const WEAK_CREDENTIALS: &[&str] = &[
+                    "changeme",
+                    "password",
+                    "secret",
+                    "admin",
+                    "test",
+                    "example",
+                    "your-access-key",
+                    "your-secret-key",
+                    "xxx",
+                    "yyy",
+                    "placeholder",
+                    "replace-me",
+                    "insert-key-here",
+                    "minioadmin", // Default minio credentials
+                    "minio",
+                    "accesskey",
+                    "secretkey",
+                ];
+                let ak_lower = ak_trimmed.to_lowercase();
+                let sk_lower = sk_trimmed.to_lowercase();
+                for weak in WEAK_CREDENTIALS {
+                    if ak_lower == *weak || sk_lower == *weak {
+                        return Err(EngineError::Configuration(format!(
+                            "s3_access_key and s3_secret_key must not be weak/placeholder values (detected: '{}')",
+                            weak
+                        )));
+                    }
+                }
+                // Also reject keys that are too short (real AWS keys are 20+ chars)
+                if ak_trimmed.len() < 16 || sk_trimmed.len() < 16 {
+                    return Err(EngineError::Configuration(
+                        "s3_access_key and s3_secret_key appear too short to be valid credentials".into(),
+                    ));
+                }
+                builder = builder
+                    .with_access_key_id(ak_trimmed)
+                    .with_secret_access_key(sk_trimmed);
             }
             // Allow http for local minio/testing
             builder = builder.with_allow_http(true);

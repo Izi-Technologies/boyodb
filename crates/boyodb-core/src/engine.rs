@@ -192,6 +192,16 @@ pub struct EngineConfig {
     pub plan_cache_ttl_secs: u64,
     /// Row granularity for index-like batch sizing (0 = disabled)
     pub index_granularity_rows: usize,
+    /// Maximum bytes allowed for in-memory joins before spilling
+    pub join_max_bytes: usize,
+    /// Target bytes per join partition when spilling to disk
+    pub join_partition_bytes: u64,
+    /// Maximum number of join partitions
+    pub join_max_partitions: usize,
+    /// Maximum rows allowed for CROSS JOIN
+    pub cross_join_max_rows: usize,
+    /// Maximum bytes allowed for set operation inputs
+    pub set_operation_max_bytes: usize,
 }
 
 impl EngineConfig {
@@ -249,6 +259,11 @@ impl EngineConfig {
             plan_cache_size: 10_000,   // 10K plans
             plan_cache_ttl_secs: 300,  // 5 minutes
             index_granularity_rows: 0,
+            join_max_bytes: 200 * 1024 * 1024,
+            join_partition_bytes: 64 * 1024 * 1024,
+            join_max_partitions: 128,
+            cross_join_max_rows: 1_000_000,
+            set_operation_max_bytes: 200 * 1024 * 1024,
         }
     }
 
@@ -441,6 +456,31 @@ impl EngineConfig {
 
     pub fn with_index_granularity_rows(mut self, rows: usize) -> Self {
         self.index_granularity_rows = rows;
+        self
+    }
+
+    pub fn with_join_max_bytes(mut self, bytes: usize) -> Self {
+        self.join_max_bytes = bytes;
+        self
+    }
+
+    pub fn with_join_partition_bytes(mut self, bytes: u64) -> Self {
+        self.join_partition_bytes = bytes;
+        self
+    }
+
+    pub fn with_join_max_partitions(mut self, partitions: usize) -> Self {
+        self.join_max_partitions = partitions.max(1);
+        self
+    }
+
+    pub fn with_cross_join_max_rows(mut self, rows: usize) -> Self {
+        self.cross_join_max_rows = rows.max(1);
+        self
+    }
+
+    pub fn with_set_operation_max_bytes(mut self, bytes: usize) -> Self {
+        self.set_operation_max_bytes = bytes;
         self
     }
 
@@ -3046,11 +3086,9 @@ impl Db {
         use crate::sql::{parse_sql, JoinType, SqlStatement};
         use arrow_ipc::writer::StreamWriter;
 
-        // Maximum combined data size for in-memory join (200MB for multiple JOINs)
-        const MAX_JOIN_DATA_BYTES: usize = 200 * 1024 * 1024;
-        // Target partition size for external hash join
-        const MAX_JOIN_PARTITION_BYTES: u64 = 64 * 1024 * 1024;
-        const MAX_JOIN_PARTITIONS: usize = 128;
+        let max_join_bytes = self.cfg.join_max_bytes;
+        let join_partition_bytes = self.cfg.join_partition_bytes;
+        let join_max_partitions = self.cfg.join_max_partitions.max(1);
 
         // Parse the SQL to get JOIN information
         let parsed = match parse_sql(&request.sql)? {
@@ -3116,7 +3154,7 @@ impl Db {
             );
             remaining_filter = next_remaining;
 
-            if total_bytes as usize > MAX_JOIN_DATA_BYTES {
+            if total_bytes as usize > max_join_bytes {
                 if join.join_type == JoinType::Cross {
                     return Err(EngineError::InvalidArgument(
                         "CROSS JOIN spill is not supported; add WHERE filters or reduce JOIN size"
@@ -3125,9 +3163,9 @@ impl Db {
                 }
 
                 let max_side_bytes = left_bytes.max(right_size);
-                let mut partitions = (max_side_bytes + MAX_JOIN_PARTITION_BYTES - 1)
-                    / MAX_JOIN_PARTITION_BYTES;
-                partitions = partitions.max(1).min(MAX_JOIN_PARTITIONS as u64);
+                let mut partitions = (max_side_bytes + join_partition_bytes - 1)
+                    / join_partition_bytes;
+                partitions = partitions.max(1).min(join_max_partitions as u64);
                 let partitions = (partitions as usize).next_power_of_two();
 
                 let tmp = TempDir::new()
@@ -3271,7 +3309,7 @@ impl Db {
                 segments_scanned += right_entries.len();
                 if join_idx + 1 < parsed.joins.len() && !current_batches.is_empty() {
                     let joined_bytes = Self::estimate_batches_bytes(&current_batches);
-                    if joined_bytes > MAX_JOIN_DATA_BYTES as u64 {
+                    if joined_bytes > max_join_bytes as u64 {
                         let tmp = TempDir::new()
                             .map_err(|e| EngineError::Io(format!("create join spill dir failed: {e}")))?;
                         let path = tmp.path().join("spill.ipc");
@@ -3337,7 +3375,7 @@ impl Db {
             // Perform the join based on type
             let joined_batch = match join.join_type {
                 JoinType::Cross => {
-                    Self::cross_join_batches(&current_batches, &right_batches)?
+                    self.cross_join_batches(&current_batches, &right_batches)?
                 }
                 JoinType::Inner => {
                     if current_batches.is_empty() || right_batches.is_empty() {
@@ -3394,7 +3432,7 @@ impl Db {
             };
             if join_idx + 1 < parsed.joins.len() && !current_batches.is_empty() {
                 let joined_bytes = Self::estimate_batches_bytes(&current_batches);
-                if joined_bytes > MAX_JOIN_DATA_BYTES as u64 {
+                if joined_bytes > max_join_bytes as u64 {
                     let tmp = TempDir::new()
                         .map_err(|e| EngineError::Io(format!("create join spill dir failed: {e}")))?;
                     let path = tmp.path().join("spill.ipc");
@@ -3475,6 +3513,7 @@ impl Db {
 
     /// Perform CROSS JOIN (Cartesian product) of two tables
     fn cross_join_batches(
+        &self,
         left_batches: &[RecordBatch],
         right_batches: &[RecordBatch],
     ) -> Result<Option<RecordBatch>, EngineError> {
@@ -3512,14 +3551,13 @@ impl Db {
             return Ok(None);
         }
 
-        // Limit cross join size to prevent memory explosion
-        const MAX_CROSS_JOIN_ROWS: usize = 1_000_000;
+        let max_cross_join_rows = self.cfg.cross_join_max_rows;
         let result_rows = left_total.saturating_mul(right_total);
-        if result_rows > MAX_CROSS_JOIN_ROWS {
+        if result_rows > max_cross_join_rows {
             return Err(EngineError::InvalidArgument(format!(
                 "CROSS JOIN would produce {} rows, exceeding limit of {}. \
                  Add WHERE clause or use a different join type.",
-                result_rows, MAX_CROSS_JOIN_ROWS
+                result_rows, max_cross_join_rows
             )));
         }
 
@@ -4135,6 +4173,8 @@ impl Db {
         use crate::sql::{parse_sql, SetOpType, SqlStatement};
         use arrow_ipc::writer::StreamWriter;
 
+        let max_set_operation_bytes = self.cfg.set_operation_max_bytes;
+
         // Check timeout helper
         let check_timeout = || -> Result<(), EngineError> {
             if let Some(dl) = deadline {
@@ -4211,6 +4251,14 @@ impl Db {
         };
         let right_response = self.query(right_request)?;
         check_timeout()?;
+
+        let total_ipc_bytes = left_response.records_ipc.len() + right_response.records_ipc.len();
+        if total_ipc_bytes > max_set_operation_bytes {
+            return Err(EngineError::InvalidArgument(format!(
+                "set operation inputs exceed size limit ({} bytes > {})",
+                total_ipc_bytes, max_set_operation_bytes
+            )));
+        }
 
         // Decode both results
         let left_batches = Self::decode_ipc_batches(&left_response.records_ipc)?;
@@ -14013,6 +14061,105 @@ fn replace_cte_reference_with_values(
     cte_name: &str,
     current_batches: &[RecordBatch],
 ) -> Result<String, EngineError> {
+    fn is_safe_cte_name(name: &str) -> bool {
+        if name.is_empty() || name.len() > 128 {
+            return false;
+        }
+        let mut chars = name.chars();
+        let first = match chars.next() {
+            Some(c) => c,
+            None => return false,
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    fn sql_literal_for_value(
+        col: &ArrayRef,
+        row_idx: usize,
+    ) -> Result<String, EngineError> {
+        use arrow_array::{
+            BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
+            UInt64Array, LargeStringArray,
+        };
+
+        if col.is_null(row_idx) {
+            return Ok("NULL".to_string());
+        }
+
+        match col.data_type() {
+            arrow_schema::DataType::Utf8 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| EngineError::Internal("invalid Utf8 array".into()))?;
+                let value = arr.value(row_idx).replace('\'', "''");
+                Ok(format!("'{}'", value))
+            }
+            arrow_schema::DataType::LargeUtf8 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| EngineError::Internal("invalid LargeUtf8 array".into()))?;
+                let value = arr.value(row_idx).replace('\'', "''");
+                Ok(format!("'{}'", value))
+            }
+            arrow_schema::DataType::Int64 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| EngineError::Internal("invalid Int64 array".into()))?;
+                Ok(arr.value(row_idx).to_string())
+            }
+            arrow_schema::DataType::Int32 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .ok_or_else(|| EngineError::Internal("invalid Int32 array".into()))?;
+                Ok(arr.value(row_idx).to_string())
+            }
+            arrow_schema::DataType::UInt64 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| EngineError::Internal("invalid UInt64 array".into()))?;
+                Ok(arr.value(row_idx).to_string())
+            }
+            arrow_schema::DataType::Float64 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| EngineError::Internal("invalid Float64 array".into()))?;
+                Ok(arr.value(row_idx).to_string())
+            }
+            arrow_schema::DataType::Float32 => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Float32Array>()
+                    .ok_or_else(|| EngineError::Internal("invalid Float32 array".into()))?;
+                Ok(arr.value(row_idx).to_string())
+            }
+            arrow_schema::DataType::Boolean => {
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| EngineError::Internal("invalid Boolean array".into()))?;
+                Ok(if arr.value(row_idx) { "true" } else { "false" }.to_string())
+            }
+            other => Err(EngineError::InvalidArgument(format!(
+                "unsupported CTE value type: {other}"
+            ))),
+        }
+    }
+
+    if !is_safe_cte_name(cte_name) {
+        return Err(EngineError::InvalidArgument(
+            "invalid CTE name".into(),
+        ));
+    }
+
     // If no data, return a query that returns no results
     if current_batches.is_empty() || current_batches.iter().all(|b| b.num_rows() == 0) {
         // Return a query that produces empty results with the same structure
@@ -14034,16 +14181,8 @@ fn replace_cte_reference_with_values(
             let mut row_values = Vec::new();
             for col_idx in 0..num_cols {
                 let col = batch.column(col_idx);
-                let val = Db::extract_column_value_as_string(col, row_idx);
-                // Quote strings, leave numbers as-is
-                if matches!(
-                    col.data_type(),
-                    arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8
-                ) {
-                    row_values.push(format!("'{}'", val.replace('\'', "''")));
-                } else {
-                    row_values.push(val);
-                }
+                let val = sql_literal_for_value(col, row_idx)?;
+                row_values.push(val);
             }
             value_rows.push(format!("({})", row_values.join(", ")));
         }

@@ -1293,8 +1293,10 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         let username = tokens
             .get(2)
             .ok_or_else(|| EngineError::InvalidArgument("DROP USER requires username".into()))?;
+        let username = unquote(username);
+        validate_ident(&username, false, "username")?;
         return Ok(Some(AuthCommand::DropUser {
-            username: unquote(username),
+            username,
         }));
     }
 
@@ -1310,8 +1312,10 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         let username = tokens
             .get(2)
             .ok_or_else(|| EngineError::InvalidArgument("LOCK USER requires username".into()))?;
+        let username = unquote(username);
+        validate_ident(&username, false, "username")?;
         return Ok(Some(AuthCommand::LockUser {
-            username: unquote(username),
+            username,
         }));
     }
 
@@ -1320,8 +1324,10 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         let username = tokens
             .get(2)
             .ok_or_else(|| EngineError::InvalidArgument("UNLOCK USER requires username".into()))?;
+        let username = unquote(username);
+        validate_ident(&username, false, "username")?;
         return Ok(Some(AuthCommand::UnlockUser {
-            username: unquote(username),
+            username,
         }));
     }
 
@@ -1335,8 +1341,10 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         let name = tokens
             .get(2)
             .ok_or_else(|| EngineError::InvalidArgument("DROP ROLE requires role name".into()))?;
+        let name = unquote(name);
+        validate_ident(&name, false, "role name")?;
         return Ok(Some(AuthCommand::DropRole {
-            name: unquote(name),
+            name,
         }));
     }
 
@@ -1365,8 +1373,10 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         let username = tokens.get(3).ok_or_else(|| {
             EngineError::InvalidArgument("SHOW GRANTS FOR requires username".into())
         })?;
+        let username = unquote(username).trim_end_matches(';').to_string();
+        validate_ident(&username, false, "username")?;
         return Ok(Some(AuthCommand::ShowGrants {
-            username: unquote(username).trim_end_matches(';').to_string(),
+            username,
         }));
     }
 
@@ -1381,6 +1391,7 @@ fn parse_create_user(sql: &str) -> Result<AuthCommand, EngineError> {
         .get(2)
         .ok_or_else(|| EngineError::InvalidArgument("CREATE USER requires username".into()))?;
     let username = unquote(username);
+    validate_ident(&username, false, "username")?;
 
     // Locate the PASSWORD keyword by token to avoid substring collisions
     let password_token_idx = tokens
@@ -1421,9 +1432,9 @@ fn parse_create_user(sql: &str) -> Result<AuthCommand, EngineError> {
         if upper == "DEFAULT" {
             if let (Some(db_kw), Some(db_token)) = (tokens.get(i + 1), tokens.get(i + 2)) {
                 if db_kw.eq_ignore_ascii_case("DATABASE") {
-                    options
-                        .default_database
-                        .replace(unquote(db_token.trim_end_matches(';')));
+                    let database = unquote(db_token.trim_end_matches(';'));
+                    validate_ident(&database, false, "database")?;
+                    options.default_database.replace(database);
                     i += 3;
                     continue;
                 }
@@ -1464,6 +1475,7 @@ fn parse_alter_user(sql: &str) -> Result<AuthCommand, EngineError> {
         .get(2)
         .ok_or_else(|| EngineError::InvalidArgument("ALTER USER requires username".into()))?;
     let username = unquote(username);
+    validate_ident(&username, false, "username")?;
 
     // ALTER USER username SET PASSWORD 'newpass'
     if upper.contains("SET PASSWORD") {
@@ -1493,7 +1505,16 @@ fn parse_alter_user(sql: &str) -> Result<AuthCommand, EngineError> {
         if let Some(idx) = upper.find("DATABASE") {
             let after_db = &sql[idx + 8..];
             let database = extract_quoted_string(after_db.trim());
-            return Ok(AuthCommand::AlterUserDefaultDb { username, database });
+            let database = database.ok_or_else(|| {
+                EngineError::InvalidArgument(
+                    "DEFAULT DATABASE must be followed by a quoted string".into(),
+                )
+            })?;
+            validate_ident(&database, false, "database")?;
+            return Ok(AuthCommand::AlterUserDefaultDb {
+                username,
+                database: Some(database),
+            });
         }
     }
 
@@ -1511,6 +1532,7 @@ fn parse_create_role(sql: &str) -> Result<AuthCommand, EngineError> {
         .get(2)
         .ok_or_else(|| EngineError::InvalidArgument("CREATE ROLE requires role name".into()))?;
     let name = unquote(name);
+    validate_ident(&name, false, "role name")?;
 
     let mut description = None;
 
@@ -1534,10 +1556,14 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
             let role = sql[6..to_idx].trim();
             let after_to = &sql[to_idx + 4..];
             let username = after_to.trim().trim_end_matches(';');
+            let role = unquote(role);
+            let username = unquote(username);
+            validate_ident(&role, false, "role name")?;
+            validate_ident(&username, false, "username")?;
 
             return Ok(AuthCommand::GrantRole {
-                role: unquote(role),
-                username: unquote(username),
+                role,
+                username,
             });
         }
     }
@@ -1573,16 +1599,18 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
 
     let grantee = after_to[..grantee_end].trim().trim_end_matches(';');
     let grantee_is_role = upper.contains("TO ROLE ");
+    let grantee = unquote(
+        grantee
+            .trim_start_matches("ROLE ")
+            .trim_start_matches("role "),
+    );
+    validate_ident(&grantee, false, "grantee")?;
 
     Ok(AuthCommand::Grant {
         privileges,
         target_type,
         target_name,
-        grantee: unquote(
-            grantee
-                .trim_start_matches("ROLE ")
-                .trim_start_matches("role "),
-        ),
+        grantee,
         grantee_is_role,
         with_grant_option: with_grant,
     })
@@ -1599,10 +1627,14 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
             let role = sql[7..from_idx].trim();
             let after_from = &sql[from_idx + 6..];
             let username = after_from.trim().trim_end_matches(';');
+            let role = unquote(role);
+            let username = unquote(username);
+            validate_ident(&role, false, "role name")?;
+            validate_ident(&username, false, "username")?;
 
             return Ok(AuthCommand::RevokeRole {
-                role: unquote(role),
-                username: unquote(username),
+                role,
+                username,
             });
         }
     }
@@ -1627,16 +1659,18 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
     let after_from = &sql[from_idx + 6..];
     let grantee = after_from.trim().trim_end_matches(';');
     let grantee_is_role = upper.contains("FROM ROLE ");
+    let grantee = unquote(
+        grantee
+            .trim_start_matches("ROLE ")
+            .trim_start_matches("role "),
+    );
+    validate_ident(&grantee, false, "grantee")?;
 
     Ok(AuthCommand::Revoke {
         privileges,
         target_type,
         target_name,
-        grantee: unquote(
-            grantee
-                .trim_start_matches("ROLE ")
-                .trim_start_matches("role "),
-        ),
+        grantee,
         grantee_is_role,
     })
 }
@@ -1651,21 +1685,29 @@ fn parse_grant_target(target_str: &str) -> Result<(GrantTargetType, Option<Strin
 
     if upper.starts_with("DATABASE ") {
         let name = target_str.trim()[9..].trim();
-        return Ok((GrantTargetType::Database, Some(unquote(name))));
+        let name = unquote(name);
+        validate_ident(&name, false, "database")?;
+        return Ok((GrantTargetType::Database, Some(name)));
     }
 
     if upper.starts_with("ALL TABLES IN DATABASE ") {
         let name = target_str.trim()[23..].trim();
-        return Ok((GrantTargetType::AllTablesInDatabase, Some(unquote(name))));
+        let name = unquote(name);
+        validate_ident(&name, false, "database")?;
+        return Ok((GrantTargetType::AllTablesInDatabase, Some(name)));
     }
 
     if upper.starts_with("TABLE ") {
         let name = target_str.trim()[6..].trim();
-        return Ok((GrantTargetType::Table, Some(unquote(name))));
+        let name = unquote(name);
+        validate_ident(&name, true, "table")?;
+        return Ok((GrantTargetType::Table, Some(name)));
     }
 
     // Default: treat as table name
-    Ok((GrantTargetType::Table, Some(unquote(target_str.trim()))))
+    let name = unquote(target_str.trim());
+    validate_ident(&name, true, "table")?;
+    Ok((GrantTargetType::Table, Some(name)))
 }
 
 /// Extract a quoted string from the beginning of text
@@ -1683,16 +1725,7 @@ fn extract_quoted_string(text: &str) -> Option<String> {
         let end = stripped.find('"')?;
         return Some(stripped[..end].to_string());
     }
-
-    // Unquoted (take until whitespace or semicolon)
-    let end = text
-        .find(|c: char| c.is_whitespace() || c == ';')
-        .unwrap_or(text.len());
-    if end > 0 {
-        Some(text[..end].to_string())
-    } else {
-        None
-    }
+    None
 }
 
 /// Remove quotes from a string
@@ -1703,6 +1736,39 @@ fn unquote(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+fn validate_ident(name: &str, allow_dot: bool, context: &str) -> Result<(), EngineError> {
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(format!(
+            "{} cannot be empty",
+            context
+        )));
+    }
+    let parts: Vec<&str> = if allow_dot {
+        name.split('.').collect()
+    } else {
+        vec![name]
+    };
+    for part in parts {
+        let mut chars = part.chars();
+        let first = chars.next().ok_or_else(|| {
+            EngineError::InvalidArgument(format!("{} cannot be empty", context))
+        })?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return Err(EngineError::InvalidArgument(format!(
+                "{} has invalid start character",
+                context
+            )));
+        }
+        if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(EngineError::InvalidArgument(format!(
+                "{} has invalid characters",
+                context
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Conflict action for UPSERT operations

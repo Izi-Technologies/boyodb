@@ -81,6 +81,26 @@ Server flags (boyodb-server startup):
 | `--cache-cold-segments <BOOL>` | Cache Cold segments in memory | No |
 | `--wal-sync-bytes <BYTES>` | Fsync WAL after N bytes (0 = strict mode) | No |
 | `--wal-sync-interval-ms <MS>` | Fsync WAL every N ms (0 = immediate) | No |
+| `--join-max-bytes <BYTES>` | Max in-memory bytes for JOINs before spilling (default: 200MB) | No |
+| `--join-partition-bytes <BYTES>` | Target partition size when spilling JOINs (default: 64MB) | No |
+| `--join-max-partitions <N>` | Max number of join partitions (default: 128) | No |
+| `--cross-join-max-rows <N>` | Max rows allowed for CROSS JOIN (default: 1M) | No |
+| `--set-operation-max-bytes <BYTES>` | Max bytes for UNION/INTERSECT/EXCEPT inputs (default: 200MB) | No |
+
+**Authentication flags:**
+
+| Option | Description | Required |
+|--------|-------------|----------|
+| `--auth` | Enable user authentication | No |
+| `--token <TOKEN>` | Simple token-based authentication | No |
+
+**Environment Variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `BOYODB_BOOTSTRAP_PASSWORD` | Password for root user (required when `--auth` is enabled for first-time setup) |
+| `AWS_ACCESS_KEY_ID` | S3 access key for tiered storage |
+| `AWS_SECRET_ACCESS_KEY` | S3 secret key for tiered storage |
 
 #### ingest
 

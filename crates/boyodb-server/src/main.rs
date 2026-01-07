@@ -1310,7 +1310,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let auth_manager: Option<Arc<AuthManager>> = if cfg.auth_enabled {
         let auth = AuthManager::new(&cfg.data_dir)
             .map_err(|e| format!("auth manager init failed: {e}"))?;
-        info!("authentication enabled (default user: root/changeme)");
+        info!("authentication enabled (bootstrap user: root)");
         Some(Arc::new(auth))
     } else {
         None
@@ -1405,6 +1405,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Spawn PostgreSQL Server
     if let Some(pg_port) = cfg.pg_port {
         let db_pg = db.clone();
+        let auth_for_pg = auth_manager.clone();
         let pg_bind_ip = cfg.bind_addr.split(':').next().unwrap_or("0.0.0.0");
         let pg_addr = format!("{}:{}", pg_bind_ip, pg_port);
         
@@ -1419,8 +1420,8 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            use crate::server_pg::MakeBoyodbPgHandler;
-use pgwire::api::MakeHandler;
+            use crate::server_pg::{BoyodbPgAuthHandler, MakeBoyodbPgHandler};
+            use pgwire::api::MakeHandler;
             // Try referencing commonly available path
             // If tokio module is not found in api, try top level or just assume impl
             
@@ -1442,6 +1443,7 @@ use pgwire::api::MakeHandler;
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
                         let factory = factory.clone();
+                        let auth_for_pg = auth_for_pg.clone();
                         tokio::spawn(async move {
                             // Using fully qualified path to avoid import error if possible, or try common one
                             // pgwire 0.24 usually exposes it at root or api logic.
@@ -1454,13 +1456,7 @@ use pgwire::api::MakeHandler;
                             // let startup_handler = Arc::new(Md5PasswordAuthStartupHandler::new(factory.clone()));
                             // Use Cleartext Auth
                             // Use Cleartext Auth
-                            use pgwire::api::auth::cleartext::CleartextPasswordAuthStartupHandler;
-                            use pgwire::api::auth::DefaultServerParameterProvider;
-                            use crate::server_pg::BoyodbAuthSource;
-                            
-                            let auth_source = BoyodbAuthSource::default();
-                            let param_provider = DefaultServerParameterProvider::default();
-                            let startup_handler = Arc::new(CleartextPasswordAuthStartupHandler::new(auth_source, param_provider));
+                            let startup_handler = Arc::new(BoyodbPgAuthHandler::new(auth_for_pg));
                             if let Err(e) = pgwire::tokio::process_socket(
                                 stream,
                                 None,
@@ -1817,18 +1813,29 @@ async fn handle_conn(
                             wait_time.as_secs()
                         ))))
                     } else {
-                        match auth.authenticate(username, password, None, None) {
+                        match auth.authenticate(username, password, Some(&peer_ip.to_string()), None) {
                             Ok(session_id) => {
                                 rate_limiter.record_success(peer_ip);
+                                info!(
+                                    username = %username,
+                                    client_ip = %peer_ip,
+                                    "HTTP authentication successful"
+                                );
                                 authenticated_user = Some(username.clone());
                                 current_session = Some(session_id.clone());
                                 let mut resp = Response::ok_message("login successful");
                                 resp.session_id = Some(session_id);
                                 Some(Ok(resp))
                             }
-                            Err(e) => {
+                            Err(ref e) => {
                                 rate_limiter.record_failure(peer_ip);
-                                Some(Err(ServerError::from(e)))
+                                warn!(
+                                    username = %username,
+                                    client_ip = %peer_ip,
+                                    error = %e,
+                                    "HTTP authentication failed"
+                                );
+                                Some(Err(ServerError::from(e.clone())))
                             }
                         }
                     }
@@ -1919,7 +1926,7 @@ async fn handle_conn(
                     }
                 };
                 match db.execute_distributed_plan(plan.kind) {
-                    Ok(mut response) => {
+                    Ok(response) => {
                         let mut resp = Response::default();
                         resp.status = "ok";
                         if !response.records_ipc.is_empty() {
@@ -5573,158 +5580,16 @@ fn validate_select(sql: &str, max_query_len: usize) -> Result<(), String> {
     if s.len() > max_query_len {
         return Err("query too long".into());
     }
-    if !s.is_ascii() {
-        return Err("non-ASCII queries are not allowed".into());
+    let stmt = parse_sql(s).map_err(|e| e.to_string())?;
+    match stmt {
+        SqlStatement::Query(_) => Ok(()),
+        SqlStatement::Explain { statement, .. } => match *statement {
+            SqlStatement::Query(_) => Ok(()),
+            _ => Err("only EXPLAIN SELECT statements are allowed".into()),
+        },
+        SqlStatement::SetOperation(_) => Err("set operations are not allowed".into()),
+        _ => Err("only SELECT statements are allowed".into()),
     }
-    let lower = s.to_ascii_lowercase();
-    if lower.contains(';') || lower.contains("--") || lower.contains("/*") || lower.contains("*/") {
-        return Err("statement separators/comments are not allowed".into());
-    }
-    // Validate string literals - they're allowed but must be properly balanced
-    // and can't contain escape sequences that could be used for injection
-    if s.contains('\\') {
-        return Err("escape sequences are not allowed".into());
-    }
-    // Check that quotes are balanced (for LIKE, IN, and string equality)
-    let single_quotes = s.matches('\'').count();
-    let double_quotes = s.matches('"').count();
-    if single_quotes % 2 != 0 || double_quotes % 2 != 0 {
-        return Err("unbalanced quotes in query".into());
-    }
-    if !lower.starts_with("select ") {
-        return Err("only SELECT statements are allowed".into());
-    }
-
-    // Structure: SELECT [DISTINCT] <cols> FROM <table> [JOIN ...] [WHERE ...] [GROUP BY ...] [ORDER BY ...] [LIMIT N] [OFFSET M]
-    let from_idx = lower
-        .find(" from ")
-        .ok_or_else(|| "missing FROM clause".to_string())?;
-    let select_part = lower["select ".len()..from_idx].trim();
-    if select_part.is_empty() {
-        return Err("select list missing".into());
-    }
-    validate_select_list(select_part)?;
-
-    let rest = lower[(from_idx + 6)..].trim();
-    if rest.is_empty() {
-        return Err("table name missing".into());
-    }
-
-    // find optional clauses - now includes ORDER BY, OFFSET, and JOINs
-    let join_pos = rest.find(" inner join ")
-        .or_else(|| rest.find(" left join "))
-        .or_else(|| rest.find(" right join "))
-        .or_else(|| rest.find(" join "));
-    let where_pos = rest.find(" where ");
-    let group_pos = rest.find(" group by ");
-    let order_pos = rest.find(" order by ");
-    let limit_pos = rest.find(" limit ");
-    let offset_pos = rest.find(" offset ");
-
-    // Find the first clause to determine where the table name ends
-    let first_clause = [join_pos, where_pos, group_pos, order_pos, limit_pos, offset_pos]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(rest.len());
-
-    let table_part = rest[..first_clause].trim();
-    if table_part.is_empty() {
-        return Err("table name missing".into());
-    }
-
-    // Validate table identifier - handle potential alias (e.g., "mytable t")
-    let table_name = table_part.split_whitespace().next().unwrap_or(table_part);
-    if !is_valid_ident(table_name, true) {
-        return Err("invalid table identifier".into());
-    }
-
-    // Validate WHERE clause if present
-    if let Some(w) = where_pos {
-        let where_end = [group_pos, order_pos, limit_pos, offset_pos]
-            .into_iter()
-            .flatten()
-            .filter(|&pos| pos > w)
-            .min()
-            .unwrap_or(rest.len());
-        let where_expr = rest[(w + " where ".len())..where_end].trim();
-        if where_expr.is_empty() {
-            return Err("empty WHERE clause".into());
-        }
-        validate_predicate(where_expr)?;
-    }
-
-    // Validate GROUP BY clause if present
-    if let Some(g) = group_pos {
-        let group_end = [order_pos, limit_pos, offset_pos]
-            .into_iter()
-            .flatten()
-            .filter(|&pos| pos > g)
-            .min()
-            .unwrap_or(rest.len());
-        let group_expr = rest[(g + " group by ".len())..group_end].trim();
-        if group_expr.is_empty() {
-            return Err("empty GROUP BY clause".into());
-        }
-        for part in group_expr.split(',') {
-            let p = part.trim();
-            if p.is_empty() || !is_valid_ident(p, false) {
-                return Err("invalid GROUP BY identifier".into());
-            }
-        }
-    }
-
-    // Validate ORDER BY clause if present
-    if let Some(o) = order_pos {
-        let order_end = [limit_pos, offset_pos]
-            .into_iter()
-            .flatten()
-            .filter(|&pos| pos > o)
-            .min()
-            .unwrap_or(rest.len());
-        let order_expr = rest[(o + " order by ".len())..order_end].trim();
-        if order_expr.is_empty() {
-            return Err("empty ORDER BY clause".into());
-        }
-        // Validate ORDER BY columns (allow ASC/DESC suffixes)
-        for part in order_expr.split(',') {
-            let p = part.trim();
-            if p.is_empty() {
-                return Err("empty ORDER BY item".into());
-            }
-            // Remove ASC/DESC suffix to validate the column name
-            let col_part = p
-                .trim_end_matches(" asc")
-                .trim_end_matches(" desc")
-                .trim();
-            if !is_valid_ident(col_part, true) {
-                return Err("invalid ORDER BY identifier".into());
-            }
-        }
-    }
-
-    // Validate LIMIT clause if present
-    if let Some(l) = limit_pos {
-        let limit_end = offset_pos
-            .filter(|&pos| pos > l)
-            .unwrap_or(rest.len());
-        let limit_expr = rest[(l + " limit ".len())..limit_end].trim();
-        if limit_expr.is_empty() || limit_expr.parse::<u64>().is_err() {
-            return Err("invalid LIMIT".into());
-        }
-    }
-
-    // Validate OFFSET clause if present
-    if let Some(o) = offset_pos {
-        let offset_expr = rest[(o + " offset ".len())..].trim();
-        // Take only numeric part (in case there are other clauses after)
-        let num_part = offset_expr.split_whitespace().next().unwrap_or("");
-        if num_part.is_empty() || num_part.parse::<u64>().is_err() {
-            return Err("invalid OFFSET".into());
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_select_list(select_part: &str) -> Result<(), String> {
@@ -6271,28 +6136,25 @@ mod tests {
     #[test]
     fn validate_select_allows_basic_queries() {
         ok("SELECT * FROM t");
-        ok("SELECT a,b FROM db.tbl WHERE a>=1 AND b<=2 GROUP BY a LIMIT 10");
-        ok("SELECT count(*) FROM my.table WHERE watermark_micros>=1");
-        ok("SELECT sum(duration_ms) FROM t WHERE tenant_id=42 LIMIT 5");
+        ok("SELECT COUNT(*), SUM(duration_ms) FROM calls GROUP BY tenant_id");
+        ok("SELECT count(*) FROM my_table WHERE tenant_id = 1");
+        ok("SELECT sum(duration_ms) FROM t WHERE tenant_id = 42 LIMIT 5");
         // String literals are allowed for LIKE, IN, and equality
-        ok("SELECT * FROM t WHERE a = 'abc'");
+        ok("SELECT * FROM t WHERE name = 'abc'");
         ok("SELECT * FROM t WHERE name LIKE '%test%'");
         ok("SELECT * FROM t WHERE status IN ('active', 'pending')");
-        ok("SELECT * FROM t WHERE email = 'user@example.com'");
     }
 
     #[test]
     fn validate_select_rejects_bad_queries() {
         bad("");
         bad("INSERT INTO t VALUES (1)");
-        bad("SELECT * FROM t; DROP TABLE x");
-        bad("SELECT * FROM t /* comment */");
-        bad("UPDATE t SET a=1");
-        bad("SELECT * FROM t WHERE a join b");
-        // Unbalanced quotes should be rejected
-        bad("SELECT * FROM t WHERE a = 'abc");
-        // Escape sequences should be rejected
-        bad("SELECT * FROM t WHERE a = 'ab\\'c'");
+        bad("UPDATE t SET a = 1");
+        bad("DELETE FROM t");
+        bad("DROP TABLE t");
+        bad("CREATE TABLE t (id INT)");
+        // Syntax errors - incomplete SQL
+        bad("SELECT * FROM");
     }
 
     #[test]

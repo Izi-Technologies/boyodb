@@ -217,6 +217,7 @@ mod server_tests {
     /// Test authentication operations
     #[test]
     fn test_core_auth_operations() {
+        std::env::set_var("BOYODB_BOOTSTRAP_PASSWORD", "TestBootstr4p!");
         let temp_dir = TempDir::new().unwrap();
         let auth_path = temp_dir.path().join("auth");
 
