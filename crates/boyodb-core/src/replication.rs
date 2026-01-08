@@ -23,6 +23,9 @@ pub struct TableMeta {
     /// Deduplication configuration for merge-on-read deduplication
     #[serde(default)]
     pub deduplication: Option<crate::sql::DeduplicationConfig>,
+    /// Table constraints (PRIMARY KEY, UNIQUE, CHECK, NOT NULL, DEFAULT)
+    #[serde(default)]
+    pub constraints: Vec<crate::sql::TableConstraint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +54,34 @@ pub struct IndexMeta {
     pub created_micros: u64,
     #[serde(default)]
     pub last_built_micros: Option<u64>,
+}
+
+/// Sequence metadata for auto-incrementing values
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SequenceMeta {
+    pub database: String,
+    pub name: String,
+    pub current_value: i64,
+    pub increment: i64,
+    pub min_value: i64,
+    pub max_value: i64,
+    pub cycle: bool,
+    pub created_micros: u64,
+}
+
+impl Default for SequenceMeta {
+    fn default() -> Self {
+        SequenceMeta {
+            database: String::new(),
+            name: String::new(),
+            current_value: 0,
+            increment: 1,
+            min_value: 1,
+            max_value: i64::MAX,
+            cycle: false,
+            created_micros: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -253,6 +284,8 @@ pub struct Manifest {
     pub materialized_views: Vec<MaterializedViewMeta>,
     #[serde(default)]
     pub indexes: Vec<IndexMeta>,
+    #[serde(default)]
+    pub sequences: Vec<SequenceMeta>,
     pub entries: Vec<ManifestEntry>,
 }
 
@@ -272,6 +305,7 @@ impl Manifest {
             views: Vec::new(),
             materialized_views: Vec::new(),
             indexes: Vec::new(),
+            sequences: Vec::new(),
             entries: Vec::new(),
         }
     }
@@ -316,6 +350,7 @@ impl Manifest {
             views: self.views.clone(),
             materialized_views: self.materialized_views.clone(),
             indexes: self.indexes.clone(),
+            sequences: self.sequences.clone(),
             entries: self
                 .entries
                 .iter()
@@ -522,6 +557,7 @@ mod tests {
             views: Vec::new(),
             materialized_views: Vec::new(),
             indexes: Vec::new(),
+            sequences: Vec::new(),
             entries: vec![
                 entry("a", SegmentTier::Hot, 10, 1),
                 entry("b", SegmentTier::Warm, 20, 2),
@@ -548,6 +584,7 @@ mod tests {
             views: Vec::new(),
             materialized_views: Vec::new(),
             indexes: Vec::new(),
+            sequences: Vec::new(),
             entries: vec![
                 entry("cold", SegmentTier::Cold, 50, 1),
                 entry("hot", SegmentTier::Hot, 30, 2),
@@ -584,6 +621,7 @@ mod tests {
             views: Vec::new(),
             materialized_views: Vec::new(),
             indexes: Vec::new(),
+            sequences: Vec::new(),
             entries: vec![entry("x", SegmentTier::Hot, 5_000_000, 1)],
         };
         let planner = BundlePlanner::new();

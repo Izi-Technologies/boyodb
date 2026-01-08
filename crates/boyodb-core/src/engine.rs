@@ -1851,6 +1851,7 @@ impl Db {
                         schema_json: Some(schema_json.clone()),
                         compression: table_compression.clone(),
                         deduplication: None,
+                        constraints: Vec::new(),
                     });
                 }
             }
@@ -2133,6 +2134,12 @@ impl Db {
             }
         }
         self.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        // Check for information_schema queries (virtual tables)
+        if let Some(response) = self.handle_information_schema_query(&request.sql)? {
+            self.metrics.queries_total.fetch_add(1, Ordering::Relaxed);
+            return Ok(response);
+        }
 
         // Calculate deadline for timeout enforcement
         let deadline = if request.timeout_millis > 0 {
@@ -6484,6 +6491,7 @@ impl Db {
             schema_json: canonical_schema_json,
             compression: None,
             deduplication: None,
+            constraints: Vec::new(),
         });
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         Ok(())
@@ -7959,6 +7967,809 @@ impl Db {
         Ok(tbl.deduplication.clone())
     }
 
+    /// Add a constraint to a table
+    pub fn add_constraint(
+        &self,
+        database: &str,
+        table: &str,
+        constraint: crate::sql::TableConstraint,
+    ) -> Result<(), EngineError> {
+        use crate::sql::TableConstraint;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let tbl = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound("table not found".into()))?;
+
+        // Validate constraint doesn't conflict with existing ones
+        match &constraint {
+            TableConstraint::PrimaryKey { name, .. } => {
+                // Only one primary key allowed
+                if tbl.constraints.iter().any(|c| matches!(c, TableConstraint::PrimaryKey { .. })) {
+                    return Err(EngineError::InvalidArgument(
+                        "table already has a primary key".into()
+                    ));
+                }
+                // Check for name conflict
+                if let Some(n) = name {
+                    if tbl.constraints.iter().any(|c| {
+                        match c {
+                            TableConstraint::PrimaryKey { name: Some(existing), .. } |
+                            TableConstraint::Unique { name: Some(existing), .. } |
+                            TableConstraint::Check { name: Some(existing), .. } => existing == n,
+                            _ => false,
+                        }
+                    }) {
+                        return Err(EngineError::InvalidArgument(
+                            format!("constraint '{}' already exists", n)
+                        ));
+                    }
+                }
+            }
+            TableConstraint::Unique { name, .. } | TableConstraint::Check { name, .. } => {
+                if let Some(n) = name {
+                    if tbl.constraints.iter().any(|c| {
+                        match c {
+                            TableConstraint::PrimaryKey { name: Some(existing), .. } |
+                            TableConstraint::Unique { name: Some(existing), .. } |
+                            TableConstraint::Check { name: Some(existing), .. } => existing == n,
+                            _ => false,
+                        }
+                    }) {
+                        return Err(EngineError::InvalidArgument(
+                            format!("constraint '{}' already exists", n)
+                        ));
+                    }
+                }
+            }
+            TableConstraint::NotNull { column } => {
+                // Check for duplicate NOT NULL
+                if tbl.constraints.iter().any(|c| {
+                    matches!(c, TableConstraint::NotNull { column: col } if col == column)
+                }) {
+                    return Err(EngineError::InvalidArgument(
+                        format!("NOT NULL constraint already exists for column '{}'", column)
+                    ));
+                }
+            }
+            TableConstraint::Default { column, .. } => {
+                // Check for duplicate DEFAULT
+                if tbl.constraints.iter().any(|c| {
+                    matches!(c, TableConstraint::Default { column: col, .. } if col == column)
+                }) {
+                    return Err(EngineError::InvalidArgument(
+                        format!("DEFAULT constraint already exists for column '{}'", column)
+                    ));
+                }
+            }
+        }
+
+        tbl.constraints.push(constraint.clone());
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+
+        tracing::info!("Added constraint to {}.{}: {:?}", database, table, constraint);
+        Ok(())
+    }
+
+    /// Drop a constraint from a table by name
+    pub fn drop_constraint(
+        &self,
+        database: &str,
+        table: &str,
+        constraint_name: &str,
+    ) -> Result<(), EngineError> {
+        use crate::sql::TableConstraint;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let tbl = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound("table not found".into()))?;
+
+        let original_len = tbl.constraints.len();
+        tbl.constraints.retain(|c| {
+            match c {
+                TableConstraint::PrimaryKey { name: Some(n), .. } |
+                TableConstraint::Unique { name: Some(n), .. } |
+                TableConstraint::Check { name: Some(n), .. } => n != constraint_name,
+                _ => true,
+            }
+        });
+
+        if tbl.constraints.len() == original_len {
+            return Err(EngineError::NotFound(
+                format!("constraint '{}' not found", constraint_name)
+            ));
+        }
+
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+
+        tracing::info!("Dropped constraint '{}' from {}.{}", constraint_name, database, table);
+        Ok(())
+    }
+
+    /// Get all constraints for a table
+    pub fn get_table_constraints(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<crate::sql::TableConstraint>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let tbl = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound("table not found".into()))?;
+        Ok(tbl.constraints.clone())
+    }
+
+    // =========================================================================
+    // Sequence Management
+    // =========================================================================
+
+    /// Create a new sequence
+    pub fn create_sequence(
+        &self,
+        database: &str,
+        name: &str,
+        start: i64,
+        increment: i64,
+        min_value: Option<i64>,
+        max_value: Option<i64>,
+        cycle: bool,
+        if_not_exists: bool,
+    ) -> Result<(), EngineError> {
+        use crate::replication::SequenceMeta;
+
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(name, "sequence")?;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Check if database exists
+        if !manifest.databases.iter().any(|db| db.name == database) {
+            return Err(EngineError::NotFound(format!("database '{}' not found", database)));
+        }
+
+        // Check if sequence already exists
+        if manifest.sequences.iter().any(|s| s.database == database && s.name == name) {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(EngineError::InvalidArgument(format!(
+                "sequence '{}' already exists in database '{}'",
+                name, database
+            )));
+        }
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let seq = SequenceMeta {
+            database: database.to_string(),
+            name: name.to_string(),
+            current_value: start - increment, // nextval will return start
+            increment,
+            min_value: min_value.unwrap_or(1),
+            max_value: max_value.unwrap_or(i64::MAX),
+            cycle,
+            created_micros: now_micros,
+        };
+
+        manifest.sequences.push(seq);
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Drop a sequence
+    pub fn drop_sequence(
+        &self,
+        database: &str,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(name, "sequence")?;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let idx = manifest
+            .sequences
+            .iter()
+            .position(|s| s.database == database && s.name == name);
+
+        match idx {
+            Some(i) => {
+                manifest.sequences.remove(i);
+                manifest.bump_version();
+                persist_manifest(&self.cfg.manifest_path, &manifest)?;
+                Ok(())
+            }
+            None => {
+                if if_exists {
+                    Ok(())
+                } else {
+                    Err(EngineError::NotFound(format!(
+                        "sequence '{}' not found in database '{}'",
+                        name, database
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Alter a sequence (restart or change increment)
+    pub fn alter_sequence(
+        &self,
+        database: &str,
+        name: &str,
+        restart_with: Option<i64>,
+        increment: Option<i64>,
+    ) -> Result<(), EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(name, "sequence")?;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let seq = manifest
+            .sequences
+            .iter_mut()
+            .find(|s| s.database == database && s.name == name)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "sequence '{}' not found in database '{}'",
+                    name, database
+                ))
+            })?;
+
+        if let Some(restart) = restart_with {
+            seq.current_value = restart - seq.increment;
+        }
+        if let Some(inc) = increment {
+            seq.increment = inc;
+        }
+
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Get next value from sequence (NEXTVAL)
+    pub fn nextval(&self, database: &str, name: &str) -> Result<i64, EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(name, "sequence")?;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let seq = manifest
+            .sequences
+            .iter_mut()
+            .find(|s| s.database == database && s.name == name)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "sequence '{}' not found in database '{}'",
+                    name, database
+                ))
+            })?;
+
+        let next = seq.current_value + seq.increment;
+
+        // Check bounds
+        if seq.increment > 0 && next > seq.max_value {
+            if seq.cycle {
+                seq.current_value = seq.min_value;
+            } else {
+                return Err(EngineError::InvalidArgument(format!(
+                    "sequence '{}' reached maximum value {}",
+                    name, seq.max_value
+                )));
+            }
+        } else if seq.increment < 0 && next < seq.min_value {
+            if seq.cycle {
+                seq.current_value = seq.max_value;
+            } else {
+                return Err(EngineError::InvalidArgument(format!(
+                    "sequence '{}' reached minimum value {}",
+                    name, seq.min_value
+                )));
+            }
+        } else {
+            seq.current_value = next;
+        }
+
+        let result = seq.current_value;
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(result)
+    }
+
+    /// Get current value from sequence (CURRVAL) - only valid after NEXTVAL
+    pub fn currval(&self, database: &str, name: &str) -> Result<i64, EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(name, "sequence")?;
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let seq = manifest
+            .sequences
+            .iter()
+            .find(|s| s.database == database && s.name == name)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "sequence '{}' not found in database '{}'",
+                    name, database
+                ))
+            })?;
+
+        Ok(seq.current_value)
+    }
+
+    /// Get all sequences in a database (for SHOW SEQUENCES)
+    pub fn list_sequences(&self, database: &str) -> Result<Vec<crate::replication::SequenceMeta>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        Ok(manifest
+            .sequences
+            .iter()
+            .filter(|s| s.database == database)
+            .cloned()
+            .collect())
+    }
+
+    /// Handle information_schema queries (virtual system tables)
+    /// Returns Some(QueryResponse) if the query is an information_schema query, None otherwise
+    fn handle_information_schema_query(&self, sql: &str) -> Result<Option<QueryResponse>, EngineError> {
+        let sql_lower = sql.to_lowercase();
+
+        // Check if this is an information_schema query
+        if !sql_lower.contains("information_schema") {
+            return Ok(None);
+        }
+
+        // Parse to find which table is being queried
+        if sql_lower.contains("information_schema.schemata") || sql_lower.contains("information_schema.\"schemata\"") {
+            return Ok(Some(self.query_information_schema_schemata()?));
+        } else if sql_lower.contains("information_schema.tables") || sql_lower.contains("information_schema.\"tables\"") {
+            return Ok(Some(self.query_information_schema_tables()?));
+        } else if sql_lower.contains("information_schema.columns") || sql_lower.contains("information_schema.\"columns\"") {
+            return Ok(Some(self.query_information_schema_columns()?));
+        } else if sql_lower.contains("information_schema.table_constraints") || sql_lower.contains("information_schema.\"table_constraints\"") {
+            return Ok(Some(self.query_information_schema_table_constraints()?));
+        } else if sql_lower.contains("information_schema.key_column_usage") || sql_lower.contains("information_schema.\"key_column_usage\"") {
+            return Ok(Some(self.query_information_schema_key_column_usage()?));
+        }
+
+        // Unknown information_schema table
+        Err(EngineError::NotFound(format!(
+            "information_schema table not found in query: {}",
+            sql
+        )))
+    }
+
+    /// Query information_schema.schemata (list of databases)
+    fn query_information_schema_schemata(&self) -> Result<QueryResponse, EngineError> {
+        use arrow_array::builder::StringBuilder;
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut catalog_name = StringBuilder::new();
+        let mut schema_name = StringBuilder::new();
+        let mut schema_owner = StringBuilder::new();
+        let mut default_character_set_name = StringBuilder::new();
+
+        for db in &manifest.databases {
+            catalog_name.append_value("boyodb");
+            schema_name.append_value(&db.name);
+            schema_owner.append_value("admin");
+            default_character_set_name.append_value("UTF8");
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("catalog_name", DataType::Utf8, true),
+            Field::new("schema_name", DataType::Utf8, false),
+            Field::new("schema_owner", DataType::Utf8, true),
+            Field::new("default_character_set_name", DataType::Utf8, true),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(catalog_name.finish()),
+                Arc::new(schema_name.finish()),
+                Arc::new(schema_owner.finish()),
+                Arc::new(default_character_set_name.finish()),
+            ],
+        )
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+        Ok(QueryResponse {
+            records_ipc: ipc,
+            data_skipped_bytes: 0,
+            segments_scanned: 0,
+            execution_stats: None,
+        })
+    }
+
+    /// Query information_schema.tables (list of tables)
+    fn query_information_schema_tables(&self) -> Result<QueryResponse, EngineError> {
+        use arrow_array::builder::StringBuilder;
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut table_catalog = StringBuilder::new();
+        let mut table_schema = StringBuilder::new();
+        let mut table_name = StringBuilder::new();
+        let mut table_type = StringBuilder::new();
+
+        for tbl in &manifest.tables {
+            table_catalog.append_value("boyodb");
+            table_schema.append_value(&tbl.database);
+            table_name.append_value(&tbl.name);
+            table_type.append_value("BASE TABLE");
+        }
+
+        // Also include views
+        for view in &manifest.views {
+            table_catalog.append_value("boyodb");
+            table_schema.append_value(&view.database);
+            table_name.append_value(&view.name);
+            table_type.append_value("VIEW");
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("table_catalog", DataType::Utf8, true),
+            Field::new("table_schema", DataType::Utf8, false),
+            Field::new("table_name", DataType::Utf8, false),
+            Field::new("table_type", DataType::Utf8, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(table_catalog.finish()),
+                Arc::new(table_schema.finish()),
+                Arc::new(table_name.finish()),
+                Arc::new(table_type.finish()),
+            ],
+        )
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+        Ok(QueryResponse {
+            records_ipc: ipc,
+            data_skipped_bytes: 0,
+            segments_scanned: 0,
+            execution_stats: None,
+        })
+    }
+
+    /// Query information_schema.columns (list of columns)
+    fn query_information_schema_columns(&self) -> Result<QueryResponse, EngineError> {
+        use arrow_array::builder::{Int64Builder, StringBuilder};
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut table_catalog = StringBuilder::new();
+        let mut table_schema = StringBuilder::new();
+        let mut table_name = StringBuilder::new();
+        let mut column_name = StringBuilder::new();
+        let mut ordinal_position = Int64Builder::new();
+        let mut data_type = StringBuilder::new();
+        let mut is_nullable = StringBuilder::new();
+
+        for tbl in &manifest.tables {
+            if let Some(schema_json) = &tbl.schema_json {
+                // Parse schema JSON to extract columns
+                if let Ok(fields) = serde_json::from_str::<Vec<serde_json::Value>>(schema_json) {
+                    for (idx, field) in fields.iter().enumerate() {
+                        table_catalog.append_value("boyodb");
+                        table_schema.append_value(&tbl.database);
+                        table_name.append_value(&tbl.name);
+
+                        if let Some(name) = field.get("name").and_then(|v| v.as_str()) {
+                            column_name.append_value(name);
+                        } else {
+                            column_name.append_value(&format!("column_{}", idx));
+                        }
+
+                        ordinal_position.append_value((idx + 1) as i64);
+
+                        if let Some(dtype) = field.get("type").and_then(|v| v.as_str()) {
+                            data_type.append_value(dtype);
+                        } else {
+                            data_type.append_value("unknown");
+                        }
+
+                        // Check if nullable field exists
+                        let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+                        is_nullable.append_value(if nullable { "YES" } else { "NO" });
+                    }
+                }
+            }
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("table_catalog", DataType::Utf8, true),
+            Field::new("table_schema", DataType::Utf8, false),
+            Field::new("table_name", DataType::Utf8, false),
+            Field::new("column_name", DataType::Utf8, false),
+            Field::new("ordinal_position", DataType::Int64, false),
+            Field::new("data_type", DataType::Utf8, false),
+            Field::new("is_nullable", DataType::Utf8, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(table_catalog.finish()),
+                Arc::new(table_schema.finish()),
+                Arc::new(table_name.finish()),
+                Arc::new(column_name.finish()),
+                Arc::new(ordinal_position.finish()),
+                Arc::new(data_type.finish()),
+                Arc::new(is_nullable.finish()),
+            ],
+        )
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+        Ok(QueryResponse {
+            records_ipc: ipc,
+            data_skipped_bytes: 0,
+            segments_scanned: 0,
+            execution_stats: None,
+        })
+    }
+
+    /// Query information_schema.table_constraints
+    fn query_information_schema_table_constraints(&self) -> Result<QueryResponse, EngineError> {
+        use arrow_array::builder::StringBuilder;
+        use crate::sql::TableConstraint;
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut constraint_catalog = StringBuilder::new();
+        let mut constraint_schema = StringBuilder::new();
+        let mut constraint_name = StringBuilder::new();
+        let mut table_schema = StringBuilder::new();
+        let mut table_name = StringBuilder::new();
+        let mut constraint_type = StringBuilder::new();
+
+        for tbl in &manifest.tables {
+            for constraint in &tbl.constraints {
+                constraint_catalog.append_value("boyodb");
+                constraint_schema.append_value(&tbl.database);
+                table_schema.append_value(&tbl.database);
+                table_name.append_value(&tbl.name);
+
+                match constraint {
+                    TableConstraint::PrimaryKey { name, .. } => {
+                        constraint_name.append_value(name.as_deref().unwrap_or("PRIMARY"));
+                        constraint_type.append_value("PRIMARY KEY");
+                    }
+                    TableConstraint::Unique { name, .. } => {
+                        constraint_name.append_value(name.as_deref().unwrap_or("UNIQUE"));
+                        constraint_type.append_value("UNIQUE");
+                    }
+                    TableConstraint::Check { name, .. } => {
+                        constraint_name.append_value(name.as_deref().unwrap_or("CHECK"));
+                        constraint_type.append_value("CHECK");
+                    }
+                    TableConstraint::NotNull { column } => {
+                        constraint_name.append_value(&format!("{}_not_null", column));
+                        constraint_type.append_value("NOT NULL");
+                    }
+                    TableConstraint::Default { column, .. } => {
+                        constraint_name.append_value(&format!("{}_default", column));
+                        constraint_type.append_value("DEFAULT");
+                    }
+                }
+            }
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("constraint_catalog", DataType::Utf8, true),
+            Field::new("constraint_schema", DataType::Utf8, false),
+            Field::new("constraint_name", DataType::Utf8, false),
+            Field::new("table_schema", DataType::Utf8, false),
+            Field::new("table_name", DataType::Utf8, false),
+            Field::new("constraint_type", DataType::Utf8, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(constraint_catalog.finish()),
+                Arc::new(constraint_schema.finish()),
+                Arc::new(constraint_name.finish()),
+                Arc::new(table_schema.finish()),
+                Arc::new(table_name.finish()),
+                Arc::new(constraint_type.finish()),
+            ],
+        )
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+        Ok(QueryResponse {
+            records_ipc: ipc,
+            data_skipped_bytes: 0,
+            segments_scanned: 0,
+            execution_stats: None,
+        })
+    }
+
+    /// Query information_schema.key_column_usage
+    fn query_information_schema_key_column_usage(&self) -> Result<QueryResponse, EngineError> {
+        use arrow_array::builder::{Int64Builder, StringBuilder};
+        use crate::sql::TableConstraint;
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut constraint_catalog = StringBuilder::new();
+        let mut constraint_schema = StringBuilder::new();
+        let mut constraint_name = StringBuilder::new();
+        let mut table_schema = StringBuilder::new();
+        let mut table_name = StringBuilder::new();
+        let mut column_name = StringBuilder::new();
+        let mut ordinal_position = Int64Builder::new();
+
+        for tbl in &manifest.tables {
+            for constraint in &tbl.constraints {
+                let (name, columns) = match constraint {
+                    TableConstraint::PrimaryKey { name, columns } => {
+                        (name.as_deref().unwrap_or("PRIMARY"), columns.clone())
+                    }
+                    TableConstraint::Unique { name, columns } => {
+                        (name.as_deref().unwrap_or("UNIQUE"), columns.clone())
+                    }
+                    _ => continue, // Only PK and UNIQUE have key columns
+                };
+
+                for (idx, col) in columns.iter().enumerate() {
+                    constraint_catalog.append_value("boyodb");
+                    constraint_schema.append_value(&tbl.database);
+                    constraint_name.append_value(name);
+                    table_schema.append_value(&tbl.database);
+                    table_name.append_value(&tbl.name);
+                    column_name.append_value(col);
+                    ordinal_position.append_value((idx + 1) as i64);
+                }
+            }
+        }
+
+        let schema = Schema::new(vec![
+            Field::new("constraint_catalog", DataType::Utf8, true),
+            Field::new("constraint_schema", DataType::Utf8, false),
+            Field::new("constraint_name", DataType::Utf8, false),
+            Field::new("table_schema", DataType::Utf8, false),
+            Field::new("table_name", DataType::Utf8, false),
+            Field::new("column_name", DataType::Utf8, false),
+            Field::new("ordinal_position", DataType::Int64, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(constraint_catalog.finish()),
+                Arc::new(constraint_schema.finish()),
+                Arc::new(constraint_name.finish()),
+                Arc::new(table_schema.finish()),
+                Arc::new(table_name.finish()),
+                Arc::new(column_name.finish()),
+                Arc::new(ordinal_position.finish()),
+            ],
+        )
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+        Ok(QueryResponse {
+            records_ipc: ipc,
+            data_skipped_bytes: 0,
+            segments_scanned: 0,
+            execution_stats: None,
+        })
+    }
+
     /// Deduplicate a RecordBatch based on key columns and optional version column
     /// Returns a new batch with duplicates removed (keeping latest version if version_column specified)
     pub fn deduplicate_batch(
@@ -8314,6 +9125,943 @@ impl Db {
         }
 
         Ok(())
+    }
+
+    /// Rename a table within a database
+    pub fn rename_table(
+        &self,
+        database: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(old_name, "table")?;
+        self.validate_identifier(new_name, "table")?;
+
+        if old_name == new_name {
+            return Ok(()); // Nothing to do
+        }
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Check if source table exists
+        let table_idx = manifest
+            .tables
+            .iter()
+            .position(|t| t.database == database && t.name == old_name)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!("table not found: {database}.{old_name}"))
+            })?;
+
+        // Check if target table name already exists
+        if manifest
+            .tables
+            .iter()
+            .any(|t| t.database == database && t.name == new_name)
+        {
+            return Err(EngineError::InvalidArgument(format!(
+                "table already exists: {database}.{new_name}"
+            )));
+        }
+
+        // Rename the table metadata
+        manifest.tables[table_idx].name = new_name.to_string();
+
+        // Update all segment entries to reference the new table name
+        for entry in manifest.entries.iter_mut() {
+            if entry.database == database && entry.table == old_name {
+                entry.table = new_name.to_string();
+            }
+        }
+
+        // Update any views that reference this table (in their query_sql)
+        for view in manifest.views.iter_mut() {
+            if view.database == database {
+                // Simple replacement - may not handle all cases but covers most
+                view.query_sql = view.query_sql.replace(
+                    &format!("{}.{}", database, old_name),
+                    &format!("{}.{}", database, new_name),
+                );
+            }
+        }
+
+        // Update indexes that reference this table
+        for index in manifest.indexes.iter_mut() {
+            if index.database == database && index.table == old_name {
+                index.table = new_name.to_string();
+            }
+        }
+
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+
+        // Rebuild manifest index
+        {
+            let mut index = self
+                .manifest_index
+                .write()
+                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        // Invalidate query cache for both old and new table names
+        {
+            let mut cache = self.query_cache.lock();
+            cache.invalidate_table(database, old_name);
+            cache.invalidate_table(database, new_name);
+        }
+
+        Ok(())
+    }
+
+    /// Create a new table from a SELECT query (CREATE TABLE AS SELECT)
+    pub fn create_table_as(
+        &self,
+        database: &str,
+        table: &str,
+        query_sql: &str,
+        if_not_exists: bool,
+    ) -> Result<u64, EngineError> {
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(table, "table")?;
+
+        // Check if table already exists
+        {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            if manifest
+                .tables
+                .iter()
+                .any(|t| t.database == database && t.name == table)
+            {
+                if if_not_exists {
+                    return Ok(0);
+                }
+                return Err(EngineError::InvalidArgument(format!(
+                    "table already exists: {database}.{table}"
+                )));
+            }
+
+            // Check database exists
+            if !manifest.databases.iter().any(|db| db.name == database) {
+                return Err(EngineError::NotFound(format!(
+                    "database not found: {database}"
+                )));
+            }
+        }
+
+        // Execute the query to get the schema and data
+        let query_request = QueryRequest {
+            sql: query_sql.to_string(),
+            timeout_millis: 0,
+            collect_stats: false,
+        };
+        let result = self.query(query_request)?;
+
+        if result.records_ipc.is_empty() {
+            // Empty result - create table with empty schema
+            self.create_table(database, table, None)?;
+            return Ok(0);
+        }
+
+        // Decode the IPC to get the schema
+        use arrow_ipc::reader::StreamReader;
+        let cursor = std::io::Cursor::new(&result.records_ipc);
+        let reader = StreamReader::try_new(cursor, None)
+            .map_err(|e| EngineError::Internal(format!("failed to read IPC: {}", e)))?;
+
+        let schema = reader.schema();
+
+        // Convert schema to JSON format for table creation
+        let schema_fields: Vec<serde_json::Value> = schema
+            .fields()
+            .iter()
+            .map(|f| {
+                let type_str = match f.data_type() {
+                    arrow_schema::DataType::Int8 => "int8",
+                    arrow_schema::DataType::Int16 => "int16",
+                    arrow_schema::DataType::Int32 => "int32",
+                    arrow_schema::DataType::Int64 => "int64",
+                    arrow_schema::DataType::UInt8 => "uint8",
+                    arrow_schema::DataType::UInt16 => "uint16",
+                    arrow_schema::DataType::UInt32 => "uint32",
+                    arrow_schema::DataType::UInt64 => "uint64",
+                    arrow_schema::DataType::Float32 => "float32",
+                    arrow_schema::DataType::Float64 => "float64",
+                    arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8 => "string",
+                    arrow_schema::DataType::Boolean => "boolean",
+                    arrow_schema::DataType::Date32 => "date32",
+                    arrow_schema::DataType::Timestamp(_, _) => "timestamp_micros",
+                    _ => "string", // Fallback to string for unknown types
+                };
+                serde_json::json!({
+                    "name": f.name(),
+                    "type": type_str,
+                    "nullable": f.is_nullable()
+                })
+            })
+            .collect();
+
+        let schema_json = serde_json::to_string(&schema_fields)
+            .map_err(|e| EngineError::Internal(format!("failed to serialize schema: {}", e)))?;
+
+        // Create the table with the derived schema
+        self.create_table(database, table, Some(schema_json))?;
+
+        // Ingest the data into the new table
+        let watermark = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let batch = IngestBatch {
+            payload_ipc: result.records_ipc,
+            watermark_micros: watermark,
+            shard_override: None,
+            database: Some(database.to_string()),
+            table: Some(table.to_string()),
+        };
+        self.ingest_ipc(batch)?;
+
+        // Count rows from the IPC (approximate based on existence)
+        Ok(1) // Return 1 to indicate success; actual row count would require decoding
+    }
+
+    /// Validate a SQL identifier (database name, table name, column name, etc.)
+    /// to prevent SQL injection and path traversal attacks.
+    fn validate_identifier(&self, name: &str, kind: &str) -> Result<(), EngineError> {
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument(format!("{} name cannot be empty", kind)));
+        }
+
+        if name.len() > 128 {
+            return Err(EngineError::InvalidArgument(format!(
+                "{} name is too long (max 128 characters)",
+                kind
+            )));
+        }
+
+        // Check for invalid characters that could enable injection or path traversal
+        let invalid_chars = ['\'', '"', '\\', '/', '\0', ';', '-', '*', '?', '`', '$', '!', '|', '&', '<', '>', '\n', '\r', '\t'];
+        for c in invalid_chars {
+            if name.contains(c) {
+                let char_display = match c {
+                    '\0' => "null".to_string(),
+                    '\n' => "newline".to_string(),
+                    '\r' => "carriage return".to_string(),
+                    '\t' => "tab".to_string(),
+                    _ => c.to_string(),
+                };
+                return Err(EngineError::InvalidArgument(format!(
+                    "{} name contains invalid character: '{}'",
+                    kind, char_display
+                )));
+            }
+        }
+
+        // Check for path traversal patterns
+        if name.contains("..") {
+            return Err(EngineError::InvalidArgument(format!(
+                "{} name contains invalid pattern '..'",
+                kind
+            )));
+        }
+
+        // Must start with a letter or underscore
+        let first = name.chars().next().unwrap();
+        if !first.is_ascii_alphabetic() && first != '_' {
+            return Err(EngineError::InvalidArgument(format!(
+                "{} name must start with a letter or underscore",
+                kind
+            )));
+        }
+
+        // Remaining characters must be alphanumeric, underscore, or period (for schema.table)
+        for c in name.chars() {
+            if !c.is_ascii_alphanumeric() && c != '_' && c != '.' {
+                return Err(EngineError::InvalidArgument(format!(
+                    "{} name contains invalid character: '{}'",
+                    kind, c
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate and resolve a COPY file path for security.
+    /// Paths must be within the data directory's 'copy' subdirectory to prevent path traversal attacks.
+    fn validate_copy_path(&self, path: &str, for_write: bool) -> Result<std::path::PathBuf, EngineError> {
+        use std::path::{Path, PathBuf};
+
+        // Create the allowed copy directory (data_dir/copy)
+        let copy_dir = self.cfg.data_dir.join("copy");
+        if !copy_dir.exists() {
+            std::fs::create_dir_all(&copy_dir)
+                .map_err(|e| EngineError::Internal(format!("failed to create copy directory: {}", e)))?;
+        }
+
+        // Parse the requested path
+        let requested = Path::new(path);
+
+        // If the path is absolute, it must be under copy_dir
+        // If relative, resolve it relative to copy_dir
+        let resolved = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            copy_dir.join(requested)
+        };
+
+        // Canonicalize the path to resolve .. and symlinks
+        // For write operations, the file may not exist yet, so canonicalize the parent
+        let canonical = if for_write {
+            let parent = resolved.parent().unwrap_or(Path::new("."));
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| EngineError::Internal(format!("failed to create directory: {}", e)))?;
+            }
+            let canonical_parent = parent.canonicalize()
+                .map_err(|e| EngineError::InvalidArgument(format!("invalid path: {}", e)))?;
+            canonical_parent.join(resolved.file_name().unwrap_or_default())
+        } else {
+            resolved.canonicalize()
+                .map_err(|e| EngineError::InvalidArgument(format!("file not found or invalid path: {}", e)))?
+        };
+
+        // Security check: ensure the canonical path is under copy_dir
+        let canonical_copy_dir = copy_dir.canonicalize()
+            .unwrap_or_else(|_| copy_dir.clone());
+
+        if !canonical.starts_with(&canonical_copy_dir) {
+            return Err(EngineError::InvalidArgument(format!(
+                "COPY path '{}' is outside the allowed directory. Files must be in '{}'",
+                path, copy_dir.display()
+            )));
+        }
+
+        // Additional security: reject paths with suspicious patterns
+        let path_str = path.to_lowercase();
+        if path_str.contains("..") || path_str.contains('\0') {
+            return Err(EngineError::InvalidArgument(
+                "COPY path contains invalid characters".into()
+            ));
+        }
+
+        Ok(canonical)
+    }
+
+    /// Copy data from a file into a table (COPY FROM)
+    pub fn copy_from(
+        &self,
+        database: &str,
+        table: &str,
+        source: &crate::sql::CopySource,
+        format: &crate::sql::CopyFormat,
+        options: &crate::sql::CopyOptions,
+    ) -> Result<u64, EngineError> {
+        use crate::sql::{CopyFormat, CopySource};
+
+        // Validate identifiers to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(table, "table")?;
+
+        // Get and validate the file path
+        let file_path = match source {
+            CopySource::File(path) => self.validate_copy_path(path, false)?,
+            CopySource::Stdin => {
+                return Err(EngineError::InvalidArgument(
+                    "COPY FROM STDIN is not supported in batch mode".into()
+                ));
+            }
+            CopySource::Program(cmd) => {
+                return Err(EngineError::InvalidArgument(format!(
+                    "COPY FROM PROGRAM '{}' is not supported for security reasons",
+                    cmd
+                )));
+            }
+        };
+
+        // Read the file
+        let file_content = std::fs::read(&file_path)
+            .map_err(|e| EngineError::Internal(format!("failed to read file '{}': {}", file_path.display(), e)))?;
+
+        match format {
+            CopyFormat::Csv | CopyFormat::Text => {
+                self.copy_from_csv(database, table, &file_content, format, options)
+            }
+            CopyFormat::Json => {
+                self.copy_from_json(database, table, &file_content, options)
+            }
+            CopyFormat::Arrow => {
+                // Direct Arrow IPC ingest
+                let watermark = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0);
+                let batch = IngestBatch {
+                    payload_ipc: file_content,
+                    watermark_micros: watermark,
+                    shard_override: None,
+                    database: Some(database.to_string()),
+                    table: Some(table.to_string()),
+                };
+                self.ingest_ipc(batch)?;
+                Ok(1)
+            }
+            _ => Err(EngineError::InvalidArgument(format!(
+                "COPY FROM format {:?} is not yet supported",
+                format
+            ))),
+        }
+    }
+
+    /// Copy from CSV/Text format
+    fn copy_from_csv(
+        &self,
+        database: &str,
+        table: &str,
+        content: &[u8],
+        format: &crate::sql::CopyFormat,
+        options: &crate::sql::CopyOptions,
+    ) -> Result<u64, EngineError> {
+        use arrow_array::builder::*;
+        use arrow_schema::{DataType, Field, Schema};
+
+        // Get table schema
+        let table_desc = self.describe_table(database, table)?;
+        let schema_json = table_desc.schema_json.ok_or_else(|| {
+            EngineError::InvalidArgument("table has no schema".into())
+        })?;
+
+        // Parse schema JSON
+        let schema_fields: Vec<serde_json::Value> = serde_json::from_str(&schema_json)
+            .map_err(|e| EngineError::Internal(format!("invalid schema JSON: {}", e)))?;
+
+        // Determine delimiter
+        let delimiter = options.delimiter.unwrap_or(
+            if matches!(format, crate::sql::CopyFormat::Text) { '\t' } else { ',' }
+        );
+
+        // Parse content
+        let content_str = std::str::from_utf8(content)
+            .map_err(|e| EngineError::InvalidArgument(format!("invalid UTF-8: {}", e)))?;
+
+        let lines: Vec<&str> = content_str.lines().collect();
+        let start_line = if options.header { 1 } else { 0 };
+        let data_lines = &lines[start_line..];
+
+        if data_lines.is_empty() {
+            return Ok(0);
+        }
+
+        // Build Arrow arrays for each column
+        let null_str = options.null_string.as_deref().unwrap_or("");
+        let mut builders: Vec<Box<dyn std::any::Any>> = Vec::new();
+        let mut arrow_fields: Vec<Field> = Vec::new();
+
+        for field in &schema_fields {
+            let name = field["name"].as_str().unwrap_or("unknown");
+            let type_str = field["type"].as_str().unwrap_or("string");
+            let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+
+            let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
+                "int64" | "bigint" => (DataType::Int64, Box::new(Int64Builder::new())),
+                "int32" | "int" | "integer" => (DataType::Int32, Box::new(Int32Builder::new())),
+                "float64" | "double" => (DataType::Float64, Box::new(Float64Builder::new())),
+                "float32" | "float" => (DataType::Float32, Box::new(Float32Builder::new())),
+                "boolean" | "bool" => (DataType::Boolean, Box::new(BooleanBuilder::new())),
+                _ => (DataType::Utf8, Box::new(StringBuilder::new())),
+            };
+
+            arrow_fields.push(Field::new(name, arrow_type, nullable));
+            builders.push(builder);
+        }
+
+        // Parse each line
+        for line in data_lines {
+            let values: Vec<&str> = line.split(delimiter).collect();
+
+            for (i, field) in schema_fields.iter().enumerate() {
+                let value = values.get(i).copied().unwrap_or("");
+                let is_null = value == null_str || value.is_empty();
+                let type_str = field["type"].as_str().unwrap_or("string");
+
+                match type_str {
+                    "int64" | "bigint" => {
+                        let builder = builders[i].downcast_mut::<Int64Builder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.parse::<i64>().unwrap_or(0));
+                        }
+                    }
+                    "int32" | "int" | "integer" => {
+                        let builder = builders[i].downcast_mut::<Int32Builder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.parse::<i32>().unwrap_or(0));
+                        }
+                    }
+                    "float64" | "double" => {
+                        let builder = builders[i].downcast_mut::<Float64Builder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.parse::<f64>().unwrap_or(0.0));
+                        }
+                    }
+                    "float32" | "float" => {
+                        let builder = builders[i].downcast_mut::<Float32Builder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.parse::<f32>().unwrap_or(0.0));
+                        }
+                    }
+                    "boolean" | "bool" => {
+                        let builder = builders[i].downcast_mut::<BooleanBuilder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            let b = matches!(value.to_lowercase().as_str(), "true" | "t" | "1" | "yes" | "y");
+                            builder.append_value(b);
+                        }
+                    }
+                    _ => {
+                        let builder = builders[i].downcast_mut::<StringBuilder>().unwrap();
+                        if is_null {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build arrays and create batch
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+        for (i, field) in schema_fields.iter().enumerate() {
+            let type_str = field["type"].as_str().unwrap_or("string");
+            let array: ArrayRef = match type_str {
+                "int64" | "bigint" => {
+                    Arc::new(builders[i].downcast_mut::<Int64Builder>().unwrap().finish())
+                }
+                "int32" | "int" | "integer" => {
+                    Arc::new(builders[i].downcast_mut::<Int32Builder>().unwrap().finish())
+                }
+                "float64" | "double" => {
+                    Arc::new(builders[i].downcast_mut::<Float64Builder>().unwrap().finish())
+                }
+                "float32" | "float" => {
+                    Arc::new(builders[i].downcast_mut::<Float32Builder>().unwrap().finish())
+                }
+                "boolean" | "bool" => {
+                    Arc::new(builders[i].downcast_mut::<BooleanBuilder>().unwrap().finish())
+                }
+                _ => {
+                    Arc::new(builders[i].downcast_mut::<StringBuilder>().unwrap().finish())
+                }
+            };
+            arrays.push(array);
+        }
+
+        let schema = Arc::new(Schema::new(arrow_fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        // Convert to IPC and ingest
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+
+        let watermark = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let ingest = IngestBatch {
+            payload_ipc: ipc,
+            watermark_micros: watermark,
+            shard_override: None,
+            database: Some(database.to_string()),
+            table: Some(table.to_string()),
+        };
+        self.ingest_ipc(ingest)?;
+
+        Ok(data_lines.len() as u64)
+    }
+
+    /// Copy from JSON lines format
+    fn copy_from_json(
+        &self,
+        database: &str,
+        table: &str,
+        content: &[u8],
+        _options: &crate::sql::CopyOptions,
+    ) -> Result<u64, EngineError> {
+        use arrow_array::builder::*;
+        use arrow_schema::{DataType, Field, Schema};
+
+        // Get table schema
+        let table_desc = self.describe_table(database, table)?;
+        let schema_json = table_desc.schema_json.ok_or_else(|| {
+            EngineError::InvalidArgument("table has no schema".into())
+        })?;
+
+        let schema_fields: Vec<serde_json::Value> = serde_json::from_str(&schema_json)
+            .map_err(|e| EngineError::Internal(format!("invalid schema JSON: {}", e)))?;
+
+        let content_str = std::str::from_utf8(content)
+            .map_err(|e| EngineError::InvalidArgument(format!("invalid UTF-8: {}", e)))?;
+
+        let lines: Vec<&str> = content_str.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
+            return Ok(0);
+        }
+
+        // Build Arrow arrays
+        let mut builders: Vec<Box<dyn std::any::Any>> = Vec::new();
+        let mut arrow_fields: Vec<Field> = Vec::new();
+
+        for field in &schema_fields {
+            let name = field["name"].as_str().unwrap_or("unknown");
+            let type_str = field["type"].as_str().unwrap_or("string");
+            let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+
+            let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
+                "int64" | "bigint" => (DataType::Int64, Box::new(Int64Builder::new())),
+                "int32" | "int" | "integer" => (DataType::Int32, Box::new(Int32Builder::new())),
+                "float64" | "double" => (DataType::Float64, Box::new(Float64Builder::new())),
+                "float32" | "float" => (DataType::Float32, Box::new(Float32Builder::new())),
+                "boolean" | "bool" => (DataType::Boolean, Box::new(BooleanBuilder::new())),
+                _ => (DataType::Utf8, Box::new(StringBuilder::new())),
+            };
+
+            arrow_fields.push(Field::new(name, arrow_type, nullable));
+            builders.push(builder);
+        }
+
+        // Parse each JSON line
+        for line in &lines {
+            let json: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| EngineError::InvalidArgument(format!("invalid JSON: {}", e)))?;
+
+            for (i, field) in schema_fields.iter().enumerate() {
+                let name = field["name"].as_str().unwrap_or("unknown");
+                let type_str = field["type"].as_str().unwrap_or("string");
+                let value = &json[name];
+
+                match type_str {
+                    "int64" | "bigint" => {
+                        let builder = builders[i].downcast_mut::<Int64Builder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.as_i64().unwrap_or(0));
+                        }
+                    }
+                    "int32" | "int" | "integer" => {
+                        let builder = builders[i].downcast_mut::<Int32Builder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.as_i64().unwrap_or(0) as i32);
+                        }
+                    }
+                    "float64" | "double" => {
+                        let builder = builders[i].downcast_mut::<Float64Builder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.as_f64().unwrap_or(0.0));
+                        }
+                    }
+                    "float32" | "float" => {
+                        let builder = builders[i].downcast_mut::<Float32Builder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.as_f64().unwrap_or(0.0) as f32);
+                        }
+                    }
+                    "boolean" | "bool" => {
+                        let builder = builders[i].downcast_mut::<BooleanBuilder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else {
+                            builder.append_value(value.as_bool().unwrap_or(false));
+                        }
+                    }
+                    _ => {
+                        let builder = builders[i].downcast_mut::<StringBuilder>().unwrap();
+                        if value.is_null() {
+                            builder.append_null();
+                        } else if let Some(s) = value.as_str() {
+                            builder.append_value(s);
+                        } else {
+                            builder.append_value(value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build arrays and create batch
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+        for (i, field) in schema_fields.iter().enumerate() {
+            let type_str = field["type"].as_str().unwrap_or("string");
+            let array: ArrayRef = match type_str {
+                "int64" | "bigint" => {
+                    Arc::new(builders[i].downcast_mut::<Int64Builder>().unwrap().finish())
+                }
+                "int32" | "int" | "integer" => {
+                    Arc::new(builders[i].downcast_mut::<Int32Builder>().unwrap().finish())
+                }
+                "float64" | "double" => {
+                    Arc::new(builders[i].downcast_mut::<Float64Builder>().unwrap().finish())
+                }
+                "float32" | "float" => {
+                    Arc::new(builders[i].downcast_mut::<Float32Builder>().unwrap().finish())
+                }
+                "boolean" | "bool" => {
+                    Arc::new(builders[i].downcast_mut::<BooleanBuilder>().unwrap().finish())
+                }
+                _ => {
+                    Arc::new(builders[i].downcast_mut::<StringBuilder>().unwrap().finish())
+                }
+            };
+            arrays.push(array);
+        }
+
+        let schema = Arc::new(Schema::new(arrow_fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+        // Convert to IPC and ingest
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
+            writer.write(&batch)
+                .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
+            writer.finish()
+                .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
+        }
+
+        let watermark = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let ingest = IngestBatch {
+            payload_ipc: ipc,
+            watermark_micros: watermark,
+            shard_override: None,
+            database: Some(database.to_string()),
+            table: Some(table.to_string()),
+        };
+        self.ingest_ipc(ingest)?;
+
+        Ok(lines.len() as u64)
+    }
+
+    /// Copy data to a file from a table (COPY TO)
+    pub fn copy_to(
+        &self,
+        database: &str,
+        table: &str,
+        destination: &str,
+        format: &crate::sql::CopyFormat,
+        options: &crate::sql::CopyOptions,
+    ) -> Result<u64, EngineError> {
+        use crate::sql::CopyFormat;
+
+        // Validate database and table names to prevent injection
+        self.validate_identifier(database, "database")?;
+        self.validate_identifier(table, "table")?;
+
+        // Validate and resolve the destination path
+        let dest_path = self.validate_copy_path(destination, true)?;
+
+        // Query all data from the table using validated identifiers
+        let query_request = QueryRequest {
+            sql: format!("SELECT * FROM \"{}\".\"{}\"", database, table),
+            timeout_millis: 0,
+            collect_stats: false,
+        };
+        let result = self.query(query_request)?;
+
+        if result.records_ipc.is_empty() {
+            std::fs::write(&dest_path, "")
+                .map_err(|e| EngineError::Internal(format!("failed to write file: {}", e)))?;
+            return Ok(0);
+        }
+
+        // Decode the IPC
+        use arrow_ipc::reader::StreamReader;
+        let cursor = std::io::Cursor::new(&result.records_ipc);
+        let mut reader = StreamReader::try_new(cursor, None)
+            .map_err(|e| EngineError::Internal(format!("failed to read IPC: {}", e)))?;
+
+        let mut output = String::new();
+        let mut row_count = 0u64;
+
+        // Get schema for header
+        let schema = reader.schema();
+
+        match format {
+            CopyFormat::Csv | CopyFormat::Text => {
+                let delimiter = options.delimiter.unwrap_or(
+                    if matches!(format, CopyFormat::Text) { '\t' } else { ',' }
+                );
+                let null_str = options.null_string.as_deref().unwrap_or("");
+
+                // Write header if requested
+                if options.header {
+                    let header: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                    output.push_str(&header.join(&delimiter.to_string()));
+                    output.push('\n');
+                }
+
+                // Write data rows
+                while let Some(batch_result) = reader.next() {
+                    let batch = batch_result
+                        .map_err(|e| EngineError::Internal(format!("failed to read batch: {}", e)))?;
+
+                    for row in 0..batch.num_rows() {
+                        let values: Vec<String> = batch
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                if col.is_null(row) {
+                                    null_str.to_string()
+                                } else {
+                                    self.array_value_to_string(col, row)
+                                }
+                            })
+                            .collect();
+                        output.push_str(&values.join(&delimiter.to_string()));
+                        output.push('\n');
+                        row_count += 1;
+                    }
+                }
+            }
+            CopyFormat::Json => {
+                while let Some(batch_result) = reader.next() {
+                    let batch = batch_result
+                        .map_err(|e| EngineError::Internal(format!("failed to read batch: {}", e)))?;
+
+                    for row in 0..batch.num_rows() {
+                        let mut obj = serde_json::Map::new();
+                        for (i, field) in schema.fields().iter().enumerate() {
+                            let col = batch.column(i);
+                            let value = if col.is_null(row) {
+                                serde_json::Value::Null
+                            } else {
+                                self.array_value_to_json(col, row)
+                            };
+                            obj.insert(field.name().clone(), value);
+                        }
+                        output.push_str(&serde_json::to_string(&obj).unwrap_or_default());
+                        output.push('\n');
+                        row_count += 1;
+                    }
+                }
+            }
+            CopyFormat::Arrow => {
+                // Write raw Arrow IPC
+                std::fs::write(&dest_path, &result.records_ipc)
+                    .map_err(|e| EngineError::Internal(format!("failed to write file: {}", e)))?;
+                return Ok(row_count);
+            }
+            _ => {
+                return Err(EngineError::InvalidArgument(format!(
+                    "COPY TO format {:?} is not yet supported",
+                    format
+                )));
+            }
+        }
+
+        std::fs::write(&dest_path, &output)
+            .map_err(|e| EngineError::Internal(format!("failed to write file: {}", e)))?;
+
+        Ok(row_count)
+    }
+
+    /// Convert an array value at a given row to a string
+    fn array_value_to_string(&self, array: &ArrayRef, row: usize) -> String {
+        use arrow_array::*;
+
+        if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+            return arr.value(row).to_string();
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+            return arr.value(row).to_string();
+        }
+        String::new()
+    }
+
+    /// Convert an array value at a given row to a JSON value
+    fn array_value_to_json(&self, array: &ArrayRef, row: usize) -> serde_json::Value {
+        use arrow_array::*;
+
+        if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+            return serde_json::Value::String(arr.value(row).to_string());
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+            return serde_json::json!(arr.value(row));
+        }
+        serde_json::Value::Null
     }
 
     /// Truncate a table by removing all its segments but keeping the table definition.
@@ -16096,6 +17844,7 @@ mod tests {
             views: Vec::new(),
             materialized_views: Vec::new(),
             indexes: Vec::new(),
+            sequences: Vec::new(),
             entries: Vec::new(),
         };
         std::fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
@@ -19512,5 +21261,151 @@ mod tests {
 
         assert_ne!(hash1, hash2, "Different tables should have different hashes");
         assert_ne!(hash1, hash3, "Different columns should have different hashes");
+    }
+
+    #[test]
+    fn test_table_constraints() {
+        use crate::sql::TableConstraint;
+
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database and table
+        db.create_database("testdb").unwrap();
+        db.create_table("testdb", "users", Some(r#"[{"name":"id","type":"int64"},{"name":"email","type":"string"}]"#.to_string())).unwrap();
+
+        // Add a PRIMARY KEY constraint
+        let pk = TableConstraint::PrimaryKey {
+            columns: vec!["id".to_string()],
+            name: Some("pk_users".to_string()),
+        };
+        db.add_constraint("testdb", "users", pk.clone()).unwrap();
+
+        // Verify constraint was added
+        let constraints = db.get_table_constraints("testdb", "users").unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert!(matches!(&constraints[0], TableConstraint::PrimaryKey { name: Some(n), .. } if n == "pk_users"));
+
+        // Adding another PRIMARY KEY should fail
+        let pk2 = TableConstraint::PrimaryKey {
+            columns: vec!["email".to_string()],
+            name: Some("pk_users_2".to_string()),
+        };
+        assert!(db.add_constraint("testdb", "users", pk2).is_err());
+
+        // Add a UNIQUE constraint
+        let unique = TableConstraint::Unique {
+            columns: vec!["email".to_string()],
+            name: Some("unique_email".to_string()),
+        };
+        db.add_constraint("testdb", "users", unique).unwrap();
+
+        // Verify both constraints exist
+        let constraints = db.get_table_constraints("testdb", "users").unwrap();
+        assert_eq!(constraints.len(), 2);
+
+        // Add a NOT NULL constraint
+        let not_null = TableConstraint::NotNull {
+            column: "email".to_string(),
+        };
+        db.add_constraint("testdb", "users", not_null).unwrap();
+        assert_eq!(db.get_table_constraints("testdb", "users").unwrap().len(), 3);
+
+        // Drop a constraint by name
+        db.drop_constraint("testdb", "users", "unique_email").unwrap();
+        let constraints = db.get_table_constraints("testdb", "users").unwrap();
+        assert_eq!(constraints.len(), 2);
+        assert!(!constraints.iter().any(|c| matches!(c, TableConstraint::Unique { name: Some(n), .. } if n == "unique_email")));
+
+        // Dropping non-existent constraint should fail
+        assert!(db.drop_constraint("testdb", "users", "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_sequences() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database
+        db.create_database("testdb").unwrap();
+
+        // Create a sequence
+        db.create_sequence("testdb", "user_id_seq", 1, 1, None, None, false, false).unwrap();
+
+        // NEXTVAL should return 1, 2, 3...
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 1);
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 2);
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 3);
+
+        // CURRVAL should return the last value
+        assert_eq!(db.currval("testdb", "user_id_seq").unwrap(), 3);
+
+        // Create sequence with custom start and increment
+        db.create_sequence("testdb", "order_seq", 100, 10, None, None, false, false).unwrap();
+        assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 100);
+        assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 110);
+        assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 120);
+
+        // ALTER SEQUENCE RESTART
+        db.alter_sequence("testdb", "user_id_seq", Some(10), None).unwrap();
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 10);
+
+        // ALTER SEQUENCE INCREMENT BY
+        db.alter_sequence("testdb", "user_id_seq", None, Some(5)).unwrap();
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 15);
+        assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 20);
+
+        // SHOW SEQUENCES
+        let sequences = db.list_sequences("testdb").unwrap();
+        assert_eq!(sequences.len(), 2);
+
+        // DROP SEQUENCE
+        db.drop_sequence("testdb", "user_id_seq", false).unwrap();
+        let sequences = db.list_sequences("testdb").unwrap();
+        assert_eq!(sequences.len(), 1);
+        assert_eq!(sequences[0].name, "order_seq");
+
+        // DROP IF EXISTS on non-existent should succeed
+        db.drop_sequence("testdb", "nonexistent", true).unwrap();
+
+        // DROP on non-existent should fail
+        assert!(db.drop_sequence("testdb", "nonexistent", false).is_err());
+
+        // IF NOT EXISTS should not fail on existing sequence
+        db.create_sequence("testdb", "order_seq", 1, 1, None, None, false, true).unwrap();
+    }
+
+    #[test]
+    fn test_rename_table() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database and table
+        db.create_database("testdb").unwrap();
+        db.create_table("testdb", "old_users", Some(r#"[{"name":"id","type":"int64"},{"name":"name","type":"string"}]"#.to_string())).unwrap();
+
+        // Rename table
+        db.rename_table("testdb", "old_users", "new_users").unwrap();
+
+        // Verify old name is gone
+        assert!(db.describe_table("testdb", "old_users").is_err());
+
+        // Verify new name exists
+        let desc = db.describe_table("testdb", "new_users").unwrap();
+        assert_eq!(desc.table, "new_users");
+        assert!(desc.schema_json.as_ref().map(|s| s.contains("id")).unwrap_or(false));
+
+        // Renaming to same name should succeed (no-op)
+        db.rename_table("testdb", "new_users", "new_users").unwrap();
+
+        // Renaming non-existent table should fail
+        assert!(db.rename_table("testdb", "nonexistent", "foo").is_err());
+
+        // Create another table and try to rename to it (should fail)
+        db.create_table("testdb", "other_table", None).unwrap();
+        assert!(db.rename_table("testdb", "new_users", "other_table").is_err());
     }
 }
