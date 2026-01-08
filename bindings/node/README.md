@@ -10,12 +10,12 @@ const db = new Database({ dataDir: '/tmp/boyodb', shardCount: 4, walMaxBytes: 32
 // Ingest expects Arrow IPC bytes.
 db.ingest(Buffer.from('arrow-ipc'), Date.now() * 1000);           // default round-robin routing
 db.ingest(Buffer.from('arrow-ipc'), Date.now() * 1000, 42);        // shard key routing (e.g., tenant hash)
-db.ingestInto(Buffer.from('arrow-ipc'), Date.now() * 1000, 42, 'cdrs', 'calls'); // shard + db/table metadata
-db.createDatabase('cdrs');
-db.createTable('cdrs', 'calls', '{"columns":[{"name":"event_time","type":"timestamp"}]}');
+db.ingestInto(Buffer.from('arrow-ipc'), Date.now() * 1000, 42, 'analytics', 'events'); // shard + db/table metadata
+db.createDatabase('analytics');
+db.createTable('analytics', 'events', '{"columns":[{"name":"event_time","type":"timestamp"}]}');
 db.healthcheck();
 console.log(JSON.parse(db.listDatabases().toString()));
-console.log(JSON.parse(db.listTables('cdrs').toString()));
+console.log(JSON.parse(db.listTables('analytics').toString()));
 const result = db.query('SELECT 1', 1000);
 console.log(result.toString());
 // Note: Query returns Arrow IPC bytes; decode with Apache Arrow JS.
@@ -33,8 +33,8 @@ console.log(JSON.parse(plan.toString()));
 CLI:
 ```
 npm run build
-node cli.js ingest /tmp/boyodb ./sample.ipc cdrs.calls
-node cli.js query /tmp/boyodb "SELECT COUNT(*) FROM cdrs.calls WHERE tenant_id=7"
+node cli.js ingest /tmp/boyodb ./sample.ipc analytics.events
+node cli.js query /tmp/boyodb "SELECT COUNT(*) FROM analytics.events WHERE tenant_id=7"
 node cli.js manifest /tmp/boyodb
 node cli.js import-manifest /tmp/boyodb ./manifest.json --overwrite
 node cli.js health /tmp/boyodb

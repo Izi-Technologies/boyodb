@@ -4,11 +4,11 @@ members = [
   "bindings/node",
   "crates/boyodb-cli",
   "crates/boyodb-server",
-  "crates/boyodb-ingestor",
   "crates/boyodb-bench",
 ]
 exclude = [
   "drivers/rust/boyodb",
+  "crates/boyodb-ingestor",  # Specialized telecom CDR tool (optional)
 ]
 resolver = "2"
 

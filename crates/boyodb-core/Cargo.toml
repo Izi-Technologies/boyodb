@@ -3,7 +3,7 @@ name = "boyodb-core"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Rust core for a low-latency CDR database with C ABI bindings"
+description = "High-performance columnar database engine for real-time analytics"
 
 [lib]
 name = "boyodb_core"
