@@ -93,7 +93,7 @@ struct Envelope {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CsvField {
     name: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", alias = "data_type")]
     data_type: String,
     #[serde(default = "default_true")]
     nullable: bool,
