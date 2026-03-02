@@ -1,0 +1,30 @@
+{
+  "name": "boyodb",
+  "version": "0.1.0",
+  "description": "Node.js driver for boyodb-server",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "node test.js"
+  },
+  "keywords": [
+    "boyodb",
+    "database",
+    "columnar",
+    "arrow",
+    "analytics",
+    "time-series"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/loreste/boyodb"
+  },
+  "dependencies": {
+    "apache-arrow": "^15.0.2"
+  }
+}

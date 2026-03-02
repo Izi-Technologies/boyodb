@@ -1,0 +1,37 @@
+{
+    "name": "boyodb/boyodb",
+    "description": "PHP client driver for boyodb-server - a high-performance columnar database",
+    "version": "0.1.0",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": [
+        "database",
+        "columnar",
+        "analytics",
+        "time-series",
+        "arrow"
+    ],
+    "homepage": "https://github.com/loreste/boyodb",
+    "authors": [
+        {
+            "name": "BoyoDB Team"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/loreste/boyodb/issues",
+        "source": "https://github.com/loreste/boyodb/tree/main/drivers/php/boyodb"
+    },
+    "require": {
+        "php": ">=8.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Boyodb\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Boyodb\\Tests\\": "tests/"
+        }
+    }
+}

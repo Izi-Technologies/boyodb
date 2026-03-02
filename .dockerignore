@@ -1,0 +1,50 @@
+# Build artifacts
+target/
+*.rlib
+*.rmeta
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# CI/CD
+.github/
+
+# Drivers (not needed for server image)
+drivers/
+
+# Test data
+*.log
+*.tmp
+test_data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node artifacts
+node_modules/
+bindings/node/index.node
+bindings/node/package-lock.json
+
+# Go artifacts
+bindings/go/
+
+# Performance baseline
+PERF_BASELINE.md

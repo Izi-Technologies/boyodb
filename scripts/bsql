@@ -1,0 +1,20 @@
+#!/bin/bash
+# bsql - BoyoDB Interactive Shell Wrapper
+
+# Locate project root (assuming script is in scripts/ or root)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Check if boyodb-cli is built
+if [ -f "$PROJECT_ROOT/target/release/boyodb-cli" ]; then
+    CMD="$PROJECT_ROOT/target/release/boyodb-cli"
+elif [ -f "$PROJECT_ROOT/target/debug/boyodb-cli" ]; then
+    CMD="$PROJECT_ROOT/target/debug/boyodb-cli"
+else
+    # Fallback to cargo run
+    echo "Building boyodb-cli..." >&2
+    cargo build -p boyodb-cli --release -q
+    CMD="$PROJECT_ROOT/target/release/boyodb-cli"
+fi
+
+# Execute shell command
+exec "$CMD" shell "$@"

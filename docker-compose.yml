@@ -1,0 +1,161 @@
+version: "3.8"
+
+services:
+  # Single-node CDRDB server
+  cdrdb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdrdb
+    ports:
+      - "5555:5555"
+    volumes:
+      - cdrdb-data:/var/lib/cdrdb/data
+      - cdrdb-wal:/var/lib/cdrdb/wal
+    environment:
+      - RUST_LOG=info
+      - CDRDB_LOG_FORMAT=json
+    healthcheck:
+      test: ["CMD", "cdrdb-cli", "health", "--host", "127.0.0.1:5555"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # Development server with auth enabled
+  cdrdb-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdrdb-dev
+    ports:
+      - "5556:5555"
+    volumes:
+      - cdrdb-dev-data:/var/lib/cdrdb/data
+      - cdrdb-dev-wal:/var/lib/cdrdb/wal
+    environment:
+      - RUST_LOG=debug
+      - CDRDB_LOG_FORMAT=json
+    command:
+      - "--data-dir"
+      - "/var/lib/cdrdb/data"
+      - "--wal-dir"
+      - "/var/lib/cdrdb/wal"
+      - "--bind"
+      - "0.0.0.0:5555"
+      - "--token"
+      - "dev-token-change-in-production"
+      - "--log-requests"
+    profiles:
+      - dev
+    restart: unless-stopped
+
+  # 3-node cluster configuration
+  cdrdb-node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdrdb-node1
+    ports:
+      - "5561:5555"
+      - "5571:5556"
+    volumes:
+      - cdrdb-cluster-node1-data:/var/lib/cdrdb/data
+      - cdrdb-cluster-node1-wal:/var/lib/cdrdb/wal
+    environment:
+      - RUST_LOG=info
+      - CDRDB_LOG_FORMAT=json
+    command:
+      - "--data-dir"
+      - "/var/lib/cdrdb/data"
+      - "--wal-dir"
+      - "/var/lib/cdrdb/wal"
+      - "--bind"
+      - "0.0.0.0:5555"
+      - "--cluster"
+      - "--cluster-bind"
+      - "0.0.0.0:5556"
+      - "--cluster-seeds"
+      - "cdrdb-node2:5556,cdrdb-node3:5556"
+      - "--token"
+      - "cluster-token-change-in-production"
+    profiles:
+      - cluster
+    restart: unless-stopped
+
+  cdrdb-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdrdb-node2
+    ports:
+      - "5562:5555"
+      - "5572:5556"
+    volumes:
+      - cdrdb-cluster-node2-data:/var/lib/cdrdb/data
+      - cdrdb-cluster-node2-wal:/var/lib/cdrdb/wal
+    environment:
+      - RUST_LOG=info
+      - CDRDB_LOG_FORMAT=json
+    command:
+      - "--data-dir"
+      - "/var/lib/cdrdb/data"
+      - "--wal-dir"
+      - "/var/lib/cdrdb/wal"
+      - "--bind"
+      - "0.0.0.0:5555"
+      - "--cluster"
+      - "--cluster-bind"
+      - "0.0.0.0:5556"
+      - "--cluster-seeds"
+      - "cdrdb-node1:5556,cdrdb-node3:5556"
+      - "--token"
+      - "cluster-token-change-in-production"
+    profiles:
+      - cluster
+    restart: unless-stopped
+
+  cdrdb-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdrdb-node3
+    ports:
+      - "5563:5555"
+      - "5573:5556"
+    volumes:
+      - cdrdb-cluster-node3-data:/var/lib/cdrdb/data
+      - cdrdb-cluster-node3-wal:/var/lib/cdrdb/wal
+    environment:
+      - RUST_LOG=info
+      - CDRDB_LOG_FORMAT=json
+    command:
+      - "--data-dir"
+      - "/var/lib/cdrdb/data"
+      - "--wal-dir"
+      - "/var/lib/cdrdb/wal"
+      - "--bind"
+      - "0.0.0.0:5555"
+      - "--cluster"
+      - "--cluster-bind"
+      - "0.0.0.0:5556"
+      - "--cluster-seeds"
+      - "cdrdb-node1:5556,cdrdb-node2:5556"
+      - "--token"
+      - "cluster-token-change-in-production"
+    profiles:
+      - cluster
+    restart: unless-stopped
+
+volumes:
+  cdrdb-data:
+  cdrdb-wal:
+  cdrdb-dev-data:
+  cdrdb-dev-wal:
+  cdrdb-cluster-node1-data:
+  cdrdb-cluster-node1-wal:
+  cdrdb-cluster-node2-data:
+  cdrdb-cluster-node2-wal:
+  cdrdb-cluster-node3-data:
+  cdrdb-cluster-node3-wal:
