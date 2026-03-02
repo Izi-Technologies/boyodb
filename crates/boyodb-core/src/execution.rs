@@ -352,34 +352,62 @@ impl QueryPipeline {
 
         match columns[0] {
             ColumnData::Int64(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::Int64(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::Int64(v) = col {
-                        merged.extend(v.iter().cloned());
+                        merged.extend_from_slice(v);
                     }
                 }
                 Ok(ColumnData::Int64(merged))
             }
             ColumnData::UInt64(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::UInt64(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::UInt64(v) = col {
-                        merged.extend(v.iter().cloned());
+                        merged.extend_from_slice(v);
                     }
                 }
                 Ok(ColumnData::UInt64(merged))
             }
             ColumnData::Float64(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::Float64(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::Float64(v) = col {
-                        merged.extend(v.iter().cloned());
+                        merged.extend_from_slice(v);
                     }
                 }
                 Ok(ColumnData::Float64(merged))
             }
             ColumnData::String(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::String(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::String(v) = col {
                         merged.extend(v.iter().cloned());
@@ -388,7 +416,14 @@ impl QueryPipeline {
                 Ok(ColumnData::String(merged))
             }
             ColumnData::Bytes(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::Bytes(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::Bytes(v) = col {
                         merged.extend(v.iter().cloned());
@@ -397,10 +432,17 @@ impl QueryPipeline {
                 Ok(ColumnData::Bytes(merged))
             }
             ColumnData::Bool(_) => {
-                let mut merged = Vec::new();
+                let total_len: usize = columns
+                    .iter()
+                    .map(|col| match col {
+                        ColumnData::Bool(v) => v.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let mut merged = Vec::with_capacity(total_len);
                 for col in columns {
                     if let ColumnData::Bool(v) = col {
-                        merged.extend(v.iter().cloned());
+                        merged.extend_from_slice(v);
                     }
                 }
                 Ok(ColumnData::Bool(merged))
@@ -1056,27 +1098,55 @@ impl AdaptiveJoinExecutor {
     fn gather_column(&self, col: &ColumnData, indices: &[usize]) -> ColumnData {
         match col {
             ColumnData::Int64(v) => {
-                ColumnData::Int64(indices.iter().map(|&i| v[i]).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx]);
+                }
+                ColumnData::Int64(data)
             }
             ColumnData::UInt64(v) => {
-                ColumnData::UInt64(indices.iter().map(|&i| v[i]).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx]);
+                }
+                ColumnData::UInt64(data)
             }
             ColumnData::Float64(v) => {
-                ColumnData::Float64(indices.iter().map(|&i| v[i]).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx]);
+                }
+                ColumnData::Float64(data)
             }
             ColumnData::String(v) => {
-                ColumnData::String(indices.iter().map(|&i| v[i].clone()).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx].clone());
+                }
+                ColumnData::String(data)
             }
             ColumnData::Bytes(v) => {
-                ColumnData::Bytes(indices.iter().map(|&i| v[i].clone()).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx].clone());
+                }
+                ColumnData::Bytes(data)
             }
             ColumnData::Bool(v) => {
-                ColumnData::Bool(indices.iter().map(|&i| v[i]).collect())
+                let mut data = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    data.push(v[idx]);
+                }
+                ColumnData::Bool(data)
             }
             ColumnData::Nullable { data, nulls } => {
+                let mut gathered_nulls = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    gathered_nulls.push(nulls[idx]);
+                }
                 ColumnData::Nullable {
                     data: Box::new(self.gather_column(data, indices)),
-                    nulls: indices.iter().map(|&i| nulls[i]).collect(),
+                    nulls: gathered_nulls,
                 }
             }
         }

@@ -12,6 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,7 +22,7 @@ use uuid::Uuid;
 use thiserror::Error;
 
 /// Errors that can occur during authentication/authorization operations
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum AuthError {
     #[error("user not found: {0}")]
     UserNotFound(String),
@@ -53,6 +56,8 @@ pub enum AuthError {
     RoleNotFound(String),
     #[error("role already exists: {0}")]
     RoleAlreadyExists(String),
+    #[error("bootstrap password required: set BOYODB_BOOTSTRAP_PASSWORD")]
+    BootstrapPasswordMissing,
 }
 
 /// Privilege types that can be granted on database objects
@@ -482,7 +487,7 @@ impl Default for AuthStore {
             roles: HashMap::new(),
             password_policy: PasswordPolicy::default(),
             session_timeout_secs: 3600, // 1 hour
-            require_auth: false,
+            require_auth: true,
             version: 1,
         }
     }
@@ -498,9 +503,49 @@ pub struct AuthManager {
     data_dir: std::path::PathBuf,
     /// Audit log entries (in-memory buffer)
     audit_log: RwLock<Vec<AuditLogEntry>>,
+    /// Path to persistent audit log file
+    audit_log_path: std::path::PathBuf,
 }
 
 impl AuthManager {
+    fn validate_password_with_policy(
+        policy: &PasswordPolicy,
+        password: &str,
+    ) -> Result<(), AuthError> {
+        if password.len() < policy.min_length {
+            return Err(AuthError::WeakPassword(format!(
+                "password must be at least {} characters",
+                policy.min_length
+            )));
+        }
+
+        if policy.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
+            return Err(AuthError::WeakPassword(
+                "password must contain uppercase letters".into(),
+            ));
+        }
+
+        if policy.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
+            return Err(AuthError::WeakPassword(
+                "password must contain lowercase letters".into(),
+            ));
+        }
+
+        if policy.require_digit && !password.chars().any(|c| c.is_ascii_digit()) {
+            return Err(AuthError::WeakPassword(
+                "password must contain digits".into(),
+            ));
+        }
+
+        if policy.require_special && !password.chars().any(|c| !c.is_alphanumeric()) {
+            return Err(AuthError::WeakPassword(
+                "password must contain special characters".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Create a new AuthManager
     pub fn new(data_dir: &Path) -> Result<Self, AuthError> {
         let store_path = data_dir.join("auth_store.json");
@@ -512,8 +557,12 @@ impl AuthManager {
             // Create default store with root superuser
             let mut store = AuthStore::default();
 
-            // Create default root user with password "changeme"
-            let root_hash = Self::hash_password_static("changeme")?;
+            let bootstrap_password =
+                env::var("BOYODB_BOOTSTRAP_PASSWORD").map_err(|_| AuthError::BootstrapPasswordMissing)?;
+            Self::validate_password_with_policy(&store.password_policy, &bootstrap_password)?;
+
+            // Create default root user with provided password
+            let root_hash = Self::hash_password_static(&bootstrap_password)?;
             let mut root = User::new("root", &root_hash);
             root.is_superuser = true;
             store.users.insert("root".to_string(), root);
@@ -599,6 +648,7 @@ impl AuthManager {
             sessions: RwLock::new(HashMap::new()),
             data_dir: data_dir.to_path_buf(),
             audit_log: RwLock::new(Vec::new()),
+            audit_log_path: data_dir.join("audit.log"),
         };
 
         // Persist initial store
@@ -668,6 +718,18 @@ impl AuthManager {
 
     /// Add an audit log entry
     fn audit(&self, entry: AuditLogEntry) {
+        // Write to persistent file first (append mode, best-effort)
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.audit_log_path)
+        {
+            if let Ok(json) = serde_json::to_string(&entry) {
+                let _ = writeln!(file, "{}", json);
+            }
+        }
+
+        // Also keep in memory buffer
         if let Ok(mut log) = self.audit_log.write() {
             log.push(entry);
             // Keep only last 10000 entries in memory
@@ -677,46 +739,37 @@ impl AuthManager {
         }
     }
 
+    /// Get recent audit log entries (from memory)
+    pub fn get_audit_log(&self, limit: usize) -> Vec<AuditLogEntry> {
+        if let Ok(log) = self.audit_log.read() {
+            let start = log.len().saturating_sub(limit);
+            log[start..].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get audit log entries filtered by event type
+    pub fn get_audit_log_by_type(&self, event_type: &str, limit: usize) -> Vec<AuditLogEntry> {
+        if let Ok(log) = self.audit_log.read() {
+            log.iter()
+                .filter(|e| e.event_type == event_type)
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Validate password against policy
     pub fn validate_password(&self, password: &str) -> Result<(), AuthError> {
         let store = self
             .store
             .read()
             .map_err(|_| AuthError::Io("lock poisoned".into()))?;
-        let policy = &store.password_policy;
-
-        if password.len() < policy.min_length {
-            return Err(AuthError::WeakPassword(format!(
-                "password must be at least {} characters",
-                policy.min_length
-            )));
-        }
-
-        if policy.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
-            return Err(AuthError::WeakPassword(
-                "password must contain uppercase letters".into(),
-            ));
-        }
-
-        if policy.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
-            return Err(AuthError::WeakPassword(
-                "password must contain lowercase letters".into(),
-            ));
-        }
-
-        if policy.require_digit && !password.chars().any(|c| c.is_ascii_digit()) {
-            return Err(AuthError::WeakPassword(
-                "password must contain digits".into(),
-            ));
-        }
-
-        if policy.require_special && !password.chars().any(|c| !c.is_alphanumeric()) {
-            return Err(AuthError::WeakPassword(
-                "password must contain special characters".into(),
-            ));
-        }
-
-        Ok(())
+        Self::validate_password_with_policy(&store.password_policy, password)
     }
 
     // ========== User Management ==========
@@ -1801,15 +1854,6 @@ impl AuthManager {
         self.persist()
     }
 
-    /// Get audit log entries
-    pub fn get_audit_log(&self, limit: usize) -> Vec<AuditLogEntry> {
-        if let Ok(log) = self.audit_log.read() {
-            log.iter().rev().take(limit).cloned().collect()
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Get active sessions
     pub fn get_active_sessions(&self) -> Vec<SessionInfo> {
         if let Ok(sessions) = self.sessions.read() {
@@ -1940,10 +1984,19 @@ pub struct SessionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
     use tempfile::tempdir;
+
+    fn ensure_bootstrap_password() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("BOYODB_BOOTSTRAP_PASSWORD", "TestBootstr4p!");
+        });
+    }
 
     #[test]
     fn test_create_and_authenticate_user() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -1968,6 +2021,7 @@ mod tests {
 
     #[test]
     fn test_privilege_check() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -2011,6 +2065,7 @@ mod tests {
 
     #[test]
     fn test_role_based_access() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -2044,6 +2099,7 @@ mod tests {
 
     #[test]
     fn test_superuser_has_all_privileges() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -2056,6 +2112,7 @@ mod tests {
 
     #[test]
     fn test_password_validation() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -2070,6 +2127,7 @@ mod tests {
 
     #[test]
     fn test_user_lockout() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 
@@ -2096,6 +2154,7 @@ mod tests {
 
     #[test]
     fn test_session_expiration() {
+        ensure_bootstrap_password();
         let tmp = tempdir().unwrap();
         let auth = AuthManager::new(tmp.path()).unwrap();
 

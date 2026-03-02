@@ -1,42 +1,115 @@
 use boyodb_core::engine::{Db, QueryRequest};
+use boyodb_core::AuthManager;
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{DataRowEncoder, FieldInfo, QueryResponse, Response, FieldFormat, DescribeStatementResponse, DescribePortalResponse, Tag};
 use pgwire::api::{ClientInfo, Type, MakeHandler};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireFrontendMessage;
-use pgwire::messages::extendedquery::{Bind, Parse, ParseComplete, BindComplete, Close, Sync as PgSync, Execute};
+use pgwire::messages::extendedquery::{Bind, Parse, ParseComplete, BindComplete};
 use std::sync::Arc;
 use futures::stream;
 use pgwire::api::portal::Portal;
 use pgwire::api::stmt::NoopQueryParser;
-use pgwire::api::auth::cleartext::CleartextPasswordAuthStartupHandler;
 use pgwire::api::ClientPortalStore;
 use pgwire::api::store::PortalStore;
 use pgwire::api::stmt::StoredStatement;
 use std::fmt::Debug;
 use futures::{Sink, SinkExt};
-use pgwire::messages::PgWireBackendMessage;
-use pgwire::api::auth::{AuthSource, LoginInfo, Password, DefaultServerParameterProvider};
+use pgwire::messages::{PgWireBackendMessage, startup::Authentication};
+use pgwire::messages::response::ErrorResponse;
+use pgwire::api::auth::{self, DefaultServerParameterProvider};
+use pgwire::api::PgWireConnectionState;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::pin::Pin;
 
-#[derive(Clone, Default)]
-pub struct BoyodbAuthSource;
+#[derive(Clone)]
+pub struct BoyodbPgAuthHandler {
+    auth_manager: Option<Arc<AuthManager>>,
+}
+
+impl BoyodbPgAuthHandler {
+    pub fn new(auth_manager: Option<Arc<AuthManager>>) -> Self {
+        Self { auth_manager }
+    }
+}
 
 #[async_trait::async_trait]
-impl AuthSource for BoyodbAuthSource {
-    async fn get_password(&self, _login: &LoginInfo) -> PgWireResult<Password> {
-        Ok(Password::new(None, "boyo".as_bytes().to_vec()))
+impl StartupHandler for BoyodbPgAuthHandler {
+    async fn on_startup<C>(&self, client: &mut C, msg: PgWireFrontendMessage) -> PgWireResult<()>
+    where
+        C: ClientInfo + Unpin + Send + Sink<PgWireBackendMessage>,
+        C::Error: Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let parameter_provider = DefaultServerParameterProvider::default();
+        match msg {
+            PgWireFrontendMessage::Startup(ref startup) => {
+                auth::save_startup_parameters_to_metadata(client, startup);
+                if self.auth_manager.is_none() {
+                    auth::finish_authentication(client, &parameter_provider).await;
+                    return Ok(());
+                }
+                client.set_state(PgWireConnectionState::AuthenticationInProgress);
+                client
+                    .send(PgWireBackendMessage::Authentication(
+                        Authentication::CleartextPassword,
+                    ))
+                    .await?;
+            }
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                let auth_manager = match &self.auth_manager {
+                    Some(auth_manager) => auth_manager,
+                    None => return Ok(()),
+                };
+                let pwd = pwd.into_password()?;
+                let login_info = auth::LoginInfo::from_client_info(client);
+                let username = login_info.user().ok_or(PgWireError::UserNameRequired)?;
+                let auth_result = auth_manager.authenticate(
+                    username,
+                    &pwd.password,
+                    Some(login_info.host()),
+                    None,
+                );
+                match auth_result {
+                    Ok(session_id) => {
+                        let _ = auth_manager.invalidate_session(&session_id);
+                        tracing::info!(
+                            username = %username,
+                            client_ip = %login_info.host(),
+                            "PostgreSQL authentication successful"
+                        );
+                        auth::finish_authentication(client, &parameter_provider).await;
+                    }
+                    Err(ref e) => {
+                        tracing::warn!(
+                            username = %username,
+                            client_ip = %login_info.host(),
+                            error = %e,
+                            "PostgreSQL authentication failed"
+                        );
+                        let error_info = ErrorInfo::new(
+                            "FATAL".to_owned(),
+                            "28P01".to_owned(),
+                            "Password authentication failed".to_owned(),
+                        );
+                        let error = ErrorResponse::from(error_info);
+                        client
+                            .feed(PgWireBackendMessage::ErrorResponse(error))
+                            .await?;
+                        client.close().await?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
 pub struct BoyodbPgHandler {
     db: Arc<Db>,
     query_parser: Arc<NoopQueryParser>,
-    #[allow(dead_code)]
-    auth_handler: Arc<CleartextPasswordAuthStartupHandler<BoyodbAuthSource, DefaultServerParameterProvider>>,
     /// Map of Statement Name -> SQL
     statements: Arc<Mutex<HashMap<String, String>>>,
     /// Map of Portal Name -> SQL (with params substituted)
@@ -48,25 +121,9 @@ impl BoyodbPgHandler {
         Self { 
             db,
             query_parser: Arc::new(NoopQueryParser::new()),
-            auth_handler: Arc::new(CleartextPasswordAuthStartupHandler::new(
-                BoyodbAuthSource,
-                DefaultServerParameterProvider::default(),
-            )),
             statements: Arc::new(Mutex::new(HashMap::new())),
             portals: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl StartupHandler for BoyodbPgHandler {
-    async fn on_startup<C>(&self, client: &mut C, msg: PgWireFrontendMessage) -> PgWireResult<()>
-    where
-        C: ClientInfo + Unpin + Send + Sink<PgWireBackendMessage>,
-        C::Error: Debug,
-        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
-    {
-        self.auth_handler.on_startup(client, msg).await
     }
 }
 
@@ -206,7 +263,7 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         tracing::debug!("PG Bind: portal={:?} stmt={:?}", msg.portal_name, msg.statement_name);
-        let portal_name = msg.portal_name.clone().unwrap_or_else(|| "".to_string());
+        let _portal_name = msg.portal_name.clone().unwrap_or_else(|| "".to_string());
         let stmt_name = msg.statement_name.clone().unwrap_or_else(|| "".to_string());
         
         let stmt = client.portal_store().get_statement(&stmt_name)
@@ -371,6 +428,18 @@ fn arrow_to_pg_type(dt: &arrow_schema::DataType) -> Type {
     }
 }
 
+fn downcast_array<'a, T: 'static>(
+    array: &'a dyn arrow_array::Array,
+    type_name: &str,
+) -> Result<&'a T, PgWireError> {
+    array.as_any().downcast_ref::<T>().ok_or_else(|| {
+        PgWireError::ApiError(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected {} array", type_name),
+        )))
+    })
+}
+
 /// Encode an Arrow array value at index i to the PostgreSQL DataRowEncoder
 fn encode_arrow_value(
     encoder: &mut DataRowEncoder,
@@ -388,69 +457,69 @@ fn encode_arrow_value(
 
     match data_type {
         DataType::Boolean => {
-            let val = array.as_any().downcast_ref::<BooleanArray>().unwrap().value(row);
+            let val = downcast_array::<BooleanArray>(array, "Boolean")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int8 => {
-            let val = array.as_any().downcast_ref::<Int8Array>().unwrap().value(row);
+            let val = downcast_array::<Int8Array>(array, "Int8")?.value(row);
             encoder.encode_field(&(val as i16)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int16 => {
-            let val = array.as_any().downcast_ref::<Int16Array>().unwrap().value(row);
+            let val = downcast_array::<Int16Array>(array, "Int16")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int32 => {
-            let val = array.as_any().downcast_ref::<Int32Array>().unwrap().value(row);
+            let val = downcast_array::<Int32Array>(array, "Int32")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int64 => {
-            let val = array.as_any().downcast_ref::<Int64Array>().unwrap().value(row);
+            let val = downcast_array::<Int64Array>(array, "Int64")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt8 => {
-            let val = array.as_any().downcast_ref::<UInt8Array>().unwrap().value(row);
+            let val = downcast_array::<UInt8Array>(array, "UInt8")?.value(row);
             encoder.encode_field(&(val as i16)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt16 => {
-            let val = array.as_any().downcast_ref::<UInt16Array>().unwrap().value(row);
+            let val = downcast_array::<UInt16Array>(array, "UInt16")?.value(row);
             encoder.encode_field(&(val as i32)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt32 => {
-            let val = array.as_any().downcast_ref::<UInt32Array>().unwrap().value(row);
+            let val = downcast_array::<UInt32Array>(array, "UInt32")?.value(row);
             encoder.encode_field(&(val as i64)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt64 => {
-            let val = array.as_any().downcast_ref::<UInt64Array>().unwrap().value(row);
+            let val = downcast_array::<UInt64Array>(array, "UInt64")?.value(row);
             // Cast to i64 (may lose precision for very large values)
             encoder.encode_field(&(val as i64)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Float32 => {
-            let val = array.as_any().downcast_ref::<Float32Array>().unwrap().value(row);
+            let val = downcast_array::<Float32Array>(array, "Float32")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Float64 => {
-            let val = array.as_any().downcast_ref::<Float64Array>().unwrap().value(row);
+            let val = downcast_array::<Float64Array>(array, "Float64")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Utf8 => {
-            let val = array.as_any().downcast_ref::<StringArray>().unwrap().value(row);
+            let val = downcast_array::<StringArray>(array, "Utf8")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::LargeUtf8 => {
-            let val = array.as_any().downcast_ref::<LargeStringArray>().unwrap().value(row);
+            let val = downcast_array::<LargeStringArray>(array, "LargeUtf8")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Binary => {
-            let val = array.as_any().downcast_ref::<BinaryArray>().unwrap().value(row);
+            let val = downcast_array::<BinaryArray>(array, "Binary")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::LargeBinary => {
-            let val = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap().value(row);
+            let val = downcast_array::<LargeBinaryArray>(array, "LargeBinary")?.value(row);
             encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Date32 => {
             // Days since Unix epoch -> convert to ISO date string
-            let val = array.as_any().downcast_ref::<Date32Array>().unwrap().value(row);
+            let val = downcast_array::<Date32Array>(array, "Date32")?.value(row);
             let date = chrono::NaiveDate::from_num_days_from_ce_opt(val + 719163); // Days from 0001-01-01 to 1970-01-01
             if let Some(d) = date {
                 let date_str: String = d.to_string();
@@ -461,7 +530,7 @@ fn encode_arrow_value(
         }
         DataType::Date64 => {
             // Milliseconds since Unix epoch -> convert to ISO date string
-            let val = array.as_any().downcast_ref::<Date64Array>().unwrap().value(row);
+            let val = downcast_array::<Date64Array>(array, "Date64")?.value(row);
             let secs = val / 1000;
             let nsecs = ((val % 1000) * 1_000_000) as u32;
             let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs);
@@ -476,16 +545,16 @@ fn encode_arrow_value(
             use arrow_schema::TimeUnit;
             let micros = match unit {
                 TimeUnit::Second => {
-                    array.as_any().downcast_ref::<TimestampSecondArray>().unwrap().value(row) * 1_000_000
+                    downcast_array::<TimestampSecondArray>(array, "TimestampSecond")?.value(row) * 1_000_000
                 }
                 TimeUnit::Millisecond => {
-                    array.as_any().downcast_ref::<TimestampMillisecondArray>().unwrap().value(row) * 1_000
+                    downcast_array::<TimestampMillisecondArray>(array, "TimestampMillisecond")?.value(row) * 1_000
                 }
                 TimeUnit::Microsecond => {
-                    array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap().value(row)
+                    downcast_array::<TimestampMicrosecondArray>(array, "TimestampMicrosecond")?.value(row)
                 }
                 TimeUnit::Nanosecond => {
-                    array.as_any().downcast_ref::<TimestampNanosecondArray>().unwrap().value(row) / 1_000
+                    downcast_array::<TimestampNanosecondArray>(array, "TimestampNanosecond")?.value(row) / 1_000
                 }
             };
             let secs = micros / 1_000_000;
@@ -499,7 +568,7 @@ fn encode_arrow_value(
             }
         }
         DataType::Decimal128(_, scale) => {
-            let val = array.as_any().downcast_ref::<Decimal128Array>().unwrap().value(row);
+            let val = downcast_array::<Decimal128Array>(array, "Decimal128")?.value(row);
             let scale = *scale as i32;
             let divisor = 10_i128.pow(scale as u32);
             let int_part = val / divisor;

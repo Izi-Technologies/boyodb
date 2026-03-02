@@ -16,6 +16,26 @@ BoyoDB implements multiple layers of security:
 
 ## Authentication
 
+### Bootstrap Password (Required)
+
+BoyoDB requires a bootstrap password to be set when initializing the authentication system for the first time. This creates the `root` superuser account.
+
+```bash
+# Set bootstrap password via environment variable (REQUIRED)
+export BOYODB_BOOTSTRAP_PASSWORD='YourSecureBootstrapPass123!'
+
+# Start server with authentication enabled
+boyodb-server /data 0.0.0.0:8765 --auth
+
+# The root user will be created with the bootstrap password
+```
+
+**Important:**
+- The `BOYODB_BOOTSTRAP_PASSWORD` environment variable is **required** when auth is enabled
+- The bootstrap password must meet the password policy requirements
+- Change the root password after initial setup for production deployments
+- Authentication is enabled by default (`require_auth = true`)
+
 ### Token-Based Authentication
 
 For simple deployments, use a shared token:
@@ -196,6 +216,28 @@ Every operation is checked against the user's privileges:
 
 ## Encryption
 
+### Data-at-Rest Encryption
+
+BoyoDB uses **AES-256-GCM** authenticated encryption to protect sensitive data at rest, including:
+
+- User credentials and session tokens
+- Internal security metadata
+- Encryption keys derived from secure key material
+
+**Key Features:**
+- AES-256-GCM provides both confidentiality and integrity
+- Cryptographically secure random number generation using `OsRng`
+- Unique nonce per encryption operation
+- Authentication tag prevents tampering
+
+```rust
+// Internal encryption (for reference)
+// - Algorithm: AES-256-GCM
+// - Key: 256-bit derived from secure material
+// - Nonce: 96-bit unique per operation
+// - Tag: 128-bit authentication tag
+```
+
 ### TLS Configuration
 
 Enable TLS for encrypted connections:
@@ -332,6 +374,35 @@ if decompressed_size > compressed_size * MAX_COMPRESSION_RATIO {
 }
 ```
 
+### S3 Credential Validation
+
+When configuring S3/object storage, BoyoDB validates credentials to prevent accidental use of weak or placeholder values:
+
+**Validation Rules:**
+1. Both `s3_access_key` and `s3_secret_key` must be provided together
+2. Neither can be empty or whitespace-only
+3. Minimum length of 16 characters (real AWS keys are 20+)
+4. Common weak/placeholder values are rejected
+
+**Rejected Credential Values:**
+```
+changeme, password, secret, admin, test, example,
+your-access-key, your-secret-key, xxx, yyy,
+placeholder, replace-me, insert-key-here,
+minioadmin, minio, accesskey, secretkey
+```
+
+**Example Error:**
+```
+Error: s3_access_key and s3_secret_key must not be weak/placeholder values (detected: 'minioadmin')
+```
+
+**Best Practices:**
+- Use IAM roles instead of static credentials when possible
+- Rotate S3 credentials periodically
+- Use separate credentials for development and production
+- Never commit credentials to version control
+
 ---
 
 ## Security Best Practices
@@ -368,6 +439,9 @@ chown boyodb:boyodb /var/lib/boyodb
 # Secure auth store
 chmod 600 /var/lib/boyodb/auth_store.json
 
+# Secure audit log
+chmod 600 /var/lib/boyodb/audit.log
+
 # Secure TLS keys
 chmod 600 /etc/boyodb/key.pem
 ```
@@ -391,12 +465,19 @@ ca_cert = "/etc/ssl/certs/ca-bundle.crt"
 ### Environment Variables
 
 ```bash
+# Bootstrap password (required for first-time auth setup)
+export BOYODB_BOOTSTRAP_PASSWORD='YourSecureBootstrapPass123!'
+
 # Use environment variables for secrets
-export BoyoDB_TOKEN="your-secret-token"
-export BoyoDB_PASSWORD="your-password"
+export BOYODB_TOKEN="your-secret-token"
+export BOYODB_PASSWORD="your-password"
+
+# S3 credentials (if using tiered storage)
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
 
 # In scripts
-boyodb-cli shell --host $BoyoDB_HOST --token $BoyoDB_TOKEN
+boyodb-cli shell --host $BOYODB_HOST --token $BOYODB_TOKEN
 ```
 
 ---
@@ -412,14 +493,69 @@ BoyoDB logs security-relevant events:
 - User management operations
 - Role and privilege changes
 - Connection events
+- Session creation and termination
 
-### Log Format
+### Persistent Audit Log
+
+Security events are written to a persistent audit log file (`audit.log`) in JSON Lines format:
+
+```bash
+# Location: <data_dir>/audit.log
+/var/lib/boyodb/audit.log
+```
+
+**Audit Log Entry Format:**
+```json
+{"timestamp":1704654321,"event_type":"LOGIN_FAILED","username":"admin","client_ip":"192.168.1.100","target":null,"action":"authenticate","success":false,"details":"invalid credentials"}
+{"timestamp":1704654325,"event_type":"LOGIN_SUCCESS","username":"root","client_ip":"127.0.0.1","target":null,"action":"authenticate","success":true,"details":null}
+{"timestamp":1704654400,"event_type":"USER_CREATED","username":"analyst","client_ip":"127.0.0.1","target":"analyst","action":"create_user","success":true,"details":"created by root"}
+{"timestamp":1704654500,"event_type":"PRIVILEGE_GRANTED","username":"root","client_ip":"127.0.0.1","target":"SELECT on analytics","action":"grant","success":true,"details":"granted to analyst"}
+```
+
+**Event Types:**
+| Event Type | Description |
+|------------|-------------|
+| `LOGIN_SUCCESS` | Successful authentication |
+| `LOGIN_FAILED` | Failed authentication attempt |
+| `USER_CREATED` | New user created |
+| `USER_DELETED` | User removed |
+| `USER_LOCKED` | User account locked |
+| `USER_UNLOCKED` | User account unlocked |
+| `PASSWORD_CHANGED` | User password updated |
+| `PRIVILEGE_GRANTED` | Privilege granted |
+| `PRIVILEGE_REVOKED` | Privilege revoked |
+| `ROLE_ASSIGNED` | Role assigned to user |
+| `ACCESS_DENIED` | Authorization failure |
+
+### Server Logs (tracing)
+
+In addition to the audit file, authentication events are logged via the server's tracing system:
 
 ```
-2024-01-15T10:30:00Z INFO  [auth] login success: user=analyst ip=10.0.1.50
-2024-01-15T10:30:05Z WARN  [auth] login failed: user=admin ip=192.168.1.100 reason=invalid_password
-2024-01-15T10:30:10Z INFO  [auth] privilege granted: grantor=root grantee=analyst privilege=SELECT target=analytics
-2024-01-15T10:31:00Z WARN  [auth] access denied: user=analyst operation=DROP target=production.users
+2024-01-15T10:30:00Z INFO  boyodb_server: HTTP authentication successful username=analyst client_ip=10.0.1.50
+2024-01-15T10:30:05Z WARN  boyodb_server: HTTP authentication failed username=admin client_ip=192.168.1.100 error=invalid credentials
+2024-01-15T10:30:10Z INFO  boyodb_server::server_pg: PostgreSQL authentication successful username=analyst client_ip=10.0.1.50
+2024-01-15T10:30:15Z WARN  boyodb_server::server_pg: PostgreSQL authentication failed username=hacker client_ip=192.168.1.200 error=user not found
+```
+
+### Querying Audit Logs
+
+**Via API (in-memory buffer):**
+```json
+{"op": "get_audit_log", "limit": 100}
+{"op": "get_audit_log_by_type", "event_type": "LOGIN_FAILED", "limit": 50}
+```
+
+**Via file (persistent):**
+```bash
+# View recent authentication failures
+grep LOGIN_FAILED /var/lib/boyodb/audit.log | tail -20
+
+# Count failures by IP
+grep LOGIN_FAILED /var/lib/boyodb/audit.log | jq -r '.client_ip' | sort | uniq -c | sort -rn
+
+# View all events for a specific user
+grep '"username":"suspicious_user"' /var/lib/boyodb/audit.log
 ```
 
 ### Enabling Verbose Logging
@@ -430,6 +566,25 @@ RUST_LOG=boyodb_server=debug boyodb-server /data 0.0.0.0:8765
 
 # Log to file
 boyodb-server /data 0.0.0.0:8765 2>&1 | tee /var/log/boyodb/server.log
+```
+
+### Log Rotation
+
+The in-memory audit buffer is limited to 10,000 entries. For the persistent file:
+
+```bash
+# Configure logrotate for audit.log
+cat > /etc/logrotate.d/boyodb << EOF
+/var/lib/boyodb/audit.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 600 boyodb boyodb
+}
+EOF
 ```
 
 ---

@@ -754,6 +754,94 @@ List all roles.
 }
 ```
 
+### Get Audit Log
+
+Retrieve recent audit log entries (from in-memory buffer).
+
+**Request:**
+```json
+{
+  "op": "get_audit_log",
+  "limit": 100
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "entries": [
+    {
+      "timestamp": 1704654321,
+      "event_type": "LOGIN_SUCCESS",
+      "username": "analyst",
+      "client_ip": "10.0.1.50",
+      "target": null,
+      "action": "authenticate",
+      "success": true,
+      "details": null
+    },
+    {
+      "timestamp": 1704654300,
+      "event_type": "LOGIN_FAILED",
+      "username": "admin",
+      "client_ip": "192.168.1.100",
+      "target": null,
+      "action": "authenticate",
+      "success": false,
+      "details": "invalid credentials"
+    }
+  ]
+}
+```
+
+### Get Audit Log by Type
+
+Filter audit log entries by event type.
+
+**Request:**
+```json
+{
+  "op": "get_audit_log_by_type",
+  "event_type": "LOGIN_FAILED",
+  "limit": 50
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "entries": [
+    {
+      "timestamp": 1704654300,
+      "event_type": "LOGIN_FAILED",
+      "username": "admin",
+      "client_ip": "192.168.1.100",
+      "target": null,
+      "action": "authenticate",
+      "success": false,
+      "details": "invalid credentials"
+    }
+  ]
+}
+```
+
+**Event Types:**
+- `LOGIN_SUCCESS` - Successful authentication
+- `LOGIN_FAILED` - Failed authentication attempt
+- `USER_CREATED` - New user created
+- `USER_DELETED` - User removed
+- `USER_LOCKED` - User account locked
+- `USER_UNLOCKED` - User account unlocked
+- `PASSWORD_CHANGED` - User password updated
+- `PRIVILEGE_GRANTED` - Privilege granted
+- `PRIVILEGE_REVOKED` - Privilege revoked
+- `ROLE_ASSIGNED` - Role assigned to user
+- `ACCESS_DENIED` - Authorization failure
+
+**Note:** The in-memory buffer holds up to 10,000 entries. For complete audit history, see the persistent `audit.log` file in the data directory.
+
 ---
 
 ## Cluster Operations
