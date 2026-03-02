@@ -225,6 +225,64 @@ Flush memtables + manifest and truncate WAL segments.
 boyodb-cli checkpoint --data-dir <DIR>
 ```
 
+#### vacuum
+
+Compact (vacuum) a specific table to reduce segment count and reclaim space.
+
+```bash
+boyodb-cli vacuum <DATA_DIR> <DATABASE> <TABLE> [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--full` | Perform VACUUM FULL (merges all segments) | `false` |
+
+**Examples:**
+
+```bash
+# Basic vacuum
+boyodb-cli vacuum /var/lib/boyodb analytics events
+
+# Full vacuum (more thorough, merges all segments)
+boyodb-cli vacuum /var/lib/boyodb analytics events --full
+```
+
+**Output:**
+```json
+{
+  "segments_processed": 1500,
+  "segments_removed": 1450,
+  "bytes_reclaimed": 524288000,
+  "new_segments": 12
+}
+```
+
+#### compact-all
+
+Compact all eligible tables in the database. Useful for reducing overall segment count after bulk ingestion.
+
+```bash
+boyodb-cli compact-all <DATA_DIR>
+```
+
+**Example:**
+
+```bash
+boyodb-cli compact-all /var/lib/boyodb
+```
+
+**Output:**
+```json
+{
+  "tables_compacted": 8,
+  "segments_processed": 5000,
+  "segments_removed": 4800,
+  "bytes_reclaimed": 2147483648
+}
+```
+
 #### wal-stats
 
 Fetch WAL stats from a running server (superuser only).

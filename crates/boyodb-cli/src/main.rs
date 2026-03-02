@@ -188,6 +188,25 @@ enum Commands {
         #[command(flatten)]
         engine: LocalEngineArgs,
     },
+    /// Compact (vacuum) a specific table to reduce segment count
+    Vacuum {
+        data_dir: PathBuf,
+        /// Database name
+        database: String,
+        /// Table name
+        table: String,
+        /// Perform VACUUM FULL (merges all segments, slower but more thorough)
+        #[arg(long, default_value_t = false)]
+        full: bool,
+        #[command(flatten)]
+        engine: LocalEngineArgs,
+    },
+    /// Compact all eligible tables in the database
+    CompactAll {
+        data_dir: PathBuf,
+        #[command(flatten)]
+        engine: LocalEngineArgs,
+    },
 }
 
 fn main() -> Result<()> {
@@ -437,6 +456,38 @@ fn main() -> Result<()> {
                 boyodb_core::ffi::boyodb_apply_bundle(handle.as_ptr(), payload.as_ptr(), payload.len());
             check_status(status)?;
             println!("restore applied from {}", input.display());
+        }
+        Commands::Vacuum {
+            data_dir,
+            database,
+            table,
+            full,
+            engine,
+        } => {
+            let handle = open(data_dir, false, engine)?;
+            let c_db = CString::new(database.as_str())?;
+            let c_tbl = CString::new(table.as_str())?;
+            let mut buf = BufferGuard::new();
+            let status = boyodb_core::ffi::boyodb_vacuum(
+                handle.as_ptr(),
+                c_db.as_ptr(),
+                c_tbl.as_ptr(),
+                *full,
+                buf.as_mut_ptr(),
+            );
+            check_status(status)?;
+            let json: serde_json::Value = serde_json::from_slice(buf.bytes())?;
+            println!("Vacuum completed for {}.{}:", database, table);
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        Commands::CompactAll { data_dir, engine } => {
+            let handle = open(data_dir, false, engine)?;
+            let mut buf = BufferGuard::new();
+            let status = boyodb_core::ffi::boyodb_compact_all(handle.as_ptr(), buf.as_mut_ptr());
+            check_status(status)?;
+            let json: serde_json::Value = serde_json::from_slice(buf.bytes())?;
+            println!("Compaction completed:");
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
     }
 

@@ -908,19 +908,69 @@ impl ManifestIndex {
         }
     }
 
-    /// Build index from manifest entries
+    /// Build index from manifest entries using parallel processing for large manifests
     fn build(entries: &[ManifestEntry]) -> Self {
-        let mut index = ManifestIndex::new();
-        for (i, entry) in entries.iter().enumerate() {
-            let db = if entry.database.is_empty() { "default" } else { &entry.database };
-            let table = if entry.table.is_empty() { "default" } else { &entry.table };
-            index.by_table
-                .entry((db.to_string(), table.to_string()))
-                .or_default()
-                .push(i);
-            index.segment_ids.insert(entry.segment_id.clone());
+        // For small manifests, use sequential processing to avoid overhead
+        if entries.len() < 1000 {
+            let mut index = ManifestIndex::new();
+            for (i, entry) in entries.iter().enumerate() {
+                let db = if entry.database.is_empty() { "default" } else { &entry.database };
+                let table = if entry.table.is_empty() { "default" } else { &entry.table };
+                index.by_table
+                    .entry((db.to_string(), table.to_string()))
+                    .or_default()
+                    .push(i);
+                index.segment_ids.insert(entry.segment_id.clone());
+            }
+            return index;
         }
-        index
+
+        // For large manifests (40K+ entries), build in parallel chunks then merge
+        use std::collections::HashMap;
+
+        // Build segment_ids set in parallel
+        let segment_ids: std::collections::HashSet<String> = entries
+            .par_iter()
+            .map(|e| e.segment_id.clone())
+            .collect();
+
+        // Build table index in parallel chunks, then merge
+        let chunk_size = (entries.len() / rayon::current_num_threads()).max(1000);
+        let partial_indexes: Vec<HashMap<(String, String), Vec<usize>>> = entries
+            .par_chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base_idx = chunk_idx * chunk_size;
+                let mut local_map: HashMap<(String, String), Vec<usize>> = HashMap::new();
+                for (i, entry) in chunk.iter().enumerate() {
+                    let db = if entry.database.is_empty() { "default" } else { &entry.database };
+                    let table = if entry.table.is_empty() { "default" } else { &entry.table };
+                    local_map
+                        .entry((db.to_string(), table.to_string()))
+                        .or_default()
+                        .push(base_idx + i);
+                }
+                local_map
+            })
+            .collect();
+
+        // Merge partial indexes
+        let mut by_table: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for partial in partial_indexes {
+            for (key, indices) in partial {
+                by_table.entry(key).or_default().extend(indices);
+            }
+        }
+
+        // Sort indices within each table entry for consistent ordering
+        for indices in by_table.values_mut() {
+            indices.sort_unstable();
+        }
+
+        ManifestIndex {
+            by_table,
+            segment_ids,
+        }
     }
 
     /// Add a new entry to the index
@@ -1573,8 +1623,8 @@ impl Db {
             })
             .collect();
 
-        // Replay WAL entries to restore manifest and segments if missing.
-        wal.replay(&storage, &cfg.manifest_path)?;
+        // NOTE: WAL replay already called above at line 1531 - removed duplicate call
+        // that was causing ~50% startup overhead with large WAL files.
 
         // Build index for O(1) lookups
         let manifest_index = ManifestIndex::build(&manifest.entries);

@@ -3,7 +3,9 @@ use crate::engine::{
     persist_segment_ipc, EngineError,
 };
 use crate::replication::ManifestEntry;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -114,14 +116,62 @@ impl Wal {
 
     pub fn replay(&mut self, storage: &crate::storage::TieredStorage, manifest_path: &Path) -> Result<(), EngineError> {
         let mut manifest = load_manifest(manifest_path)?;
-        let mut manifest_changed = false;
 
-        for path in wal_paths_for_replay(&self.path)? {
-            replay_wal_file(&path, storage, &mut manifest, &mut manifest_changed)?;
+        // Build HashSet of existing segment IDs for O(1) lookup during replay
+        // This avoids O(n²) complexity when replaying 40K+ segments
+        let existing_ids: HashSet<String> = manifest
+            .entries
+            .iter()
+            .map(|e| e.segment_id.clone())
+            .collect();
+
+        let wal_paths = wal_paths_for_replay(&self.path)?;
+
+        if wal_paths.is_empty() {
+            return Ok(());
         }
-        if manifest_changed {
+
+        // For large WAL replays, process files in parallel
+        // Each file collects its own new entries, then we merge at the end
+        let results: Vec<Result<Vec<(ManifestEntry, Vec<u8>)>, EngineError>> = wal_paths
+            .par_iter()
+            .map(|path| replay_wal_file_parallel(path, &existing_ids))
+            .collect();
+
+        // Collect all new entries and persist segments
+        let mut new_entries = Vec::new();
+        let mut seen_in_replay: HashSet<String> = HashSet::new();
+
+        for result in results {
+            let entries = result?;
+            for (entry, payload) in entries {
+                // Skip if we've already seen this segment in this replay
+                if seen_in_replay.contains(&entry.segment_id) {
+                    continue;
+                }
+                seen_in_replay.insert(entry.segment_id.clone());
+
+                // Persist segment file
+                persist_segment_ipc(storage, &entry.segment_id, &payload)?;
+
+                // Only add to manifest if not already present
+                if !existing_ids.contains(&entry.segment_id) {
+                    new_entries.push(entry);
+                }
+            }
+        }
+
+        // Update manifest with new entries
+        if !new_entries.is_empty() {
+            for entry in new_entries {
+                manifest.bump_version();
+                let mut entry = entry;
+                entry.version_added = manifest.version;
+                manifest.entries.push(entry);
+            }
             persist_manifest(manifest_path, &manifest)?;
         }
+
         Ok(())
     }
 
@@ -231,15 +281,17 @@ fn wal_paths_for_replay(current_path: &Path) -> Result<Vec<PathBuf>, EngineError
     Ok(paths)
 }
 
-fn replay_wal_file(
+/// Parallel-safe WAL file replay that returns entries instead of modifying manifest.
+/// This enables parallel processing of multiple WAL files.
+fn replay_wal_file_parallel(
     path: &Path,
-    storage: &crate::storage::TieredStorage,
-    manifest: &mut crate::replication::Manifest,
-    manifest_changed: &mut bool,
-) -> Result<(), EngineError> {
+    existing_ids: &HashSet<String>,
+) -> Result<Vec<(ManifestEntry, Vec<u8>)>, EngineError> {
     let file = File::open(path)
         .map_err(|e| EngineError::Io(format!("open wal for replay failed: {e}")))?;
-    let reader = BufReader::new(file);
+    let reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer for large files
+
+    let mut entries = Vec::new();
 
     for line in reader.lines() {
         let line = line.map_err(|e| EngineError::Io(format!("read wal failed: {e}")))?;
@@ -267,8 +319,14 @@ fn replay_wal_file(
         let payload = &rest.as_bytes()[..len];
         let rec: WalRecord = serde_json::from_slice(payload)
             .map_err(|e| EngineError::Internal(format!("wal decode failed: {e}")))?;
+
         match rec {
             WalRecord::Segment { entry, payload } => {
+                // Skip segments already in manifest (O(1) lookup)
+                if existing_ids.contains(&entry.segment_id) {
+                    continue;
+                }
+
                 let actual = compute_checksum(&payload);
                 if actual != entry.checksum {
                     return Err(EngineError::Io(format!(
@@ -288,23 +346,13 @@ fn replay_wal_file(
                         )));
                     }
                 }
-                // Persist segment file and manifest entry if missing.
-                persist_segment_ipc(storage, &entry.segment_id, &payload)?;
-                if !manifest
-                    .entries
-                    .iter()
-                    .any(|e| e.segment_id == entry.segment_id)
-                {
-                    manifest.bump_version();
-                    let mut entry = entry;
-                    entry.version_added = manifest.version;
-                    manifest.entries.push(entry);
-                    *manifest_changed = true;
-                }
+
+                entries.push((entry, payload));
             }
         }
     }
-    Ok(())
+
+    Ok(entries)
 }
 
 fn cleanup_rotated_segments(current_path: &Path) -> Result<(), EngineError> {

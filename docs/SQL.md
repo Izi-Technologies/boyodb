@@ -729,6 +729,47 @@ EXECUTE statement_name;
 
 ---
 
+## Maintenance Statements
+
+### VACUUM
+
+Compact table segments to reduce segment count and reclaim space.
+
+```sql
+VACUUM [database.]table_name;
+VACUUM FULL [database.]table_name;
+```
+
+**Modes:**
+
+| Mode | Description |
+|------|-------------|
+| `VACUUM` | Rewrites fragmented segments (< 50% of target size) |
+| `VACUUM FULL` | Merges ALL segments into optimally-sized chunks |
+
+**Examples:**
+
+```sql
+-- Basic vacuum (compact fragmented segments)
+VACUUM analytics.events;
+
+-- Full vacuum (merge all segments, slower but thorough)
+VACUUM FULL analytics.events;
+```
+
+**Returns:**
+```
+Vacuum complete: processed=1500 removed=1450 reclaimed=524288000 bytes new=12
+```
+
+**Best Practices:**
+
+- Run `VACUUM` periodically after heavy write/delete workloads
+- Use `VACUUM FULL` when segment count grows excessively (e.g., >10,000 segments per table)
+- Schedule during low-traffic periods as it temporarily increases I/O
+
+---
+
 ## Utility Statements
 
 ### SHOW Statements

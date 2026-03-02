@@ -490,6 +490,54 @@ Merge segments for a table.
 }
 ```
 
+### Vacuum
+
+Compact a table with more control over the compaction strategy.
+
+**Request:**
+```json
+{
+  "op": "vacuum",
+  "database": "analytics",
+  "table": "events",
+  "full": false
+}
+```
+
+**Parameters:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `database` | string | Yes | Database name |
+| `table` | string | Yes | Table name |
+| `full` | boolean | No | If true, performs VACUUM FULL (merges all segments) |
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "vacuum_result": {
+    "segments_processed": 1500,
+    "segments_removed": 1450,
+    "bytes_reclaimed": 524288000,
+    "new_segments": 12
+  }
+}
+```
+
+### Vacuum Full
+
+Force merge all segments into optimally-sized chunks.
+
+**Request:**
+```json
+{
+  "op": "vacuum",
+  "database": "analytics",
+  "table": "events",
+  "full": true
+}
+```
+
 ### Checkpoint
 
 Flush memtables + manifest and truncate WAL segments (superuser only).

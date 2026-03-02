@@ -603,6 +603,105 @@ pub extern "C" fn boyodb_describe_table(
     }
 }
 
+/// Vacuum (compact) a table to reduce segment count and reclaim space.
+///
+/// Arguments:
+/// - handle: The database handle
+/// - database: The database name (C string)
+/// - table: The table name (C string)
+/// - full: If true, performs a VACUUM FULL (merges all segments)
+/// - out_buf: Output buffer to receive JSON result with compaction stats
+#[no_mangle]
+pub extern "C" fn boyodb_vacuum(
+    handle: *const BoyodbHandle,
+    database: *const c_char,
+    table: *const c_char,
+    full: bool,
+    out_buf: *mut OwnedBuffer,
+) -> BoyodbStatus {
+    if handle.is_null() || database.is_null() || table.is_null() || out_buf.is_null() {
+        return BoyodbStatus::InvalidArgument;
+    }
+
+    let db_name = match cstr_to_str(database) {
+        Ok(s) => s,
+        Err(status) => return status,
+    };
+    let table_name = match cstr_to_str(table) {
+        Ok(s) => s,
+        Err(status) => return status,
+    };
+
+    let h = unsafe { &*handle };
+    match h.db.vacuum(&db_name, &table_name, full) {
+        Ok(result) => {
+            record_error(None);
+            let json = serde_json::json!({
+                "segments_processed": result.segments_processed,
+                "segments_removed": result.segments_removed,
+                "bytes_reclaimed": result.bytes_reclaimed,
+                "new_segments": result.new_segments,
+            });
+            let bytes = json.to_string().into_bytes();
+            let buf = OwnedBuffer::from_vec(bytes);
+            unsafe { *out_buf = buf };
+            BoyodbStatus::Ok
+        }
+        Err(e) => status_from_error(e),
+    }
+}
+
+/// Compact all eligible tables in the database.
+/// Returns JSON with summary of compaction across all tables.
+#[no_mangle]
+pub extern "C" fn boyodb_compact_all(
+    handle: *const BoyodbHandle,
+    out_buf: *mut OwnedBuffer,
+) -> BoyodbStatus {
+    if handle.is_null() || out_buf.is_null() {
+        return BoyodbStatus::InvalidArgument;
+    }
+
+    let h = unsafe { &*handle };
+
+    // Get compaction candidates and run compaction
+    let candidates = match h.db.get_compaction_candidates() {
+        Ok(c) => c,
+        Err(e) => return status_from_error(e),
+    };
+
+    let mut total_processed = 0usize;
+    let mut total_removed = 0usize;
+    let mut total_bytes = 0u64;
+    let mut tables_compacted = 0usize;
+
+    for candidate in candidates {
+        match h.db.vacuum(&candidate.database, &candidate.table, false) {
+            Ok(result) => {
+                total_processed += result.segments_processed;
+                total_removed += result.segments_removed;
+                total_bytes += result.bytes_reclaimed;
+                if result.segments_removed > 0 {
+                    tables_compacted += 1;
+                }
+            }
+            Err(_) => continue, // Skip tables that fail
+        }
+    }
+
+    record_error(None);
+    let json = serde_json::json!({
+        "tables_compacted": tables_compacted,
+        "segments_processed": total_processed,
+        "segments_removed": total_removed,
+        "bytes_reclaimed": total_bytes,
+    });
+    let bytes = json.to_string().into_bytes();
+    let buf = OwnedBuffer::from_vec(bytes);
+    unsafe { *out_buf = buf };
+    BoyodbStatus::Ok
+}
+
 fn status_from_result(res: Result<(), EngineError>) -> BoyodbStatus {
     match res {
         Ok(_) => {

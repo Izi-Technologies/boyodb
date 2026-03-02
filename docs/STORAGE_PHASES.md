@@ -23,9 +23,14 @@ Status: complete
 
 ## Phase 2: Read Latency Wins
 
+Status: complete
+
 4) Aggressive background compaction
    - Merge small hot segments into larger sorted segments.
    - Keep hot tier lightly compressed; compress warm/cold more aggressively.
+   - CLI commands: `boyodb-cli vacuum`, `boyodb-cli compact-all`
+   - SQL: `VACUUM [FULL] database.table`
+   - Parallel WAL replay and O(1) segment lookups for fast startup.
 
 5) Projection + filter pushdown everywhere
    - Pushdown in scans, joins, aggregations, and IPC filtering.

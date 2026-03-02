@@ -230,3 +230,36 @@ By default, BoyoDB uses strict per-write `fsync`. Ensure your configuration main
 - **Partitioning**: Use sensible shard keys or partition predicates (like `tenant_id` or `event_time`) in your queries to allow the engine to prune segments effectively.
 - **Sorting**: Data is sorted by `event_time` + `route_id` by default. Align your queries with this sort order for maximum performance.
 
+### 6. Segment Management & Compaction
+Over time, heavy ingestion can result in thousands of small segment files. This impacts startup time and query performance. Use compaction to consolidate segments:
+
+```bash
+# Compact a specific table
+boyodb-cli vacuum /var/lib/boyodb analytics events
+
+# Full compaction (merges all segments)
+boyodb-cli vacuum /var/lib/boyodb analytics events --full
+
+# Compact all eligible tables
+boyodb-cli compact-all /var/lib/boyodb
+```
+
+Or via SQL:
+```sql
+VACUUM analytics.events;
+VACUUM FULL analytics.events;
+```
+
+**Best Practices:**
+- Run compaction after bulk data loads or during maintenance windows
+- Use `VACUUM FULL` when segment count exceeds 10,000 per table
+- Follow compaction with `checkpoint` to reclaim WAL space:
+  ```bash
+  boyodb-cli checkpoint /var/lib/boyodb
+  ```
+
+**Automatic Compaction**: Background compaction runs automatically with configurable settings:
+- `--compaction-interval-ms`: How often to check for compaction candidates (default: 60,000ms)
+- `--compact-min-segments`: Minimum segments before considering compaction (default: 2)
+- `--max-concurrent-compactions`: Parallel compaction jobs (default: 2)
+
