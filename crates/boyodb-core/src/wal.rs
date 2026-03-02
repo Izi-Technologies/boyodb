@@ -289,7 +289,7 @@ fn replay_wal_file_parallel(
 ) -> Result<Vec<(ManifestEntry, Vec<u8>)>, EngineError> {
     let file = File::open(path)
         .map_err(|e| EngineError::Io(format!("open wal for replay failed: {e}")))?;
-    let reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer for large files
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, file); // 8MB buffer for NVMe throughput
 
     let mut entries = Vec::new();
 

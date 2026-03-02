@@ -2833,8 +2833,8 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
 
     let json = serde_json::to_vec(&req)?;
 
-    // Connect with timeout
-    let connect_timeout = Duration::from_secs(10);
+    // Connect with timeout (reduced from 10s to 5s for faster failure detection)
+    let connect_timeout = Duration::from_secs(5);
     let tcp_stream = tokio::time::timeout(
         connect_timeout,
         TcpStream::connect(&state.host)
@@ -2842,6 +2842,9 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
     .await
     .map_err(|_| anyhow!("Connection timed out after {:?}", connect_timeout))?
     .map_err(|e| anyhow!("Connection failed: {}", e))?;
+
+    // Disable Nagle's algorithm for low-latency request/response
+    tcp_stream.set_nodelay(true)?;
 
     // If TLS is configured, wrap the connection
     if let Some(ref connector) = state.tls_connector {
