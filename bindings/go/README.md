@@ -10,10 +10,10 @@ Link flags expect `libboyodb_core` to be available in `target/release` or `targe
 
 CLI helper (parity with Node/Rust CLIs) lives at `bindings/go/cmd/boyodb-go-cli`:
 ```
-go run ./cmd/boyodb-go-cli ingest /tmp/boyodb batch.ipc mydb.calls
-go run ./cmd/boyodb-go-cli query /tmp/boyodb "SELECT COUNT(*) FROM mydb.calls"
+go run ./cmd/boyodb-go-cli ingest /tmp/boyodb batch.ipc mydb.events
+go run ./cmd/boyodb-go-cli query /tmp/boyodb "SELECT COUNT(*) FROM mydb.events"
 go run ./cmd/boyodb-go-cli create-db /tmp/boyodb mydb
-go run ./cmd/boyodb-go-cli create-table /tmp/boyodb mydb.calls schema.json
+go run ./cmd/boyodb-go-cli create-table /tmp/boyodb mydb.events schema.json
 go run ./cmd/boyodb-go-cli list-dbs /tmp/boyodb
 go run ./cmd/boyodb-go-cli list-tables /tmp/boyodb mydb
 go run ./cmd/boyodb-go-cli manifest /tmp/boyodb
@@ -34,13 +34,13 @@ defer handle.Close()
 // Ingest expects Arrow IPC bytes.
 _ = handle.Ingest([]byte("arrow-ipc"), uint64(time.Now().UnixMicro()))
 _ = handle.IngestWithShard([]byte("arrow-ipc"), uint64(time.Now().UnixMicro()), 42)
-_ = handle.IngestInto([]byte("arrow-ipc"), uint64(time.Now().UnixMicro()), 42, true, "cdrs", "calls")
-_ = handle.CreateDatabase("cdrs")
-_ = handle.CreateTable("cdrs", "calls", `{"columns":[{"name":"event_time","type":"timestamp"}]}`)
+_ = handle.IngestInto([]byte("arrow-ipc"), uint64(time.Now().UnixMicro()), 42, true, "analytics", "events")
+_ = handle.CreateDatabase("analytics")
+_ = handle.CreateTable("analytics", "events", `{"columns":[{"name":"event_time","type":"timestamp"}]}`)
 _ = handle.HealthCheck()
 dbs, _ := handle.ListDatabases()
-tables, _ := handle.ListTables("cdrs")
-rows, _ := handle.Query("SELECT * FROM cdrs.calls", 1000)
+tables, _ := handle.ListTables("analytics")
+rows, _ := handle.Query("SELECT * FROM analytics.events", 1000)
 plan, _ := handle.PlanBundle(boyodb.BundleRequest{
     MaxBytes: 10_000_000, HasMaxBytes: true,
     TargetBytesPerSec: 5_000_000, HasTargetBytesPerSec: true,

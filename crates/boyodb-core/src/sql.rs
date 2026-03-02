@@ -4336,12 +4336,12 @@ mod tests {
 
     #[test]
     fn test_parse_aggregation() {
-        let sql = "SELECT COUNT(*), SUM(duration_ms) FROM cdrs.calls GROUP BY tenant_id";
+        let sql = "SELECT COUNT(*), SUM(duration_ms) FROM analytics.events GROUP BY tenant_id";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Query(q) => {
-                assert_eq!(q.database, Some("cdrs".to_string()));
-                assert_eq!(q.table, Some("calls".to_string()));
+                assert_eq!(q.database, Some("analytics".to_string()));
+                assert_eq!(q.table, Some("events".to_string()));
                 let agg = q.aggregation.unwrap();
                 assert_eq!(agg.group_by, GroupBy::Tenant);
                 assert_eq!(agg.aggs.len(), 2);
@@ -4383,7 +4383,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_add_column() {
-        let sql = "ALTER TABLE mydb.calls ADD COLUMN latency int64";
+        let sql = "ALTER TABLE mydb.events ADD COLUMN latency int64";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Ddl(DdlCommand::AlterTableAddColumn {
@@ -4394,7 +4394,7 @@ mod tests {
                 nullable,
             }) => {
                 assert_eq!(database, "mydb");
-                assert_eq!(table, "calls");
+                assert_eq!(table, "events");
                 assert_eq!(column, "latency");
                 assert_eq!(data_type, "int64");
                 assert!(nullable);
@@ -4405,7 +4405,7 @@ mod tests {
 
     #[test]
     fn test_parse_alter_drop_column() {
-        let sql = "ALTER TABLE calls DROP COLUMN status";
+        let sql = "ALTER TABLE events DROP COLUMN status";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Ddl(DdlCommand::AlterTableDropColumn {
@@ -4414,7 +4414,7 @@ mod tests {
                 column,
             }) => {
                 assert_eq!(database, "default");
-                assert_eq!(table, "calls");
+                assert_eq!(table, "events");
                 assert_eq!(column, "status");
             }
             _ => panic!("expected alter table drop column"),
@@ -4625,12 +4625,12 @@ mod tests {
 
     #[test]
     fn test_parse_insert() {
-        let sql = "INSERT INTO mydb.calls (tenant_id, duration_ms, status) VALUES (1, 500, 'completed')";
+        let sql = "INSERT INTO mydb.events (tenant_id, duration_ms, status) VALUES (1, 500, 'completed')";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Insert(cmd) => {
                 assert_eq!(cmd.database, "mydb");
-                assert_eq!(cmd.table, "calls");
+                assert_eq!(cmd.table, "events");
                 assert_eq!(
                     cmd.columns,
                     Some(vec![
@@ -4651,12 +4651,12 @@ mod tests {
 
     #[test]
     fn test_parse_insert_multiple_rows() {
-        let sql = "INSERT INTO calls VALUES (1, 100), (2, 200), (3, 300)";
+        let sql = "INSERT INTO events VALUES (1, 100), (2, 200), (3, 300)";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Insert(cmd) => {
                 assert_eq!(cmd.database, "default");
-                assert_eq!(cmd.table, "calls");
+                assert_eq!(cmd.table, "events");
                 assert!(cmd.columns.is_none());
                 assert_eq!(cmd.values.len(), 3);
             }
@@ -4856,12 +4856,12 @@ mod tests {
         }
 
         // DESC shorthand
-        let sql = "DESC mydb.calls;";
+        let sql = "DESC mydb.events;";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Ddl(DdlCommand::DescribeTable { database, table }) => {
                 assert_eq!(database, "mydb");
-                assert_eq!(table, "calls");
+                assert_eq!(table, "events");
             }
             _ => panic!("expected DescribeTable"),
         }

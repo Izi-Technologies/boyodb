@@ -17022,8 +17022,8 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
-            Field::new("value", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -17049,14 +17049,14 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT watermark_micros,value FROM cdrs.calls WHERE watermark>=5 AND event_time<=250 AND tenant_id=7 AND route_id=102 LIMIT 1".into(),
+                sql: "SELECT watermark_micros,label FROM analytics.events WHERE watermark>=5 AND event_time<=250 AND tenant_id=7 AND route_id=102 LIMIT 1".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17092,7 +17092,7 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -17117,14 +17117,14 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT COUNT(*),SUM(duration_ms),AVG(duration_ms) FROM cdrs.calls WHERE tenant_id=7".into(),
+                sql: "SELECT COUNT(*),SUM(value),AVG(value) FROM analytics.events WHERE tenant_id=7".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17164,7 +17164,7 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -17189,14 +17189,14 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT COUNT(*),MIN(duration_ms),MAX(duration_ms) FROM cdrs.calls".into(),
+                sql: "SELECT COUNT(*),MIN(value),MAX(value) FROM analytics.events".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17338,7 +17338,7 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -17363,14 +17363,14 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT COUNT(*),SUM(duration_ms) FROM cdrs.calls GROUP BY route_id".into(),
+                sql: "SELECT COUNT(*),SUM(value) FROM analytics.events GROUP BY route_id".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17541,7 +17541,7 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        db.create_table("testdb", "calls", None).unwrap();
+        db.create_table("testdb", "events", None).unwrap();
 
         let schema = Schema::new(vec![
             Field::new("watermark_micros", DataType::UInt64, false),
@@ -17572,18 +17572,18 @@ mod tests {
             watermark_micros: 1,
             shard_override: None,
             database: Some("testdb".into()),
-            table: Some("calls".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let deleted = db
-            .delete_rows("testdb", "calls", Some("tenant_id=1"))
+            .delete_rows("testdb", "events", Some("tenant_id=1"))
             .unwrap();
         assert_eq!(deleted, 2);
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT tenant_id,value FROM testdb.calls".into(),
+                sql: "SELECT tenant_id,value FROM testdb.events".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17613,7 +17613,7 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        db.create_table("testdb", "calls", None).unwrap();
+        db.create_table("testdb", "events", None).unwrap();
 
         let schema = Schema::new(vec![
             Field::new("watermark_micros", DataType::UInt64, false),
@@ -17644,14 +17644,14 @@ mod tests {
             watermark_micros: 1,
             shard_override: None,
             database: Some("testdb".into()),
-            table: Some("calls".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         let updated = db
             .update_rows(
                 "testdb",
-                "calls",
+                "events",
                 &[("value".to_string(), SqlValue::Integer(999))],
                 Some("route_id=20"),
             )
@@ -17660,7 +17660,7 @@ mod tests {
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT tenant_id,route_id,value FROM testdb.calls WHERE tenant_id=1 ORDER BY route_id"
+                sql: "SELECT tenant_id,route_id,value FROM testdb.events WHERE tenant_id=1 ORDER BY route_id"
                     .into(),
                 timeout_millis: 1000,
             collect_stats: false,
@@ -17814,7 +17814,7 @@ mod tests {
         let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
         db.create_table(
             "testdb",
-            "calls",
+            "events",
             Some(
                 serde_json::to_string(&vec![TableFieldSpec {
                     name: "value".into(),
@@ -17844,20 +17844,20 @@ mod tests {
             watermark_micros: 1,
             shard_override: None,
             database: Some("testdb".into()),
-            table: Some("calls".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
-        db.alter_table_add_column("testdb", "calls", "latency_ms", "int64", true)
+        db.alter_table_add_column("testdb", "events", "latency_ms", "int64", true)
             .unwrap();
-        let desc = db.describe_table("testdb", "calls").unwrap();
+        let desc = db.describe_table("testdb", "events").unwrap();
         let fields: Vec<TableFieldSpec> =
             serde_json::from_str(desc.schema_json.as_ref().unwrap()).unwrap();
         assert!(fields.iter().any(|f| f.name == "latency_ms"));
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT latency_ms FROM testdb.calls".into(),
+                sql: "SELECT latency_ms FROM testdb.events".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -17887,7 +17887,7 @@ mod tests {
         ]);
         db.create_table(
             "testdb",
-            "calls",
+            "events",
             Some(
                 serde_json::to_string(&vec![
                     TableFieldSpec {
@@ -17928,13 +17928,13 @@ mod tests {
             watermark_micros: 1,
             shard_override: None,
             database: Some("testdb".into()),
-            table: Some("calls".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
-        db.alter_table_drop_column("testdb", "calls", "note")
+        db.alter_table_drop_column("testdb", "events", "note")
             .unwrap();
-        let desc = db.describe_table("testdb", "calls").unwrap();
+        let desc = db.describe_table("testdb", "events").unwrap();
         let fields: Vec<TableFieldSpec> =
             serde_json::from_str(desc.schema_json.as_ref().unwrap()).unwrap();
         assert_eq!(fields.len(), 1);
@@ -17943,7 +17943,7 @@ mod tests {
         // Query should still work and only return the remaining column
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT value FROM testdb.calls".into(),
+                sql: "SELECT value FROM testdb.events".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -18047,7 +18047,7 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -18058,7 +18058,7 @@ mod tests {
                 Arc::new(UInt64Array::from(vec![1u64, 1, 1, 2, 2, 2])),
                 // route_id: 10,10,20,10,20,20
                 Arc::new(UInt64Array::from(vec![10u64, 10, 20, 10, 20, 20])),
-                // duration_ms: 10,20,30,40,50,60
+                // value: 10,20,30,40,50,60
                 Arc::new(Int64Array::from(vec![10i64, 20, 30, 40, 50, 60])),
             ],
         )
@@ -18075,8 +18075,8 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
@@ -18084,7 +18084,7 @@ mod tests {
         let resp = db
             .query(QueryRequest {
                 sql:
-                    "SELECT COUNT(*), SUM(duration_ms) FROM cdrs.calls GROUP BY tenant_id, route_id"
+                    "SELECT COUNT(*), SUM(value) FROM analytics.events GROUP BY tenant_id, route_id"
                         .into(),
                 timeout_millis: 1000,
             collect_stats: false,
@@ -18103,7 +18103,7 @@ mod tests {
         assert!(schema.field_with_name("tenant_id").is_ok());
         assert!(schema.field_with_name("route_id").is_ok());
         assert!(schema.field_with_name("count").is_ok());
-        assert!(schema.field_with_name("sum_duration_ms").is_ok());
+        assert!(schema.field_with_name("sum_value").is_ok());
 
         // Collect all groups into a map for verification
         let tenant_col = out_batch
@@ -18159,8 +18159,8 @@ mod tests {
             Field::new("event_time", DataType::UInt64, false),
             Field::new("tenant_id", DataType::UInt64, false),
             Field::new("route_id", DataType::UInt64, false),
-            Field::new("duration_ms", DataType::Int64, false),
-            Field::new("bytes_sent", DataType::Int64, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new("amount", DataType::Int64, false),
         ]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
@@ -18169,8 +18169,8 @@ mod tests {
                 Arc::new(UInt64Array::from(vec![100u64, 200, 300])),
                 Arc::new(UInt64Array::from(vec![7u64, 7, 8])),
                 Arc::new(UInt64Array::from(vec![101u64, 101, 102])),
-                Arc::new(Int64Array::from(vec![10i64, -5, 30])), // duration_ms: min=-5, max=30
-                Arc::new(Int64Array::from(vec![100i64, 500, 200])), // bytes_sent: min=100, max=500
+                Arc::new(Int64Array::from(vec![10i64, -5, 30])), // value: min=-5, max=30
+                Arc::new(Int64Array::from(vec![100i64, 500, 200])), // amount: min=100, max=500
             ],
         )
         .unwrap();
@@ -18186,15 +18186,15 @@ mod tests {
             payload_ipc: ipc,
             watermark_micros: 10,
             shard_override: None,
-            database: Some("cdrs".into()),
-            table: Some("calls".into()),
+            database: Some("analytics".into()),
+            table: Some("events".into()),
         })
         .unwrap();
 
         // Test multiple MIN/MAX on different columns
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT MIN(duration_ms), MAX(duration_ms), MIN(bytes_sent), MAX(bytes_sent) FROM cdrs.calls".into(),
+                sql: "SELECT MIN(value), MAX(value), MIN(amount), MAX(amount) FROM analytics.events".into(),
                 timeout_millis: 1000,
             collect_stats: false,
         })
@@ -18206,10 +18206,10 @@ mod tests {
 
         // Verify schema has correct column names
         let schema = out_batch.schema();
-        assert!(schema.field_with_name("min_duration_ms").is_ok());
-        assert!(schema.field_with_name("max_duration_ms").is_ok());
-        assert!(schema.field_with_name("min_bytes_sent").is_ok());
-        assert!(schema.field_with_name("max_bytes_sent").is_ok());
+        assert!(schema.field_with_name("min_value").is_ok());
+        assert!(schema.field_with_name("max_value").is_ok());
+        assert!(schema.field_with_name("min_amount").is_ok());
+        assert!(schema.field_with_name("max_amount").is_ok());
 
         // Verify values
         let min_duration = out_batch
