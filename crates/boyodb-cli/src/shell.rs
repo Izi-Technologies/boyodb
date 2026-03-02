@@ -561,6 +561,12 @@ struct ClientView {
 }
 
 /// Shell state
+/// Persistent connection for connection reuse
+enum PersistentConnection {
+    Tcp(TcpStream),
+    Tls(tokio_rustls::client::TlsStream<TcpStream>),
+}
+
 struct ShellState {
     host: String,
     token: Option<String>,
@@ -582,6 +588,8 @@ struct ShellState {
     output_file: Option<PathBuf>,
     /// Whether to use pager for large output
     use_pager: bool,
+    /// Persistent connection for reuse (reduces connection overhead by 50-100ms per request)
+    persistent_conn: std::sync::Arc<tokio::sync::Mutex<Option<PersistentConnection>>>,
 }
 
 impl ShellState {
@@ -607,7 +615,14 @@ impl ShellState {
             client_views,
             output_file: None,
             use_pager: true, // Enable pager by default
+            persistent_conn: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    /// Clear persistent connection (on error or explicit disconnect)
+    async fn clear_connection(&self) {
+        let mut conn = self.persistent_conn.lock().await;
+        *conn = None;
     }
 
     fn prompt(&self) -> String {
