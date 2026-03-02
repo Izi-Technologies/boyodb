@@ -37,6 +37,7 @@ pub mod high_availability;
 pub mod resource_governance;
 pub mod tooling;
 pub mod wal;
+pub mod gpu;
 
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
@@ -204,4 +205,10 @@ pub use tooling::{
     ParquetOptions as ToolingParquetOptions, QueryResult as ToolingQueryResult,
     RestoreConfig as ToolingRestoreConfig, SchemaInferrer, TableSchema as ToolingTableSchema,
     ToolingError, ToolingResult, TypeCoercion,
+};
+
+// GPU Acceleration re-exports (Phase 19)
+pub use gpu::{
+    AggregateResult, AggregationType, FilterOp, FilterPredicate, GpuConfig, GpuDecision,
+    GpuDeviceInfo, GpuError, GpuExecutionStats, GpuExecutor, GpuOperation, GpuStatus,
 };
