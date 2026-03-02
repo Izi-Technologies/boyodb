@@ -1,6 +1,7 @@
 use arrow_array::RecordBatch;
 use arrow_csv::reader::Format;
 use arrow_csv::ReaderBuilder;
+use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use base64::{engine::general_purpose, Engine as _};
@@ -54,6 +55,8 @@ enum ServerError {
     Db(String),
     #[error("encode: {0}")]
     Encode(String),
+    #[error("decode: {0}")]
+    Decode(String),
     #[error("tls: {0}")]
     Tls(String),
     #[error("auth: {0}")]
@@ -62,6 +65,8 @@ enum ServerError {
     Unauthorized,
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
 }
 
 impl From<AuthError> for ServerError {
@@ -4791,6 +4796,166 @@ where
             };
             Ok(Response::ok_message(msg))
         }
+        // New DDL commands
+        DdlCommand::AlterTableRename { database, old_table, new_table } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: old_table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.rename_table(&database, &old_table, &new_table)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("table renamed"))
+        }
+        DdlCommand::AlterTableRenameColumn { database, table, old_column, new_column } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            // TODO: Implement column rename in engine
+            Err(ServerError::NotImplemented(format!(
+                "ALTER TABLE RENAME COLUMN is not yet implemented (rename {} to {})",
+                old_column, new_column
+            )))
+        }
+        DdlCommand::CreateTableAs { database, table, query_sql, if_not_exists } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            let rows_inserted = blocking(move || {
+                db.create_table_as(&database, &table, &query_sql, if_not_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("table created with {} rows", rows_inserted)))
+        }
+        DdlCommand::CreateSequence { database, name, start, increment, min_value, max_value, cycle, if_not_exists } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.create_sequence(&database, &name, start, increment, min_value, max_value, cycle, if_not_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("sequence created"))
+        }
+        DdlCommand::DropSequence { database, name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.drop_sequence(&database, &name, if_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("sequence dropped"))
+        }
+        DdlCommand::AlterSequence { database, name, restart_with, increment } => {
+            require_privilege(Privilege::Alter, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.alter_sequence(&database, &name, restart_with, increment)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("sequence altered"))
+        }
+        DdlCommand::ShowSequences { database } => {
+            if let Some(ref db_name) = database {
+                require_privilege(Privilege::Select, PrivilegeTarget::Database(db_name.clone()))?;
+            }
+            let db = db.clone();
+            let sequences = blocking(move || {
+                let db_name = database.as_deref().unwrap_or("default");
+                db.list_sequences(db_name)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if sequences.is_empty() {
+                Ok(Response::ok_message("No sequences"))
+            } else {
+                let seq_list: Vec<String> = sequences
+                    .iter()
+                    .map(|s| format!("{}.{} (current: {}, increment: {})", s.database, s.name, s.current_value, s.increment))
+                    .collect();
+                Ok(Response {
+                    message: Some(format!("Sequences: {}", seq_list.join("; "))),
+                    ..Default::default()
+                })
+            }
+        }
+        DdlCommand::CopyFrom { database, table, source, format, options } => {
+            require_privilege(
+                Privilege::Insert,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            let rows_copied = blocking(move || {
+                db.copy_from(&database, &table, &source, &format, &options)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("COPY {} rows imported", rows_copied)))
+        }
+        DdlCommand::CopyTo { database, table, destination, format, options } => {
+            require_privilege(
+                Privilege::Select,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            let dest_clone = destination.clone();
+            let rows_copied = blocking(move || {
+                db.copy_to(&database, &table, &destination, &format, &options)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("COPY {} rows exported to {}", rows_copied, dest_clone)))
+        }
+        DdlCommand::AddConstraint { database, table, constraint } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.add_constraint(&database, &table, constraint)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("constraint added"))
+        }
+        DdlCommand::DropConstraint { database, table, constraint_name } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.drop_constraint(&database, &table, &constraint_name)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("constraint dropped"))
+        }
     }
 }
 
@@ -4805,6 +4970,7 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
         columns,
         values,
         on_conflict: _on_conflict, // TODO: implement UPSERT logic
+        returning,
     } = cmd;
 
     if values.is_empty() {
@@ -5217,6 +5383,15 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     // Ingest the data
     let db = db.clone();
     let rows_inserted = num_rows;
+
+    // If RETURNING is specified, we need to return the inserted data
+    let returning_data = if returning.is_some() {
+        // Clone the IPC data before ingestion for returning
+        Some(ipc_buffer.clone())
+    } else {
+        None
+    };
+
     blocking(move || {
         db.ingest_ipc(IngestBatch {
             payload_ipc: ipc_buffer,
@@ -5229,6 +5404,71 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     })
     .await?;
 
+    // Handle RETURNING clause
+    if let Some(returning_cols) = returning {
+        if returning_cols.iter().any(|c| c == "*") {
+            // RETURNING * - return all inserted data
+            if let Some(ipc_data) = returning_data {
+                let ipc_base64 = general_purpose::STANDARD.encode(&ipc_data);
+                return Ok(Response {
+                    ipc_base64: Some(ipc_base64),
+                    ipc_len: Some(ipc_data.len() as u64),
+                    message: Some(format!("{} row(s) inserted", rows_inserted)),
+                    ..Default::default()
+                });
+            }
+        } else {
+            // RETURNING specific columns - filter the batch
+            if let Some(ipc_data) = returning_data {
+                // Read back the IPC data
+                let cursor = std::io::Cursor::new(&ipc_data);
+                let reader = StreamReader::try_new(cursor, None)
+                    .map_err(|e| ServerError::Decode(format!("failed to read returning data: {}", e)))?;
+
+                let batches: Vec<RecordBatch> = reader
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| ServerError::Decode(format!("failed to read batches: {}", e)))?;
+
+                if let Some(batch) = batches.first() {
+                    // Select only the requested columns
+                    let mut selected_arrays: Vec<arrow_array::ArrayRef> = Vec::new();
+                    let mut selected_fields: Vec<Field> = Vec::new();
+
+                    for col_name in &returning_cols {
+                        if let Ok(idx) = batch.schema().index_of(col_name) {
+                            selected_arrays.push(batch.column(idx).clone());
+                            selected_fields.push(batch.schema().field(idx).clone());
+                        }
+                    }
+
+                    if !selected_arrays.is_empty() {
+                        let selected_schema = Arc::new(Schema::new(selected_fields));
+                        let selected_batch = RecordBatch::try_new(selected_schema.clone(), selected_arrays)
+                            .map_err(|e| ServerError::Encode(format!("failed to create returning batch: {}", e)))?;
+
+                        let mut output = Vec::new();
+                        {
+                            let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
+                                .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                            writer.write(&selected_batch)
+                                .map_err(|e| ServerError::Encode(format!("failed to write batch: {}", e)))?;
+                            writer.finish()
+                                .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
+                        }
+                        let ipc_base64 = general_purpose::STANDARD.encode(&output);
+                        return Ok(Response {
+                            ipc_base64: Some(ipc_base64),
+                            ipc_len: Some(output.len() as u64),
+                            message: Some(format!("{} row(s) inserted", rows_inserted)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Response::ok_message(&format!("{} row(s) inserted", rows_inserted)))
 }
 
@@ -5238,19 +5478,38 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
         table,
         assignments,
         where_clause,
+        returning,
     } = cmd;
 
     let db = _db.clone();
+    let db_name = database.clone();
+    let tbl_name = table.clone();
+    let where_cl = where_clause.clone();
+    let ret_cols = returning.clone();
+
     let updated = blocking(move || {
         db.update_rows(&database, &table, &assignments, where_clause.as_deref())
             .map_err(|e| ServerError::Db(e.to_string()))
     })
     .await?;
 
-    Ok(Response::ok_message(&format!(
-        "{} row(s) updated",
-        updated
-    )))
+    // Handle RETURNING clause for UPDATE
+    // Note: For full RETURNING support, we would need to capture the modified rows
+    // before and after the update. For now, we'll return a count message.
+    // TODO: Implement full RETURNING support by returning the modified rows
+    if ret_cols.is_some() {
+        // Future: Query the updated rows and return them
+        // For now, return a structured message indicating the update count
+        Ok(Response::ok_message(&format!(
+            "{} row(s) updated (RETURNING clause support is limited)",
+            updated
+        )))
+    } else {
+        Ok(Response::ok_message(&format!(
+            "{} row(s) updated",
+            updated
+        )))
+    }
 }
 
 async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, ServerError> {
@@ -5258,19 +5517,33 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
         database,
         table,
         where_clause,
+        returning,
     } = cmd;
 
     let db = _db.clone();
+    let ret_cols = returning.clone();
+
     let deleted = blocking(move || {
         db.delete_rows(&database, &table, where_clause.as_deref())
             .map_err(|e| ServerError::Db(e.to_string()))
     })
     .await?;
 
-    Ok(Response::ok_message(&format!(
-        "{} row(s) deleted",
-        deleted
-    )))
+    // Handle RETURNING clause for DELETE
+    // Note: For full RETURNING support, we would need to capture the deleted rows
+    // before deletion. For now, we'll return a count message.
+    // TODO: Implement full RETURNING support by returning the deleted rows
+    if ret_cols.is_some() {
+        Ok(Response::ok_message(&format!(
+            "{} row(s) deleted (RETURNING clause support is limited)",
+            deleted
+        )))
+    } else {
+        Ok(Response::ok_message(&format!(
+            "{} row(s) deleted",
+            deleted
+        )))
+    }
 }
 
 /// Execute EXPLAIN [ANALYZE] for a SQL statement
@@ -5950,6 +6223,53 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
         DdlCommand::SetDeduplication { database, table, config } => {
             let db = if database == "default" { effective_db.to_string() } else { database };
             DdlCommand::SetDeduplication { database: db, table, config }
+        }
+        // New DDL commands for Phase 19
+        DdlCommand::AlterTableRename { database, old_table, new_table } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::AlterTableRename { database: db, old_table, new_table }
+        }
+        DdlCommand::AlterTableRenameColumn { database, table, old_column, new_column } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::AlterTableRenameColumn { database: db, table, old_column, new_column }
+        }
+        DdlCommand::CreateTableAs { database, table, query_sql, if_not_exists } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::CreateTableAs { database: db, table, query_sql, if_not_exists }
+        }
+        DdlCommand::CreateSequence { database, name, start, increment, min_value, max_value, cycle, if_not_exists } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::CreateSequence { database: db, name, start, increment, min_value, max_value, cycle, if_not_exists }
+        }
+        DdlCommand::DropSequence { database, name, if_exists } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::DropSequence { database: db, name, if_exists }
+        }
+        DdlCommand::AlterSequence { database, name, restart_with, increment } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::AlterSequence { database: db, name, restart_with, increment }
+        }
+        DdlCommand::ShowSequences { database } => {
+            let db = database.map(|d| {
+                if d == "default" { effective_db.to_string() } else { d }
+            }).or_else(|| Some(effective_db.to_string()));
+            DdlCommand::ShowSequences { database: db }
+        }
+        DdlCommand::CopyFrom { database, table, source, format, options } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::CopyFrom { database: db, table, source, format, options }
+        }
+        DdlCommand::CopyTo { database, table, destination, format, options } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::CopyTo { database: db, table, destination, format, options }
+        }
+        DdlCommand::AddConstraint { database, table, constraint } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::AddConstraint { database: db, table, constraint }
+        }
+        DdlCommand::DropConstraint { database, table, constraint_name } => {
+            let db = if database == "default" { effective_db.to_string() } else { database };
+            DdlCommand::DropConstraint { database: db, table, constraint_name }
         }
     }
 }

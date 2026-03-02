@@ -690,6 +690,82 @@ pub enum DdlCommand {
         table: String,
         config: Option<DeduplicationConfig>,
     },
+    /// ALTER TABLE ... RENAME TO new_name
+    AlterTableRename {
+        database: String,
+        old_table: String,
+        new_table: String,
+    },
+    /// ALTER TABLE ... RENAME COLUMN old_name TO new_name
+    AlterTableRenameColumn {
+        database: String,
+        table: String,
+        old_column: String,
+        new_column: String,
+    },
+    /// CREATE TABLE ... AS SELECT ...
+    CreateTableAs {
+        database: String,
+        table: String,
+        query_sql: String,
+        if_not_exists: bool,
+    },
+    /// CREATE SEQUENCE [IF NOT EXISTS] name [START WITH n] [INCREMENT BY n]
+    CreateSequence {
+        database: String,
+        name: String,
+        start: i64,
+        increment: i64,
+        min_value: Option<i64>,
+        max_value: Option<i64>,
+        cycle: bool,
+        if_not_exists: bool,
+    },
+    /// DROP SEQUENCE [IF EXISTS] name
+    DropSequence {
+        database: String,
+        name: String,
+        if_exists: bool,
+    },
+    /// ALTER SEQUENCE name [RESTART WITH n]
+    AlterSequence {
+        database: String,
+        name: String,
+        restart_with: Option<i64>,
+        increment: Option<i64>,
+    },
+    /// SHOW SEQUENCES [IN database]
+    ShowSequences {
+        database: Option<String>,
+    },
+    /// COPY table FROM 'file' [WITH options]
+    CopyFrom {
+        database: String,
+        table: String,
+        source: CopySource,
+        format: CopyFormat,
+        options: CopyOptions,
+    },
+    /// COPY table TO 'file' [WITH options]
+    CopyTo {
+        database: String,
+        table: String,
+        destination: String,
+        format: CopyFormat,
+        options: CopyOptions,
+    },
+    /// ADD CONSTRAINT to table
+    AddConstraint {
+        database: String,
+        table: String,
+        constraint: TableConstraint,
+    },
+    /// DROP CONSTRAINT from table
+    DropConstraint {
+        database: String,
+        table: String,
+        constraint_name: String,
+    },
 }
 
 /// Index type for CREATE INDEX
@@ -732,6 +808,61 @@ impl Default for DeduplicationMode {
     fn default() -> Self {
         DeduplicationMode::OnCompaction
     }
+}
+
+/// Source for COPY FROM command
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CopySource {
+    /// File path
+    File(String),
+    /// STDIN (for streaming data)
+    Stdin,
+    /// Program to execute (e.g., PROGRAM 'gzip -d < file.gz')
+    Program(String),
+}
+
+/// Format for COPY command
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CopyFormat {
+    /// CSV format
+    Csv,
+    /// Tab-separated values
+    Text,
+    /// Binary format
+    Binary,
+    /// JSON lines format
+    Json,
+    /// Parquet format
+    Parquet,
+    /// Arrow IPC format
+    Arrow,
+}
+
+impl Default for CopyFormat {
+    fn default() -> Self {
+        CopyFormat::Csv
+    }
+}
+
+/// Options for COPY command
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CopyOptions {
+    /// Column delimiter (default: comma for CSV, tab for TEXT)
+    pub delimiter: Option<char>,
+    /// Quote character (default: double quote)
+    pub quote: Option<char>,
+    /// Escape character
+    pub escape: Option<char>,
+    /// Whether the file has a header row
+    pub header: bool,
+    /// NULL string representation (default: empty string)
+    pub null_string: Option<String>,
+    /// Encoding (default: UTF8)
+    pub encoding: Option<String>,
+    /// Columns to copy (if not all)
+    pub columns: Option<Vec<String>>,
+    /// Compression type (gzip, zstd, none)
+    pub compression: Option<String>,
 }
 
 /// Authentication/Authorization command types
@@ -1803,6 +1934,8 @@ pub struct InsertCommand {
     pub values: Vec<Vec<SqlValue>>,
     /// ON CONFLICT clause for UPSERT operations
     pub on_conflict: Option<OnConflict>,
+    /// RETURNING clause - columns to return after insert
+    pub returning: Option<Vec<String>>,
 }
 
 /// A SQL value from INSERT/UPDATE statements
@@ -1824,6 +1957,8 @@ pub struct UpdateCommand {
     pub assignments: Vec<(String, SqlValue)>,
     /// WHERE clause filter (simplified for now)
     pub where_clause: Option<String>,
+    /// RETURNING clause - columns to return after update
+    pub returning: Option<Vec<String>>,
 }
 
 /// DELETE command parsed from SQL
@@ -1833,6 +1968,60 @@ pub struct DeleteCommand {
     pub table: String,
     /// WHERE clause filter (simplified for now)
     pub where_clause: Option<String>,
+    /// RETURNING clause - columns to return after delete
+    pub returning: Option<Vec<String>>,
+}
+
+/// Table constraint types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TableConstraint {
+    /// PRIMARY KEY constraint
+    PrimaryKey {
+        columns: Vec<String>,
+        name: Option<String>,
+    },
+    /// UNIQUE constraint
+    Unique {
+        columns: Vec<String>,
+        name: Option<String>,
+    },
+    /// CHECK constraint
+    Check {
+        expr: String,
+        name: Option<String>,
+    },
+    /// NOT NULL constraint (column-level)
+    NotNull {
+        column: String,
+    },
+    /// DEFAULT value constraint
+    Default {
+        column: String,
+        value: String,
+    },
+}
+
+/// Column definition for CREATE TABLE
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub default: Option<String>,
+    pub primary_key: bool,
+    pub unique: bool,
+    pub auto_increment: bool,
+}
+
+/// Sequence definition for auto-increment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SequenceDef {
+    pub name: String,
+    pub start: i64,
+    pub increment: i64,
+    pub min_value: Option<i64>,
+    pub max_value: Option<i64>,
+    pub cycle: bool,
 }
 
 /// Transaction control commands
@@ -1945,8 +2134,9 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             table_name,
             columns,
             source,
+            returning,
             ..
-        } => parse_insert(table_name, columns, source),
+        } => parse_insert(table_name, columns, source, returning),
         Statement::StartTransaction { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Start)),
         Statement::Commit { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Commit)),
         Statement::Rollback { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Rollback)),
@@ -2106,13 +2296,15 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             table,
             assignments,
             selection,
+            returning,
             ..
-        } => parse_update(table, assignments, selection),
+        } => parse_update(table, assignments, selection, returning),
         Statement::Delete {
             from,
             selection,
+            returning,
             ..
-        } => parse_delete(from, selection),
+        } => parse_delete(from, selection, returning),
         Statement::CreateIndex {
             name,
             table_name,
@@ -3324,6 +3516,7 @@ fn parse_insert(
     table_name: &ObjectName,
     columns: &[Ident],
     source: &Option<Box<Query>>,
+    returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
     let full_name = table_name.to_string();
     let (database, table) = parse_table_name(&full_name)?;
@@ -3365,13 +3558,58 @@ fn parse_insert(
         ));
     }
 
+    // Parse RETURNING clause
+    let returning_cols = parse_returning_clause(returning)?;
+
     Ok(SqlStatement::Insert(InsertCommand {
         database,
         table,
         columns: cols,
         values,
         on_conflict: None,
+        returning: returning_cols,
     }))
+}
+
+/// Parse RETURNING clause columns
+fn parse_returning_clause(
+    returning: &Option<Vec<sqlparser::ast::SelectItem>>,
+) -> Result<Option<Vec<String>>, EngineError> {
+    match returning {
+        None => Ok(None),
+        Some(items) => {
+            let mut cols = Vec::new();
+            for item in items {
+                match item {
+                    sqlparser::ast::SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
+                        cols.push(ident.value.clone());
+                    }
+                    sqlparser::ast::SelectItem::UnnamedExpr(Expr::CompoundIdentifier(parts)) => {
+                        // Take the last part (column name)
+                        if let Some(last) = parts.last() {
+                            cols.push(last.value.clone());
+                        }
+                    }
+                    sqlparser::ast::SelectItem::Wildcard(_) => {
+                        cols.push("*".to_string());
+                    }
+                    sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                        // Use alias if provided, otherwise extract column name
+                        match expr {
+                            Expr::Identifier(ident) => cols.push(alias.value.clone()),
+                            _ => cols.push(alias.value.clone()),
+                        }
+                    }
+                    _ => {
+                        return Err(EngineError::NotImplemented(format!(
+                            "unsupported RETURNING item: {item}"
+                        )))
+                    }
+                }
+            }
+            Ok(Some(cols))
+        }
+    }
 }
 
 /// Convert an Expr to SqlValue
@@ -3429,6 +3667,7 @@ fn parse_update(
     table: &sqlparser::ast::TableWithJoins,
     assignments: &[sqlparser::ast::Assignment],
     selection: &Option<Expr>,
+    returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
     // Extract table name from the UPDATE clause
     let table_name = match &table.relation {
@@ -3464,11 +3703,15 @@ fn parse_update(
     // Convert WHERE clause to string representation (simplified for now)
     let where_clause = selection.as_ref().map(|expr| expr.to_string());
 
+    // Parse RETURNING clause
+    let returning_cols = parse_returning_clause(returning)?;
+
     Ok(SqlStatement::Update(UpdateCommand {
         database,
         table,
         assignments: parsed_assignments,
         where_clause,
+        returning: returning_cols,
     }))
 }
 
@@ -3476,6 +3719,7 @@ fn parse_update(
 fn parse_delete(
     from: &[sqlparser::ast::TableWithJoins],
     selection: &Option<Expr>,
+    returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
     // Extract table name from the FROM clause
     let from_table = from.first().ok_or_else(|| {
@@ -3495,10 +3739,14 @@ fn parse_delete(
     // Convert WHERE clause to string representation (simplified for now)
     let where_clause = selection.as_ref().map(|expr| expr.to_string());
 
+    // Parse RETURNING clause
+    let returning_cols = parse_returning_clause(returning)?;
+
     Ok(SqlStatement::Delete(DeleteCommand {
         database,
         table,
         where_clause,
+        returning: returning_cols,
     }))
 }
 
@@ -4886,6 +5134,122 @@ mod tests {
                 assert_eq!(table, "mytable");
             }
             _ => panic!("expected DescribeTable with default database"),
+        }
+    }
+
+    #[test]
+    fn test_parse_insert_returning() {
+        // INSERT with RETURNING *
+        let sql = "INSERT INTO mydb.users (id, name) VALUES (1, 'Alice') RETURNING *";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Insert(cmd) => {
+                assert_eq!(cmd.database, "mydb");
+                assert_eq!(cmd.table, "users");
+                assert!(cmd.returning.is_some());
+                assert_eq!(cmd.returning.as_ref().unwrap(), &["*".to_string()]);
+            }
+            _ => panic!("expected Insert"),
+        }
+
+        // INSERT with RETURNING specific columns
+        let sql = "INSERT INTO users (id, name) VALUES (1, 'Alice') RETURNING id, name";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Insert(cmd) => {
+                assert!(cmd.returning.is_some());
+                let cols = cmd.returning.as_ref().unwrap();
+                assert_eq!(cols.len(), 2);
+                assert_eq!(cols[0], "id");
+                assert_eq!(cols[1], "name");
+            }
+            _ => panic!("expected Insert"),
+        }
+
+        // INSERT without RETURNING
+        let sql = "INSERT INTO users VALUES (1, 'Alice')";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Insert(cmd) => {
+                assert!(cmd.returning.is_none());
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_returning() {
+        // UPDATE with RETURNING *
+        let sql = "UPDATE users SET name = 'Bob' WHERE id = 1 RETURNING *";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Update(cmd) => {
+                assert!(cmd.returning.is_some());
+                assert_eq!(cmd.returning.as_ref().unwrap(), &["*".to_string()]);
+            }
+            _ => panic!("expected Update"),
+        }
+
+        // UPDATE with RETURNING specific columns
+        let sql = "UPDATE mydb.users SET name = 'Bob' RETURNING id, name";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Update(cmd) => {
+                assert_eq!(cmd.database, "mydb");
+                assert!(cmd.returning.is_some());
+                let cols = cmd.returning.as_ref().unwrap();
+                assert_eq!(cols.len(), 2);
+            }
+            _ => panic!("expected Update"),
+        }
+
+        // UPDATE without RETURNING
+        let sql = "UPDATE users SET name = 'Bob' WHERE id = 1";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Update(cmd) => {
+                assert!(cmd.returning.is_none());
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_returning() {
+        // DELETE with RETURNING *
+        let sql = "DELETE FROM users WHERE id = 1 RETURNING *";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Delete(cmd) => {
+                assert!(cmd.returning.is_some());
+                assert_eq!(cmd.returning.as_ref().unwrap(), &["*".to_string()]);
+            }
+            _ => panic!("expected Delete"),
+        }
+
+        // DELETE with RETURNING specific columns
+        let sql = "DELETE FROM mydb.users WHERE id = 1 RETURNING id, deleted_at";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Delete(cmd) => {
+                assert_eq!(cmd.database, "mydb");
+                assert!(cmd.returning.is_some());
+                let cols = cmd.returning.as_ref().unwrap();
+                assert_eq!(cols.len(), 2);
+                assert_eq!(cols[0], "id");
+                assert_eq!(cols[1], "deleted_at");
+            }
+            _ => panic!("expected Delete"),
+        }
+
+        // DELETE without RETURNING
+        let sql = "DELETE FROM users WHERE id = 1";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Delete(cmd) => {
+                assert!(cmd.returning.is_none());
+            }
+            _ => panic!("expected Delete"),
         }
     }
 }
