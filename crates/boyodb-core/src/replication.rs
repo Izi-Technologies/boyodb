@@ -131,7 +131,6 @@ impl Default for SequenceMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", content = "value")]
 pub enum PrimitiveValue {
     Int64(i64),
     Int32(i32),
@@ -456,11 +455,11 @@ impl Manifest {
             self.format_version = 1;
         }
 
-        // Add future migrations here:
-        // if self.format_version == 1 {
-        //     // migrate from v1 to v2
-        //     self.format_version = 2;
-        // }
+        // Migration from version 1 to 2: binary format support
+        if self.format_version == 1 {
+            // No data transformation needed - binary format is just a different serialization
+            self.format_version = 2;
+        }
 
         true
     }

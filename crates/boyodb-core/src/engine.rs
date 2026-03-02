@@ -1435,6 +1435,28 @@ pub struct Db {
     pub storage: std::sync::Arc<crate::storage::TieredStorage>,
 }
 
+impl Drop for Db {
+    fn drop(&mut self) {
+        // Flush WAL to ensure all entries are written to disk
+        if let Ok(mut wal) = self.wal.lock() {
+            let _ = wal.flush_sync();
+        }
+
+        // Persist manifest if it has changed since last persistence
+        let current_version = self
+            .manifest
+            .read()
+            .map(|m| m.version)
+            .unwrap_or(0);
+        let last_persisted = self.last_persisted_version.load(Ordering::Acquire);
+        if current_version > last_persisted {
+            if let Ok(manifest) = self.manifest.read() {
+                let _ = persist_manifest(&self.cfg.manifest_path, &manifest);
+            }
+        }
+    }
+}
+
 struct ReadGuard<'a> {
     db: &'a Db,
 }
@@ -11319,8 +11341,17 @@ fn snapshot_manifest(snapshot_path: &Path, manifest_path: &Path) -> Result<(), E
         fs::create_dir_all(parent)
             .map_err(|e| EngineError::Io(format!("create snapshot dir failed: {e}")))?;
     }
-    fs::copy(manifest_path, snapshot_path)
-        .map_err(|e| EngineError::Io(format!("copy manifest snapshot failed: {e}")))?;
+    // Copy binary manifest (.bincode) to snapshot, or fall back to JSON
+    let binary_manifest_path = manifest_path.with_extension("bincode");
+    let binary_snapshot_path = snapshot_path.with_extension("bincode");
+    if binary_manifest_path.exists() {
+        fs::copy(&binary_manifest_path, &binary_snapshot_path)
+            .map_err(|e| EngineError::Io(format!("copy binary manifest snapshot failed: {e}")))?;
+    } else if manifest_path.exists() {
+        fs::copy(manifest_path, snapshot_path)
+            .map_err(|e| EngineError::Io(format!("copy manifest snapshot failed: {e}")))?;
+    }
+    // If neither exists, it's a fresh database - no snapshot needed
     Ok(())
 }
 
@@ -18118,8 +18149,10 @@ mod tests {
         let manifest = load_manifest(&manifest_path).unwrap();
         assert_eq!(manifest.format_version, MANIFEST_FORMAT_VERSION);
 
-        let persisted: Manifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        // After migration, manifest is persisted to binary format (.bincode)
+        let binary_path = manifest_path.with_extension("bincode");
+        let bytes = std::fs::read(&binary_path).unwrap();
+        let persisted = crate::replication::deserialize_manifest_binary(&bytes).unwrap();
         assert_eq!(persisted.format_version, MANIFEST_FORMAT_VERSION);
     }
 

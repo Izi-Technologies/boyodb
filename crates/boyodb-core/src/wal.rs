@@ -101,7 +101,7 @@ impl Wal {
         Ok(())
     }
 
-    fn flush_sync(&mut self) -> Result<(), EngineError> {
+    pub fn flush_sync(&mut self) -> Result<(), EngineError> {
         self.writer
             .flush()
             .map_err(|e| EngineError::Io(format!("wal flush failed: {e}")))?;

@@ -275,6 +275,10 @@ fn main() -> Result<()> {
             let payload = std::fs::read(ipc_file)?;
             let db = database.clone().unwrap_or_else(|| "default".into());
             let tbl = table.clone().unwrap_or_else(|| "default".into());
+            // Store CStrings in variables to prevent use-after-free
+            // (temporary CStrings would be dropped immediately after as_ptr())
+            let db_cstr = CString::new(db)?;
+            let tbl_cstr = CString::new(tbl)?;
             let status = boyodb_core::ffi::boyodb_ingest_ipc_v3(
                 handle.as_ptr(),
                 payload.as_ptr(),
@@ -282,9 +286,9 @@ fn main() -> Result<()> {
                 0,
                 *shard_hint,
                 true,
-                CString::new(db)?.as_ptr(),
+                db_cstr.as_ptr(),
                 true,
-                CString::new(tbl)?.as_ptr(),
+                tbl_cstr.as_ptr(),
                 true,
             );
             check_status(status)?;
