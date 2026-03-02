@@ -8544,7 +8544,8 @@ impl Db {
 
                         ordinal_position.append_value((idx + 1) as i64);
 
-                        if let Some(dtype) = field.get("type").and_then(|v| v.as_str()) {
+                        if let Some(dtype) = field.get("type").and_then(|v| v.as_str())
+                            .or_else(|| field.get("data_type").and_then(|v| v.as_str())) {
                             data_type.append_value(dtype);
                         } else {
                             data_type.append_value("unknown");
@@ -9569,7 +9570,9 @@ impl Db {
 
         for field in &schema_fields {
             let name = field["name"].as_str().unwrap_or("unknown");
-            let type_str = field["type"].as_str().unwrap_or("string");
+            let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
             let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
 
             let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
@@ -9592,7 +9595,9 @@ impl Db {
             for (i, field) in schema_fields.iter().enumerate() {
                 let value = values.get(i).copied().unwrap_or("");
                 let is_null = value == null_str || value.is_empty();
-                let type_str = field["type"].as_str().unwrap_or("string");
+                let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
 
                 match type_str {
                     "int64" | "bigint" => {
@@ -9651,7 +9656,9 @@ impl Db {
         // Build arrays and create batch
         let mut arrays: Vec<ArrayRef> = Vec::new();
         for (i, field) in schema_fields.iter().enumerate() {
-            let type_str = field["type"].as_str().unwrap_or("string");
+            let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
             let array: ArrayRef = match type_str {
                 "int64" | "bigint" => {
                     Arc::new(builders[i].downcast_mut::<Int64Builder>().unwrap().finish())
@@ -9740,7 +9747,9 @@ impl Db {
 
         for field in &schema_fields {
             let name = field["name"].as_str().unwrap_or("unknown");
-            let type_str = field["type"].as_str().unwrap_or("string");
+            let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
             let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
 
             let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
@@ -9763,7 +9772,9 @@ impl Db {
 
             for (i, field) in schema_fields.iter().enumerate() {
                 let name = field["name"].as_str().unwrap_or("unknown");
-                let type_str = field["type"].as_str().unwrap_or("string");
+                let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
                 let value = &json[name];
 
                 match type_str {
@@ -9824,7 +9835,9 @@ impl Db {
         // Build arrays and create batch
         let mut arrays: Vec<ArrayRef> = Vec::new();
         for (i, field) in schema_fields.iter().enumerate() {
-            let type_str = field["type"].as_str().unwrap_or("string");
+            let type_str = field["type"].as_str()
+                .or_else(|| field["data_type"].as_str())
+                .unwrap_or("string");
             let array: ArrayRef = match type_str {
                 "int64" | "bigint" => {
                     Arc::new(builders[i].downcast_mut::<Int64Builder>().unwrap().finish())
@@ -13753,7 +13766,9 @@ pub fn canonical_schema_from_json(s: &str) -> Result<SchemaWrapper, EngineError>
         let result_json = if needs_conversion {
             // Convert from old format (type) to TableFieldSpec format (data_type)
             let converted: Vec<serde_json::Value> = fields.iter().map(|f| {
-                let type_val = f.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                let type_val = f.get("type").and_then(|t| t.as_str())
+                    .or_else(|| f.get("data_type").and_then(|t| t.as_str()))
+                    .unwrap_or("string");
                 // Convert Arrow DataType string back to our format
                 let data_type_str = match type_val {
                     "Int64" => "int64",

@@ -1719,7 +1719,9 @@ async fn execute_sql(state: &ShellState, sql: &str) -> Result<()> {
                 table.set_header(vec!["Column", "Type", "Nullable"]);
                 for field in fields {
                     let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                    let dtype = field.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+                    let dtype = field.get("type").and_then(|v| v.as_str())
+                        .or_else(|| field.get("data_type").and_then(|v| v.as_str()))
+                        .unwrap_or("?");
                     let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
                     table.add_row(vec![
                         name.to_string(),
