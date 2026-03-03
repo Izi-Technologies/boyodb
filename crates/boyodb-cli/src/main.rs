@@ -169,7 +169,7 @@ enum Commands {
         format: String,
     },
     /// Create a database on a running server
-    #[command(name = "create-db")]
+    #[command(name = "server-create-db")]
     RemoteCreateDb {
         #[command(flatten)]
         server: ServerArgs,
@@ -177,7 +177,7 @@ enum Commands {
         name: String,
     },
     /// Drop a database on a running server
-    #[command(name = "drop-db")]
+    #[command(name = "server-drop-db")]
     RemoteDropDb {
         #[command(flatten)]
         server: ServerArgs,
@@ -188,13 +188,13 @@ enum Commands {
         force: bool,
     },
     /// List databases on a running server
-    #[command(name = "databases")]
+    #[command(name = "server-databases")]
     RemoteListDbs {
         #[command(flatten)]
         server: ServerArgs,
     },
     /// List tables on a running server
-    #[command(name = "tables")]
+    #[command(name = "server-tables")]
     RemoteListTables {
         #[command(flatten)]
         server: ServerArgs,
@@ -202,16 +202,16 @@ enum Commands {
         #[arg(short, long)]
         database: Option<String>,
     },
-    /// Describe a table schema
-    #[command(name = "describe")]
+    /// Describe a table schema on a running server
+    #[command(name = "server-describe")]
     RemoteDescribe {
         #[command(flatten)]
         server: ServerArgs,
         /// Table name (database.table format)
         table: String,
     },
-    /// Vacuum/compact a table
-    #[command(name = "vacuum-remote")]
+    /// Vacuum/compact a table on a running server
+    #[command(name = "server-vacuum")]
     RemoteVacuum {
         #[command(flatten)]
         server: ServerArgs,
