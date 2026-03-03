@@ -234,7 +234,14 @@ boyodb/
 
 ## Client Drivers
 
-Native drivers for all major languages:
+Native drivers for all major languages with varying feature sets:
+
+| Driver | Pooling | Batch Insert | Transactions | Arrow Native |
+|--------|---------|--------------|--------------|--------------|
+| **Rust** | Yes | Yes | Yes | Yes |
+| Go | - | - | - | - |
+| Python | - | - | - | - |
+| Node.js | - | - | - | - |
 
 ### Go
 ```go
@@ -263,11 +270,25 @@ with Client("localhost:8765") as client:
 
 ### Rust
 ```rust
-use boyodb::{Client, Config};
+use boyodb::{Client, Config, Pool, PoolConfig};
+use boyodb::batch::{BatchInserter, Value};
 
+// Simple query
 let client = Client::connect("localhost:8765", Config::default()).await?;
 let result = client.query("SELECT * FROM events LIMIT 10").await?;
+
+// Connection pooling for high throughput
+let pool = Pool::new("localhost:8765", PoolConfig::new(20)).await?;
+let conn = pool.get().await?;
+conn.query("SELECT COUNT(*) FROM events").await?;
+
+// High-performance batch inserts
+let mut inserter = BatchInserter::new(&client, "db", "table", schema, 10_000);
+inserter.add_row(vec![Value::Int64(1), Value::String("data".into())])?;
+inserter.flush().await?;
 ```
+
+See [Rust Driver Documentation](drivers/rust/README.md) for connection pooling, transactions, and Arrow support.
 
 ### Node.js
 ```javascript
