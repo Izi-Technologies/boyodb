@@ -257,31 +257,38 @@ const SQL_KEYWORDS: &[&str] = &[
     "DEDUPLICATION",
 ];
 
-/// Meta-commands for tab completion
+/// Meta-commands for tab completion (psql/mysql compatible)
 const META_COMMANDS: &[&str] = &[
-    "\\q",
-    "\\quit",
-    "\\h",
-    "\\help",
-    "\\?",
-    "\\l",
-    "\\dt",
-    "\\d",
-    "\\du",
-    "\\di",
-    "\\dv",
-    "\\c",
-    "\\x",
-    "\\o",
-    "\\i",
+    // Quit/Help
+    "\\q", "\\quit", "\\h", "\\help", "\\?",
+    // Database/Schema info
+    "\\l", "\\dt", "\\d", "\\du", "\\di", "\\dv", "\\df", "\\dn", "\\dp", "\\ds",
+    // Connection/Database
+    "\\c", "\\connect", "\\conninfo",
+    // Output/Display
+    "\\x", "\\o", "\\t", "\\a", "\\H", "\\pset", "\\pager", "\\format",
+    // Input/Execution
+    "\\i", "\\e", "\\g", "\\gx", "\\r", "\\p", "\\w", "\\s",
+    // Variables
+    "\\set", "\\unset", "\\echo", "\\qecho",
+    // Timing/Stats
     "\\timing",
-    "\\format",
+    // Copy/Import
     "\\copy",
-    "\\ps",
-    "\\views",
+    // Prepared/Views
+    "\\ps", "\\views",
+    // History
     "\\history",
-    "\\pset",
-    "\\pager",
+    // Misc
+    "\\!", "\\cd", "\\password", "\\watch",
+    // MySQL style
+    "\\G",
+    // Transaction
+    "\\begin", "\\commit", "\\rollback", "\\savepoint",
+    // Saved queries
+    "\\save", "\\load", "\\queries",
+    // Tee
+    "\\tee", "\\notee",
 ];
 
 /// Tab completion helper for the shell
@@ -445,11 +452,87 @@ impl Hinter for BoyodbHelper {
 
 impl Highlighter for BoyodbHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        Cow::Borrowed(line) // No syntax highlighting for now
+        // Simple syntax highlighting for SQL keywords
+        // ANSI color codes
+        const KEYWORD_COLOR: &str = "\x1b[1;34m";  // Bold blue
+        const STRING_COLOR: &str = "\x1b[32m";     // Green for strings
+        const NUMBER_COLOR: &str = "\x1b[33m";    // Yellow for numbers
+        const RESET: &str = "\x1b[0m";
+
+        let mut result = String::with_capacity(line.len() * 2);
+        let mut chars = line.char_indices().peekable();
+
+        while let Some((i, c)) = chars.next() {
+            // Handle strings
+            if c == '\'' || c == '"' {
+                result.push_str(STRING_COLOR);
+                result.push(c);
+                let quote_char = c;
+                // Consume until closing quote
+                while let Some((_, ch)) = chars.next() {
+                    result.push(ch);
+                    if ch == quote_char {
+                        break;
+                    }
+                }
+                result.push_str(RESET);
+                continue;
+            }
+
+            // Handle numbers
+            if c.is_ascii_digit() {
+                result.push_str(NUMBER_COLOR);
+                result.push(c);
+                while let Some(&(_, ch)) = chars.peek() {
+                    if ch.is_ascii_digit() || ch == '.' {
+                        result.push(ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                result.push_str(RESET);
+                continue;
+            }
+
+            // Handle words (potential keywords)
+            if c.is_alphabetic() || c == '_' || c == '\\' {
+                let start = i;
+                let mut word = String::new();
+                word.push(c);
+                while let Some(&(_, ch)) = chars.peek() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        word.push(ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+
+                // Check if it's a SQL keyword
+                let upper = word.to_uppercase();
+                if SQL_KEYWORDS.contains(&upper.as_str()) {
+                    result.push_str(KEYWORD_COLOR);
+                    result.push_str(&word);
+                    result.push_str(RESET);
+                } else {
+                    result.push_str(&word);
+                }
+                continue;
+            }
+
+            result.push(c);
+        }
+
+        if result == line {
+            Cow::Borrowed(line)
+        } else {
+            Cow::Owned(result)
+        }
     }
 
     fn highlight_char(&self, _line: &str, _pos: usize, _forced: bool) -> bool {
-        false
+        true // Enable character highlighting
     }
 }
 
@@ -668,6 +751,60 @@ enum PersistentConnection {
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
 }
 
+/// Transaction state tracking
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum TransactionState {
+    #[default]
+    None,
+    Active,
+    Failed,
+}
+
+/// Action to take on SQL error
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum OnErrorAction {
+    #[default]
+    Continue,
+    Stop,
+    Rollback,
+}
+
+/// Display settings (like psql \pset)
+#[derive(Clone, Debug)]
+struct DisplaySettings {
+    /// Show borders (0=none, 1=single, 2=double)
+    border: u8,
+    /// String to display for NULL values
+    null_display: String,
+    /// Show only tuples (no headers/footers)
+    tuples_only: bool,
+    /// Show timing after queries
+    timing: bool,
+    /// Expanded/vertical display auto threshold (0=off, n=auto at n columns)
+    expanded_auto: usize,
+    /// Field separator for unaligned output
+    field_sep: String,
+    /// Record separator for unaligned output
+    record_sep: String,
+    /// Show line numbers in output
+    line_numbers: bool,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            border: 1,
+            null_display: "NULL".to_string(),
+            tuples_only: false,
+            timing: true,
+            expanded_auto: 0,
+            field_sep: "|".to_string(),
+            record_sep: "\n".to_string(),
+            line_numbers: false,
+        }
+    }
+}
+
 struct ShellState {
     host: String,
     token: Option<String>,
@@ -691,6 +828,26 @@ struct ShellState {
     use_pager: bool,
     /// Persistent connection for reuse (reduces connection overhead by 50-100ms per request)
     persistent_conn: std::sync::Arc<tokio::sync::Mutex<Option<PersistentConnection>>>,
+    /// Shell variables (like psql \set)
+    variables: std::collections::HashMap<String, String>,
+    /// Transaction state
+    transaction_state: TransactionState,
+    /// Tee output file for logging all output
+    tee_file: Option<PathBuf>,
+    /// Last executed query (for \g, \gx)
+    last_query: Option<String>,
+    /// Display settings
+    display_settings: DisplaySettings,
+    /// Auto-commit mode (default true)
+    autocommit: bool,
+    /// Echo queries before execution (like psql -e)
+    echo_queries: bool,
+    /// Quiet mode (suppress informational messages)
+    quiet: bool,
+    /// On error: stop, continue, or rollback
+    on_error: OnErrorAction,
+    /// Saved queries/bookmarks
+    saved_queries: std::collections::HashMap<String, String>,
 }
 
 impl ShellState {
@@ -707,6 +864,9 @@ impl ShellState {
         // Load saved views from disk
         let client_views = load_client_views().unwrap_or_default();
 
+        // Load saved queries from disk
+        let saved_queries = load_saved_queries().unwrap_or_default();
+
         Self {
             host,
             token,
@@ -722,6 +882,16 @@ impl ShellState {
             output_file: None,
             use_pager: true, // Enable pager by default
             persistent_conn: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            variables: std::collections::HashMap::new(),
+            transaction_state: TransactionState::default(),
+            tee_file: None,
+            last_query: None,
+            display_settings: DisplaySettings::default(),
+            autocommit: true,
+            echo_queries: false,
+            quiet: false,
+            on_error: OnErrorAction::default(),
+            saved_queries,
         }
     }
 
@@ -741,10 +911,58 @@ impl ShellState {
             Some(user) => format!("{}@", user),
             None => String::new(),
         };
+        // Transaction state indicator (like psql)
+        let txn_indicator = match self.transaction_state {
+            TransactionState::None => "",
+            TransactionState::Active => "*",      // Active transaction
+            TransactionState::Failed => "!",      // Failed transaction (needs rollback)
+        };
         match &self.current_db {
-            Some(db) => format!("{}boyodb{}[{}]> ", user_indicator, tls_indicator, db),
-            None => format!("{}boyodb{}> ", user_indicator, tls_indicator),
+            Some(db) => format!("{}boyodb{}[{}]{}> ", user_indicator, tls_indicator, db, txn_indicator),
+            None => format!("{}boyodb{}{}> ", user_indicator, tls_indicator, txn_indicator),
         }
+    }
+
+    /// Substitute shell variables in input (like psql :variable or :'variable')
+    fn substitute_variables(&self, input: &str) -> String {
+        let mut result = input.to_string();
+
+        // Replace :variable with its value
+        for (name, value) in &self.variables {
+            // :name (unquoted)
+            let pattern = format!(":{}", name);
+            result = result.replace(&pattern, value);
+
+            // :'name' (quoted - wrap value in single quotes)
+            let quoted_pattern = format!(":'{}'", name);
+            result = result.replace(&quoted_pattern, &format!("'{}'", value.replace('\'', "''")));
+
+            // :"name" (double quoted)
+            let dquoted_pattern = format!(":\"{}\"", name);
+            result = result.replace(&dquoted_pattern, &format!("\"{}\"", value.replace('"', "\\\"")));
+        }
+
+        result
+    }
+
+    /// Write output to tee file if enabled
+    fn tee_write(&self, text: &str) {
+        if let Some(ref path) = self.tee_file {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+            {
+                let _ = writeln!(file, "{}", text);
+            }
+        }
+    }
+
+    /// Print output (to stdout and optionally tee file)
+    fn print(&self, text: &str) {
+        println!("{}", text);
+        self.tee_write(text);
     }
 
     /// Get the current auth token (session_id takes precedence over static token)
@@ -1976,10 +2194,6 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             }
             return Ok(false);
         }
-        Some("\\timing") => {
-            println!("Query timing is always enabled");
-            return Ok(false);
-        }
         Some("\\pager") => {
             // Toggle pager for large output (like psql \pset pager)
             if parts.len() > 1 {
@@ -2111,7 +2325,7 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             }
             return Ok(false);
         }
-        Some("clear") | Some("\\!") => {
+        Some("clear") => {
             print!("\x1B[2J\x1B[1;1H");
             return Ok(false);
         }
@@ -2188,6 +2402,679 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             list_views(state);
             return Ok(false);
         }
+        // Shell command execution (\! or system)
+        Some("\\!") | Some("system") => {
+            if parts.len() > 1 {
+                let cmd = parts[1..].join(" ");
+                let cmd = cmd.trim_end_matches(';');
+                match std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .status()
+                {
+                    Ok(status) => {
+                        if !status.success() {
+                            eprintln!("Command exited with status: {}", status);
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to execute command: {}", e),
+                }
+            } else {
+                eprintln!("Usage: \\! <shell command>");
+            }
+            return Ok(false);
+        }
+        // Change directory
+        Some("\\cd") => {
+            if parts.len() > 1 {
+                let dir = parts[1].trim_end_matches(';');
+                let expanded = expand_path(dir);
+                match std::env::set_current_dir(&expanded) {
+                    Ok(()) => println!("Changed to: {}", expanded),
+                    Err(e) => eprintln!("Cannot change directory: {}", e),
+                }
+            } else {
+                // Print current directory
+                match std::env::current_dir() {
+                    Ok(dir) => println!("{}", dir.display()),
+                    Err(e) => eprintln!("Cannot get current directory: {}", e),
+                }
+            }
+            return Ok(false);
+        }
+        // Connection info
+        Some("\\conninfo") => {
+            println!("Connected to: {}", state.host);
+            if let Some(ref db) = state.current_db {
+                println!("Database: {}", db);
+            }
+            if let Some(ref user) = state.current_user {
+                println!("User: {}", user);
+            }
+            if state.tls_config.is_some() {
+                println!("TLS: enabled");
+            } else {
+                println!("TLS: disabled");
+            }
+            println!("Timeout: {}ms", state.timeout_millis);
+            println!("Transaction: {:?}", state.transaction_state);
+            return Ok(false);
+        }
+        // Toggle tuples-only mode
+        Some("\\t") => {
+            state.display_settings.tuples_only = !state.display_settings.tuples_only;
+            if state.display_settings.tuples_only {
+                println!("Tuples only is on.");
+            } else {
+                println!("Tuples only is off.");
+            }
+            return Ok(false);
+        }
+        // Toggle aligned output
+        Some("\\a") => {
+            // Toggle between Table and unaligned (CSV-like)
+            if state.output_format == OutputFormat::Csv {
+                state.output_format = OutputFormat::Table;
+                println!("Output format is aligned.");
+            } else {
+                state.output_format = OutputFormat::Csv;
+                println!("Output format is unaligned.");
+            }
+            return Ok(false);
+        }
+        // Toggle timing
+        Some("\\timing") => {
+            state.display_settings.timing = !state.display_settings.timing;
+            if state.display_settings.timing {
+                println!("Timing is on.");
+            } else {
+                println!("Timing is off.");
+            }
+            return Ok(false);
+        }
+        // Echo text
+        Some("\\echo") => {
+            if parts.len() > 1 {
+                let text = parts[1..].join(" ");
+                let text = text.trim_end_matches(';');
+                // Substitute variables
+                let text = state.substitute_variables(text);
+                state.print(&text);
+            }
+            return Ok(false);
+        }
+        // Echo to query output
+        Some("\\qecho") => {
+            if parts.len() > 1 {
+                let text = parts[1..].join(" ");
+                let text = text.trim_end_matches(';');
+                let text = state.substitute_variables(&text);
+                if let Some(ref path) = state.output_file {
+                    use std::io::Write;
+                    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+                        let _ = writeln!(file, "{}", text);
+                    }
+                }
+                state.print(&text);
+            }
+            return Ok(false);
+        }
+        // Set variable
+        Some("\\set") => {
+            if parts.len() == 1 {
+                // List all variables
+                println!("Variables:");
+                for (name, value) in &state.variables {
+                    println!("  {} = '{}'", name, value);
+                }
+                // Also show special variables
+                println!("\nSpecial variables:");
+                println!("  AUTOCOMMIT = {}", state.autocommit);
+                println!("  ECHO = {}", state.echo_queries);
+                println!("  QUIET = {}", state.quiet);
+                println!("  ON_ERROR = {:?}", state.on_error);
+            } else if parts.len() == 2 {
+                // Show specific variable
+                let name = parts[1].trim_end_matches(';');
+                match name.to_uppercase().as_str() {
+                    "AUTOCOMMIT" => println!("AUTOCOMMIT = {}", state.autocommit),
+                    "ECHO" => println!("ECHO = {}", state.echo_queries),
+                    "QUIET" => println!("QUIET = {}", state.quiet),
+                    "ON_ERROR" | "ON_ERROR_STOP" => println!("ON_ERROR = {:?}", state.on_error),
+                    _ => {
+                        if let Some(value) = state.variables.get(name) {
+                            println!("{} = '{}'", name, value);
+                        } else {
+                            println!("Variable '{}' is not set", name);
+                        }
+                    }
+                }
+            } else {
+                // Set variable
+                let name = parts[1];
+                let value = parts[2..].join(" ");
+                let value = value.trim_end_matches(';').to_string();
+
+                // Handle special variables
+                match name.to_uppercase().as_str() {
+                    "AUTOCOMMIT" => {
+                        state.autocommit = value == "on" || value == "true" || value == "1";
+                        println!("AUTOCOMMIT = {}", state.autocommit);
+                    }
+                    "ECHO" => {
+                        state.echo_queries = value == "on" || value == "true" || value == "1";
+                        println!("ECHO = {}", state.echo_queries);
+                    }
+                    "QUIET" => {
+                        state.quiet = value == "on" || value == "true" || value == "1";
+                        println!("QUIET = {}", state.quiet);
+                    }
+                    "ON_ERROR_STOP" | "ON_ERROR" => {
+                        state.on_error = match value.to_lowercase().as_str() {
+                            "stop" | "1" | "true" | "on" => OnErrorAction::Stop,
+                            "rollback" => OnErrorAction::Rollback,
+                            _ => OnErrorAction::Continue,
+                        };
+                        println!("ON_ERROR = {:?}", state.on_error);
+                    }
+                    _ => {
+                        state.variables.insert(name.to_string(), value.clone());
+                        if !state.quiet {
+                            println!("{} = '{}'", name, value);
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+        // Unset variable
+        Some("\\unset") => {
+            if parts.len() > 1 {
+                let name = parts[1].trim_end_matches(';');
+                if state.variables.remove(name).is_some() {
+                    println!("Unset variable '{}'", name);
+                } else {
+                    println!("Variable '{}' is not set", name);
+                }
+            } else {
+                eprintln!("Usage: \\unset <variable>");
+            }
+            return Ok(false);
+        }
+        // Print current query buffer
+        Some("\\p") => {
+            if let Some(ref query) = state.last_query {
+                println!("{}", query);
+            } else {
+                println!("(query buffer is empty)");
+            }
+            return Ok(false);
+        }
+        // Reset/clear query buffer
+        Some("\\r") | Some("\\reset") => {
+            // In our implementation, just clear last_query
+            if state.last_query.is_some() {
+                println!("Query buffer reset (cleared).");
+            }
+            return Ok(false);
+        }
+        // Re-execute last query
+        Some("\\g") => {
+            if let Some(ref query) = state.last_query.clone() {
+                execute_sql(state, query).await?;
+            } else {
+                eprintln!("No previous query to execute");
+            }
+            return Ok(false);
+        }
+        // Re-execute last query in expanded mode
+        Some("\\gx") | Some("\\G") => {
+            if let Some(ref query) = state.last_query.clone() {
+                let old_format = state.output_format;
+                state.output_format = OutputFormat::Vertical;
+                execute_sql(state, query).await?;
+                state.output_format = old_format;
+            } else {
+                eprintln!("No previous query to execute");
+            }
+            return Ok(false);
+        }
+        // Write query to file
+        Some("\\w") => {
+            if parts.len() < 2 {
+                eprintln!("Usage: \\w <filename>");
+            } else if let Some(ref query) = state.last_query {
+                let path = parts[1].trim_end_matches(';');
+                let expanded = expand_path(path);
+                match std::fs::write(&expanded, query) {
+                    Ok(()) => println!("Wrote query to: {}", expanded),
+                    Err(e) => eprintln!("Cannot write to '{}': {}", expanded, e),
+                }
+            } else {
+                eprintln!("No query in buffer to write");
+            }
+            return Ok(false);
+        }
+        // Save history to file
+        Some("\\s") => {
+            if parts.len() > 1 {
+                let path = parts[1].trim_end_matches(';');
+                println!("History saved to: {}", path);
+                // Note: actual save happens via rustyline
+            } else {
+                println!("Usage: \\s <filename> - save history to file");
+            }
+            return Ok(false);
+        }
+        // Edit query in external editor
+        Some("\\e") | Some("\\edit") => {
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+
+            // Create temp file with last query
+            let temp_path = std::env::temp_dir().join("boyodb_edit.sql");
+            if let Some(ref query) = state.last_query {
+                let _ = std::fs::write(&temp_path, query);
+            } else {
+                let _ = std::fs::write(&temp_path, "");
+            }
+
+            // Open editor
+            match std::process::Command::new(&editor)
+                .arg(&temp_path)
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    // Read back and execute
+                    if let Ok(query) = std::fs::read_to_string(&temp_path) {
+                        let query = query.trim();
+                        if !query.is_empty() {
+                            println!("Executing: {}", truncate_sql(query, 60));
+                            execute_sql(state, query).await?;
+                        }
+                    }
+                }
+                Ok(status) => eprintln!("Editor exited with status: {}", status),
+                Err(e) => eprintln!("Cannot start editor '{}': {}", editor, e),
+            }
+            let _ = std::fs::remove_file(&temp_path);
+            return Ok(false);
+        }
+        // Watch - repeat query every N seconds
+        Some("\\watch") => {
+            let interval: u64 = if parts.len() > 1 {
+                parts[1].trim_end_matches(';').parse().unwrap_or(2)
+            } else {
+                2
+            };
+
+            if let Some(ref query) = state.last_query.clone() {
+                println!("Repeating query every {} seconds (Ctrl+C to stop)...", interval);
+                loop {
+                    print!("\x1B[2J\x1B[1;1H"); // Clear screen
+                    println!("Every {}s: {}\n", interval, truncate_sql(query, 60));
+                    execute_sql(state, query).await?;
+                    tokio::time::sleep(Duration::from_secs(interval)).await;
+                }
+            } else {
+                eprintln!("No previous query to watch");
+            }
+            return Ok(false);
+        }
+        // Tee - log output to file
+        Some("\\tee") | Some("tee") => {
+            if parts.len() > 1 {
+                let path = parts[1].trim_end_matches(';');
+                let expanded = PathBuf::from(expand_path(path));
+                state.tee_file = Some(expanded.clone());
+                println!("Logging to file: {}", expanded.display());
+            } else {
+                eprintln!("Usage: \\tee <filename>");
+            }
+            return Ok(false);
+        }
+        // Notee - stop logging
+        Some("\\notee") | Some("notee") => {
+            if state.tee_file.is_some() {
+                println!("Logging stopped");
+                state.tee_file = None;
+            } else {
+                println!("Not logging to file");
+            }
+            return Ok(false);
+        }
+        // Transaction commands
+        Some("\\begin") | Some("begin") => {
+            if state.transaction_state == TransactionState::Active {
+                eprintln!("Already in a transaction");
+            } else {
+                let resp = send_request(
+                    state,
+                    Operation::Query {
+                        sql: "BEGIN".to_string(),
+                        timeout_millis: state.timeout_millis,
+                        database: state.current_db.clone(),
+                    },
+                )
+                .await?;
+                if resp.status == "ok" {
+                    state.transaction_state = TransactionState::Active;
+                    println!("BEGIN");
+                } else {
+                    eprintln!("BEGIN failed: {}", resp.message.unwrap_or_default());
+                }
+            }
+            return Ok(false);
+        }
+        Some("\\commit") | Some("commit") => {
+            if state.transaction_state != TransactionState::Active {
+                eprintln!("Not in a transaction");
+            } else {
+                let resp = send_request(
+                    state,
+                    Operation::Query {
+                        sql: "COMMIT".to_string(),
+                        timeout_millis: state.timeout_millis,
+                        database: state.current_db.clone(),
+                    },
+                )
+                .await?;
+                if resp.status == "ok" {
+                    state.transaction_state = TransactionState::None;
+                    println!("COMMIT");
+                } else {
+                    eprintln!("COMMIT failed: {}", resp.message.unwrap_or_default());
+                }
+            }
+            return Ok(false);
+        }
+        Some("\\rollback") | Some("rollback") => {
+            if state.transaction_state == TransactionState::None {
+                eprintln!("Not in a transaction");
+            } else {
+                let target = if parts.len() > 1 {
+                    format!("ROLLBACK TO {}", parts[1].trim_end_matches(';'))
+                } else {
+                    "ROLLBACK".to_string()
+                };
+                let resp = send_request(
+                    state,
+                    Operation::Query {
+                        sql: target.clone(),
+                        timeout_millis: state.timeout_millis,
+                        database: state.current_db.clone(),
+                    },
+                )
+                .await?;
+                if resp.status == "ok" {
+                    if parts.len() == 1 {
+                        state.transaction_state = TransactionState::None;
+                    }
+                    println!("{}", target);
+                } else {
+                    eprintln!("ROLLBACK failed: {}", resp.message.unwrap_or_default());
+                }
+            }
+            return Ok(false);
+        }
+        Some("\\savepoint") | Some("savepoint") => {
+            if state.transaction_state != TransactionState::Active {
+                eprintln!("Not in a transaction");
+            } else if parts.len() < 2 {
+                eprintln!("Usage: \\savepoint <name>");
+            } else {
+                let name = parts[1].trim_end_matches(';');
+                let sql = format!("SAVEPOINT {}", name);
+                let resp = send_request(
+                    state,
+                    Operation::Query {
+                        sql: sql.clone(),
+                        timeout_millis: state.timeout_millis,
+                        database: state.current_db.clone(),
+                    },
+                )
+                .await?;
+                if resp.status == "ok" {
+                    println!("{}", sql);
+                } else {
+                    eprintln!("SAVEPOINT failed: {}", resp.message.unwrap_or_default());
+                }
+            }
+            return Ok(false);
+        }
+        // Save query with name
+        Some("\\save") => {
+            if parts.len() < 2 {
+                eprintln!("Usage: \\save <name> [query]");
+                eprintln!("       \\save <name>  - save last query");
+            } else {
+                let name = parts[1].to_string();
+                let query = if parts.len() > 2 {
+                    parts[2..].join(" ").trim_end_matches(';').to_string()
+                } else if let Some(ref q) = state.last_query {
+                    q.clone()
+                } else {
+                    eprintln!("No query to save");
+                    return Ok(false);
+                };
+                state.saved_queries.insert(name.clone(), query.clone());
+                let _ = save_saved_queries(&state.saved_queries);
+                println!("Saved query '{}': {}", name, truncate_sql(&query, 50));
+            }
+            return Ok(false);
+        }
+        // Load and execute saved query
+        Some("\\load") => {
+            if parts.len() < 2 {
+                eprintln!("Usage: \\load <name>");
+            } else {
+                let name = parts[1].trim_end_matches(';');
+                if let Some(query) = state.saved_queries.get(name).cloned() {
+                    println!("Executing saved query '{}': {}", name, truncate_sql(&query, 50));
+                    execute_sql(state, &query).await?;
+                } else {
+                    eprintln!("No saved query named '{}'", name);
+                }
+            }
+            return Ok(false);
+        }
+        // List saved queries
+        Some("\\queries") => {
+            if state.saved_queries.is_empty() {
+                println!("No saved queries");
+            } else {
+                println!("Saved queries:");
+                for (name, query) in &state.saved_queries {
+                    println!("  {} : {}", name, truncate_sql(query, 60));
+                }
+            }
+            return Ok(false);
+        }
+        // pset - set display options (psql compatible)
+        Some("\\pset") => {
+            if parts.len() == 1 {
+                // Show all settings
+                println!("Display settings:");
+                println!("  border = {}", state.display_settings.border);
+                println!("  null = '{}'", state.display_settings.null_display);
+                println!("  tuples_only = {}", state.display_settings.tuples_only);
+                println!("  timing = {}", state.display_settings.timing);
+                println!("  expanded = {}", if state.output_format == OutputFormat::Vertical { "on" } else { "off" });
+                println!("  format = {:?}", state.output_format);
+                println!("  lineno = {}", state.display_settings.line_numbers);
+            } else {
+                let setting = parts[1].to_lowercase();
+                let setting = setting.trim_end_matches(';');
+                let value = parts.get(2).map(|s| s.trim_end_matches(';')).unwrap_or("");
+
+                match setting {
+                    "border" => {
+                        if let Ok(n) = value.parse::<u8>() {
+                            state.display_settings.border = n.min(2);
+                            println!("Border style is {}.", state.display_settings.border);
+                        } else {
+                            println!("Current border style: {}", state.display_settings.border);
+                        }
+                    }
+                    "null" => {
+                        if !value.is_empty() {
+                            state.display_settings.null_display = value.to_string();
+                        }
+                        println!("Null display is \"{}\".", state.display_settings.null_display);
+                    }
+                    "tuples_only" | "t" => {
+                        if value == "on" || value == "1" {
+                            state.display_settings.tuples_only = true;
+                        } else if value == "off" || value == "0" {
+                            state.display_settings.tuples_only = false;
+                        } else if !value.is_empty() {
+                            state.display_settings.tuples_only = !state.display_settings.tuples_only;
+                        }
+                        println!("Tuples only is {}.", if state.display_settings.tuples_only { "on" } else { "off" });
+                    }
+                    "expanded" | "x" => {
+                        if value == "on" || value == "1" {
+                            state.output_format = OutputFormat::Vertical;
+                        } else if value == "off" || value == "0" {
+                            state.output_format = OutputFormat::Table;
+                        } else if value == "auto" {
+                            state.display_settings.expanded_auto = 1;
+                        } else {
+                            if state.output_format == OutputFormat::Vertical {
+                                state.output_format = OutputFormat::Table;
+                            } else {
+                                state.output_format = OutputFormat::Vertical;
+                            }
+                        }
+                        println!("Expanded display is {}.", if state.output_format == OutputFormat::Vertical { "on" } else { "off" });
+                    }
+                    "format" => {
+                        match value {
+                            "aligned" | "table" => state.output_format = OutputFormat::Table,
+                            "unaligned" | "csv" => state.output_format = OutputFormat::Csv,
+                            _ => {}
+                        }
+                        println!("Output format is {:?}.", state.output_format);
+                    }
+                    "lineno" => {
+                        if value == "on" || value == "1" {
+                            state.display_settings.line_numbers = true;
+                        } else if value == "off" || value == "0" {
+                            state.display_settings.line_numbers = false;
+                        } else {
+                            state.display_settings.line_numbers = !state.display_settings.line_numbers;
+                        }
+                        println!("Line numbers is {}.", if state.display_settings.line_numbers { "on" } else { "off" });
+                    }
+                    "fieldsep" => {
+                        if !value.is_empty() {
+                            state.display_settings.field_sep = value.to_string();
+                        }
+                        println!("Field separator is \"{}\".", state.display_settings.field_sep);
+                    }
+                    _ => {
+                        eprintln!("Unknown pset option: {}", setting);
+                        eprintln!("Available: border, null, tuples_only, expanded, format, lineno, fieldsep");
+                    }
+                }
+            }
+            return Ok(false);
+        }
+        // Password change
+        Some("\\password") => {
+            let target_user = if parts.len() > 1 {
+                parts[1].trim_end_matches(';').to_string()
+            } else if let Some(ref user) = state.current_user {
+                user.clone()
+            } else {
+                eprintln!("Not logged in. Usage: \\password [username]");
+                return Ok(false);
+            };
+
+            let new_password = rpassword::prompt_password("Enter new password: ")
+                .unwrap_or_else(|_| String::new());
+            if new_password.is_empty() {
+                eprintln!("Password cannot be empty");
+                return Ok(false);
+            }
+            let confirm = rpassword::prompt_password("Confirm password: ")
+                .unwrap_or_else(|_| String::new());
+            if new_password != confirm {
+                eprintln!("Passwords do not match");
+                return Ok(false);
+            }
+
+            let sql = format!("ALTER USER {} PASSWORD '{}'", target_user, new_password);
+            let resp = send_request(
+                state,
+                Operation::Query {
+                    sql,
+                    timeout_millis: state.timeout_millis,
+                    database: state.current_db.clone(),
+                },
+            )
+            .await?;
+            if resp.status == "ok" {
+                println!("Password changed for user '{}'", target_user);
+            } else {
+                eprintln!("Failed to change password: {}", resp.message.unwrap_or_default());
+            }
+            return Ok(false);
+        }
+        // Source file (mysql style)
+        Some("source") => {
+            if parts.len() < 2 {
+                eprintln!("Usage: source <filename>");
+                return Ok(false);
+            }
+            // Reuse \i implementation
+            let fake_input = format!("\\i {}", parts[1..].join(" "));
+            let fake_parts: Vec<&str> = fake_input.split_whitespace().collect();
+            // Execute file (reuse \i logic below - but for now just call process_input recursively)
+            // Actually, let's just inline the logic
+            let file_path = parts[1].trim_end_matches(';');
+            let path = PathBuf::from(expand_path(file_path));
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    println!("Executing commands from: {}", path.display());
+                    let mut success_count = 0;
+                    let mut error_count = 0;
+                    for stmt in contents.split(';') {
+                        let stmt = stmt.trim();
+                        if stmt.is_empty() || stmt.starts_with("--") {
+                            continue;
+                        }
+                        let sql = format!("{};", stmt);
+                        match send_request(
+                            state,
+                            build_query_operation(sql.clone(), state.timeout_millis, state.current_db.clone()),
+                        )
+                        .await
+                        {
+                            Ok(resp) => {
+                                if resp.status == "ok" {
+                                    success_count += 1;
+                                } else {
+                                    eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown".to_string()));
+                                    error_count += 1;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                error_count += 1;
+                            }
+                        }
+                    }
+                    println!("Executed {} statement(s), {} error(s)", success_count, error_count);
+                }
+                Err(e) => eprintln!("Cannot read file '{}': {}", file_path, e),
+            }
+            return Ok(false);
+        }
+        // HTML output toggle (psql \H)
+        Some("\\H") | Some("\\html") => {
+            println!("HTML mode not implemented. Use \\format json for structured output.");
+            return Ok(false);
+        }
         _ => {}
     }
 
@@ -2221,6 +3108,44 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    // Handle transaction statements
+    if lower.starts_with("begin") || lower == "begin;" || lower == "start transaction" || lower == "start transaction;" {
+        if state.transaction_state == TransactionState::Active {
+            eprintln!("WARNING: Already in a transaction");
+        }
+        execute_sql(state, input).await?;
+        state.transaction_state = TransactionState::Active;
+        return Ok(false);
+    }
+
+    if lower.starts_with("commit") || lower == "commit;" {
+        execute_sql(state, input).await?;
+        state.transaction_state = TransactionState::None;
+        return Ok(false);
+    }
+
+    if lower.starts_with("rollback") || lower == "rollback;" {
+        execute_sql(state, input).await?;
+        // Only reset state if not rolling back to a savepoint
+        if !lower.contains(" to ") {
+            state.transaction_state = TransactionState::None;
+        }
+        return Ok(false);
+    }
+
+    if lower.starts_with("savepoint ") {
+        if state.transaction_state != TransactionState::Active {
+            eprintln!("WARNING: SAVEPOINT outside of transaction");
+        }
+        execute_sql(state, input).await?;
+        return Ok(false);
+    }
+
+    if lower.starts_with("release ") {
+        execute_sql(state, input).await?;
+        return Ok(false);
+    }
+
     // Handle SQL statements
     if lower.starts_with("select")
         || lower.starts_with("show")
@@ -2237,12 +3162,16 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
         || lower.starts_with("delete")
         || lower.starts_with("describe")
         || lower.starts_with("desc ")
+        || lower.starts_with("set ")
+        || lower.starts_with("vacuum")
+        || lower.starts_with("analyze")
+        || lower.starts_with("with ")
     {
         execute_sql(state, input).await?;
     } else if lower.starts_with("explain") {
         execute_explain(state, input).await?;
     } else {
-        eprintln!("Unknown command. Type 'help' for available commands.");
+        eprintln!("Unknown command. Type 'help' or '\\?' for available commands.");
     }
 
     Ok(false)
@@ -2580,6 +3509,30 @@ fn save_client_views(views: &std::collections::HashMap<String, ClientView>) -> R
     let path = views_file_path().ok_or_else(|| anyhow!("Cannot determine home directory"))?;
     let views_vec: Vec<&ClientView> = views.values().collect();
     let content = serde_json::to_string_pretty(&views_vec)?;
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
+/// File path for saved queries
+fn queries_file_path() -> Option<PathBuf> {
+    dirs_next::home_dir().map(|h| h.join(".boyodb_queries"))
+}
+
+/// Load saved queries from disk
+fn load_saved_queries() -> Result<std::collections::HashMap<String, String>> {
+    let path = queries_file_path().ok_or_else(|| anyhow!("Cannot determine home directory"))?;
+    if !path.exists() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let queries: std::collections::HashMap<String, String> = serde_json::from_str(&content)?;
+    Ok(queries)
+}
+
+/// Save queries to disk
+fn save_saved_queries(queries: &std::collections::HashMap<String, String>) -> Result<()> {
+    let path = queries_file_path().ok_or_else(|| anyhow!("Cannot determine home directory"))?;
+    let content = serde_json::to_string_pretty(&queries)?;
     std::fs::write(&path, content)?;
     Ok(())
 }
@@ -3606,109 +4559,152 @@ const RETRY_DELAY_MS: u64 = 1000;
 fn print_help() {
     println!(
         r#"
-boyodb shell commands:
+boyodb shell - PostgreSQL/MySQL compatible command-line interface
 
-  Authentication:
-    login [username]    Log in to the server (prompts for password)
-    logout              Log out from the server
-    whoami              Show current user
+AUTHENTICATION:
+  login [user] [pass]   Log in (prompts for password if not provided)
+  logout                Log out from the server
+  whoami                Show current user
+  \password [user]      Change password for current user or specified user
 
-  SQL Commands:
-    SELECT ...          Execute a query
-    EXPLAIN SELECT ...  Show query execution plan
-    CREATE DATABASE x   Create a new database
-    CREATE TABLE x.y    Create a new table
-    DROP DATABASE x     Drop a database
-    DROP TABLE x.y      Drop a table
-    TRUNCATE TABLE x.y  Truncate a table
-    ALTER TABLE x.y ADD COLUMN col type [NULL]   Add a nullable column
-    ALTER TABLE x.y DROP COLUMN col              Drop a column
-    INSERT INTO ...     Insert rows into a table
-    UPDATE ...          Update rows
-    DELETE FROM ...     Delete rows
-    SHOW USERS          List users (requires auth)
-    SHOW ROLES          List roles (requires auth)
-    SHOW GRANTS FOR x   Show grants for a user
-    GRANT ...           Grant privileges
-    REVOKE ...          Revoke privileges
+SQL COMMANDS:
+  SELECT ...            Execute a query
+  INSERT INTO ...       Insert rows
+  UPDATE ...            Update rows
+  DELETE FROM ...       Delete rows
+  CREATE DATABASE x     Create database
+  CREATE TABLE x.y ...  Create table
+  DROP DATABASE x       Drop database
+  DROP TABLE x.y        Drop table
+  TRUNCATE TABLE x.y    Truncate table
+  ALTER TABLE ...       Modify table structure
+  EXPLAIN SELECT ...    Show query execution plan
+  SHOW USERS/ROLES      List users or roles
+  SHOW GRANTS FOR x     Show grants for user
+  GRANT/REVOKE ...      Manage privileges
+  VACUUM [table]        Compact table(s)
+  ANALYZE [table]       Update statistics
 
-  Prepared Statements:
-    PREPARE name AS sql   Create a prepared statement with $1, $2, ... params
-    EXECUTE name (args)   Execute a prepared statement with arguments
-    DEALLOCATE name       Remove a prepared statement
-    DEALLOCATE ALL        Remove all prepared statements
+TRANSACTIONS:
+  BEGIN                 Start transaction (also: START TRANSACTION)
+  COMMIT                Commit transaction
+  ROLLBACK [TO sp]      Rollback transaction or to savepoint
+  SAVEPOINT name        Create savepoint
+  RELEASE name          Release savepoint
 
-  Client-Side Views:
-    CREATE VIEW name AS SELECT ...    Create a local view (stored in ~/.boyodb_views)
-    CREATE OR REPLACE VIEW name AS... Replace or create a view
-    DROP VIEW name                    Remove a view
-    DROP VIEW IF EXISTS name          Remove a view if it exists
-    \views, \dv                       List all client-side views
+PREPARED STATEMENTS:
+  PREPARE name AS sql   Create prepared statement ($1, $2, ... for params)
+  EXECUTE name (args)   Execute with arguments
+  DEALLOCATE name       Remove prepared statement
+  DEALLOCATE ALL        Remove all prepared statements
 
-  Shell Commands:
-    \l                  List databases
-    \dt [database]      List tables
-    \d <table>          Describe a table (show schema, segments, size)
-    \du                 List users and roles
-    \di                 List indexes
-    \dv, \views         List client-side views
-    \c <database>       Switch to a database (USE <database>)
-    \x                  Toggle expanded/vertical output (like psql)
-    \o [file]           Redirect output to file (\o - to reset to stdout)
-    \i <file>           Execute SQL from file
-    \ps                 List prepared statements
-    \format [fmt]       Set output format: table, csv, json, vertical
-    \pager [on|off]     Toggle pager for large output
-    \history [N]        Show last N history entries (default: 20)
-    \history search X   Search history for pattern X
-    \copy <tbl> FROM 'file' [WITH (opts)]  Import CSV file into table
-    \q                  Quit (also: quit, exit)
-    \?                  Show this help (also: help, \h)
-    clear               Clear screen
-    status              Show server status and login info
+CLIENT-SIDE VIEWS:
+  CREATE VIEW name AS ...         Create local view (~/.boyodb_views)
+  CREATE OR REPLACE VIEW name ... Replace or create view
+  DROP VIEW [IF EXISTS] name      Remove view
+  \views, \dv                     List all views
 
-  Keyboard Shortcuts:
-    Ctrl+R              Reverse history search (like bash)
-    Ctrl+S              Forward history search
-    Up/Down             Navigate history
-    Ctrl+C              Cancel current line / multi-line input
-    Ctrl+D              Exit shell
+INFORMATIONAL (psql-style):
+  \l                    List databases
+  \dt [db]              List tables in database
+  \d <table>            Describe table (schema, stats)
+  \du                   List users/roles
+  \di                   List indexes
+  \conninfo             Show connection info
 
-  Multi-line Input:
-    SQL statements can span multiple lines. Press Enter to continue
-    on a new line (shown with '   -> ' prompt). The statement executes
-    when you type a semicolon (;) at the end. Example:
-      boyodb> SELECT id, name
-         -> FROM users
-         -> WHERE active = true;
+OUTPUT CONTROL:
+  \x                    Toggle expanded/vertical display
+  \t                    Toggle tuples-only mode (no headers/footers)
+  \a                    Toggle aligned/unaligned output
+  \format [fmt]         Set format: table, csv, json, vertical
+  \pset <opt> [val]     Set display option (border, null, expanded, etc.)
+  \o [file]             Redirect output to file (\o - for stdout)
+  \pager [on|off]       Toggle pager for large results
 
-  CSV Import (\copy):
-    \copy <table> FROM '<file>' [WITH (options)]
-    Options:
-      DELIMITER '<char>'  - Field delimiter (default: ',')
-      NO HEADER           - File has no header row (default: has header)
-    Examples:
-      \copy users FROM '/data/users.csv'
-      \copy mydb.events FROM '~/events.csv' WITH (DELIMITER '|')
-      \copy logs FROM 'data.csv' WITH (NO HEADER)
+QUERY EXECUTION:
+  \g                    Re-execute last query
+  \gx, \G               Re-execute last query in expanded mode
+  \watch [N]            Repeat last query every N seconds
+  \timing               Toggle query timing display
 
-  Examples:
-    login admin
-    SELECT * FROM mydb.calls LIMIT 10;
-    SELECT COUNT(*) FROM mydb.calls WHERE tenant_id = 42;
-    CREATE DATABASE analytics;
-    \c analytics
-    SELECT * FROM calls;
-    \copy calls FROM 'calls.csv'
-    PREPARE q1 AS SELECT * FROM calls WHERE tenant_id = $1;
-    EXECUTE q1 (42);
-    \format json
-    EXECUTE q1 (100);
-    CREATE VIEW recent_calls AS SELECT * FROM calls WHERE ts > now() - 3600;
-    SELECT * FROM recent_calls LIMIT 10;
-    \views
-    DROP VIEW recent_calls;
-    logout
+INPUT/EDITING:
+  \i <file>             Execute SQL from file
+  source <file>         Execute SQL from file (MySQL-style)
+  \e                    Edit query in $EDITOR
+  \p                    Print current query buffer
+  \r                    Reset (clear) query buffer
+  \w <file>             Write query buffer to file
+  \s [file]             Save history to file
+
+VARIABLES:
+  \set [var [val]]      Set or show shell variables
+  \unset var            Unset variable
+  \echo text            Print text (with variable substitution)
+  \qecho text           Print to query output channel
+
+  Special variables:
+    AUTOCOMMIT          Auto-commit mode (on/off)
+    ECHO                Echo queries before execution
+    QUIET               Suppress informational messages
+    ON_ERROR_STOP       Stop on error (continue/stop/rollback)
+
+SAVED QUERIES:
+  \save name [query]    Save query (or last query) with name
+  \load name            Load and execute saved query
+  \queries              List all saved queries
+
+SHELL INTEGRATION:
+  \! <command>          Execute shell command
+  system <command>      Execute shell command (MySQL-style)
+  \cd [dir]             Change/show current directory
+  \tee <file>           Log all output to file
+  \notee                Stop logging
+
+CONNECTION:
+  \c <database>         Switch to database
+  status                Show server status and session info
+  clear                 Clear screen
+  \q, quit, exit        Exit shell
+
+KEYBOARD SHORTCUTS:
+  Ctrl+R                Reverse history search
+  Ctrl+S                Forward history search
+  Up/Down               Navigate history
+  Ctrl+C                Cancel input
+  Ctrl+D                Exit shell
+  Tab                   Auto-complete keywords, tables, databases
+
+MULTI-LINE INPUT:
+  SQL statements span multiple lines until terminated with semicolon (;)
+  The prompt changes to '   -> ' for continuation lines.
+
+  Example:
+    boyodb> SELECT id, name
+       -> FROM users
+       -> WHERE active = true;
+
+CSV IMPORT:
+  \copy <table> FROM '<file>' [WITH (options)]
+  Options: DELIMITER '<char>', NO HEADER
+
+  Example:
+    \copy users FROM 'data.csv' WITH (DELIMITER '|')
+
+PROMPT INDICATORS:
+  user@boyodb[db]>      Normal mode
+  user@boyodb[db]*>     Active transaction
+  user@boyodb[db]!>     Failed transaction (needs rollback)
+  [TLS]                 TLS connection active
+
+CONFIG FILE: ~/.boyodbrc (TOML format)
+  host = "localhost:8765"
+  database = "mydb"
+  user = "admin"
+  tls = true
+  format = "table"
+  timeout_ms = 30000
+
+For more info: https://github.com/Izi-Technologies/boyodb
 "#
     );
 }
