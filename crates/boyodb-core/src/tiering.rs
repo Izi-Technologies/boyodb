@@ -1,4 +1,4 @@
-use crate::engine::{EngineError, persist_manifest};
+use crate::engine::{persist_manifest, EngineError};
 use crate::replication::{Manifest, ManifestEntry, SegmentTier};
 use crate::storage::TieredStorage;
 use std::collections::HashMap;
@@ -46,8 +46,8 @@ impl S3StorageClass {
             S3StorageClass::OneZoneIA => 0,
             S3StorageClass::IntelligentTiering => 0,
             S3StorageClass::GlacierIR => 0,
-            S3StorageClass::Glacier => 180,         // 3-5 minutes expedited
-            S3StorageClass::DeepArchive => 43200,   // 12 hours standard
+            S3StorageClass::Glacier => 180, // 3-5 minutes expedited
+            S3StorageClass::DeepArchive => 43200, // 12 hours standard
         }
     }
 }
@@ -104,25 +104,19 @@ pub enum TransitionCondition {
 impl TransitionCondition {
     pub fn evaluate(&self, segment: &SegmentInfo, stats: &TieringStats) -> bool {
         match self {
-            TransitionCondition::AgeExceeds(threshold) => {
-                segment.age_millis >= *threshold
-            }
-            TransitionCondition::SizeExceeds(threshold) => {
-                segment.size_bytes >= *threshold
-            }
-            TransitionCondition::SizeBelow(threshold) => {
-                segment.size_bytes < *threshold
-            }
-            TransitionCondition::AccessCountBelow { count, window_millis } => {
-                let recent_accesses = stats.get_recent_accesses(&segment.segment_id, *window_millis);
+            TransitionCondition::AgeExceeds(threshold) => segment.age_millis >= *threshold,
+            TransitionCondition::SizeExceeds(threshold) => segment.size_bytes >= *threshold,
+            TransitionCondition::SizeBelow(threshold) => segment.size_bytes < *threshold,
+            TransitionCondition::AccessCountBelow {
+                count,
+                window_millis,
+            } => {
+                let recent_accesses =
+                    stats.get_recent_accesses(&segment.segment_id, *window_millis);
                 recent_accesses < *count
             }
-            TransitionCondition::RowCountExceeds(threshold) => {
-                segment.row_count >= *threshold
-            }
-            TransitionCondition::RowCountBelow(threshold) => {
-                segment.row_count < *threshold
-            }
+            TransitionCondition::RowCountExceeds(threshold) => segment.row_count >= *threshold,
+            TransitionCondition::RowCountBelow(threshold) => segment.row_count < *threshold,
             TransitionCondition::Always => true,
         }
     }
@@ -219,10 +213,12 @@ impl TieringStats {
     pub fn record_tier_transition(&self, bytes: u64, to_tier: SegmentTier) {
         match to_tier {
             SegmentTier::Cold => {
-                self.bytes_tiered_to_cold.fetch_add(bytes, Ordering::Relaxed);
+                self.bytes_tiered_to_cold
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             SegmentTier::Warm => {
-                self.bytes_tiered_to_warm.fetch_add(bytes, Ordering::Relaxed);
+                self.bytes_tiered_to_warm
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -234,7 +230,8 @@ impl TieringStats {
     }
 
     pub fn record_cold_retrieval(&self, bytes: u64) {
-        self.bytes_retrieved_cold.fetch_add(bytes, Ordering::Relaxed);
+        self.bytes_retrieved_cold
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> TieringStatsSnapshot {
@@ -328,7 +325,8 @@ impl ColdDataCache {
 
             if let Some(key) = lru_key {
                 if let Some(removed) = cache.remove(&key) {
-                    self.current_bytes.fetch_sub(removed.data.len() as u64, Ordering::Relaxed);
+                    self.current_bytes
+                        .fetch_sub(removed.data.len() as u64, Ordering::Relaxed);
                 }
             } else {
                 break;
@@ -336,12 +334,16 @@ impl ColdDataCache {
         }
 
         // Insert new entry
-        if let Some(existing) = cache.insert(segment_id.to_string(), CacheEntry {
-            data,
-            last_access: now,
-            access_count: 1,
-        }) {
-            self.current_bytes.fetch_sub(existing.data.len() as u64, Ordering::Relaxed);
+        if let Some(existing) = cache.insert(
+            segment_id.to_string(),
+            CacheEntry {
+                data,
+                last_access: now,
+                access_count: 1,
+            },
+        ) {
+            self.current_bytes
+                .fetch_sub(existing.data.len() as u64, Ordering::Relaxed);
         }
         self.current_bytes.fetch_add(data_len, Ordering::Relaxed);
     }
@@ -349,7 +351,8 @@ impl ColdDataCache {
     pub fn invalidate(&self, segment_id: &str) {
         let mut cache = self.cache.write().unwrap();
         if let Some(removed) = cache.remove(segment_id) {
-            self.current_bytes.fetch_sub(removed.data.len() as u64, Ordering::Relaxed);
+            self.current_bytes
+                .fetch_sub(removed.data.len() as u64, Ordering::Relaxed);
         }
     }
 
@@ -402,16 +405,14 @@ impl LifecyclePolicy {
             name: "cost_optimized".to_string(),
             database_filter: None,
             table_filter: None,
-            rules: vec![
-                LifecycleRule {
-                    from_tier: SegmentTier::Hot,
-                    to_tier: SegmentTier::Cold,
-                    conditions: vec![
-                        TransitionCondition::AgeExceeds(3600_000), // 1 hour
-                    ],
-                    storage_class: S3StorageClass::OneZoneIA,
-                },
-            ],
+            rules: vec![LifecycleRule {
+                from_tier: SegmentTier::Hot,
+                to_tier: SegmentTier::Cold,
+                conditions: vec![
+                    TransitionCondition::AgeExceeds(3600_000), // 1 hour
+                ],
+                storage_class: S3StorageClass::OneZoneIA,
+            }],
             priority: 0,
             enabled: true,
         }
@@ -452,16 +453,14 @@ impl LifecyclePolicy {
             name: "archive".to_string(),
             database_filter: None,
             table_filter: None,
-            rules: vec![
-                LifecycleRule {
-                    from_tier: SegmentTier::Hot,
-                    to_tier: SegmentTier::Cold,
-                    conditions: vec![
-                        TransitionCondition::AgeExceeds(86400_000), // 24 hours
-                    ],
-                    storage_class: S3StorageClass::DeepArchive,
-                },
-            ],
+            rules: vec![LifecycleRule {
+                from_tier: SegmentTier::Hot,
+                to_tier: SegmentTier::Cold,
+                conditions: vec![
+                    TransitionCondition::AgeExceeds(86400_000), // 24 hours
+                ],
+                storage_class: S3StorageClass::DeepArchive,
+            }],
             priority: 0,
             enabled: true,
         }
@@ -483,7 +482,11 @@ impl LifecyclePolicy {
     }
 
     /// Find applicable rule for a segment
-    pub fn find_applicable_rule(&self, segment: &SegmentInfo, stats: &TieringStats) -> Option<&LifecycleRule> {
+    pub fn find_applicable_rule(
+        &self,
+        segment: &SegmentInfo,
+        stats: &TieringStats,
+    ) -> Option<&LifecycleRule> {
         if !self.enabled {
             return None;
         }
@@ -493,8 +496,7 @@ impl LifecyclePolicy {
                 continue;
             }
 
-            let all_conditions_met = rule.conditions.iter()
-                .all(|c| c.evaluate(segment, stats));
+            let all_conditions_met = rule.conditions.iter().all(|c| c.evaluate(segment, stats));
 
             if all_conditions_met {
                 return Some(rule);
@@ -617,11 +619,12 @@ impl TieringManager {
 
         loop {
             // Check every minute (or faster if threshold is very low during testing)
-            let sleep_duration = if self.tier_cold_after_millis < 1000 && !self.use_lifecycle_policies {
-                Duration::from_millis(100)
-            } else {
-                Duration::from_secs(60)
-            };
+            let sleep_duration =
+                if self.tier_cold_after_millis < 1000 && !self.use_lifecycle_policies {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(60)
+                };
             sleep(sleep_duration).await;
 
             if self.use_lifecycle_policies {
@@ -806,7 +809,8 @@ impl TieringManager {
                     }
                 }
 
-                self.stats.record_tier_transition(data_size, SegmentTier::Cold);
+                self.stats
+                    .record_tier_transition(data_size, SegmentTier::Cold);
             }
             SegmentTier::Warm => {
                 // Hot -> Warm transition (just update manifest, data stays local)
@@ -821,7 +825,8 @@ impl TieringManager {
                     tracing::info!(segment_id = %segment_id, "Transitioned to Warm tier");
                 }
 
-                self.stats.record_tier_transition(data_size, SegmentTier::Warm);
+                self.stats
+                    .record_tier_transition(data_size, SegmentTier::Warm);
             }
             SegmentTier::Hot => {
                 // Promoting cold data back to hot (prefetch)

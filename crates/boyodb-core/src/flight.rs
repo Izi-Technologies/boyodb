@@ -177,10 +177,12 @@ impl FlightDataStream {
             let mut writer = StreamWriter::try_new(&mut buf, &self.schema)
                 .map_err(|e| format!("IPC writer error: {}", e))?;
             for batch in &self.batches {
-                writer.write(batch)
+                writer
+                    .write(batch)
                     .map_err(|e| format!("IPC write error: {}", e))?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| format!("IPC finish error: {}", e))?;
         }
         Ok(buf)
@@ -390,10 +392,12 @@ impl ZeroCopyConverter {
             let mut writer = StreamWriter::try_new(&mut buf, &schema)
                 .map_err(|e| format!("IPC writer error: {}", e))?;
             for batch in batches {
-                writer.write(batch)
+                writer
+                    .write(batch)
                     .map_err(|e| format!("IPC write error: {}", e))?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| format!("IPC finish error: {}", e))?;
         }
         Ok(buf)
@@ -455,8 +459,7 @@ mod tests {
 
     #[test]
     fn test_flight_ticket_with_partition() {
-        let ticket = FlightTicket::new("q1", "SELECT *")
-            .with_partition(2, 4);
+        let ticket = FlightTicket::new("q1", "SELECT *").with_partition(2, 4);
 
         assert_eq!(ticket.partition, Some(2));
         assert_eq!(ticket.total_partitions, Some(4));
@@ -466,8 +469,7 @@ mod tests {
     fn test_flight_info() {
         let batch = make_test_batch();
         let ticket = FlightTicket::new("q1", "SELECT *");
-        let info = FlightInfo::new(batch.schema(), ticket)
-            .with_stats(1000, 8000);
+        let info = FlightInfo::new(batch.schema(), ticket).with_stats(1000, 8000);
 
         assert_eq!(info.total_records, Some(1000));
         assert_eq!(info.total_bytes, Some(8000));
@@ -566,9 +568,7 @@ mod tests {
 
     #[test]
     fn test_prepared_statement() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let stmt = FlightPreparedStatement::new("stmt-1", "SELECT id FROM t", schema.clone());
 
         assert_eq!(stmt.handle, "stmt-1");

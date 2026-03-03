@@ -9,9 +9,9 @@
 //! - Subquery distribution
 //! - Cost-based distribution decisions
 
-use crate::engine::{PlanKind, AggPlan, AggKind, QueryFilter, GroupBy};
+use crate::engine::{AggKind, AggPlan, GroupBy, PlanKind, QueryFilter};
 use crate::sql::{JoinType, SelectColumn};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -318,7 +318,11 @@ impl DistributionCost {
         // Weight network cost heavily
         let network_cost = self.network_bytes as f64 * 0.001; // 1ms per KB
         let cpu = self.cpu_cost;
-        let memory_penalty = if self.memory_bytes > 1_000_000_000 { 100.0 } else { 0.0 };
+        let memory_penalty = if self.memory_bytes > 1_000_000_000 {
+            100.0
+        } else {
+            0.0
+        };
 
         network_cost + cpu + memory_penalty
     }
@@ -408,18 +412,23 @@ pub fn distribute_plan_with_options(
     offset: Option<usize>,
 ) -> Option<(LocalPlan, GlobalPlan)> {
     match kind {
-        PlanKind::Simple { agg, db, table, projection, filter, computed_columns } => {
-            distribute_simple_plan(
-                agg.as_ref(),
-                db,
-                table,
-                projection,
-                filter,
-                computed_columns,
-                limit,
-                offset,
-            )
-        }
+        PlanKind::Simple {
+            agg,
+            db,
+            table,
+            projection,
+            filter,
+            computed_columns,
+        } => distribute_simple_plan(
+            agg.as_ref(),
+            db,
+            table,
+            projection,
+            filter,
+            computed_columns,
+            limit,
+            offset,
+        ),
         PlanKind::Join => {
             // Join distribution handled separately
             None
@@ -457,8 +466,14 @@ fn distribute_simple_plan(
     if let Some(agg_plan) = agg {
         // Distribute aggregation query
         distribute_aggregation(
-            agg_plan, db, table, projection, filter, computed_columns,
-            limit, offset,
+            agg_plan,
+            db,
+            table,
+            projection,
+            filter,
+            computed_columns,
+            limit,
+            offset,
         )
     } else {
         // Non-aggregated query - simple scatter-gather
@@ -473,8 +488,7 @@ fn distribute_simple_plan(
 
         // Local plan gets LIMIT for pushdown (limit + offset)
         let local_limit = limit.map(|l| l + offset.unwrap_or(0));
-        let local_plan = LocalPlan::new(local_kind.clone())
-            .with_order_limit(vec![], local_limit);
+        let local_plan = LocalPlan::new(local_kind.clone()).with_order_limit(vec![], local_limit);
 
         // Global plan merges results
         let merge_strategy = if limit.is_some() {
@@ -487,8 +501,7 @@ fn distribute_simple_plan(
             MergeStrategy::Concatenate
         };
 
-        let global_plan = GlobalPlan::new(local_kind)
-            .with_merge_strategy(merge_strategy);
+        let global_plan = GlobalPlan::new(local_kind).with_merge_strategy(merge_strategy);
 
         Some((local_plan, global_plan))
     }
@@ -515,7 +528,9 @@ fn distribute_aggregation(
                 // Local: COUNT(*) -> produces "count" column
                 local_aggs.push(AggKind::CountStar);
                 // Global: SUM(count) -> final count
-                global_aggs.push(AggKind::Sum { column: "count".into() });
+                global_aggs.push(AggKind::Sum {
+                    column: "count".into(),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec!["count".into()],
                     final_agg: FinalAggKind::CountOfCounts,
@@ -525,8 +540,12 @@ fn distribute_aggregation(
             AggKind::CountDistinct { column } => {
                 // For COUNT(DISTINCT), we need to collect all values and deduplicate
                 // This is expensive - for now, fall back to approximate
-                local_aggs.push(AggKind::ApproxCountDistinct { column: column.clone() });
-                global_aggs.push(AggKind::Sum { column: format!("approx_count_distinct_{}", column) });
+                local_aggs.push(AggKind::ApproxCountDistinct {
+                    column: column.clone(),
+                });
+                global_aggs.push(AggKind::Sum {
+                    column: format!("approx_count_distinct_{}", column),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("approx_count_distinct_{}", column)],
                     final_agg: FinalAggKind::HllUnion,
@@ -535,9 +554,13 @@ fn distribute_aggregation(
             }
             AggKind::Sum { column } => {
                 // Local: SUM(col) -> produces "sum_{col}" column
-                local_aggs.push(AggKind::Sum { column: column.clone() });
+                local_aggs.push(AggKind::Sum {
+                    column: column.clone(),
+                });
                 // Global: SUM(sum_{col}) -> final sum
-                global_aggs.push(AggKind::Sum { column: format!("sum_{}", column) });
+                global_aggs.push(AggKind::Sum {
+                    column: format!("sum_{}", column),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("sum_{}", column)],
                     final_agg: FinalAggKind::SumOfSums,
@@ -547,7 +570,9 @@ fn distribute_aggregation(
             AggKind::Avg { column } => {
                 // AVG requires both SUM and COUNT for proper distributed computation
                 // Local: SUM(col) and COUNT(*)
-                local_aggs.push(AggKind::Sum { column: column.clone() });
+                local_aggs.push(AggKind::Sum {
+                    column: column.clone(),
+                });
                 local_aggs.push(AggKind::CountStar);
                 // Global: AVG = SUM(sums) / SUM(counts)
                 partial_agg_specs.push(PartialAggSpec {
@@ -558,9 +583,13 @@ fn distribute_aggregation(
             }
             AggKind::Min { column } => {
                 // Local: MIN(col) -> produces "min_{col}"
-                local_aggs.push(AggKind::Min { column: column.clone() });
+                local_aggs.push(AggKind::Min {
+                    column: column.clone(),
+                });
                 // Global: MIN(min_{col}) -> final min
-                global_aggs.push(AggKind::Min { column: format!("min_{}", column) });
+                global_aggs.push(AggKind::Min {
+                    column: format!("min_{}", column),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("min_{}", column)],
                     final_agg: FinalAggKind::MinOfMins,
@@ -569,9 +598,13 @@ fn distribute_aggregation(
             }
             AggKind::Max { column } => {
                 // Local: MAX(col) -> produces "max_{col}"
-                local_aggs.push(AggKind::Max { column: column.clone() });
+                local_aggs.push(AggKind::Max {
+                    column: column.clone(),
+                });
                 // Global: MAX(max_{col}) -> final max
-                global_aggs.push(AggKind::Max { column: format!("max_{}", column) });
+                global_aggs.push(AggKind::Max {
+                    column: format!("max_{}", column),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("max_{}", column)],
                     final_agg: FinalAggKind::MaxOfMaxes,
@@ -582,7 +615,9 @@ fn distribute_aggregation(
                 let is_pop = matches!(agg_kind, AggKind::StddevPop { .. });
                 // Welford's parallel algorithm requires: count, sum, m2 (sum of squared differences)
                 // Local: compute partial stats
-                local_aggs.push(AggKind::Sum { column: column.clone() });
+                local_aggs.push(AggKind::Sum {
+                    column: column.clone(),
+                });
                 local_aggs.push(AggKind::CountStar);
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![
@@ -600,7 +635,9 @@ fn distribute_aggregation(
             }
             AggKind::VarianceSamp { column } | AggKind::VariancePop { column } => {
                 let is_pop = matches!(agg_kind, AggKind::VariancePop { .. });
-                local_aggs.push(AggKind::Sum { column: column.clone() });
+                local_aggs.push(AggKind::Sum {
+                    column: column.clone(),
+                });
                 local_aggs.push(AggKind::CountStar);
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![
@@ -618,7 +655,9 @@ fn distribute_aggregation(
             }
             AggKind::ApproxCountDistinct { column } => {
                 // HyperLogLog can be unioned across nodes
-                local_aggs.push(AggKind::ApproxCountDistinct { column: column.clone() });
+                local_aggs.push(AggKind::ApproxCountDistinct {
+                    column: column.clone(),
+                });
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("approx_count_distinct_{}", column)],
                     final_agg: FinalAggKind::HllUnion,
@@ -672,8 +711,7 @@ fn distribute_aggregation(
         group_by: agg_plan.group_by.clone(),
     };
 
-    let global_plan = GlobalPlan::new(global_kind)
-        .with_merge_strategy(merge_strategy);
+    let global_plan = GlobalPlan::new(global_kind).with_merge_strategy(merge_strategy);
 
     Some((local_plan, global_plan))
 }
@@ -785,7 +823,8 @@ fn get_partition_key(plan: &DistributedPlan, stats: &DistributedStats) -> Option
                 local.database().unwrap_or("default"),
                 local.table().unwrap_or("")
             );
-            stats.table_stats
+            stats
+                .table_stats
                 .get(&table_key)
                 .and_then(|s| s.partition_key.clone())
         }
@@ -801,7 +840,8 @@ fn estimate_plan_bytes(plan: &DistributedPlan, stats: &DistributedStats) -> u64 
                 local.database().unwrap_or("default"),
                 local.table().unwrap_or("")
             );
-            stats.table_stats
+            stats
+                .table_stats
                 .get(&table_key)
                 .map(|s| s.size_bytes)
                 .unwrap_or(100 * 1024 * 1024) // Default 100MB if unknown
@@ -923,9 +963,7 @@ pub fn explain_distributed(
     target_shards: &[u16],
 ) -> DistributedExplainPlan {
     let (local, global) = distribute_plan(kind)
-        .unwrap_or_else(|| {
-            (LocalPlan::new(kind.clone()), GlobalPlan::new(kind.clone()))
-        });
+        .unwrap_or_else(|| (LocalPlan::new(kind.clone()), GlobalPlan::new(kind.clone())));
 
     let distribution_strategy = match &local.execution_hint {
         ExecutionHint::Scatter => "Scatter-Gather".to_string(),
@@ -940,12 +978,15 @@ pub fn explain_distributed(
 
     let merge_strategy = match &global.merge_strategy {
         MergeStrategy::Concatenate => "Concatenate".to_string(),
-        MergeStrategy::MergeSort { order_by, limit, .. } => {
+        MergeStrategy::MergeSort {
+            order_by, limit, ..
+        } => {
             let cols: Vec<_> = order_by.iter().map(|o| o.column.as_str()).collect();
             format!("Merge-Sort ({}) LIMIT {:?}", cols.join(", "), limit)
         }
         MergeStrategy::FinalAggregate { partial_aggs, .. } => {
-            let aggs: Vec<_> = partial_aggs.iter()
+            let aggs: Vec<_> = partial_aggs
+                .iter()
                 .map(|a| format!("{:?}", a.final_agg))
                 .collect();
             format!("Final Aggregate ({})", aggs.join(", "))
@@ -1022,7 +1063,9 @@ mod tests {
 
         let (_, global) = result.unwrap();
         match global.merge_strategy {
-            MergeStrategy::FinalAggregate { ref partial_aggs, .. } => {
+            MergeStrategy::FinalAggregate {
+                ref partial_aggs, ..
+            } => {
                 assert_eq!(partial_aggs.len(), 1);
                 assert_eq!(partial_aggs[0].final_agg, FinalAggKind::CountOfCounts);
             }
@@ -1032,14 +1075,19 @@ mod tests {
 
     #[test]
     fn test_distribute_avg() {
-        let plan = make_agg_plan(vec![AggKind::Avg { column: "value".to_string() }]);
+        let plan = make_agg_plan(vec![AggKind::Avg {
+            column: "value".to_string(),
+        }]);
         let result = distribute_plan(&plan);
         assert!(result.is_some());
 
         let (_, global) = result.unwrap();
         match global.merge_strategy {
-            MergeStrategy::FinalAggregate { ref partial_aggs, .. } => {
-                let avg_agg = partial_aggs.iter()
+            MergeStrategy::FinalAggregate {
+                ref partial_aggs, ..
+            } => {
+                let avg_agg = partial_aggs
+                    .iter()
                     .find(|a| matches!(a.final_agg, FinalAggKind::AvgFromSumCount))
                     .expect("Should have AvgFromSumCount");
                 assert_eq!(avg_agg.source_columns.len(), 2);
@@ -1071,16 +1119,22 @@ mod tests {
         let stats = DistributedStats {
             table_stats: {
                 let mut m = HashMap::new();
-                m.insert("default.small".to_string(), TableStatsSnapshot {
-                    row_count: 1000,
-                    size_bytes: 50 * 1024 * 1024, // 50MB
-                    partition_key: None,
-                });
-                m.insert("default.large".to_string(), TableStatsSnapshot {
-                    row_count: 10_000_000,
-                    size_bytes: 5 * 1024 * 1024 * 1024, // 5GB
-                    partition_key: None,
-                });
+                m.insert(
+                    "default.small".to_string(),
+                    TableStatsSnapshot {
+                        row_count: 1000,
+                        size_bytes: 50 * 1024 * 1024, // 50MB
+                        partition_key: None,
+                    },
+                );
+                m.insert(
+                    "default.large".to_string(),
+                    TableStatsSnapshot {
+                        row_count: 10_000_000,
+                        size_bytes: 5 * 1024 * 1024 * 1024, // 5GB
+                        partition_key: None,
+                    },
+                );
                 m
             },
             node_count: 3,
@@ -1147,11 +1201,14 @@ mod tests {
         let stats = DistributedStats {
             table_stats: {
                 let mut m = HashMap::new();
-                m.insert("default.tiny".to_string(), TableStatsSnapshot {
-                    row_count: 100,
-                    size_bytes: 1024 * 1024, // 1MB
-                    partition_key: None,
-                });
+                m.insert(
+                    "default.tiny".to_string(),
+                    TableStatsSnapshot {
+                        row_count: 100,
+                        size_bytes: 1024 * 1024, // 1MB
+                        partition_key: None,
+                    },
+                );
                 m
             },
             node_count: 3,

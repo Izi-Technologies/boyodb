@@ -47,13 +47,8 @@ impl ReplicationCoordinator {
 
     /// Add a follower to replicate to.
     pub fn add_follower(&mut self, node_id: NodeId, addr: SocketAddr) {
-        self.followers.insert(
-            node_id,
-            FollowerConnection {
-                addr,
-                stream: None,
-            },
-        );
+        self.followers
+            .insert(node_id, FollowerConnection { addr, stream: None });
     }
 
     /// Remove a follower.
@@ -79,11 +74,7 @@ impl ReplicationCoordinator {
 
         for (follower_id, conn) in self.followers.iter_mut() {
             if let Err(e) = send_to_follower(conn, &data).await {
-                tracing::warn!(
-                    "failed to replicate to follower {}: {}",
-                    follower_id,
-                    e
-                );
+                tracing::warn!("failed to replicate to follower {}: {}", follower_id, e);
             } else {
                 success_count += 1;
             }
@@ -216,11 +207,9 @@ impl ReplicationHandler {
                 let database = database.clone();
                 let table = table.clone();
                 let schema_json = schema_json.clone();
-                tokio::task::spawn_blocking(move || {
-                    db.create_table(&database, &table, schema_json)
-                })
-                .await
-                .map_err(|e| EngineError::Internal(format!("spawn blocking failed: {}", e)))?
+                tokio::task::spawn_blocking(move || db.create_table(&database, &table, schema_json))
+                    .await
+                    .map_err(|e| EngineError::Internal(format!("spawn blocking failed: {}", e)))?
             }
 
             WritePayload::DropTable { database, table } => {
@@ -399,8 +388,8 @@ async fn handle_replication_connection(
                 from: _from,
                 last_version,
             } => {
-
-                let (bundle_data, to_version) = match handler.export_bundle_from(last_version).await {
+                let (bundle_data, to_version) = match handler.export_bundle_from(last_version).await
+                {
                     Ok(pair) => pair,
                     Err(e) => {
                         tracing::warn!(error = %e, last_version, "sync request failed");
@@ -415,8 +404,9 @@ async fn handle_replication_connection(
                     to_version,
                 };
 
-                let resp_data = serde_json::to_vec(&resp)
-                    .map_err(|e| EngineError::Internal(format!("serialize sync response: {}", e)))?;
+                let resp_data = serde_json::to_vec(&resp).map_err(|e| {
+                    EngineError::Internal(format!("serialize sync response: {}", e))
+                })?;
 
                 let len = resp_data.len() as u32;
                 stream
@@ -433,7 +423,12 @@ async fn handle_replication_connection(
                 from_version,
                 to_version,
             } => {
-                tracing::info!(from_version, to_version, size = bundle_data.len(), "received sync response");
+                tracing::info!(
+                    from_version,
+                    to_version,
+                    size = bundle_data.len(),
+                    "received sync response"
+                );
                 if let Err(e) = handler.apply_bundle_payload(&bundle_data).await {
                     tracing::warn!(error = %e, "failed to apply sync response");
                 }

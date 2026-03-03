@@ -62,9 +62,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build server
-        run: cargo build -p cdrdb-server --release
+        run: cargo build -p boyodb-server --release
       - name: Run integration tests
-        run: cargo test -p cdrdb-server --release -- --ignored
+        run: cargo test -p boyodb-server --release -- --ignored
 
   security:
     name: Security Audit
@@ -96,26 +96,29 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: cdrdb-linux-x86_64
+          name: boyodb-linux-x86_64
           path: |
-            target/release/cdrdb-server
-            target/release/cdrdb-cli
-            target/release/cdr-ingestor
+            target/release/boyodb-server
+            target/release/boyodb-cli
+            target/release/boyodb-bench
+          if-no-files-found: ignore
       - name: Upload artifacts (macOS)
         if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: cdrdb-macos-x86_64
+          name: boyodb-macos-x86_64
           path: |
-            target/release/cdrdb-server
-            target/release/cdrdb-cli
-            target/release/cdr-ingestor
+            target/release/boyodb-server
+            target/release/boyodb-cli
+            target/release/boyodb-bench
+          if-no-files-found: ignore
       - name: Upload artifacts (Windows)
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: cdrdb-windows-x86_64
+          name: boyodb-windows-x86_64
           path: |
-            target/release/cdrdb-server.exe
-            target/release/cdrdb-cli.exe
-            target/release/cdr-ingestor.exe
+            target/release/boyodb-server.exe
+            target/release/boyodb-cli.exe
+            target/release/boyodb-bench.exe
+          if-no-files-found: ignore

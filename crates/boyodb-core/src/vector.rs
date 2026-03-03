@@ -75,7 +75,9 @@ impl Ord for VectorSearchResult {
     fn cmp(&self, other: &Self) -> Ordering {
         // Normal ordering: BinaryHeap is max-heap, so largest score at top
         // We want to keep k smallest scores, so pop() removes the largest
-        self.score.partial_cmp(&other.score).unwrap_or(Ordering::Equal)
+        self.score
+            .partial_cmp(&other.score)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -212,7 +214,10 @@ pub fn knn_search(
 
     for (i, vec) in vectors.iter().enumerate() {
         let dist = compute_distance(query, vec, metric);
-        heap.push(VectorSearchResult { index: i, score: dist });
+        heap.push(VectorSearchResult {
+            index: i,
+            score: dist,
+        });
 
         if heap.len() > k {
             heap.pop(); // Remove the largest
@@ -331,7 +336,11 @@ impl FlatVectorIndex {
 
     /// Add a vector with its ID
     pub fn add(&mut self, id: u64, vector: Vec<f32>) {
-        debug_assert_eq!(vector.len(), self.config.dimensions, "Vector dimension mismatch");
+        debug_assert_eq!(
+            vector.len(),
+            self.config.dimensions,
+            "Vector dimension mismatch"
+        );
         self.ids.push(id);
         self.vectors.push(vector);
     }
@@ -498,10 +507,10 @@ mod tests {
     #[test]
     fn test_knn_search() {
         let vectors = vec![
-            vec![1.0, 0.0],  // Index 0 - exact match
-            vec![0.0, 1.0],  // Index 1 - distance sqrt(2)
-            vec![1.0, 1.0],  // Index 2 - distance 1.0
-            vec![2.0, 0.0],  // Index 3 - distance 1.0
+            vec![1.0, 0.0], // Index 0 - exact match
+            vec![0.0, 1.0], // Index 1 - distance sqrt(2)
+            vec![1.0, 1.0], // Index 2 - distance 1.0
+            vec![2.0, 0.0], // Index 3 - distance 1.0
         ];
         let query = vec![1.0, 0.0];
 
@@ -509,9 +518,17 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         // First result should have near-zero distance (the exact match at index 0)
-        assert!(results[0].score < 0.001, "First result score should be ~0, got {}", results[0].score);
+        assert!(
+            results[0].score < 0.001,
+            "First result score should be ~0, got {}",
+            results[0].score
+        );
         // Second result should be one of the vectors at distance 1.0 (index 2 or 3)
-        assert!((results[1].score - 1.0).abs() < 0.001, "Second result score should be ~1.0, got {}", results[1].score);
+        assert!(
+            (results[1].score - 1.0).abs() < 0.001,
+            "Second result score should be ~1.0, got {}",
+            results[1].score
+        );
     }
 
     #[test]
@@ -566,11 +583,7 @@ mod tests {
 
     #[test]
     fn test_batch_knn_search() {
-        let vectors = vec![
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-            vec![1.0, 1.0],
-        ];
+        let vectors = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]];
 
         let queries = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
 

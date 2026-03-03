@@ -7,9 +7,9 @@
 //! - Query Profiler for performance debugging
 //! - Online Schema Changes for zero-downtime DDL
 
-use std::collections::{HashMap, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -117,7 +117,7 @@ impl BackupManifest {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs()
+                .as_secs(),
         );
         self.state = BackupState::Completed;
         self.file_count = self.files.len();
@@ -129,7 +129,7 @@ impl BackupManifest {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs()
+                .as_secs(),
         );
         self.state = BackupState::Failed;
     }
@@ -252,8 +252,14 @@ impl BackupManager {
             return Err(BackupError::BackupInProgress);
         }
 
-        let backup_id = format!("backup_{}_{}", database,
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis());
+        let backup_id = format!(
+            "backup_{}_{}",
+            database,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
 
         let mut manifest = BackupManifest::new(&backup_id, BackupType::Full, database);
         manifest.compression = config.compression.clone();
@@ -286,7 +292,10 @@ impl BackupManager {
         manifest.files = sample_files;
         manifest.complete();
 
-        self.backups.write().unwrap().insert(backup_id.clone(), manifest);
+        self.backups
+            .write()
+            .unwrap()
+            .insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
         Ok(backup_id)
@@ -311,8 +320,14 @@ impl BackupManager {
             return Err(BackupError::BackupInProgress);
         }
 
-        let backup_id = format!("backup_incr_{}_{}", database,
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis());
+        let backup_id = format!(
+            "backup_incr_{}_{}",
+            database,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
 
         let mut manifest = BackupManifest::new(&backup_id, BackupType::Incremental, database);
         manifest.base_backup_id = Some(base_backup_id.to_string());
@@ -321,7 +336,10 @@ impl BackupManager {
         // In real implementation, would only backup changed files since base
         manifest.complete();
 
-        self.backups.write().unwrap().insert(backup_id.clone(), manifest);
+        self.backups
+            .write()
+            .unwrap()
+            .insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
         Ok(backup_id)
@@ -335,7 +353,8 @@ impl BackupManager {
     ) -> Result<RestoreResult, BackupError> {
         let manifest = {
             let backups = self.backups.read().unwrap();
-            backups.get(backup_id)
+            backups
+                .get(backup_id)
                 .cloned()
                 .ok_or_else(|| BackupError::BackupNotFound(backup_id.to_string()))?
         };
@@ -378,14 +397,16 @@ impl BackupManager {
         let mut backups = self.backups.write().unwrap();
 
         // Check if any incremental depends on this backup
-        let has_dependents = backups.values()
+        let has_dependents = backups
+            .values()
             .any(|b| b.base_backup_id.as_ref() == Some(&backup_id.to_string()));
 
         if has_dependents {
             return Err(BackupError::HasDependentBackups);
         }
 
-        backups.remove(backup_id)
+        backups
+            .remove(backup_id)
             .ok_or_else(|| BackupError::BackupNotFound(backup_id.to_string()))?;
 
         Ok(())
@@ -428,8 +449,12 @@ impl std::fmt::Display for BackupError {
             BackupError::BackupNotFound(id) => write!(f, "Backup not found: {}", id),
             BackupError::BaseBackupNotFound(id) => write!(f, "Base backup not found: {}", id),
             BackupError::InvalidBackupState => write!(f, "Invalid backup state for operation"),
-            BackupError::HasDependentBackups => write!(f, "Cannot delete: other backups depend on this one"),
-            BackupError::ChecksumMismatch(file) => write!(f, "Checksum mismatch for file: {}", file),
+            BackupError::HasDependentBackups => {
+                write!(f, "Cannot delete: other backups depend on this one")
+            }
+            BackupError::ChecksumMismatch(file) => {
+                write!(f, "Checksum mismatch for file: {}", file)
+            }
             BackupError::IoError(e) => write!(f, "I/O error: {}", e),
             BackupError::CompressionError(e) => write!(f, "Compression error: {}", e),
             BackupError::EncryptionError(e) => write!(f, "Encryption error: {}", e),
@@ -523,9 +548,7 @@ impl TtlManager {
     /// Add a TTL rule
     pub fn add_rule(&self, rule: TtlRule) {
         let mut rules = self.rules.write().unwrap();
-        rules.entry(rule.table.clone())
-            .or_default()
-            .push(rule);
+        rules.entry(rule.table.clone()).or_default().push(rule);
     }
 
     /// Remove a TTL rule
@@ -541,7 +564,9 @@ impl TtlManager {
 
     /// Get all rules for a table
     pub fn get_rules(&self, table: &str) -> Vec<TtlRule> {
-        self.rules.read().unwrap()
+        self.rules
+            .read()
+            .unwrap()
             .get(table)
             .cloned()
             .unwrap_or_default()
@@ -573,7 +598,10 @@ impl TtlManager {
             .as_secs();
 
         // Update last scan time
-        self.last_scan.write().unwrap().insert(table.to_string(), now);
+        self.last_scan
+            .write()
+            .unwrap()
+            .insert(table.to_string(), now);
 
         let rules = self.get_rules(table);
         let start = Instant::now();
@@ -614,7 +642,8 @@ impl TtlManager {
         let rules = self.get_rules(table);
 
         // Find the shortest TTL
-        rules.iter()
+        rules
+            .iter()
             .filter(|r| r.enabled && r.action == TtlAction::Delete)
             .map(|r| timestamp + r.ttl_duration.as_secs())
             .min()
@@ -668,12 +697,12 @@ impl Default for ResourceQuota {
     fn default() -> Self {
         Self {
             max_memory_per_query: Some(4 * 1024 * 1024 * 1024), // 4GB
-            max_total_memory: Some(16 * 1024 * 1024 * 1024), // 16GB
-            max_cpu_time_ms: Some(60_000), // 1 minute
+            max_total_memory: Some(16 * 1024 * 1024 * 1024),    // 16GB
+            max_cpu_time_ms: Some(60_000),                      // 1 minute
             max_concurrent_queries: Some(10),
             max_result_rows: Some(1_000_000),
             max_result_size: Some(1024 * 1024 * 1024), // 1GB
-            max_execution_time_ms: Some(300_000), // 5 minutes
+            max_execution_time_ms: Some(300_000),      // 5 minutes
             max_rows_to_scan: None,
             max_bytes_to_scan: None,
             read_rate_limit: None,
@@ -720,22 +749,30 @@ pub enum QuotaViolation {
 impl std::fmt::Display for QuotaViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QuotaViolation::MemoryExceeded { used, limit } =>
-                write!(f, "Memory limit exceeded: {} / {} bytes", used, limit),
-            QuotaViolation::CpuTimeExceeded { used, limit } =>
-                write!(f, "CPU time limit exceeded: {} / {} ms", used, limit),
-            QuotaViolation::ConcurrencyExceeded { active, limit } =>
-                write!(f, "Concurrent query limit exceeded: {} / {}", active, limit),
-            QuotaViolation::ResultRowsExceeded { rows, limit } =>
-                write!(f, "Result rows limit exceeded: {} / {}", rows, limit),
-            QuotaViolation::ResultSizeExceeded { size, limit } =>
-                write!(f, "Result size limit exceeded: {} / {} bytes", size, limit),
-            QuotaViolation::ExecutionTimeExceeded { time, limit } =>
-                write!(f, "Execution time limit exceeded: {} / {} ms", time, limit),
-            QuotaViolation::ScanLimitExceeded { scanned, limit } =>
-                write!(f, "Scan limit exceeded: {} / {}", scanned, limit),
-            QuotaViolation::RateLimitExceeded { rate, limit } =>
-                write!(f, "Rate limit exceeded: {} / {} bytes/sec", rate, limit),
+            QuotaViolation::MemoryExceeded { used, limit } => {
+                write!(f, "Memory limit exceeded: {} / {} bytes", used, limit)
+            }
+            QuotaViolation::CpuTimeExceeded { used, limit } => {
+                write!(f, "CPU time limit exceeded: {} / {} ms", used, limit)
+            }
+            QuotaViolation::ConcurrencyExceeded { active, limit } => {
+                write!(f, "Concurrent query limit exceeded: {} / {}", active, limit)
+            }
+            QuotaViolation::ResultRowsExceeded { rows, limit } => {
+                write!(f, "Result rows limit exceeded: {} / {}", rows, limit)
+            }
+            QuotaViolation::ResultSizeExceeded { size, limit } => {
+                write!(f, "Result size limit exceeded: {} / {} bytes", size, limit)
+            }
+            QuotaViolation::ExecutionTimeExceeded { time, limit } => {
+                write!(f, "Execution time limit exceeded: {} / {} ms", time, limit)
+            }
+            QuotaViolation::ScanLimitExceeded { scanned, limit } => {
+                write!(f, "Scan limit exceeded: {} / {}", scanned, limit)
+            }
+            QuotaViolation::RateLimitExceeded { rate, limit } => {
+                write!(f, "Rate limit exceeded: {} / {} bytes/sec", rate, limit)
+            }
         }
     }
 }
@@ -769,7 +806,9 @@ impl QuotaManager {
 
     /// Get quota for a user
     pub fn get_quota(&self, user: &str) -> ResourceQuota {
-        self.quotas.read().unwrap()
+        self.quotas
+            .read()
+            .unwrap()
             .get(user)
             .cloned()
             .unwrap_or_else(|| self.default_quota.clone())
@@ -880,7 +919,9 @@ impl QuotaManager {
 
     /// Get current usage for a user
     pub fn get_usage(&self, user: &str) -> ResourceUsage {
-        self.usage.read().unwrap()
+        self.usage
+            .read()
+            .unwrap()
             .get(user)
             .cloned()
             .unwrap_or_default()
@@ -888,7 +929,9 @@ impl QuotaManager {
 
     /// Start tracking a query
     pub fn start_query(&self, user: &str, query_id: &str) {
-        self.query_start_times.write().unwrap()
+        self.query_start_times
+            .write()
+            .unwrap()
             .insert(query_id.to_string(), Instant::now());
 
         let mut usage = self.usage.write().unwrap();
@@ -1067,7 +1110,7 @@ impl QueryProfile {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos() as u64
+                .as_nanos() as u64,
         );
         if let Some(end) = self.end_time {
             self.total_time_ns = end.saturating_sub(self.start_time);
@@ -1092,9 +1135,18 @@ impl QueryProfile {
 
         report.push_str(&format!("Query Profile: {}\n", self.query_id));
         report.push_str(&format!("SQL: {}\n", self.sql));
-        report.push_str(&format!("Total Time: {:.3} ms\n", self.total_time_ns as f64 / 1_000_000.0));
-        report.push_str(&format!("Planning Time: {:.3} ms\n", self.planning_time_ns as f64 / 1_000_000.0));
-        report.push_str(&format!("Execution Time: {:.3} ms\n", self.execution_time_ns as f64 / 1_000_000.0));
+        report.push_str(&format!(
+            "Total Time: {:.3} ms\n",
+            self.total_time_ns as f64 / 1_000_000.0
+        ));
+        report.push_str(&format!(
+            "Planning Time: {:.3} ms\n",
+            self.planning_time_ns as f64 / 1_000_000.0
+        ));
+        report.push_str(&format!(
+            "Execution Time: {:.3} ms\n",
+            self.execution_time_ns as f64 / 1_000_000.0
+        ));
         report.push_str(&format!("Peak Memory: {} bytes\n", self.peak_memory));
         report.push_str(&format!("Rows Returned: {}\n", self.rows_returned));
         report.push_str(&format!("From Cache: {}\n\n", self.from_cache));
@@ -1172,7 +1224,9 @@ impl QueryProfiler {
         }
 
         let profile = QueryProfile::new(query_id, sql);
-        self.active_profiles.write().unwrap()
+        self.active_profiles
+            .write()
+            .unwrap()
             .insert(query_id.to_string(), profile);
     }
 
@@ -1231,7 +1285,9 @@ impl QueryProfiler {
 
         profile.complete();
         profile.rows_returned = rows_returned;
-        profile.execution_time_ns = profile.total_time_ns.saturating_sub(profile.planning_time_ns);
+        profile.execution_time_ns = profile
+            .total_time_ns
+            .saturating_sub(profile.planning_time_ns);
 
         // Check if profile meets threshold
         if profile.total_time_ns >= self.min_time_threshold.load(Ordering::Relaxed) {
@@ -1257,7 +1313,9 @@ impl QueryProfiler {
 
     /// Get profile history
     pub fn get_history(&self, limit: usize) -> Vec<QueryProfile> {
-        self.history.read().unwrap()
+        self.history
+            .read()
+            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -1281,7 +1339,8 @@ impl QueryProfiler {
 
     /// Set minimum time threshold for storing profiles
     pub fn set_threshold(&self, threshold_ns: u64) {
-        self.min_time_threshold.store(threshold_ns, Ordering::Relaxed);
+        self.min_time_threshold
+            .store(threshold_ns, Ordering::Relaxed);
     }
 
     /// Clear history
@@ -1397,8 +1456,13 @@ pub struct SchemaChange {
 impl SchemaChange {
     pub fn new(table: &str, database: &str, change_type: SchemaChangeType) -> Self {
         Self {
-            id: format!("schema_change_{}",
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()),
+            id: format!(
+                "schema_change_{}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ),
             table: table.to_string(),
             database: database.to_string(),
             change_type,
@@ -1442,7 +1506,8 @@ impl OnlineSchemaChangeManager {
         // Check if another change is in progress for this table
         {
             let active = self.active_changes.read().unwrap();
-            let table_changes = active.values()
+            let table_changes = active
+                .values()
                 .filter(|c| c.table == change.table && c.database == change.database)
                 .count();
 
@@ -1462,7 +1527,10 @@ impl OnlineSchemaChangeManager {
         change.state = SchemaChangeState::Preparing;
 
         let change_id = change.id.clone();
-        self.active_changes.write().unwrap().insert(change_id.clone(), change);
+        self.active_changes
+            .write()
+            .unwrap()
+            .insert(change_id.clone(), change);
 
         Ok(change_id)
     }
@@ -1471,7 +1539,8 @@ impl OnlineSchemaChangeManager {
     pub fn execute_change(&self, change_id: &str) -> Result<(), SchemaChangeError> {
         let mut change = {
             let mut active = self.active_changes.write().unwrap();
-            active.get_mut(change_id)
+            active
+                .get_mut(change_id)
                 .ok_or_else(|| SchemaChangeError::ChangeNotFound(change_id.to_string()))?
                 .clone()
         };
@@ -1493,7 +1562,7 @@ impl OnlineSchemaChangeManager {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs()
+                .as_secs(),
         );
 
         // Update schema version
@@ -1512,7 +1581,8 @@ impl OnlineSchemaChangeManager {
     /// Cancel a schema change
     pub fn cancel_change(&self, change_id: &str) -> Result<(), SchemaChangeError> {
         let mut active = self.active_changes.write().unwrap();
-        let change = active.get_mut(change_id)
+        let change = active
+            .get_mut(change_id)
             .ok_or_else(|| SchemaChangeError::ChangeNotFound(change_id.to_string()))?;
 
         if change.state == SchemaChangeState::Completed {
@@ -1524,7 +1594,7 @@ impl OnlineSchemaChangeManager {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs()
+                .as_secs(),
         );
 
         let change = active.remove(change_id).unwrap();
@@ -1535,11 +1605,15 @@ impl OnlineSchemaChangeManager {
 
     /// Get change status
     pub fn get_change(&self, change_id: &str) -> Option<SchemaChange> {
-        self.active_changes.read().unwrap()
+        self.active_changes
+            .read()
+            .unwrap()
             .get(change_id)
             .cloned()
             .or_else(|| {
-                self.history.read().unwrap()
+                self.history
+                    .read()
+                    .unwrap()
                     .iter()
                     .find(|c| c.id == change_id)
                     .cloned()
@@ -1601,12 +1675,19 @@ impl OnlineSchemaChangeManager {
 
     /// List active changes
     pub fn list_active(&self) -> Vec<SchemaChange> {
-        self.active_changes.read().unwrap().values().cloned().collect()
+        self.active_changes
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// List recent changes
     pub fn list_history(&self, limit: usize) -> Vec<SchemaChange> {
-        self.history.read().unwrap()
+        self.history
+            .read()
+            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -1615,7 +1696,9 @@ impl OnlineSchemaChangeManager {
     }
 
     fn update_change(&self, change: &SchemaChange) {
-        self.active_changes.write().unwrap()
+        self.active_changes
+            .write()
+            .unwrap()
             .insert(change.id.clone(), change.clone());
     }
 
@@ -1644,7 +1727,9 @@ pub enum SchemaChangeError {
 impl std::fmt::Display for SchemaChangeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SchemaChangeError::ChangeInProgress(t) => write!(f, "Schema change already in progress for table: {}", t),
+            SchemaChangeError::ChangeInProgress(t) => {
+                write!(f, "Schema change already in progress for table: {}", t)
+            }
             SchemaChangeError::ChangeNotFound(id) => write!(f, "Schema change not found: {}", id),
             SchemaChangeError::AlreadyCompleted => write!(f, "Schema change already completed"),
             SchemaChangeError::InvalidChange(msg) => write!(f, "Invalid schema change: {}", msg),
@@ -1703,7 +1788,9 @@ mod tests {
         let config = BackupConfig::default();
 
         let full_id = manager.start_full_backup("testdb", &config).unwrap();
-        let incr_id = manager.start_incremental_backup("testdb", &full_id, &config).unwrap();
+        let incr_id = manager
+            .start_incremental_backup("testdb", &full_id, &config)
+            .unwrap();
 
         let incr = manager.get_backup(&incr_id).unwrap();
         assert_eq!(incr.backup_type, BackupType::Incremental);
@@ -1729,7 +1816,9 @@ mod tests {
         let config = BackupConfig::default();
 
         let full_id = manager.start_full_backup("testdb", &config).unwrap();
-        let _incr_id = manager.start_incremental_backup("testdb", &full_id, &config).unwrap();
+        let _incr_id = manager
+            .start_incremental_backup("testdb", &full_id, &config)
+            .unwrap();
 
         // Cannot delete full backup while incremental depends on it
         let result = manager.delete_backup(&full_id);
@@ -1813,7 +1902,10 @@ mod tests {
         });
 
         let rules = manager.get_rules("logs");
-        assert!(matches!(rules[0].action, TtlAction::MoveToTier(StorageTier::Cold)));
+        assert!(matches!(
+            rules[0].action,
+            TtlAction::MoveToTier(StorageTier::Cold)
+        ));
     }
 
     // Resource Quota tests
@@ -2028,7 +2120,10 @@ mod tests {
 
         // Second change should fail
         let result = manager.start_change(change2);
-        assert!(matches!(result, Err(SchemaChangeError::ChangeInProgress(_))));
+        assert!(matches!(
+            result,
+            Err(SchemaChangeError::ChangeInProgress(_))
+        ));
     }
 
     #[test]
@@ -2038,7 +2133,9 @@ mod tests {
         let change = SchemaChange::new(
             "users",
             "testdb",
-            SchemaChangeType::DropColumn { name: "unused".to_string() },
+            SchemaChangeType::DropColumn {
+                name: "unused".to_string(),
+            },
         );
 
         let change_id = manager.start_change(change).unwrap();

@@ -3,10 +3,10 @@
 // Provides UPDATE/DELETE mutations, specialized merge engines, and lightweight deletes
 // for analytical workloads.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Mutations (UPDATE/DELETE)
@@ -243,11 +243,14 @@ impl MutationManager {
     /// Start executing a mutation
     pub fn start_mutation(&self, mutation_id: u64) -> Result<(), MutationError> {
         let mut mutations = self.mutations.write();
-        let mutation = mutations.get_mut(&mutation_id)
+        let mutation = mutations
+            .get_mut(&mutation_id)
             .ok_or_else(|| MutationError::MutationFailed("Mutation not found".to_string()))?;
 
         if mutation.state != MutationState::Pending {
-            return Err(MutationError::MutationFailed("Mutation not in pending state".to_string()));
+            return Err(MutationError::MutationFailed(
+                "Mutation not in pending state".to_string(),
+            ));
         }
 
         mutation.state = MutationState::Executing;
@@ -255,7 +258,7 @@ impl MutationManager {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_millis() as i64
+                .as_millis() as i64,
         );
 
         Ok(())
@@ -269,7 +272,8 @@ impl MutationManager {
         parts_completed: u64,
     ) -> Result<(), MutationError> {
         let mut mutations = self.mutations.write();
-        let mutation = mutations.get_mut(&mutation_id)
+        let mutation = mutations
+            .get_mut(&mutation_id)
             .ok_or_else(|| MutationError::MutationFailed("Mutation not found".to_string()))?;
 
         mutation.rows_affected = rows_affected;
@@ -279,11 +283,16 @@ impl MutationManager {
     }
 
     /// Complete a mutation
-    pub fn complete_mutation(&self, mutation_id: u64, rows_affected: u64) -> Result<(), MutationError> {
+    pub fn complete_mutation(
+        &self,
+        mutation_id: u64,
+        rows_affected: u64,
+    ) -> Result<(), MutationError> {
         let table_key;
         {
             let mut mutations = self.mutations.write();
-            let mutation = mutations.get_mut(&mutation_id)
+            let mutation = mutations
+                .get_mut(&mutation_id)
                 .ok_or_else(|| MutationError::MutationFailed("Mutation not found".to_string()))?;
 
             mutation.state = MutationState::Completed;
@@ -292,7 +301,7 @@ impl MutationManager {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_millis() as i64
+                    .as_millis() as i64,
             );
 
             table_key = format!("{}.{}", mutation.database, mutation.table);
@@ -307,7 +316,8 @@ impl MutationManager {
         let table_key;
         {
             let mut mutations = self.mutations.write();
-            let mutation = mutations.get_mut(&mutation_id)
+            let mutation = mutations
+                .get_mut(&mutation_id)
                 .ok_or_else(|| MutationError::MutationFailed("Mutation not found".to_string()))?;
 
             mutation.state = MutationState::Failed(error.to_string());
@@ -315,7 +325,7 @@ impl MutationManager {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_millis() as i64
+                    .as_millis() as i64,
             );
 
             table_key = format!("{}.{}", mutation.database, mutation.table);
@@ -330,11 +340,14 @@ impl MutationManager {
         let table_key;
         {
             let mut mutations = self.mutations.write();
-            let mutation = mutations.get_mut(&mutation_id)
+            let mutation = mutations
+                .get_mut(&mutation_id)
                 .ok_or_else(|| MutationError::MutationFailed("Mutation not found".to_string()))?;
 
             if mutation.state == MutationState::Completed {
-                return Err(MutationError::MutationFailed("Cannot cancel completed mutation".to_string()));
+                return Err(MutationError::MutationFailed(
+                    "Cannot cancel completed mutation".to_string(),
+                ));
             }
 
             mutation.state = MutationState::Cancelled;
@@ -355,13 +368,16 @@ impl MutationManager {
         let mutations = self.mutations.read();
         let mutation = mutations.get(&mutation_id)?;
 
-        let elapsed_ms = mutation.started_at.map(|start| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-            (now - start) as u64
-        }).unwrap_or(0);
+        let elapsed_ms = mutation
+            .started_at
+            .map(|start| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64;
+                (now - start) as u64
+            })
+            .unwrap_or(0);
 
         Some(MutationProgress {
             mutation_id,
@@ -376,7 +392,8 @@ impl MutationManager {
 
     /// List all mutations for a table
     pub fn list_mutations(&self, database: &str, table: &str) -> Vec<Mutation> {
-        self.mutations.read()
+        self.mutations
+            .read()
             .values()
             .filter(|m| m.database == database && m.table == table)
             .cloned()
@@ -385,7 +402,8 @@ impl MutationManager {
 
     /// List pending mutations
     pub fn list_pending(&self) -> Vec<Mutation> {
-        self.mutations.read()
+        self.mutations
+            .read()
             .values()
             .filter(|m| m.state == MutationState::Pending)
             .cloned()
@@ -406,39 +424,46 @@ impl MutationManager {
             MutationPredicate::True => true,
             MutationPredicate::Eq(col, val) => row.get(col).map(|v| v == val).unwrap_or(false),
             MutationPredicate::Ne(col, val) => row.get(col).map(|v| v != val).unwrap_or(true),
-            MutationPredicate::Lt(col, val) => {
-                row.get(col).map(|v| compare_values(v, val) == std::cmp::Ordering::Less).unwrap_or(false)
-            }
-            MutationPredicate::Le(col, val) => {
-                row.get(col).map(|v| compare_values(v, val) != std::cmp::Ordering::Greater).unwrap_or(false)
-            }
-            MutationPredicate::Gt(col, val) => {
-                row.get(col).map(|v| compare_values(v, val) == std::cmp::Ordering::Greater).unwrap_or(false)
-            }
-            MutationPredicate::Ge(col, val) => {
-                row.get(col).map(|v| compare_values(v, val) != std::cmp::Ordering::Less).unwrap_or(false)
-            }
+            MutationPredicate::Lt(col, val) => row
+                .get(col)
+                .map(|v| compare_values(v, val) == std::cmp::Ordering::Less)
+                .unwrap_or(false),
+            MutationPredicate::Le(col, val) => row
+                .get(col)
+                .map(|v| compare_values(v, val) != std::cmp::Ordering::Greater)
+                .unwrap_or(false),
+            MutationPredicate::Gt(col, val) => row
+                .get(col)
+                .map(|v| compare_values(v, val) == std::cmp::Ordering::Greater)
+                .unwrap_or(false),
+            MutationPredicate::Ge(col, val) => row
+                .get(col)
+                .map(|v| compare_values(v, val) != std::cmp::Ordering::Less)
+                .unwrap_or(false),
             MutationPredicate::In(col, vals) => {
                 row.get(col).map(|v| vals.contains(v)).unwrap_or(false)
             }
             MutationPredicate::NotIn(col, vals) => {
                 row.get(col).map(|v| !vals.contains(v)).unwrap_or(true)
             }
-            MutationPredicate::IsNull(col) => {
-                row.get(col).map(|v| *v == MutationValue::Null).unwrap_or(true)
-            }
-            MutationPredicate::IsNotNull(col) => {
-                row.get(col).map(|v| *v != MutationValue::Null).unwrap_or(false)
-            }
-            MutationPredicate::Like(col, pattern) => {
-                row.get(col).map(|v| {
+            MutationPredicate::IsNull(col) => row
+                .get(col)
+                .map(|v| *v == MutationValue::Null)
+                .unwrap_or(true),
+            MutationPredicate::IsNotNull(col) => row
+                .get(col)
+                .map(|v| *v != MutationValue::Null)
+                .unwrap_or(false),
+            MutationPredicate::Like(col, pattern) => row
+                .get(col)
+                .map(|v| {
                     if let MutationValue::String(s) = v {
                         like_match(s, pattern)
                     } else {
                         false
                     }
-                }).unwrap_or(false)
-            }
+                })
+                .unwrap_or(false),
             MutationPredicate::And(a, b) => {
                 Self::evaluate_predicate(a, row) && Self::evaluate_predicate(b, row)
             }
@@ -462,9 +487,15 @@ impl MutationManager {
                 let vb = Self::evaluate_expr(b, row);
                 match (va, vb) {
                     (MutationValue::Int(x), MutationValue::Int(y)) => MutationValue::Int(x + y),
-                    (MutationValue::Float(x), MutationValue::Float(y)) => MutationValue::Float(x + y),
-                    (MutationValue::Int(x), MutationValue::Float(y)) => MutationValue::Float(x as f64 + y),
-                    (MutationValue::Float(x), MutationValue::Int(y)) => MutationValue::Float(x + y as f64),
+                    (MutationValue::Float(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x + y)
+                    }
+                    (MutationValue::Int(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x as f64 + y)
+                    }
+                    (MutationValue::Float(x), MutationValue::Int(y)) => {
+                        MutationValue::Float(x + y as f64)
+                    }
                     _ => MutationValue::Null,
                 }
             }
@@ -473,9 +504,15 @@ impl MutationManager {
                 let vb = Self::evaluate_expr(b, row);
                 match (va, vb) {
                     (MutationValue::Int(x), MutationValue::Int(y)) => MutationValue::Int(x - y),
-                    (MutationValue::Float(x), MutationValue::Float(y)) => MutationValue::Float(x - y),
-                    (MutationValue::Int(x), MutationValue::Float(y)) => MutationValue::Float(x as f64 - y),
-                    (MutationValue::Float(x), MutationValue::Int(y)) => MutationValue::Float(x - y as f64),
+                    (MutationValue::Float(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x - y)
+                    }
+                    (MutationValue::Int(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x as f64 - y)
+                    }
+                    (MutationValue::Float(x), MutationValue::Int(y)) => {
+                        MutationValue::Float(x - y as f64)
+                    }
                     _ => MutationValue::Null,
                 }
             }
@@ -484,9 +521,15 @@ impl MutationManager {
                 let vb = Self::evaluate_expr(b, row);
                 match (va, vb) {
                     (MutationValue::Int(x), MutationValue::Int(y)) => MutationValue::Int(x * y),
-                    (MutationValue::Float(x), MutationValue::Float(y)) => MutationValue::Float(x * y),
-                    (MutationValue::Int(x), MutationValue::Float(y)) => MutationValue::Float(x as f64 * y),
-                    (MutationValue::Float(x), MutationValue::Int(y)) => MutationValue::Float(x * y as f64),
+                    (MutationValue::Float(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x * y)
+                    }
+                    (MutationValue::Int(x), MutationValue::Float(y)) => {
+                        MutationValue::Float(x as f64 * y)
+                    }
+                    (MutationValue::Float(x), MutationValue::Int(y)) => {
+                        MutationValue::Float(x * y as f64)
+                    }
                     _ => MutationValue::Null,
                 }
             }
@@ -494,10 +537,18 @@ impl MutationManager {
                 let va = Self::evaluate_expr(a, row);
                 let vb = Self::evaluate_expr(b, row);
                 match (va, vb) {
-                    (MutationValue::Int(x), MutationValue::Int(y)) if y != 0 => MutationValue::Int(x / y),
-                    (MutationValue::Float(x), MutationValue::Float(y)) if y != 0.0 => MutationValue::Float(x / y),
-                    (MutationValue::Int(x), MutationValue::Float(y)) if y != 0.0 => MutationValue::Float(x as f64 / y),
-                    (MutationValue::Float(x), MutationValue::Int(y)) if y != 0 => MutationValue::Float(x / y as f64),
+                    (MutationValue::Int(x), MutationValue::Int(y)) if y != 0 => {
+                        MutationValue::Int(x / y)
+                    }
+                    (MutationValue::Float(x), MutationValue::Float(y)) if y != 0.0 => {
+                        MutationValue::Float(x / y)
+                    }
+                    (MutationValue::Int(x), MutationValue::Float(y)) if y != 0.0 => {
+                        MutationValue::Float(x as f64 / y)
+                    }
+                    (MutationValue::Float(x), MutationValue::Int(y)) if y != 0 => {
+                        MutationValue::Float(x / y as f64)
+                    }
                     _ => MutationValue::Null,
                 }
             }
@@ -540,7 +591,9 @@ impl Default for MutationManager {
 fn compare_values(a: &MutationValue, b: &MutationValue) -> std::cmp::Ordering {
     match (a, b) {
         (MutationValue::Int(x), MutationValue::Int(y)) => x.cmp(y),
-        (MutationValue::Float(x), MutationValue::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (MutationValue::Float(x), MutationValue::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (MutationValue::String(x), MutationValue::String(y)) => x.cmp(y),
         (MutationValue::Timestamp(x), MutationValue::Timestamp(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
@@ -548,9 +601,7 @@ fn compare_values(a: &MutationValue, b: &MutationValue) -> std::cmp::Ordering {
 }
 
 fn like_match(s: &str, pattern: &str) -> bool {
-    let regex_pattern = pattern
-        .replace('%', ".*")
-        .replace('_', ".");
+    let regex_pattern = pattern.replace('%', ".*").replace('_', ".");
     regex::Regex::new(&format!("^{}$", regex_pattern))
         .map(|re| re.is_match(s))
         .unwrap_or(false)
@@ -574,7 +625,10 @@ pub enum MergeTreeEngine {
     /// Collapses rows with Sign column (+1/-1)
     CollapsingMergeTree { sign_column: String },
     /// Version-aware collapsing
-    VersionedCollapsingMergeTree { sign_column: String, version_column: String },
+    VersionedCollapsingMergeTree {
+        sign_column: String,
+        version_column: String,
+    },
 }
 
 /// Row with metadata for specialized engines
@@ -702,18 +756,15 @@ impl MergeTreeMerger {
             MergeTreeEngine::ReplacingMergeTree { version_column } => {
                 self.merge_replacing(rows, version_column.as_deref())
             }
-            MergeTreeEngine::SummingMergeTree { columns } => {
-                self.merge_summing(rows, columns)
-            }
-            MergeTreeEngine::AggregatingMergeTree => {
-                self.merge_aggregating(rows)
-            }
+            MergeTreeEngine::SummingMergeTree { columns } => self.merge_summing(rows, columns),
+            MergeTreeEngine::AggregatingMergeTree => self.merge_aggregating(rows),
             MergeTreeEngine::CollapsingMergeTree { sign_column } => {
                 self.merge_collapsing(rows, sign_column)
             }
-            MergeTreeEngine::VersionedCollapsingMergeTree { sign_column, version_column } => {
-                self.merge_versioned_collapsing(rows, sign_column, version_column)
-            }
+            MergeTreeEngine::VersionedCollapsingMergeTree {
+                sign_column,
+                version_column,
+            } => self.merge_versioned_collapsing(rows, sign_column, version_column),
         }
     }
 
@@ -728,11 +779,27 @@ impl MergeTreeMerger {
                 None => true,
                 Some(existing) => {
                     if let Some(vc) = version_column {
-                        let new_ver = row.values.get(vc)
-                            .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                        let new_ver = row
+                            .values
+                            .get(vc)
+                            .and_then(|v| {
+                                if let MutationValue::Int(i) = v {
+                                    Some(*i)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or(0);
-                        let old_ver = existing.values.get(vc)
-                            .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                        let old_ver = existing
+                            .values
+                            .get(vc)
+                            .and_then(|v| {
+                                if let MutationValue::Int(i) = v {
+                                    Some(*i)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or(0);
                         new_ver > old_ver
                     } else {
@@ -765,10 +832,14 @@ impl MergeTreeMerger {
                     // Sum the specified columns
                     for col in sum_columns {
                         if let (Some(MutationValue::Int(a)), Some(MutationValue::Int(b))) =
-                            (existing.values.get_mut(col), row.values.get(col)) {
+                            (existing.values.get_mut(col), row.values.get(col))
+                        {
                             *a += b;
-                        } else if let (Some(MutationValue::Float(a)), Some(MutationValue::Float(b))) =
-                            (existing.values.get_mut(col), row.values.get(col)) {
+                        } else if let (
+                            Some(MutationValue::Float(a)),
+                            Some(MutationValue::Float(b)),
+                        ) = (existing.values.get_mut(col), row.values.get(col))
+                        {
                             *a += b;
                         }
                     }
@@ -799,11 +870,27 @@ impl MergeTreeMerger {
         for (_, mut group) in by_key {
             // Sort by sign to process consistently
             group.sort_by(|a, b| {
-                let sa = a.values.get(sign_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let sa = a
+                    .values
+                    .get(sign_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
-                let sb = b.values.get(sign_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let sb = b
+                    .values
+                    .get(sign_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 sa.cmp(&sb)
             });
@@ -813,8 +900,16 @@ impl MergeTreeMerger {
             let mut last_negative: Option<MergeRow> = None;
 
             for row in group {
-                let sign = row.values.get(sign_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let sign = row
+                    .values
+                    .get(sign_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(1);
 
                 balance += sign;
@@ -860,20 +955,52 @@ impl MergeTreeMerger {
         for (_, mut group) in by_key {
             // Sort by version then sign
             group.sort_by(|a, b| {
-                let va = a.values.get(version_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let va = a
+                    .values
+                    .get(version_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
-                let vb = b.values.get(version_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let vb = b
+                    .values
+                    .get(version_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
 
                 match va.cmp(&vb) {
                     std::cmp::Ordering::Equal => {
-                        let sa = a.values.get(sign_column)
-                            .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                        let sa = a
+                            .values
+                            .get(sign_column)
+                            .and_then(|v| {
+                                if let MutationValue::Int(i) = v {
+                                    Some(*i)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or(0);
-                        let sb = b.values.get(sign_column)
-                            .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                        let sb = b
+                            .values
+                            .get(sign_column)
+                            .and_then(|v| {
+                                if let MutationValue::Int(i) = v {
+                                    Some(*i)
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or(0);
                         sa.cmp(&sb)
                     }
@@ -884,8 +1011,16 @@ impl MergeTreeMerger {
             // Group by version and collapse within each version
             let mut by_version: BTreeMap<i64, Vec<MergeRow>> = BTreeMap::new();
             for row in group {
-                let ver = row.values.get(version_column)
-                    .and_then(|v| if let MutationValue::Int(i) = v { Some(*i) } else { None })
+                let ver = row
+                    .values
+                    .get(version_column)
+                    .and_then(|v| {
+                        if let MutationValue::Int(i) = v {
+                            Some(*i)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or(0);
                 by_version.entry(ver).or_default().push(row);
             }
@@ -1099,14 +1234,17 @@ impl LightweightDeleteManager {
         drop(masks);
 
         let mask = DeleteMask::new(row_count);
-        self.masks.write().insert(part_name.to_string(), mask.clone());
+        self.masks
+            .write()
+            .insert(part_name.to_string(), mask.clone());
         mask
     }
 
     /// Apply deletes to a part
     pub fn apply_deletes(&self, part_name: &str, row_indices: &[u64], row_count: u64) -> u64 {
         let mut masks = self.masks.write();
-        let mask = masks.entry(part_name.to_string())
+        let mask = masks
+            .entry(part_name.to_string())
             .or_insert_with(|| DeleteMask::new(row_count));
 
         let before = mask.deleted_count();
@@ -1118,7 +1256,8 @@ impl LightweightDeleteManager {
 
     /// Check if a row is deleted
     pub fn is_deleted(&self, part_name: &str, row_index: u64) -> bool {
-        self.masks.read()
+        self.masks
+            .read()
             .get(part_name)
             .map(|m| m.is_deleted(row_index))
             .unwrap_or(false)
@@ -1131,7 +1270,8 @@ impl LightweightDeleteManager {
 
     /// Check if part needs compaction
     pub fn needs_compaction(&self, part_name: &str) -> bool {
-        self.masks.read()
+        self.masks
+            .read()
             .get(part_name)
             .map(|m| m.deletion_ratio() > self.compaction_threshold)
             .unwrap_or(false)
@@ -1139,7 +1279,8 @@ impl LightweightDeleteManager {
 
     /// List parts that need compaction
     pub fn parts_needing_compaction(&self) -> Vec<String> {
-        self.masks.read()
+        self.masks
+            .read()
             .iter()
             .filter(|(_, mask)| mask.deletion_ratio() > self.compaction_threshold)
             .map(|(name, _)| name.clone())
@@ -1164,7 +1305,11 @@ impl LightweightDeleteManager {
             total_rows,
             deleted_rows,
             live_rows: total_rows - deleted_rows,
-            deletion_ratio: if total_rows > 0 { deleted_rows as f64 / total_rows as f64 } else { 0.0 },
+            deletion_ratio: if total_rows > 0 {
+                deleted_rows as f64 / total_rows as f64
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -1200,19 +1345,19 @@ mod tests {
     fn test_mutation_submit_update() {
         let manager = MutationManager::new();
 
-        let updates = vec![
-            ColumnUpdate {
-                column: "status".to_string(),
-                expression: MutationExpr::Literal(MutationValue::String("archived".to_string())),
-            },
-        ];
+        let updates = vec![ColumnUpdate {
+            column: "status".to_string(),
+            expression: MutationExpr::Literal(MutationValue::String("archived".to_string())),
+        }];
 
-        let id = manager.submit_update(
-            "default",
-            "events",
-            updates,
-            MutationPredicate::Lt("timestamp".to_string(), MutationValue::Timestamp(1000)),
-        ).unwrap();
+        let id = manager
+            .submit_update(
+                "default",
+                "events",
+                updates,
+                MutationPredicate::Lt("timestamp".to_string(), MutationValue::Timestamp(1000)),
+            )
+            .unwrap();
 
         let mutation = manager.get_mutation(id).unwrap();
         assert_eq!(mutation.mutation_type, MutationType::Update);
@@ -1223,11 +1368,13 @@ mod tests {
     fn test_mutation_submit_delete() {
         let manager = MutationManager::new();
 
-        let id = manager.submit_delete(
-            "default",
-            "events",
-            MutationPredicate::Eq("user_id".to_string(), MutationValue::Int(123)),
-        ).unwrap();
+        let id = manager
+            .submit_delete(
+                "default",
+                "events",
+                MutationPredicate::Eq("user_id".to_string(), MutationValue::Int(123)),
+            )
+            .unwrap();
 
         let mutation = manager.get_mutation(id).unwrap();
         assert_eq!(mutation.mutation_type, MutationType::Delete);
@@ -1237,11 +1384,9 @@ mod tests {
     fn test_mutation_lifecycle() {
         let manager = MutationManager::new();
 
-        let id = manager.submit_delete(
-            "default",
-            "events",
-            MutationPredicate::True,
-        ).unwrap();
+        let id = manager
+            .submit_delete("default", "events", MutationPredicate::True)
+            .unwrap();
 
         manager.start_mutation(id).unwrap();
         let mutation = manager.get_mutation(id).unwrap();
@@ -1259,7 +1404,9 @@ mod tests {
     fn test_mutation_cancel() {
         let manager = MutationManager::new();
 
-        let id = manager.submit_delete("default", "events", MutationPredicate::True).unwrap();
+        let id = manager
+            .submit_delete("default", "events", MutationPredicate::True)
+            .unwrap();
         manager.cancel_mutation(id).unwrap();
 
         let mutation = manager.get_mutation(id).unwrap();
@@ -1270,7 +1417,9 @@ mod tests {
     fn test_mutation_concurrent_blocked() {
         let manager = MutationManager::new();
 
-        let _id1 = manager.submit_delete("default", "events", MutationPredicate::True).unwrap();
+        let _id1 = manager
+            .submit_delete("default", "events", MutationPredicate::True)
+            .unwrap();
         let result = manager.submit_delete("default", "events", MutationPredicate::True);
 
         assert!(matches!(result, Err(MutationError::ConcurrentMutation)));
@@ -1289,7 +1438,10 @@ mod tests {
     fn test_evaluate_predicate() {
         let mut row = HashMap::new();
         row.insert("age".to_string(), MutationValue::Int(25));
-        row.insert("name".to_string(), MutationValue::String("Alice".to_string()));
+        row.insert(
+            "name".to_string(),
+            MutationValue::String("Alice".to_string()),
+        );
 
         assert!(MutationManager::evaluate_predicate(
             &MutationPredicate::Eq("age".to_string(), MutationValue::Int(25)),
@@ -1308,8 +1460,14 @@ mod tests {
 
         assert!(MutationManager::evaluate_predicate(
             &MutationPredicate::And(
-                Box::new(MutationPredicate::Ge("age".to_string(), MutationValue::Int(18))),
-                Box::new(MutationPredicate::Le("age".to_string(), MutationValue::Int(30))),
+                Box::new(MutationPredicate::Ge(
+                    "age".to_string(),
+                    MutationValue::Int(18)
+                )),
+                Box::new(MutationPredicate::Le(
+                    "age".to_string(),
+                    MutationValue::Int(30)
+                )),
             ),
             &row
         ));
@@ -1355,7 +1513,9 @@ mod tests {
     #[test]
     fn test_replacing_merge_tree() {
         let config = MergeTreeConfig {
-            engine: MergeTreeEngine::ReplacingMergeTree { version_column: Some("ver".to_string()) },
+            engine: MergeTreeEngine::ReplacingMergeTree {
+                version_column: Some("ver".to_string()),
+            },
             order_by: vec!["id".to_string()],
             partition_by: None,
             primary_key: None,
@@ -1393,13 +1553,18 @@ mod tests {
 
         let merged = merger.merge(rows);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].values.get("data"), Some(&MutationValue::String("new".to_string())));
+        assert_eq!(
+            merged[0].values.get("data"),
+            Some(&MutationValue::String("new".to_string()))
+        );
     }
 
     #[test]
     fn test_summing_merge_tree() {
         let config = MergeTreeConfig {
-            engine: MergeTreeEngine::SummingMergeTree { columns: vec!["count".to_string(), "sum".to_string()] },
+            engine: MergeTreeEngine::SummingMergeTree {
+                columns: vec!["count".to_string(), "sum".to_string()],
+            },
             order_by: vec!["key".to_string()],
             partition_by: None,
             primary_key: None,
@@ -1444,7 +1609,9 @@ mod tests {
     #[test]
     fn test_collapsing_merge_tree() {
         let config = MergeTreeConfig {
-            engine: MergeTreeEngine::CollapsingMergeTree { sign_column: "sign".to_string() },
+            engine: MergeTreeEngine::CollapsingMergeTree {
+                sign_column: "sign".to_string(),
+            },
             order_by: vec!["id".to_string()],
             partition_by: None,
             primary_key: None,
@@ -1486,7 +1653,9 @@ mod tests {
     #[test]
     fn test_collapsing_unbalanced() {
         let config = MergeTreeConfig {
-            engine: MergeTreeEngine::CollapsingMergeTree { sign_column: "sign".to_string() },
+            engine: MergeTreeEngine::CollapsingMergeTree {
+                sign_column: "sign".to_string(),
+            },
             order_by: vec!["id".to_string()],
             partition_by: None,
             primary_key: None,
@@ -1572,7 +1741,10 @@ mod tests {
                     let mut m = HashMap::new();
                     m.insert("sign".to_string(), MutationValue::Int(1));
                     m.insert("ver".to_string(), MutationValue::Int(2));
-                    m.insert("data".to_string(), MutationValue::String("latest".to_string()));
+                    m.insert(
+                        "data".to_string(),
+                        MutationValue::String("latest".to_string()),
+                    );
                     m
                 },
                 version: Some(2),
@@ -1595,8 +1767,14 @@ mod tests {
             assert!((v - 150.0).abs() < 0.001);
         }
 
-        let mut avg1 = AggState::Avg { sum: 100.0, count: 10 };
-        let avg2 = AggState::Avg { sum: 50.0, count: 5 };
+        let mut avg1 = AggState::Avg {
+            sum: 100.0,
+            count: 10,
+        };
+        let avg2 = AggState::Avg {
+            sum: 50.0,
+            count: 5,
+        };
         avg1.merge(&avg2);
 
         if let AggState::Avg { sum, count } = avg1 {

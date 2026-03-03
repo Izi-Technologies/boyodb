@@ -3,11 +3,11 @@
 // Distributed DDL execution across cluster nodes and global secondary indexes
 // for cross-shard queries with ON CLUSTER support and distributed indexes.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
 
 // ============================================================================
 // Distributed DDL
@@ -107,17 +107,25 @@ pub enum DataType {
     UInt64,
     Float32,
     Float64,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     String,
     FixedString(u32),
     Date,
     DateTime,
-    DateTime64 { precision: u8 },
+    DateTime64 {
+        precision: u8,
+    },
     UUID,
     IPv4,
     IPv6,
     Array(Box<DataType>),
-    Map { key: Box<DataType>, value: Box<DataType> },
+    Map {
+        key: Box<DataType>,
+        value: Box<DataType>,
+    },
     Tuple(Vec<DataType>),
     Nullable(Box<DataType>),
     LowCardinality(Box<DataType>),
@@ -161,17 +169,38 @@ impl DataType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TableEngine {
     MergeTree,
-    ReplacingMergeTree { version_column: Option<String> },
-    SummingMergeTree { columns: Vec<String> },
+    ReplacingMergeTree {
+        version_column: Option<String>,
+    },
+    SummingMergeTree {
+        columns: Vec<String>,
+    },
     AggregatingMergeTree,
-    CollapsingMergeTree { sign_column: String },
-    VersionedCollapsingMergeTree { sign_column: String, version_column: String },
-    ReplicatedMergeTree { zoo_path: String, replica_name: String },
-    Distributed { cluster: String, database: String, table: String, sharding_key: Option<String> },
+    CollapsingMergeTree {
+        sign_column: String,
+    },
+    VersionedCollapsingMergeTree {
+        sign_column: String,
+        version_column: String,
+    },
+    ReplicatedMergeTree {
+        zoo_path: String,
+        replica_name: String,
+    },
+    Distributed {
+        cluster: String,
+        database: String,
+        table: String,
+        sharding_key: Option<String>,
+    },
     Memory,
     Log,
     TinyLog,
-    Buffer { database: String, table: String, layers: BufferLayers },
+    Buffer {
+        database: String,
+        table: String,
+        layers: BufferLayers,
+    },
 }
 
 /// Buffer engine layers config
@@ -189,19 +218,48 @@ pub struct BufferLayers {
 /// Table alterations
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableAlteration {
-    AddColumn { column: ColumnDefinition, after: Option<String> },
-    DropColumn { name: String },
-    RenameColumn { old_name: String, new_name: String },
-    ModifyColumn { column: ColumnDefinition },
-    CommentColumn { name: String, comment: String },
-    ModifyOrderBy { columns: Vec<String> },
-    ModifyTtl { ttl: String },
-    AddIndex { index: IndexDefinition },
-    DropIndex { name: String },
-    AddProjection { projection: ProjectionDefinition },
-    DropProjection { name: String },
-    Freeze { partition: Option<String> },
-    Unfreeze { partition: Option<String> },
+    AddColumn {
+        column: ColumnDefinition,
+        after: Option<String>,
+    },
+    DropColumn {
+        name: String,
+    },
+    RenameColumn {
+        old_name: String,
+        new_name: String,
+    },
+    ModifyColumn {
+        column: ColumnDefinition,
+    },
+    CommentColumn {
+        name: String,
+        comment: String,
+    },
+    ModifyOrderBy {
+        columns: Vec<String>,
+    },
+    ModifyTtl {
+        ttl: String,
+    },
+    AddIndex {
+        index: IndexDefinition,
+    },
+    DropIndex {
+        name: String,
+    },
+    AddProjection {
+        projection: ProjectionDefinition,
+    },
+    DropProjection {
+        name: String,
+    },
+    Freeze {
+        partition: Option<String>,
+    },
+    Unfreeze {
+        partition: Option<String>,
+    },
 }
 
 /// Index definition
@@ -268,18 +326,24 @@ impl DdlTask {
     /// Check if all nodes completed
     pub fn is_complete(&self) -> bool {
         self.node_tasks.values().all(|t| {
-            matches!(t.status, DdlTaskStatus::Completed | DdlTaskStatus::Failed(_))
+            matches!(
+                t.status,
+                DdlTaskStatus::Completed | DdlTaskStatus::Failed(_)
+            )
         })
     }
 
     /// Check if all nodes succeeded
     pub fn is_success(&self) -> bool {
-        self.node_tasks.values().all(|t| t.status == DdlTaskStatus::Completed)
+        self.node_tasks
+            .values()
+            .all(|t| t.status == DdlTaskStatus::Completed)
     }
 
     /// Get failed nodes
     pub fn failed_nodes(&self) -> Vec<&str> {
-        self.node_tasks.iter()
+        self.node_tasks
+            .iter()
             .filter(|(_, t)| matches!(t.status, DdlTaskStatus::Failed(_)))
             .map(|(n, _)| n.as_str())
             .collect()
@@ -287,7 +351,8 @@ impl DdlTask {
 
     /// Get pending nodes
     pub fn pending_nodes(&self) -> Vec<&str> {
-        self.node_tasks.iter()
+        self.node_tasks
+            .iter()
             .filter(|(_, t)| matches!(t.status, DdlTaskStatus::Pending | DdlTaskStatus::Running))
             .map(|(n, _)| n.as_str())
             .collect()
@@ -323,7 +388,9 @@ impl std::fmt::Display for DdlError {
         match self {
             Self::ClusterNotFound(c) => write!(f, "Cluster not found: {}", c),
             Self::NodeUnreachable(n) => write!(f, "Node unreachable: {}", n),
-            Self::OperationFailed { node, error } => write!(f, "Operation failed on {}: {}", node, error),
+            Self::OperationFailed { node, error } => {
+                write!(f, "Operation failed on {}: {}", node, error)
+            }
             Self::Timeout => write!(f, "DDL operation timed out"),
             Self::InvalidOperation(msg) => write!(f, "Invalid operation: {}", msg),
             Self::AlreadyExists(name) => write!(f, "Already exists: {}", name),
@@ -435,7 +502,9 @@ impl DistributedDdlManager {
         cluster_name: &str,
         operation: DdlOperation,
     ) -> Result<u64, DdlError> {
-        let cluster = self.clusters.read()
+        let cluster = self
+            .clusters
+            .read()
             .get(cluster_name)
             .cloned()
             .ok_or_else(|| DdlError::ClusterNotFound(cluster_name.to_string()))?;
@@ -448,14 +517,17 @@ impl DistributedDdlManager {
 
         for node in &cluster.nodes {
             if seen_nodes.insert(node.node_id.clone()) {
-                node_tasks.insert(node.node_id.clone(), DdlNodeTask {
-                    node_id: node.node_id.clone(),
-                    status: DdlTaskStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    error: None,
-                    retries: 0,
-                });
+                node_tasks.insert(
+                    node.node_id.clone(),
+                    DdlNodeTask {
+                        node_id: node.node_id.clone(),
+                        status: DdlTaskStatus::Pending,
+                        started_at: None,
+                        completed_at: None,
+                        error: None,
+                        retries: 0,
+                    },
+                );
             }
         }
 
@@ -481,7 +553,8 @@ impl DistributedDdlManager {
     /// Execute DDL locally (for simulation/testing)
     fn execute_local(&self, task_id: u64) -> Result<(), DdlError> {
         let mut tasks = self.tasks.write();
-        let task = tasks.get_mut(&task_id)
+        let task = tasks
+            .get_mut(&task_id)
             .ok_or_else(|| DdlError::InternalError("Task not found".to_string()))?;
 
         // Mark local node as running then completed
@@ -534,11 +607,15 @@ impl DistributedDdlManager {
     /// Cancel a DDL task
     pub fn cancel_task(&self, task_id: u64) -> Result<(), DdlError> {
         let mut tasks = self.tasks.write();
-        let task = tasks.get_mut(&task_id)
+        let task = tasks
+            .get_mut(&task_id)
             .ok_or_else(|| DdlError::InternalError("Task not found".to_string()))?;
 
         for node_task in task.node_tasks.values_mut() {
-            if matches!(node_task.status, DdlTaskStatus::Pending | DdlTaskStatus::Running) {
+            if matches!(
+                node_task.status,
+                DdlTaskStatus::Pending | DdlTaskStatus::Running
+            ) {
                 node_task.status = DdlTaskStatus::Cancelled;
             }
         }
@@ -547,9 +624,15 @@ impl DistributedDdlManager {
     }
 
     /// Mark node task as failed
-    pub fn mark_node_failed(&self, task_id: u64, node_id: &str, error: &str) -> Result<(), DdlError> {
+    pub fn mark_node_failed(
+        &self,
+        task_id: u64,
+        node_id: &str,
+        error: &str,
+    ) -> Result<(), DdlError> {
         let mut tasks = self.tasks.write();
-        let task = tasks.get_mut(&task_id)
+        let task = tasks
+            .get_mut(&task_id)
             .ok_or_else(|| DdlError::InternalError("Task not found".to_string()))?;
 
         if let Some(node_task) = task.node_tasks.get_mut(node_id) {
@@ -564,7 +647,8 @@ impl DistributedDdlManager {
     /// Mark node task as completed
     pub fn mark_node_completed(&self, task_id: u64, node_id: &str) -> Result<(), DdlError> {
         let mut tasks = self.tasks.write();
-        let task = tasks.get_mut(&task_id)
+        let task = tasks
+            .get_mut(&task_id)
             .ok_or_else(|| DdlError::InternalError("Task not found".to_string()))?;
 
         if let Some(node_task) = task.node_tasks.get_mut(node_id) {
@@ -638,21 +722,25 @@ impl IndexValue {
         match data_type {
             DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
                 if data.len() >= 8 {
-                    Some(IndexValue::Int(i64::from_le_bytes(data[..8].try_into().ok()?)))
+                    Some(IndexValue::Int(i64::from_le_bytes(
+                        data[..8].try_into().ok()?,
+                    )))
                 } else {
                     None
                 }
             }
             DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
                 if data.len() >= 8 {
-                    Some(IndexValue::UInt(u64::from_le_bytes(data[..8].try_into().ok()?)))
+                    Some(IndexValue::UInt(u64::from_le_bytes(
+                        data[..8].try_into().ok()?,
+                    )))
                 } else {
                     None
                 }
             }
-            DataType::String => {
-                String::from_utf8(data.to_vec()).ok().map(IndexValue::String)
-            }
+            DataType::String => String::from_utf8(data.to_vec())
+                .ok()
+                .map(IndexValue::String),
             _ => Some(IndexValue::Bytes(data.to_vec())),
         }
     }
@@ -667,7 +755,7 @@ pub struct GlobalIndexConfig {
     pub columns: Vec<String>,
     pub index_type: GlobalIndexType,
     pub unique: bool,
-    pub include_columns: Vec<String>,  // Covering index columns
+    pub include_columns: Vec<String>, // Covering index columns
 }
 
 /// Global index types
@@ -761,12 +849,18 @@ impl GlobalIndex {
         stats.lookups += 1;
 
         let result = match self.config.index_type {
-            GlobalIndexType::BTree => {
-                self.btree_index.read().get(value).cloned().unwrap_or_default()
-            }
-            GlobalIndexType::Hash => {
-                self.hash_index.read().get(value).cloned().unwrap_or_default()
-            }
+            GlobalIndexType::BTree => self
+                .btree_index
+                .read()
+                .get(value)
+                .cloned()
+                .unwrap_or_default(),
+            GlobalIndexType::Hash => self
+                .hash_index
+                .read()
+                .get(value)
+                .cloned()
+                .unwrap_or_default(),
             GlobalIndexType::Bitmap => {
                 // Convert bitmap to locations
                 if let Some(bitmap) = self.bitmap_index.read().get(value) {
@@ -790,9 +884,12 @@ impl GlobalIndex {
                     Vec::new()
                 }
             }
-            _ => {
-                self.hash_index.read().get(value).cloned().unwrap_or_default()
-            }
+            _ => self
+                .hash_index
+                .read()
+                .get(value)
+                .cloned()
+                .unwrap_or_default(),
         };
 
         if !result.is_empty() {
@@ -803,7 +900,11 @@ impl GlobalIndex {
     }
 
     /// Range lookup (BTree only)
-    pub fn range_lookup(&self, min: Option<&IndexValue>, max: Option<&IndexValue>) -> Vec<ShardLocation> {
+    pub fn range_lookup(
+        &self,
+        min: Option<&IndexValue>,
+        max: Option<&IndexValue>,
+    ) -> Vec<ShardLocation> {
         if self.config.index_type != GlobalIndexType::BTree {
             return Vec::new();
         }
@@ -812,15 +913,9 @@ impl GlobalIndex {
         let mut results = Vec::new();
 
         let range = match (min, max) {
-            (Some(min), Some(max)) => {
-                index.range(min.clone()..=max.clone())
-            }
-            (Some(min), None) => {
-                index.range(min.clone()..)
-            }
-            (None, Some(max)) => {
-                index.range(..=max.clone())
-            }
+            (Some(min), Some(max)) => index.range(min.clone()..=max.clone()),
+            (Some(min), None) => index.range(min.clone()..),
+            (None, Some(max)) => index.range(..=max.clone()),
             (None, None) => {
                 return index.values().flatten().cloned().collect();
             }
@@ -843,7 +938,11 @@ impl GlobalIndex {
     }
 
     /// Get shards for range query
-    pub fn get_shards_for_range(&self, min: Option<&IndexValue>, max: Option<&IndexValue>) -> Vec<u32> {
+    pub fn get_shards_for_range(
+        &self,
+        min: Option<&IndexValue>,
+        max: Option<&IndexValue>,
+    ) -> Vec<u32> {
         let locations = self.range_lookup(min, max);
         let mut shards: Vec<u32> = locations.iter().map(|l| l.shard_id).collect();
         shards.sort();
@@ -959,7 +1058,8 @@ impl GlobalIndexManager {
     /// List indexes for a table
     pub fn list_indexes(&self, database: &str, table: &str) -> Vec<String> {
         let prefix = format!("{}.{}.", database, table);
-        self.indexes.read()
+        self.indexes
+            .read()
             .keys()
             .filter(|k| k.starts_with(&prefix))
             .map(|k| k.strip_prefix(&prefix).unwrap_or(k).to_string())
@@ -967,14 +1067,22 @@ impl GlobalIndexManager {
     }
 
     /// Find indexes that can serve a query predicate
-    pub fn find_indexes_for_columns(&self, database: &str, table: &str, columns: &[&str]) -> Vec<Arc<GlobalIndex>> {
+    pub fn find_indexes_for_columns(
+        &self,
+        database: &str,
+        table: &str,
+        columns: &[&str],
+    ) -> Vec<Arc<GlobalIndex>> {
         let prefix = format!("{}.{}.", database, table);
 
-        self.indexes.read()
+        self.indexes
+            .read()
             .iter()
             .filter(|(k, idx)| {
-                k.starts_with(&prefix) &&
-                columns.iter().any(|c| idx.config().columns.contains(&c.to_string()))
+                k.starts_with(&prefix)
+                    && columns
+                        .iter()
+                        .any(|c| idx.config().columns.contains(&c.to_string()))
             })
             .map(|(_, idx)| Arc::clone(idx))
             .collect()
@@ -1073,9 +1181,33 @@ mod tests {
         let cluster = ClusterDefinition {
             name: "test".to_string(),
             nodes: vec![
-                ClusterNode { node_id: "n1".to_string(), host: "".to_string(), port: 0, shard: 1, replica: 1, is_local: true, weight: 1 },
-                ClusterNode { node_id: "n2".to_string(), host: "".to_string(), port: 0, shard: 1, replica: 2, is_local: false, weight: 1 },
-                ClusterNode { node_id: "n3".to_string(), host: "".to_string(), port: 0, shard: 2, replica: 1, is_local: false, weight: 1 },
+                ClusterNode {
+                    node_id: "n1".to_string(),
+                    host: "".to_string(),
+                    port: 0,
+                    shard: 1,
+                    replica: 1,
+                    is_local: true,
+                    weight: 1,
+                },
+                ClusterNode {
+                    node_id: "n2".to_string(),
+                    host: "".to_string(),
+                    port: 0,
+                    shard: 1,
+                    replica: 2,
+                    is_local: false,
+                    weight: 1,
+                },
+                ClusterNode {
+                    node_id: "n3".to_string(),
+                    host: "".to_string(),
+                    port: 0,
+                    shard: 2,
+                    replica: 1,
+                    is_local: false,
+                    weight: 1,
+                },
             ],
             shards: 2,
             replicas_per_shard: 2,
@@ -1095,9 +1227,15 @@ mod tests {
 
         let cluster = ClusterDefinition {
             name: "cluster1".to_string(),
-            nodes: vec![
-                ClusterNode { node_id: "node1".to_string(), host: "".to_string(), port: 0, shard: 1, replica: 1, is_local: true, weight: 1 },
-            ],
+            nodes: vec![ClusterNode {
+                node_id: "node1".to_string(),
+                host: "".to_string(),
+                port: 0,
+                shard: 1,
+                replica: 1,
+                is_local: true,
+                weight: 1,
+            }],
             shards: 1,
             replicas_per_shard: 1,
             internal_replication: false,
@@ -1149,8 +1287,24 @@ mod tests {
         let cluster = ClusterDefinition {
             name: "c1".to_string(),
             nodes: vec![
-                ClusterNode { node_id: "node1".to_string(), host: "".to_string(), port: 0, shard: 1, replica: 1, is_local: true, weight: 1 },
-                ClusterNode { node_id: "node2".to_string(), host: "".to_string(), port: 0, shard: 2, replica: 1, is_local: false, weight: 1 },
+                ClusterNode {
+                    node_id: "node1".to_string(),
+                    host: "".to_string(),
+                    port: 0,
+                    shard: 1,
+                    replica: 1,
+                    is_local: true,
+                    weight: 1,
+                },
+                ClusterNode {
+                    node_id: "node2".to_string(),
+                    host: "".to_string(),
+                    port: 0,
+                    shard: 2,
+                    replica: 1,
+                    is_local: false,
+                    weight: 1,
+                },
             ],
             shards: 2,
             replicas_per_shard: 1,
@@ -1158,11 +1312,16 @@ mod tests {
         };
         manager.register_cluster(cluster);
 
-        let task_id = manager.execute_on_cluster("c1", DdlOperation::CreateDatabase {
-            name: "test_db".to_string(),
-            if_not_exists: true,
-            engine: None,
-        }).unwrap();
+        let task_id = manager
+            .execute_on_cluster(
+                "c1",
+                DdlOperation::CreateDatabase {
+                    name: "test_db".to_string(),
+                    if_not_exists: true,
+                    engine: None,
+                },
+            )
+            .unwrap();
 
         let task = manager.get_task(task_id).unwrap();
         assert!(task.is_complete());
@@ -1172,11 +1331,14 @@ mod tests {
     fn test_ddl_cluster_not_found() {
         let manager = DistributedDdlManager::new("node1".to_string());
 
-        let result = manager.execute_on_cluster("nonexistent", DdlOperation::CreateDatabase {
-            name: "test".to_string(),
-            if_not_exists: false,
-            engine: None,
-        });
+        let result = manager.execute_on_cluster(
+            "nonexistent",
+            DdlOperation::CreateDatabase {
+                name: "test".to_string(),
+                if_not_exists: false,
+                engine: None,
+            },
+        );
 
         assert!(matches!(result, Err(DdlError::ClusterNotFound(_))));
     }
@@ -1184,15 +1346,22 @@ mod tests {
     #[test]
     fn test_data_type_string() {
         assert_eq!(DataType::Int64.to_string(), "Int64");
-        assert_eq!(DataType::Array(Box::new(DataType::String)).to_string(), "Array(String)");
+        assert_eq!(
+            DataType::Array(Box::new(DataType::String)).to_string(),
+            "Array(String)"
+        );
         assert_eq!(
             DataType::Map {
                 key: Box::new(DataType::String),
                 value: Box::new(DataType::Int64)
-            }.to_string(),
+            }
+            .to_string(),
             "Map(String, Int64)"
         );
-        assert_eq!(DataType::Nullable(Box::new(DataType::Float64)).to_string(), "Nullable(Float64)");
+        assert_eq!(
+            DataType::Nullable(Box::new(DataType::Float64)).to_string(),
+            "Nullable(Float64)"
+        );
     }
 
     // Global Index Tests
@@ -1212,27 +1381,36 @@ mod tests {
         let index = GlobalIndex::new(config);
 
         // Insert entries
-        index.insert(IndexValue::Int(100), ShardLocation {
-            shard_id: 1,
-            partition: "202401".to_string(),
-            part_name: "all_1_1_0".to_string(),
-            min_block: 0,
-            max_block: 1000,
-        });
-        index.insert(IndexValue::Int(100), ShardLocation {
-            shard_id: 2,
-            partition: "202401".to_string(),
-            part_name: "all_1_1_0".to_string(),
-            min_block: 0,
-            max_block: 500,
-        });
-        index.insert(IndexValue::Int(200), ShardLocation {
-            shard_id: 1,
-            partition: "202401".to_string(),
-            part_name: "all_2_2_0".to_string(),
-            min_block: 1001,
-            max_block: 2000,
-        });
+        index.insert(
+            IndexValue::Int(100),
+            ShardLocation {
+                shard_id: 1,
+                partition: "202401".to_string(),
+                part_name: "all_1_1_0".to_string(),
+                min_block: 0,
+                max_block: 1000,
+            },
+        );
+        index.insert(
+            IndexValue::Int(100),
+            ShardLocation {
+                shard_id: 2,
+                partition: "202401".to_string(),
+                part_name: "all_1_1_0".to_string(),
+                min_block: 0,
+                max_block: 500,
+            },
+        );
+        index.insert(
+            IndexValue::Int(200),
+            ShardLocation {
+                shard_id: 1,
+                partition: "202401".to_string(),
+                part_name: "all_2_2_0".to_string(),
+                min_block: 1001,
+                max_block: 2000,
+            },
+        );
 
         // Lookup
         let locations = index.lookup(&IndexValue::Int(100));
@@ -1257,20 +1435,21 @@ mod tests {
         let index = GlobalIndex::new(config);
 
         for i in 0..10 {
-            index.insert(IndexValue::Int(i * 100), ShardLocation {
-                shard_id: (i % 3) as u32,
-                partition: "".to_string(),
-                part_name: "".to_string(),
-                min_block: 0,
-                max_block: 100,
-            });
+            index.insert(
+                IndexValue::Int(i * 100),
+                ShardLocation {
+                    shard_id: (i % 3) as u32,
+                    partition: "".to_string(),
+                    part_name: "".to_string(),
+                    min_block: 0,
+                    max_block: 100,
+                },
+            );
         }
 
         // Range lookup 200-500
-        let locations = index.range_lookup(
-            Some(&IndexValue::Int(200)),
-            Some(&IndexValue::Int(500)),
-        );
+        let locations =
+            index.range_lookup(Some(&IndexValue::Int(200)), Some(&IndexValue::Int(500)));
         assert_eq!(locations.len(), 4); // 200, 300, 400, 500
     }
 
@@ -1288,13 +1467,16 @@ mod tests {
 
         let index = GlobalIndex::new(config);
 
-        index.insert(IndexValue::String("sess_abc".to_string()), ShardLocation {
-            shard_id: 1,
-            partition: "".to_string(),
-            part_name: "".to_string(),
-            min_block: 0,
-            max_block: 100,
-        });
+        index.insert(
+            IndexValue::String("sess_abc".to_string()),
+            ShardLocation {
+                shard_id: 1,
+                partition: "".to_string(),
+                part_name: "".to_string(),
+                min_block: 0,
+                max_block: 100,
+            },
+        );
 
         let locations = index.lookup(&IndexValue::String("sess_abc".to_string()));
         assert_eq!(locations.len(), 1);
@@ -1317,13 +1499,16 @@ mod tests {
 
         // Status "active" is on shards 0, 1, 3
         for shard in [0, 1, 3] {
-            index.insert(IndexValue::String("active".to_string()), ShardLocation {
-                shard_id: shard,
-                partition: "".to_string(),
-                part_name: "".to_string(),
-                min_block: 0,
-                max_block: 100,
-            });
+            index.insert(
+                IndexValue::String("active".to_string()),
+                ShardLocation {
+                    shard_id: shard,
+                    partition: "".to_string(),
+                    part_name: "".to_string(),
+                    min_block: 0,
+                    max_block: 100,
+                },
+            );
         }
 
         let shards = index.get_shards(&IndexValue::String("active".to_string()));
@@ -1344,8 +1529,26 @@ mod tests {
 
         let index = GlobalIndex::new(config);
 
-        index.insert(IndexValue::Int(1), ShardLocation { shard_id: 1, partition: "".to_string(), part_name: "".to_string(), min_block: 0, max_block: 100 });
-        index.insert(IndexValue::Int(1), ShardLocation { shard_id: 2, partition: "".to_string(), part_name: "".to_string(), min_block: 0, max_block: 100 });
+        index.insert(
+            IndexValue::Int(1),
+            ShardLocation {
+                shard_id: 1,
+                partition: "".to_string(),
+                part_name: "".to_string(),
+                min_block: 0,
+                max_block: 100,
+            },
+        );
+        index.insert(
+            IndexValue::Int(1),
+            ShardLocation {
+                shard_id: 2,
+                partition: "".to_string(),
+                part_name: "".to_string(),
+                min_block: 0,
+                max_block: 100,
+            },
+        );
 
         assert_eq!(index.get_shards(&IndexValue::Int(1)), vec![1, 2]);
 
@@ -1396,14 +1599,19 @@ mod tests {
 
         manager.create_index(config).unwrap();
 
-        let index = manager.get_index("default", "events", "idx_tenant").unwrap();
-        index.insert(IndexValue::Int(123), ShardLocation {
-            shard_id: 2,
-            partition: "".to_string(),
-            part_name: "".to_string(),
-            min_block: 0,
-            max_block: 100,
-        });
+        let index = manager
+            .get_index("default", "events", "idx_tenant")
+            .unwrap();
+        index.insert(
+            IndexValue::Int(123),
+            ShardLocation {
+                shard_id: 2,
+                partition: "".to_string(),
+                part_name: "".to_string(),
+                min_block: 0,
+                max_block: 100,
+            },
+        );
 
         // Route query WHERE tenant_id = 123
         let shards = manager.route_query(
@@ -1430,13 +1638,16 @@ mod tests {
         let index = GlobalIndex::new(config);
 
         for i in 0..100 {
-            index.insert(IndexValue::Int(i % 10), ShardLocation {
-                shard_id: (i % 3) as u32,
-                partition: "".to_string(),
-                part_name: "".to_string(),
-                min_block: 0,
-                max_block: 100,
-            });
+            index.insert(
+                IndexValue::Int(i % 10),
+                ShardLocation {
+                    shard_id: (i % 3) as u32,
+                    partition: "".to_string(),
+                    part_name: "".to_string(),
+                    min_block: 0,
+                    max_block: 100,
+                },
+            );
         }
 
         // Do some lookups
@@ -1483,11 +1694,7 @@ mod tests {
 
     #[test]
     fn test_index_value_ordering() {
-        let mut values = vec![
-            IndexValue::Int(3),
-            IndexValue::Int(1),
-            IndexValue::Int(2),
-        ];
+        let mut values = vec![IndexValue::Int(3), IndexValue::Int(1), IndexValue::Int(2)];
         values.sort();
 
         assert_eq!(values[0], IndexValue::Int(1));

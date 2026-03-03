@@ -31,12 +31,12 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, UInt64Array};
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use arrow_array::{RecordBatch, ArrayRef, Int64Array, Float64Array, UInt64Array};
-use arrow_schema::{Schema, SchemaRef, DataType, Field};
 
 // ============================================================================
 // GPU Device Information
@@ -127,9 +127,9 @@ impl Default for GpuConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            preferred_device: -1, // Auto-select
+            preferred_device: -1,             // Auto-select
             min_gpu_batch_bytes: 1024 * 1024, // 1MB minimum
-            max_gpu_memory_bytes: 0, // Unlimited
+            max_gpu_memory_bytes: 0,          // Unlimited
             gpu_aggregations: true,
             gpu_filtering: true,
             gpu_joins: true,
@@ -441,7 +441,10 @@ impl GpuExecutor {
                 GpuDecision {
                     use_gpu: speedup > 1.2, // Only use GPU if >20% faster
                     reason: if speedup > 1.2 {
-                        format!("GPU selected: {} (estimated {:.1}x speedup)", dev.name, speedup)
+                        format!(
+                            "GPU selected: {} (estimated {:.1}x speedup)",
+                            dev.name, speedup
+                        )
                     } else {
                         format!("CPU preferred: estimated GPU speedup only {:.1}x", speedup)
                     },
@@ -462,9 +465,9 @@ impl GpuExecutor {
     fn select_device(&self, required_bytes: u64) -> Option<&GpuDeviceInfo> {
         if self.config.preferred_device >= 0 {
             // Use preferred device if it has enough memory
-            self.devices
-                .iter()
-                .find(|d| d.device_id == self.config.preferred_device as u32 && d.has_memory(required_bytes))
+            self.devices.iter().find(|d| {
+                d.device_id == self.config.preferred_device as u32 && d.has_memory(required_bytes)
+            })
         } else {
             // Auto-select: prefer device with most free memory
             self.devices
@@ -480,23 +483,23 @@ impl GpuExecutor {
         // Real implementation would use historical data and device capabilities
 
         let base_speedup = match op {
-            GpuOperation::Aggregation => 5.0,  // GPUs excel at parallel reduction
-            GpuOperation::Filter => 3.0,       // Good parallelization
-            GpuOperation::HashJoin => 4.0,     // Hash operations parallelize well
-            GpuOperation::Sort => 2.0,         // Moderate improvement
-            GpuOperation::GroupBy => 4.0,      // Good for parallel hashing
-            GpuOperation::Window => 2.5,       // Depends on window size
-            GpuOperation::StringOps => 0.8,    // Often slower on GPU
-            GpuOperation::Math => 10.0,        // GPUs excel at math
+            GpuOperation::Aggregation => 5.0, // GPUs excel at parallel reduction
+            GpuOperation::Filter => 3.0,      // Good parallelization
+            GpuOperation::HashJoin => 4.0,    // Hash operations parallelize well
+            GpuOperation::Sort => 2.0,        // Moderate improvement
+            GpuOperation::GroupBy => 4.0,     // Good for parallel hashing
+            GpuOperation::Window => 2.5,      // Depends on window size
+            GpuOperation::StringOps => 0.8,   // Often slower on GPU
+            GpuOperation::Math => 10.0,       // GPUs excel at math
         };
 
         // Scale by data size (larger data = better GPU utilization)
         let size_factor = if data_bytes < 10 * 1024 * 1024 {
-            0.5  // Small data: GPU overhead dominates
+            0.5 // Small data: GPU overhead dominates
         } else if data_bytes < 100 * 1024 * 1024 {
-            1.0  // Medium data: good utilization
+            1.0 // Medium data: good utilization
         } else {
-            1.5  // Large data: excellent utilization
+            1.5 // Large data: excellent utilization
         };
 
         // Scale by device capability
@@ -516,7 +519,10 @@ impl GpuExecutor {
         agg_type: AggregationType,
         column_idx: usize,
     ) -> Result<AggregateResult, GpuError> {
-        let data_bytes: u64 = batches.iter().map(|b| b.get_array_memory_size() as u64).sum();
+        let data_bytes: u64 = batches
+            .iter()
+            .map(|b| b.get_array_memory_size() as u64)
+            .sum();
         let decision = self.should_use_gpu(GpuOperation::Aggregation, data_bytes);
 
         if decision.use_gpu {
@@ -623,17 +629,23 @@ impl GpuExecutor {
     fn extract_f64_values(&self, array: &ArrayRef) -> Result<Vec<f64>, GpuError> {
         match array.data_type() {
             DataType::Int64 => {
-                let arr = array.as_any().downcast_ref::<Int64Array>()
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
                     .ok_or(GpuError::TypeMismatch("Expected Int64Array".into()))?;
                 Ok(arr.iter().filter_map(|v| v.map(|x| x as f64)).collect())
             }
             DataType::UInt64 => {
-                let arr = array.as_any().downcast_ref::<UInt64Array>()
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
                     .ok_or(GpuError::TypeMismatch("Expected UInt64Array".into()))?;
                 Ok(arr.iter().filter_map(|v| v.map(|x| x as f64)).collect())
             }
             DataType::Float64 => {
-                let arr = array.as_any().downcast_ref::<Float64Array>()
+                let arr = array
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
                     .ok_or(GpuError::TypeMismatch("Expected Float64Array".into()))?;
                 Ok(arr.iter().filter_map(|v| v).collect())
             }
@@ -680,20 +692,20 @@ impl GpuExecutor {
         let column = batch.column(predicate.column_idx);
         let values = self.extract_f64_values(column)?;
 
-        let mask: Vec<bool> = values.iter().map(|&v| {
-            match predicate.op {
+        let mask: Vec<bool> = values
+            .iter()
+            .map(|&v| match predicate.op {
                 FilterOp::Eq => (v - predicate.value).abs() < f64::EPSILON,
                 FilterOp::Ne => (v - predicate.value).abs() >= f64::EPSILON,
                 FilterOp::Lt => v < predicate.value,
                 FilterOp::Le => v <= predicate.value,
                 FilterOp::Gt => v > predicate.value,
                 FilterOp::Ge => v >= predicate.value,
-            }
-        }).collect();
+            })
+            .collect();
 
         let filter_array = BooleanArray::from(mask);
-        filter_record_batch(batch, &filter_array)
-            .map_err(|e| GpuError::ArrowError(e.to_string()))
+        filter_record_batch(batch, &filter_array).map_err(|e| GpuError::ArrowError(e.to_string()))
     }
 }
 
@@ -763,7 +775,9 @@ impl std::fmt::Display for GpuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GpuError::NotAvailable(msg) => write!(f, "GPU not available: {}", msg),
-            GpuError::OutOfMemory(bytes) => write!(f, "Out of GPU memory: {} bytes required", bytes),
+            GpuError::OutOfMemory(bytes) => {
+                write!(f, "Out of GPU memory: {} bytes required", bytes)
+            }
             GpuError::InvalidColumn(idx) => write!(f, "Invalid column index: {}", idx),
             GpuError::TypeMismatch(msg) => write!(f, "Type mismatch: {}", msg),
             GpuError::UnsupportedDataType(dt) => write!(f, "Unsupported data type: {}", dt),
@@ -785,9 +799,9 @@ pub mod datafusion_integration {
     //! DataFusion integration for query optimization and GPU execution
 
     use super::*;
-    use datafusion::prelude::*;
     use datafusion::execution::context::SessionContext;
     use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::prelude::*;
     use std::sync::Arc;
 
     /// DataFusion-based query optimizer with GPU awareness
@@ -807,10 +821,15 @@ pub mod datafusion_integration {
 
         /// Optimize a SQL query
         pub async fn optimize(&self, sql: &str) -> Result<Arc<dyn ExecutionPlan>, GpuError> {
-            let df = self.ctx.sql(sql).await
+            let df = self
+                .ctx
+                .sql(sql)
+                .await
                 .map_err(|e| GpuError::Other(e.to_string()))?;
 
-            let plan = df.create_physical_plan().await
+            let plan = df
+                .create_physical_plan()
+                .await
                 .map_err(|e| GpuError::Other(e.to_string()))?;
 
             // TODO: Walk plan tree and inject GPU operators where beneficial
@@ -821,7 +840,8 @@ pub mod datafusion_integration {
         /// Register a table for querying
         pub async fn register_batch(&self, name: &str, batch: RecordBatch) -> Result<(), GpuError> {
             let schema = batch.schema();
-            self.ctx.register_batch(name, batch)
+            self.ctx
+                .register_batch(name, batch)
                 .map_err(|e| GpuError::Other(e.to_string()))?;
             Ok(())
         }
@@ -840,9 +860,11 @@ mod tests {
     use std::sync::Arc;
 
     fn make_test_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
         let values = Int64Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap()
     }
@@ -851,7 +873,10 @@ mod tests {
     fn test_gpu_executor_creation() {
         let executor = GpuExecutor::with_defaults();
         // Without actual CUDA, should report no devices or not compiled
-        assert!(matches!(executor.status(), GpuStatus::NoDevices | GpuStatus::NotCompiled));
+        assert!(matches!(
+            executor.status(),
+            GpuStatus::NoDevices | GpuStatus::NotCompiled
+        ));
     }
 
     #[test]
@@ -867,7 +892,9 @@ mod tests {
         let executor = GpuExecutor::disabled();
         let batch = make_test_batch();
 
-        let result = executor.aggregate(&[batch], AggregationType::Sum, 0).unwrap();
+        let result = executor
+            .aggregate(&[batch], AggregationType::Sum, 0)
+            .unwrap();
         assert_eq!(result, AggregateResult::Float(55.0));
     }
 
@@ -876,7 +903,9 @@ mod tests {
         let executor = GpuExecutor::disabled();
         let batch = make_test_batch();
 
-        let result = executor.aggregate(&[batch], AggregationType::Count, 0).unwrap();
+        let result = executor
+            .aggregate(&[batch], AggregationType::Count, 0)
+            .unwrap();
         assert_eq!(result, AggregateResult::Int(10));
     }
 
@@ -885,7 +914,9 @@ mod tests {
         let executor = GpuExecutor::disabled();
         let batch = make_test_batch();
 
-        let result = executor.aggregate(&[batch], AggregationType::Avg, 0).unwrap();
+        let result = executor
+            .aggregate(&[batch], AggregationType::Avg, 0)
+            .unwrap();
         assert_eq!(result, AggregateResult::Float(5.5));
     }
 
@@ -894,8 +925,12 @@ mod tests {
         let executor = GpuExecutor::disabled();
         let batch = make_test_batch();
 
-        let min = executor.aggregate(&[batch.clone()], AggregationType::Min, 0).unwrap();
-        let max = executor.aggregate(&[batch], AggregationType::Max, 0).unwrap();
+        let min = executor
+            .aggregate(&[batch.clone()], AggregationType::Min, 0)
+            .unwrap();
+        let max = executor
+            .aggregate(&[batch], AggregationType::Max, 0)
+            .unwrap();
 
         assert_eq!(min, AggregateResult::Float(1.0));
         assert_eq!(max, AggregateResult::Float(10.0));

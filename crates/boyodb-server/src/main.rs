@@ -5,14 +5,14 @@ use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use base64::{engine::general_purpose, Engine as _};
+use boyodb_core::engine::EngineError;
+use boyodb_core::planner_distributed::LocalPlan;
 use boyodb_core::TableMeta;
 use boyodb_core::{
     parse_sql, AuthCommand, AuthError, AuthManager, ClusterConfig, ClusterManager, Db, DdlCommand,
     DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest, Privilege,
     PrivilegeTarget, QueryRequest, SqlStatement, SqlValue, UpdateCommand,
 };
-use boyodb_core::planner_distributed::LocalPlan;
-use boyodb_core::engine::EngineError;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Seek, Write};
@@ -679,13 +679,10 @@ impl PreparedStatementCache {
                 Some(id) => id.clone(),
                 None => break,
             };
-            match self.entries.get(&id) {
-                Some(entry) => {
-                    if entry.created_at.elapsed() <= self.ttl {
-                        break;
-                    }
+            if let Some(entry) = self.entries.get(&id) {
+                if entry.created_at.elapsed() <= self.ttl {
+                    break;
                 }
-                None => {}
             }
             self.order.pop_front();
             self.entries.remove(&id);
@@ -737,8 +734,8 @@ fn map_engine_error(err: EngineError) -> ServerError {
 fn decompress_with_limit(compressed: &[u8], max_bytes: usize) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let cursor = std::io::Cursor::new(compressed);
-    let mut decoder = zstd::stream::Decoder::new(cursor)
-        .map_err(|e| format!("failed to create decoder: {e}"))?;
+    let mut decoder =
+        zstd::stream::Decoder::new(cursor).map_err(|e| format!("failed to create decoder: {e}"))?;
 
     // Pre-allocate with a reasonable size, capped at max_bytes
     let initial_capacity = compressed.len().saturating_mul(4).min(max_bytes);
@@ -749,7 +746,9 @@ fn decompress_with_limit(compressed: &[u8], max_bytes: usize) -> Result<Vec<u8>,
     let mut buf = vec![0u8; chunk_size];
 
     loop {
-        let n = decoder.read(&mut buf).map_err(|e| format!("decompression error: {e}"))?;
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|e| format!("decompression error: {e}"))?;
         if n == 0 {
             break;
         }
@@ -945,7 +944,7 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
             "--wal-sync-interval-ms" => {
                 if let Some(val) = args.get(i + 1) {
                     if let Ok(v) = val.parse::<u64>() {
-                         wal_sync_interval_ms = v;
+                        wal_sync_interval_ms = v;
                     }
                     i += 1;
                 }
@@ -1347,8 +1346,12 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         let cluster_config = ClusterConfig {
             cluster_id: cluster_id.clone(),
             node_id: node_id_str.clone(),
-            rpc_addr: rpc_addr.parse().map_err(|e| format!("invalid rpc_addr: {e}"))?,
-            gossip_addr: gossip_addr.parse().map_err(|e| format!("invalid gossip_addr: {e}"))?,
+            rpc_addr: rpc_addr
+                .parse()
+                .map_err(|e| format!("invalid rpc_addr: {e}"))?,
+            gossip_addr: gossip_addr
+                .parse()
+                .map_err(|e| format!("invalid gossip_addr: {e}"))?,
             seed_nodes: cfg
                 .seed_nodes
                 .iter()
@@ -1367,7 +1370,11 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         let (manager, gossip_rx) = ClusterManager::new(cluster_config, db.clone());
         let manager = Arc::new(manager);
         let effective_node_id = node_id_str.unwrap_or_else(|| "auto-generated".to_string());
-        let mode_str = if cfg.two_node_mode { "two-node" } else { "standard" };
+        let mode_str = if cfg.two_node_mode {
+            "two-node"
+        } else {
+            "standard"
+        };
         info!(
             cluster_id = %cluster_id,
             node_id = %effective_node_id,
@@ -1395,8 +1402,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         let shutdown_flag = manager.shutdown_flag();
         tokio::spawn(async move {
             if let Err(e) =
-                boyodb_core::cluster::start_gossip_sender(gossip_rx, shutdown_flag)
-                    .await
+                boyodb_core::cluster::start_gossip_sender(gossip_rx, shutdown_flag).await
             {
                 tracing::error!("gossip sender error: {}", e);
             }
@@ -1413,9 +1419,9 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         let auth_for_pg = auth_manager.clone();
         let pg_bind_ip = cfg.bind_addr.split(':').next().unwrap_or("0.0.0.0");
         let pg_addr = format!("{}:{}", pg_bind_ip, pg_port);
-        
+
         info!("Starting PostgreSQL interface on {}", pg_addr);
-        
+
         tokio::spawn(async move {
             let listener = match TcpListener::bind(&pg_addr).await {
                 Ok(l) => l,
@@ -1429,21 +1435,21 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
             use pgwire::api::MakeHandler;
             // Try referencing commonly available path
             // If tokio module is not found in api, try top level or just assume impl
-            
+
             // Actually, we called process_socket(stream, None, factory, factory, factory)
             // This function signature is likely:
             // process_socket(socket, ssl, startup_maker, query_maker, extended_maker)
-            
+
             // Let's assume the function is in `pgwire::api`? Or `pgwire::messages`?
             // "could not find tokio in api" -> pgwire::api::tokio doesn't exist.
             // Maybe pgwire::api::process_socket exists?
-            
+
             // To be safe, I'll use full path if I can guess.
             // But better: check valid paths.
             // I'll try `pgwire::api::process_socket`.
-            
+
             let factory = Arc::new(MakeBoyodbPgHandler::new(db_pg));
-            
+
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
@@ -1467,14 +1473,15 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                                 None,
                                 startup_handler,
                                 handler.clone(),
-                                handler.clone()
-                            ).await {
+                                handler.clone(),
+                            )
+                            .await
+                            {
                                 debug!("PG connection error: {}", e);
                             }
                         });
                     }
                     Err(e) => {
-
                         error!("PG accept error: {}", e);
                         sleep(Duration::from_millis(100)).await;
                     }
@@ -1818,7 +1825,12 @@ async fn handle_conn(
                             wait_time.as_secs()
                         ))))
                     } else {
-                        match auth.authenticate(username, password, Some(&peer_ip.to_string()), None) {
+                        match auth.authenticate(
+                            username,
+                            password,
+                            Some(&peer_ip.to_string()),
+                            None,
+                        ) {
                             Ok(session_id) => {
                                 rate_limiter.record_success(peer_ip);
                                 info!(
@@ -1941,7 +1953,8 @@ async fn handle_conn(
                                     3,
                                 )
                                 .unwrap_or_default();
-                                resp.ipc_base64 = Some(general_purpose::STANDARD.encode(compressed));
+                                resp.ipc_base64 =
+                                    Some(general_purpose::STANDARD.encode(compressed));
                                 resp.compression = Some("zstd".to_string());
                                 resp.ipc_len = Some(response.records_ipc.len() as u64);
                             } else {
@@ -1955,7 +1968,7 @@ async fn handle_conn(
                         write_response(&mut stream, &resp, cfg.io_timeout, cfg.max_frame_len)
                             .await?;
                     }
-                     Err(e) => {
+                    Err(e) => {
                         let err = map_engine_error(e);
                         write_response(
                             &mut stream,
@@ -2437,13 +2450,22 @@ async fn process_request(
                 }
                 SqlStatement::Query(parsed) => {
                     // Determine effective databases for primary and join tables when a default is supplied
-                    let main_db = parsed.database.as_deref()
+                    let main_db = parsed
+                        .database
+                        .as_deref()
                         .filter(|d| *d != "default")
                         .unwrap_or(effective_db)
                         .to_string();
 
                     let mut table_refs: Vec<(String, String, bool)> = Vec::new();
-                    table_refs.push((main_db.clone(), parsed.table.clone().unwrap_or_else(|| "unknown".to_string()), parsed.database.as_deref() == Some("default") || parsed.database.is_none()));
+                    table_refs.push((
+                        main_db.clone(),
+                        parsed
+                            .table
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        parsed.database.as_deref() == Some("default") || parsed.database.is_none(),
+                    ));
                     for join in &parsed.joins {
                         let join_db = if join.database == "default" {
                             effective_db.to_string()
@@ -2474,9 +2496,11 @@ async fn process_request(
                                 let join_pat = format!("JOIN {}", table_name);
                                 let join_rep = format!("JOIN {}.{}", effective_db, table_name);
                                 let from_pat_lower = format!("from {}", table_name);
-                                let from_rep_lower = format!("from {}.{}", effective_db, table_name);
+                                let from_rep_lower =
+                                    format!("from {}.{}", effective_db, table_name);
                                 let join_pat_lower = format!("join {}", table_name);
-                                let join_rep_lower = format!("join {}.{}", effective_db, table_name);
+                                let join_rep_lower =
+                                    format!("join {}.{}", effective_db, table_name);
 
                                 effective_sql = effective_sql
                                     .replace(&from_pat, &from_rep)
@@ -2577,7 +2601,9 @@ async fn process_request(
                 }
                 SqlStatement::Explain { analyze, statement } => {
                     // Execute EXPLAIN [ANALYZE] queries
-                    let explain_result = execute_explain(&db, *statement, analyze, effective_db, &require_privilege).await?;
+                    let explain_result =
+                        execute_explain(&db, *statement, analyze, effective_db, &require_privilege)
+                            .await?;
                     Ok(Response {
                         message: Some(explain_result),
                         ..Default::default()
@@ -2598,13 +2624,22 @@ async fn process_request(
                 }
             };
 
-            let main_db = parsed.database.as_deref()
+            let main_db = parsed
+                .database
+                .as_deref()
                 .filter(|d| *d != "default")
                 .unwrap_or(effective_db)
                 .to_string();
 
             let mut table_refs: Vec<(String, String, bool)> = Vec::new();
-            table_refs.push((main_db.clone(), parsed.table.clone().unwrap_or_else(|| "unknown".to_string()), parsed.database.as_deref() == Some("default") || parsed.database.is_none()));
+            table_refs.push((
+                main_db.clone(),
+                parsed
+                    .table
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                parsed.database.as_deref() == Some("default") || parsed.database.is_none(),
+            ));
             for join in &parsed.joins {
                 let join_db = if join.database == "default" {
                     effective_db.to_string()
@@ -3034,8 +3069,7 @@ async fn process_request(
             blocking(move || {
                 let payload: boyodb_core::BundlePayload = serde_json::from_value(bundle_json)
                     .map_err(|e| ServerError::BadRequest(format!("invalid bundle: {e}")))?;
-                db.apply_bundle(payload)
-                    .map_err(map_engine_error)
+                db.apply_bundle(payload).map_err(map_engine_error)
             })
             .await?;
             Ok(Response::ok_message("bundle applied"))
@@ -3445,7 +3479,8 @@ async fn process_query_binary(
     }
 
     let effective_db = default_database.as_deref().unwrap_or("default");
-    let stmt = parse_sql(&sql).map_err(|e| ServerError::BadRequest(format!("SQL parse error: {e}")))?;
+    let stmt =
+        parse_sql(&sql).map_err(|e| ServerError::BadRequest(format!("SQL parse error: {e}")))?;
 
     let parsed = match stmt {
         SqlStatement::Query(parsed) => parsed,
@@ -3456,13 +3491,22 @@ async fn process_query_binary(
         }
     };
 
-    let main_db = parsed.database.as_deref()
+    let main_db = parsed
+        .database
+        .as_deref()
         .filter(|d| *d != "default")
         .unwrap_or(effective_db)
         .to_string();
 
     let mut table_refs: Vec<(String, String, bool)> = Vec::new();
-    table_refs.push((main_db.clone(), parsed.table.clone().unwrap_or_else(|| "unknown".to_string()), parsed.database.as_deref() == Some("default") || parsed.database.is_none()));
+    table_refs.push((
+        main_db.clone(),
+        parsed
+            .table
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        parsed.database.as_deref() == Some("default") || parsed.database.is_none(),
+    ));
     for join in &parsed.joins {
         let join_db = if join.database == "default" {
             effective_db.to_string()
@@ -3570,8 +3614,7 @@ async fn process_query_binary(
     if payload_len > max_frame_len as u64 {
         return Err(ServerError::BadRequest(format!(
             "response too large ({} > {})",
-            payload_len,
-            max_frame_len
+            payload_len, max_frame_len
         )));
     }
 
@@ -3610,7 +3653,8 @@ async fn process_query_binary_stream(
         };
 
     let effective_db = default_database.as_deref().unwrap_or("default");
-    let stmt = parse_sql(&sql).map_err(|e| ServerError::BadRequest(format!("SQL parse error: {e}")))?;
+    let stmt =
+        parse_sql(&sql).map_err(|e| ServerError::BadRequest(format!("SQL parse error: {e}")))?;
 
     let parsed = match stmt {
         SqlStatement::Query(parsed) => parsed,
@@ -3621,13 +3665,22 @@ async fn process_query_binary_stream(
         }
     };
 
-    let main_db = parsed.database.as_deref()
+    let main_db = parsed
+        .database
+        .as_deref()
         .filter(|d| *d != "default")
         .unwrap_or(effective_db)
         .to_string();
 
     let mut table_refs: Vec<(String, String, bool)> = Vec::new();
-    table_refs.push((main_db.clone(), parsed.table.clone().unwrap_or_else(|| "unknown".to_string()), parsed.database.as_deref() == Some("default") || parsed.database.is_none()));
+    table_refs.push((
+        main_db.clone(),
+        parsed
+            .table
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        parsed.database.as_deref() == Some("default") || parsed.database.is_none(),
+    ));
     for join in &parsed.joins {
         let join_db = if join.database == "default" {
             effective_db.to_string()
@@ -3679,8 +3732,7 @@ async fn process_query_binary_stream(
     };
     let db = db.clone();
     let chunk_size = max_frame_len.min(256 * 1024).max(1024);
-    let (tx, mut rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, ServerError>>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, ServerError>>();
     let tx_done = tx.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -3864,8 +3916,7 @@ async fn process_execute_prepared_binary(
     if payload_len > max_frame_len as u64 {
         return Err(ServerError::BadRequest(format!(
             "response too large ({} > {})",
-            payload_len,
-            max_frame_len
+            payload_len, max_frame_len
         )));
     }
 
@@ -3931,8 +3982,7 @@ async fn process_execute_prepared_binary_stream(
     };
     let db = db.clone();
     let chunk_size = max_frame_len.min(256 * 1024).max(1024);
-    let (tx, mut rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, ServerError>>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, ServerError>>();
     let tx_done = tx.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -4282,12 +4332,7 @@ fn execute_auth_command(
             for priv_str in &privileges {
                 let priv_type = parse_privilege(priv_str)?;
                 if grantee_is_role {
-                    auth.revoke_privilege_from_role(
-                        &grantee,
-                        priv_type,
-                        target.clone(),
-                        actor,
-                    )?;
+                    auth.revoke_privilege_from_role(&grantee, priv_type, target.clone(), actor)?;
                 } else {
                     auth.revoke_privilege(&grantee, priv_type, target.clone(), actor)?;
                 }
@@ -4472,7 +4517,10 @@ where
         DdlCommand::ShowTables { database } => {
             // If database is specified, check privilege for that database
             if let Some(ref db_name) = database {
-                require_privilege(Privilege::Select, PrivilegeTarget::Database(db_name.clone()))?;
+                require_privilege(
+                    Privilege::Select,
+                    PrivilegeTarget::Database(db_name.clone()),
+                )?;
             }
             let db = db.clone();
             let tables = blocking(move || {
@@ -4527,10 +4575,7 @@ where
             name,
             if_exists,
         } => {
-            require_privilege(
-                Privilege::Drop,
-                PrivilegeTarget::Database(database.clone()),
-            )?;
+            require_privilege(Privilege::Drop, PrivilegeTarget::Database(database.clone()))?;
             let db = db.clone();
             blocking(move || {
                 db.drop_view(&database, &name, if_exists)
@@ -4542,7 +4587,10 @@ where
         DdlCommand::ShowViews { database } => {
             // If database is specified, check privilege for that database
             if let Some(ref db_name) = database {
-                require_privilege(Privilege::Select, PrivilegeTarget::Database(db_name.clone()))?;
+                require_privilege(
+                    Privilege::Select,
+                    PrivilegeTarget::Database(db_name.clone()),
+                )?;
             }
             let db = db.clone();
             let views = blocking(move || {
@@ -4551,7 +4599,10 @@ where
             })
             .await?;
             // Return views as a list of (database, name, query) tuples
-            let view_names: Vec<String> = views.iter().map(|(db, name, _)| format!("{}.{}", db, name)).collect();
+            let view_names: Vec<String> = views
+                .iter()
+                .map(|(db, name, _)| format!("{}.{}", db, name))
+                .collect();
             Ok(Response {
                 message: Some(format!("Views: {}", view_names.join(", "))),
                 ..Default::default()
@@ -4580,10 +4631,7 @@ where
             name,
             if_exists,
         } => {
-            require_privilege(
-                Privilege::Drop,
-                PrivilegeTarget::Database(database.clone()),
-            )?;
+            require_privilege(Privilege::Drop, PrivilegeTarget::Database(database.clone()))?;
             let db = db.clone();
             blocking(move || {
                 db.drop_materialized_view(&database, &name, if_exists)
@@ -4608,7 +4656,10 @@ where
         DdlCommand::ShowMaterializedViews { database } => {
             // If database is specified, check privilege for that database
             if let Some(ref db_name) = database {
-                require_privilege(Privilege::Select, PrivilegeTarget::Database(db_name.clone()))?;
+                require_privilege(
+                    Privilege::Select,
+                    PrivilegeTarget::Database(db_name.clone()),
+                )?;
             }
             let db = db.clone();
             let views = blocking(move || {
@@ -4649,8 +4700,15 @@ where
             )?;
             let db = db.clone();
             blocking(move || {
-                db.create_index(&database, &table, &index_name, &columns, index_type, if_not_exists)
-                    .map_err(|e| ServerError::Db(e.to_string()))
+                db.create_index(
+                    &database,
+                    &table,
+                    &index_name,
+                    &columns,
+                    index_type,
+                    if_not_exists,
+                )
+                .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
             Ok(Response::ok_message("index created"))
@@ -4696,7 +4754,14 @@ where
             let index_list: Vec<String> = indexes
                 .iter()
                 .map(|(db_name, tbl_name, idx_name, cols, idx_type)| {
-                    format!("{}.{}.{} ({:?}) on ({})", db_name, tbl_name, idx_name, idx_type, cols.join(", "))
+                    format!(
+                        "{}.{}.{} ({:?}) on ({})",
+                        db_name,
+                        tbl_name,
+                        idx_name,
+                        idx_type,
+                        cols.join(", ")
+                    )
                 })
                 .collect();
             Ok(Response {
@@ -4797,7 +4862,11 @@ where
             Ok(Response::ok_message(msg))
         }
         // New DDL commands
-        DdlCommand::AlterTableRename { database, old_table, new_table } => {
+        DdlCommand::AlterTableRename {
+            database,
+            old_table,
+            new_table,
+        } => {
             require_privilege(
                 Privilege::Alter,
                 PrivilegeTarget::Table {
@@ -4813,7 +4882,12 @@ where
             .await?;
             Ok(Response::ok_message("table renamed"))
         }
-        DdlCommand::AlterTableRenameColumn { database, table, old_column, new_column } => {
+        DdlCommand::AlterTableRenameColumn {
+            database,
+            table,
+            old_column,
+            new_column,
+        } => {
             require_privilege(
                 Privilege::Alter,
                 PrivilegeTarget::Table {
@@ -4827,27 +4901,63 @@ where
                 old_column, new_column
             )))
         }
-        DdlCommand::CreateTableAs { database, table, query_sql, if_not_exists } => {
-            require_privilege(Privilege::Create, PrivilegeTarget::Database(database.clone()))?;
+        DdlCommand::CreateTableAs {
+            database,
+            table,
+            query_sql,
+            if_not_exists,
+        } => {
+            require_privilege(
+                Privilege::Create,
+                PrivilegeTarget::Database(database.clone()),
+            )?;
             let db = db.clone();
             let rows_inserted = blocking(move || {
                 db.create_table_as(&database, &table, &query_sql, if_not_exists)
                     .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
-            Ok(Response::ok_message(&format!("table created with {} rows", rows_inserted)))
+            Ok(Response::ok_message(&format!(
+                "table created with {} rows",
+                rows_inserted
+            )))
         }
-        DdlCommand::CreateSequence { database, name, start, increment, min_value, max_value, cycle, if_not_exists } => {
-            require_privilege(Privilege::Create, PrivilegeTarget::Database(database.clone()))?;
+        DdlCommand::CreateSequence {
+            database,
+            name,
+            start,
+            increment,
+            min_value,
+            max_value,
+            cycle,
+            if_not_exists,
+        } => {
+            require_privilege(
+                Privilege::Create,
+                PrivilegeTarget::Database(database.clone()),
+            )?;
             let db = db.clone();
             blocking(move || {
-                db.create_sequence(&database, &name, start, increment, min_value, max_value, cycle, if_not_exists)
-                    .map_err(|e| ServerError::Db(e.to_string()))
+                db.create_sequence(
+                    &database,
+                    &name,
+                    start,
+                    increment,
+                    min_value,
+                    max_value,
+                    cycle,
+                    if_not_exists,
+                )
+                .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
             Ok(Response::ok_message("sequence created"))
         }
-        DdlCommand::DropSequence { database, name, if_exists } => {
+        DdlCommand::DropSequence {
+            database,
+            name,
+            if_exists,
+        } => {
             require_privilege(Privilege::Drop, PrivilegeTarget::Database(database.clone()))?;
             let db = db.clone();
             blocking(move || {
@@ -4857,8 +4967,16 @@ where
             .await?;
             Ok(Response::ok_message("sequence dropped"))
         }
-        DdlCommand::AlterSequence { database, name, restart_with, increment } => {
-            require_privilege(Privilege::Alter, PrivilegeTarget::Database(database.clone()))?;
+        DdlCommand::AlterSequence {
+            database,
+            name,
+            restart_with,
+            increment,
+        } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Database(database.clone()),
+            )?;
             let db = db.clone();
             blocking(move || {
                 db.alter_sequence(&database, &name, restart_with, increment)
@@ -4869,7 +4987,10 @@ where
         }
         DdlCommand::ShowSequences { database } => {
             if let Some(ref db_name) = database {
-                require_privilege(Privilege::Select, PrivilegeTarget::Database(db_name.clone()))?;
+                require_privilege(
+                    Privilege::Select,
+                    PrivilegeTarget::Database(db_name.clone()),
+                )?;
             }
             let db = db.clone();
             let sequences = blocking(move || {
@@ -4883,7 +5004,12 @@ where
             } else {
                 let seq_list: Vec<String> = sequences
                     .iter()
-                    .map(|s| format!("{}.{} (current: {}, increment: {})", s.database, s.name, s.current_value, s.increment))
+                    .map(|s| {
+                        format!(
+                            "{}.{} (current: {}, increment: {})",
+                            s.database, s.name, s.current_value, s.increment
+                        )
+                    })
                     .collect();
                 Ok(Response {
                     message: Some(format!("Sequences: {}", seq_list.join("; "))),
@@ -4891,7 +5017,13 @@ where
                 })
             }
         }
-        DdlCommand::CopyFrom { database, table, source, format, options } => {
+        DdlCommand::CopyFrom {
+            database,
+            table,
+            source,
+            format,
+            options,
+        } => {
             require_privilege(
                 Privilege::Insert,
                 PrivilegeTarget::Table {
@@ -4905,9 +5037,18 @@ where
                     .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
-            Ok(Response::ok_message(&format!("COPY {} rows imported", rows_copied)))
+            Ok(Response::ok_message(&format!(
+                "COPY {} rows imported",
+                rows_copied
+            )))
         }
-        DdlCommand::CopyTo { database, table, destination, format, options } => {
+        DdlCommand::CopyTo {
+            database,
+            table,
+            destination,
+            format,
+            options,
+        } => {
             require_privilege(
                 Privilege::Select,
                 PrivilegeTarget::Table {
@@ -4922,9 +5063,16 @@ where
                     .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
-            Ok(Response::ok_message(&format!("COPY {} rows exported to {}", rows_copied, dest_clone)))
+            Ok(Response::ok_message(&format!(
+                "COPY {} rows exported to {}",
+                rows_copied, dest_clone
+            )))
         }
-        DdlCommand::AddConstraint { database, table, constraint } => {
+        DdlCommand::AddConstraint {
+            database,
+            table,
+            constraint,
+        } => {
             require_privilege(
                 Privilege::Alter,
                 PrivilegeTarget::Table {
@@ -4940,7 +5088,11 @@ where
             .await?;
             Ok(Response::ok_message("constraint added"))
         }
-        DdlCommand::DropConstraint { database, table, constraint_name } => {
+        DdlCommand::DropConstraint {
+            database,
+            table,
+            constraint_name,
+        } => {
             require_privilege(
                 Privilege::Alter,
                 PrivilegeTarget::Table {
@@ -4974,7 +5126,9 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     } = cmd;
 
     if values.is_empty() {
-        return Err(ServerError::BadRequest("INSERT requires at least one row".into()));
+        return Err(ServerError::BadRequest(
+            "INSERT requires at least one row".into(),
+        ));
     }
 
     // Get table schema to know column types
@@ -4989,9 +5143,10 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     .await?;
 
     // Parse schema from JSON (CsvField format)
-    let schema_json = table_desc.schema_json.as_ref().ok_or_else(|| {
-        ServerError::BadRequest("table has no schema defined".into())
-    })?;
+    let schema_json = table_desc
+        .schema_json
+        .as_ref()
+        .ok_or_else(|| ServerError::BadRequest("table has no schema defined".into()))?;
     let csv_fields: Vec<CsvField> = serde_json::from_str(schema_json)
         .map_err(|e| ServerError::BadRequest(format!("invalid schema JSON: {}", e)))?;
     let schema = Arc::new(
@@ -5169,15 +5324,20 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
                     match &row[col_idx] {
                         SqlValue::String(s) => {
                             // Parse UUID string (hyphenated or compact)
-                            let hex_str: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+                            let hex_str: String =
+                                s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
                             if hex_str.len() != 32 {
                                 return Err(ServerError::BadRequest(format!(
                                     "invalid UUID for column '{}': expected 32 hex chars, got {}",
-                                    col_name, hex_str.len()
+                                    col_name,
+                                    hex_str.len()
                                 )));
                             }
                             let bytes = hex::decode(&hex_str).map_err(|e| {
-                                ServerError::BadRequest(format!("invalid UUID hex for column '{}': {}", col_name, e))
+                                ServerError::BadRequest(format!(
+                                    "invalid UUID hex for column '{}': {}",
+                                    col_name, e
+                                ))
                             })?;
                             builder.append_value(&bytes).map_err(|e| {
                                 ServerError::BadRequest(format!("UUID append error: {}", e))
@@ -5224,7 +5384,9 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
             DataType::Decimal128(precision, scale) => {
                 let mut builder = Decimal128Builder::with_capacity(num_rows)
                     .with_precision_and_scale(*precision, *scale)
-                    .map_err(|e| ServerError::BadRequest(format!("invalid decimal config: {}", e)))?;
+                    .map_err(|e| {
+                        ServerError::BadRequest(format!("invalid decimal config: {}", e))
+                    })?;
                 for row in &values {
                     match &row[col_idx] {
                         SqlValue::Integer(v) => {
@@ -5238,9 +5400,13 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
                         }
                         SqlValue::String(s) => {
                             // Parse decimal string
-                            let (value, parsed_scale) = parse_decimal_string(s).ok_or_else(|| {
-                                ServerError::BadRequest(format!("invalid decimal for column '{}': {}", col_name, s))
-                            })?;
+                            let (value, parsed_scale) =
+                                parse_decimal_string(s).ok_or_else(|| {
+                                    ServerError::BadRequest(format!(
+                                        "invalid decimal for column '{}': {}",
+                                        col_name, s
+                                    ))
+                                })?;
                             // Adjust scale if needed
                             let adjusted = if parsed_scale < *scale {
                                 value * 10_i128.pow((*scale - parsed_scale) as u32)
@@ -5296,9 +5462,15 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
                     match &row[col_idx] {
                         SqlValue::String(s) => {
                             // Parse hex string (0x prefix optional)
-                            let hex_str = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+                            let hex_str = s
+                                .strip_prefix("0x")
+                                .or_else(|| s.strip_prefix("0X"))
+                                .unwrap_or(s);
                             let bytes = hex::decode(hex_str).map_err(|e| {
-                                ServerError::BadRequest(format!("invalid binary hex for column '{}': {}", col_name, e))
+                                ServerError::BadRequest(format!(
+                                    "invalid binary hex for column '{}': {}",
+                                    col_name, e
+                                ))
                             })?;
                             builder.append_value(&bytes);
                         }
@@ -5422,13 +5594,16 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
             if let Some(ipc_data) = returning_data {
                 // Read back the IPC data
                 let cursor = std::io::Cursor::new(&ipc_data);
-                let reader = StreamReader::try_new(cursor, None)
-                    .map_err(|e| ServerError::Decode(format!("failed to read returning data: {}", e)))?;
+                let reader = StreamReader::try_new(cursor, None).map_err(|e| {
+                    ServerError::Decode(format!("failed to read returning data: {}", e))
+                })?;
 
                 let batches: Vec<RecordBatch> = reader
                     .into_iter()
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| ServerError::Decode(format!("failed to read batches: {}", e)))?;
+                    .map_err(|e| {
+                    ServerError::Decode(format!("failed to read batches: {}", e))
+                })?;
 
                 if let Some(batch) = batches.first() {
                     // Select only the requested columns
@@ -5444,17 +5619,27 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
 
                     if !selected_arrays.is_empty() {
                         let selected_schema = Arc::new(Schema::new(selected_fields));
-                        let selected_batch = RecordBatch::try_new(selected_schema.clone(), selected_arrays)
-                            .map_err(|e| ServerError::Encode(format!("failed to create returning batch: {}", e)))?;
+                        let selected_batch =
+                            RecordBatch::try_new(selected_schema.clone(), selected_arrays)
+                                .map_err(|e| {
+                                    ServerError::Encode(format!(
+                                        "failed to create returning batch: {}",
+                                        e
+                                    ))
+                                })?;
 
                         let mut output = Vec::new();
                         {
                             let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
-                                .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
-                            writer.write(&selected_batch)
-                                .map_err(|e| ServerError::Encode(format!("failed to write batch: {}", e)))?;
-                            writer.finish()
-                                .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
+                                .map_err(|e| {
+                                ServerError::Encode(format!("failed to write returning: {}", e))
+                            })?;
+                            writer.write(&selected_batch).map_err(|e| {
+                                ServerError::Encode(format!("failed to write batch: {}", e))
+                            })?;
+                            writer.finish().map_err(|e| {
+                                ServerError::Encode(format!("failed to finish writer: {}", e))
+                            })?;
                         }
                         let ipc_base64 = general_purpose::STANDARD.encode(&output);
                         return Ok(Response {
@@ -5469,7 +5654,10 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
         }
     }
 
-    Ok(Response::ok_message(&format!("{} row(s) inserted", rows_inserted)))
+    Ok(Response::ok_message(&format!(
+        "{} row(s) inserted",
+        rows_inserted
+    )))
 }
 
 async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, ServerError> {
@@ -5482,9 +5670,9 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
     } = cmd;
 
     let db = _db.clone();
-    let db_name = database.clone();
-    let tbl_name = table.clone();
-    let where_cl = where_clause.clone();
+    let _db_name = database.clone();
+    let _tbl_name = table.clone();
+    let _where_cl = where_clause.clone();
     let ret_cols = returning.clone();
 
     let updated = blocking(move || {
@@ -5505,10 +5693,7 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
             updated
         )))
     } else {
-        Ok(Response::ok_message(&format!(
-            "{} row(s) updated",
-            updated
-        )))
+        Ok(Response::ok_message(&format!("{} row(s) updated", updated)))
     }
 }
 
@@ -5539,10 +5724,7 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
             deleted
         )))
     } else {
-        Ok(Response::ok_message(&format!(
-            "{} row(s) deleted",
-            deleted
-        )))
+        Ok(Response::ok_message(&format!("{} row(s) deleted", deleted)))
     }
 }
 
@@ -5564,7 +5746,9 @@ where
     match statement {
         SqlStatement::Query(parsed) => {
             // Determine database for privilege check
-            let main_db = parsed.database.as_deref()
+            let main_db = parsed
+                .database
+                .as_deref()
                 .filter(|d| *d != "default")
                 .unwrap_or(effective_db)
                 .to_string();
@@ -5573,12 +5757,22 @@ where
                 Privilege::Select,
                 PrivilegeTarget::Table {
                     database: main_db.clone(),
-                    table: parsed.table.clone().unwrap_or_else(|| "unknown".to_string()),
+                    table: parsed
+                        .table
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
                 },
             )?;
 
-            explain_output.push_str(&format!("Query Plan:\n"));
-            explain_output.push_str(&format!("  -> Scan on {}.{}\n", main_db, parsed.table.clone().unwrap_or_else(|| "unknown".to_string())));
+            explain_output.push_str("Query Plan:\n");
+            explain_output.push_str(&format!(
+                "  -> Scan on {}.{}\n",
+                main_db,
+                parsed
+                    .table
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            ));
 
             if !parsed.joins.is_empty() {
                 for join in &parsed.joins {
@@ -5587,10 +5781,17 @@ where
                     } else {
                         join.database.clone()
                     };
-                    explain_output.push_str(&format!("  -> {:?} Join with {}.{}\n", join.join_type, join_db, join.table));
-                    explain_output.push_str(&format!("       On: {}.{} = {}.{}\n",
-                        main_db, join.on_condition.left_column,
-                        join_db, join.on_condition.right_column));
+                    explain_output.push_str(&format!(
+                        "  -> {:?} Join with {}.{}\n",
+                        join.join_type, join_db, join.table
+                    ));
+                    explain_output.push_str(&format!(
+                        "       On: {}.{} = {}.{}\n",
+                        main_db,
+                        join.on_condition.left_column,
+                        join_db,
+                        join.on_condition.right_column
+                    ));
                 }
             }
 
@@ -5605,15 +5806,24 @@ where
             if analyze {
                 let start = Instant::now();
                 let db_clone = db.clone();
-                let sql = format!("SELECT * FROM {}.{} LIMIT 1", main_db, parsed.table.clone().unwrap_or_else(|| "unknown".to_string()));
+                let sql = format!(
+                    "SELECT * FROM {}.{} LIMIT 1",
+                    main_db,
+                    parsed
+                        .table
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string())
+                );
                 let result = blocking(move || {
-                    db_clone.query(QueryRequest {
-                        sql,
-                        timeout_millis: 5000,
-                        collect_stats: true,
-                    })
-                    .map_err(|e| ServerError::Db(e.to_string()))
-                }).await;
+                    db_clone
+                        .query(QueryRequest {
+                            sql,
+                            timeout_millis: 5000,
+                            collect_stats: true,
+                        })
+                        .map_err(|e| ServerError::Db(e.to_string()))
+                })
+                .await;
                 let elapsed = start.elapsed();
 
                 explain_output.push_str("\nExecution Statistics:\n");
@@ -5622,48 +5832,76 @@ where
                 // Use real stats if available
                 if let Ok(ref resp) = result {
                     if let Some(ref stats) = resp.execution_stats {
-                        explain_output.push_str(&format!("  Execution time: {:.2} ms\n", stats.execution_time_micros as f64 / 1000.0));
-                        explain_output.push_str(&format!("  Segments: {} scanned, {} pruned (of {} total)\n",
-                            stats.segments_scanned, stats.segments_pruned, stats.segments_total));
-                        explain_output.push_str(&format!("  Pruning efficiency: {:.1}%\n", stats.pruning_efficiency()));
+                        explain_output.push_str(&format!(
+                            "  Execution time: {:.2} ms\n",
+                            stats.execution_time_micros as f64 / 1000.0
+                        ));
+                        explain_output.push_str(&format!(
+                            "  Segments: {} scanned, {} pruned (of {} total)\n",
+                            stats.segments_scanned, stats.segments_pruned, stats.segments_total
+                        ));
+                        explain_output.push_str(&format!(
+                            "  Pruning efficiency: {:.1}%\n",
+                            stats.pruning_efficiency()
+                        ));
                         explain_output.push_str(&format!("  Bytes read: {}\n", stats.bytes_read));
-                        explain_output.push_str(&format!("  Bytes skipped: {}\n", stats.bytes_skipped));
+                        explain_output
+                            .push_str(&format!("  Bytes skipped: {}\n", stats.bytes_skipped));
                         if stats.cache_hit {
                             explain_output.push_str("  Cache: HIT\n");
                         }
                     } else {
-                        explain_output.push_str(&format!("  Execution time: {:.2} ms\n", elapsed.as_secs_f64() * 1000.0));
-                        explain_output.push_str(&format!("  Segments scanned: {}\n", resp.segments_scanned));
-                        explain_output.push_str(&format!("  Data skipped: {} bytes\n", resp.data_skipped_bytes));
+                        explain_output.push_str(&format!(
+                            "  Execution time: {:.2} ms\n",
+                            elapsed.as_secs_f64() * 1000.0
+                        ));
+                        explain_output
+                            .push_str(&format!("  Segments scanned: {}\n", resp.segments_scanned));
+                        explain_output.push_str(&format!(
+                            "  Data skipped: {} bytes\n",
+                            resp.data_skipped_bytes
+                        ));
                     }
                 }
             }
         }
         SqlStatement::Insert(cmd) => {
-            let db_name = if cmd.database == "default" { effective_db.to_string() } else { cmd.database };
-            explain_output.push_str(&format!("Query Plan:\n"));
+            let db_name = if cmd.database == "default" {
+                effective_db.to_string()
+            } else {
+                cmd.database
+            };
+            explain_output.push_str("Query Plan:\n");
             explain_output.push_str(&format!("  -> Insert into {}.{}\n", db_name, cmd.table));
             explain_output.push_str(&format!("     Rows to insert: {}\n", cmd.values.len()));
         }
         SqlStatement::Update(cmd) => {
-            let db_name = if cmd.database == "default" { effective_db.to_string() } else { cmd.database };
-            explain_output.push_str(&format!("Query Plan:\n"));
+            let db_name = if cmd.database == "default" {
+                effective_db.to_string()
+            } else {
+                cmd.database
+            };
+            explain_output.push_str("Query Plan:\n");
             explain_output.push_str(&format!("  -> Update on {}.{}\n", db_name, cmd.table));
             explain_output.push_str(&format!("     Assignments: {}\n", cmd.assignments.len()));
             if cmd.where_clause.is_some() {
-                explain_output.push_str(&format!("     Filter: WHERE clause present\n"));
+                explain_output.push_str("     Filter: WHERE clause present\n");
             }
         }
         SqlStatement::Delete(cmd) => {
-            let db_name = if cmd.database == "default" { effective_db.to_string() } else { cmd.database };
-            explain_output.push_str(&format!("Query Plan:\n"));
+            let db_name = if cmd.database == "default" {
+                effective_db.to_string()
+            } else {
+                cmd.database
+            };
+            explain_output.push_str("Query Plan:\n");
             explain_output.push_str(&format!("  -> Delete from {}.{}\n", db_name, cmd.table));
             if cmd.where_clause.is_some() {
-                explain_output.push_str(&format!("     Filter: WHERE clause present\n"));
+                explain_output.push_str("     Filter: WHERE clause present\n");
             }
         }
         SqlStatement::Ddl(ddl) => {
-            explain_output.push_str(&format!("Query Plan:\n"));
+            explain_output.push_str("Query Plan:\n");
             explain_output.push_str(&format!("  -> DDL Operation: {:?}\n", ddl));
         }
         _ => {
@@ -5684,7 +5922,7 @@ fn parse_date_string(s: &str) -> Option<i32> {
     let month: u32 = parts[1].parse().ok()?;
     let day: u32 = parts[2].parse().ok()?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
@@ -5917,10 +6155,7 @@ fn validate_predicate(expr: &str) -> Result<(), String> {
     // - % and _ for LIKE patterns (inside quotes)
     // - @ for emails and other common string values
     // - - for dashes in values
-    let allowed_chars = |c: char| {
-        c.is_ascii_alphanumeric()
-            || " _.<>=!&|()'\"%,@-".contains(c)
-    };
+    let allowed_chars = |c: char| c.is_ascii_alphanumeric() || " _.<>=!&|()'\"%,@-".contains(c);
     if !expr.chars().all(allowed_chars) {
         return Err("WHERE contains invalid characters".into());
     }
@@ -6121,155 +6356,524 @@ where
 /// Apply the default database to DDL commands that use "default" as database
 fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlCommand {
     match cmd {
-        DdlCommand::CreateTable { database, table, schema_json } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateTable { database: db, table, schema_json }
+        DdlCommand::CreateTable {
+            database,
+            table,
+            schema_json,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateTable {
+                database: db,
+                table,
+                schema_json,
+            }
         }
-        DdlCommand::DropTable { database, table, if_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropTable { database: db, table, if_exists }
+        DdlCommand::DropTable {
+            database,
+            table,
+            if_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropTable {
+                database: db,
+                table,
+                if_exists,
+            }
         }
         DdlCommand::TruncateTable { database, table } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::TruncateTable { database: db, table }
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::TruncateTable {
+                database: db,
+                table,
+            }
         }
-        DdlCommand::AlterTableAddColumn { database, table, column, data_type, nullable } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AlterTableAddColumn { database: db, table, column, data_type, nullable }
+        DdlCommand::AlterTableAddColumn {
+            database,
+            table,
+            column,
+            data_type,
+            nullable,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AlterTableAddColumn {
+                database: db,
+                table,
+                column,
+                data_type,
+                nullable,
+            }
         }
-        DdlCommand::AlterTableDropColumn { database, table, column } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AlterTableDropColumn { database: db, table, column }
+        DdlCommand::AlterTableDropColumn {
+            database,
+            table,
+            column,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AlterTableDropColumn {
+                database: db,
+                table,
+                column,
+            }
         }
         // Commands that don't have a table-level database field
-        DdlCommand::CreateDatabase { .. } |
-        DdlCommand::DropDatabase { .. } |
-        DdlCommand::ShowDatabases => cmd,
+        DdlCommand::CreateDatabase { .. }
+        | DdlCommand::DropDatabase { .. }
+        | DdlCommand::ShowDatabases => cmd,
         // ShowTables may have an optional database - if not specified, use effective_db
         DdlCommand::ShowTables { database } => {
-            let db = database.map(|d| {
-                if d == "default" { effective_db.to_string() } else { d }
-            }).or_else(|| Some(effective_db.to_string()));
+            let db = database
+                .map(|d| {
+                    if d == "default" {
+                        effective_db.to_string()
+                    } else {
+                        d
+                    }
+                })
+                .or_else(|| Some(effective_db.to_string()));
             DdlCommand::ShowTables { database: db }
         }
         // DescribeTable needs database substitution
         DdlCommand::DescribeTable { database, table } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DescribeTable { database: db, table }
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DescribeTable {
+                database: db,
+                table,
+            }
         }
         // View commands need database substitution
-        DdlCommand::CreateView { database, name, query_sql, or_replace } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateView { database: db, name, query_sql, or_replace }
+        DdlCommand::CreateView {
+            database,
+            name,
+            query_sql,
+            or_replace,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateView {
+                database: db,
+                name,
+                query_sql,
+                or_replace,
+            }
         }
-        DdlCommand::DropView { database, name, if_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropView { database: db, name, if_exists }
+        DdlCommand::DropView {
+            database,
+            name,
+            if_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropView {
+                database: db,
+                name,
+                if_exists,
+            }
         }
         DdlCommand::ShowViews { database } => {
-            let db = database.map(|d| {
-                if d == "default" { effective_db.to_string() } else { d }
-            }).or_else(|| Some(effective_db.to_string()));
+            let db = database
+                .map(|d| {
+                    if d == "default" {
+                        effective_db.to_string()
+                    } else {
+                        d
+                    }
+                })
+                .or_else(|| Some(effective_db.to_string()));
             DdlCommand::ShowViews { database: db }
         }
         // Materialized View commands need database substitution
-        DdlCommand::CreateMaterializedView { database, name, query_sql, or_replace } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateMaterializedView { database: db, name, query_sql, or_replace }
+        DdlCommand::CreateMaterializedView {
+            database,
+            name,
+            query_sql,
+            or_replace,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateMaterializedView {
+                database: db,
+                name,
+                query_sql,
+                or_replace,
+            }
         }
-        DdlCommand::DropMaterializedView { database, name, if_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropMaterializedView { database: db, name, if_exists }
+        DdlCommand::DropMaterializedView {
+            database,
+            name,
+            if_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropMaterializedView {
+                database: db,
+                name,
+                if_exists,
+            }
         }
         DdlCommand::RefreshMaterializedView { database, name } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
             DdlCommand::RefreshMaterializedView { database: db, name }
         }
         DdlCommand::ShowMaterializedViews { database } => {
-            let db = database.map(|d| {
-                if d == "default" { effective_db.to_string() } else { d }
-            }).or_else(|| Some(effective_db.to_string()));
+            let db = database
+                .map(|d| {
+                    if d == "default" {
+                        effective_db.to_string()
+                    } else {
+                        d
+                    }
+                })
+                .or_else(|| Some(effective_db.to_string()));
             DdlCommand::ShowMaterializedViews { database: db }
         }
         // Index commands need database substitution
-        DdlCommand::CreateIndex { database, table, index_name, columns, index_type, if_not_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateIndex { database: db, table, index_name, columns, index_type, if_not_exists }
+        DdlCommand::CreateIndex {
+            database,
+            table,
+            index_name,
+            columns,
+            index_type,
+            if_not_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateIndex {
+                database: db,
+                table,
+                index_name,
+                columns,
+                index_type,
+                if_not_exists,
+            }
         }
-        DdlCommand::DropIndex { database, table, index_name, if_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropIndex { database: db, table, index_name, if_exists }
+        DdlCommand::DropIndex {
+            database,
+            table,
+            index_name,
+            if_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropIndex {
+                database: db,
+                table,
+                index_name,
+                if_exists,
+            }
         }
         DdlCommand::ShowIndexes { database, table } => {
-            let db = database.map(|d| {
-                if d == "default" { effective_db.to_string() } else { d }
-            }).or_else(|| Some(effective_db.to_string()));
+            let db = database
+                .map(|d| {
+                    if d == "default" {
+                        effective_db.to_string()
+                    } else {
+                        d
+                    }
+                })
+                .or_else(|| Some(effective_db.to_string()));
             let tbl = table; // table is optional
-            DdlCommand::ShowIndexes { database: db, table: tbl }
+            DdlCommand::ShowIndexes {
+                database: db,
+                table: tbl,
+            }
         }
         // Maintenance commands need database substitution
         DdlCommand::AnalyzeTable { database, table } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AnalyzeTable { database: db, table }
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AnalyzeTable {
+                database: db,
+                table,
+            }
         }
-        DdlCommand::Vacuum { database, table, full } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::Vacuum { database: db, table, full }
+        DdlCommand::Vacuum {
+            database,
+            table,
+            full,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::Vacuum {
+                database: db,
+                table,
+                full,
+            }
         }
         DdlCommand::Deduplicate { database, table } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::Deduplicate { database: db, table }
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::Deduplicate {
+                database: db,
+                table,
+            }
         }
-        DdlCommand::SetDeduplication { database, table, config } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::SetDeduplication { database: db, table, config }
+        DdlCommand::SetDeduplication {
+            database,
+            table,
+            config,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::SetDeduplication {
+                database: db,
+                table,
+                config,
+            }
         }
         // New DDL commands for Phase 19
-        DdlCommand::AlterTableRename { database, old_table, new_table } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AlterTableRename { database: db, old_table, new_table }
+        DdlCommand::AlterTableRename {
+            database,
+            old_table,
+            new_table,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AlterTableRename {
+                database: db,
+                old_table,
+                new_table,
+            }
         }
-        DdlCommand::AlterTableRenameColumn { database, table, old_column, new_column } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AlterTableRenameColumn { database: db, table, old_column, new_column }
+        DdlCommand::AlterTableRenameColumn {
+            database,
+            table,
+            old_column,
+            new_column,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AlterTableRenameColumn {
+                database: db,
+                table,
+                old_column,
+                new_column,
+            }
         }
-        DdlCommand::CreateTableAs { database, table, query_sql, if_not_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateTableAs { database: db, table, query_sql, if_not_exists }
+        DdlCommand::CreateTableAs {
+            database,
+            table,
+            query_sql,
+            if_not_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateTableAs {
+                database: db,
+                table,
+                query_sql,
+                if_not_exists,
+            }
         }
-        DdlCommand::CreateSequence { database, name, start, increment, min_value, max_value, cycle, if_not_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CreateSequence { database: db, name, start, increment, min_value, max_value, cycle, if_not_exists }
+        DdlCommand::CreateSequence {
+            database,
+            name,
+            start,
+            increment,
+            min_value,
+            max_value,
+            cycle,
+            if_not_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CreateSequence {
+                database: db,
+                name,
+                start,
+                increment,
+                min_value,
+                max_value,
+                cycle,
+                if_not_exists,
+            }
         }
-        DdlCommand::DropSequence { database, name, if_exists } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropSequence { database: db, name, if_exists }
+        DdlCommand::DropSequence {
+            database,
+            name,
+            if_exists,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropSequence {
+                database: db,
+                name,
+                if_exists,
+            }
         }
-        DdlCommand::AlterSequence { database, name, restart_with, increment } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AlterSequence { database: db, name, restart_with, increment }
+        DdlCommand::AlterSequence {
+            database,
+            name,
+            restart_with,
+            increment,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AlterSequence {
+                database: db,
+                name,
+                restart_with,
+                increment,
+            }
         }
         DdlCommand::ShowSequences { database } => {
-            let db = database.map(|d| {
-                if d == "default" { effective_db.to_string() } else { d }
-            }).or_else(|| Some(effective_db.to_string()));
+            let db = database
+                .map(|d| {
+                    if d == "default" {
+                        effective_db.to_string()
+                    } else {
+                        d
+                    }
+                })
+                .or_else(|| Some(effective_db.to_string()));
             DdlCommand::ShowSequences { database: db }
         }
-        DdlCommand::CopyFrom { database, table, source, format, options } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CopyFrom { database: db, table, source, format, options }
+        DdlCommand::CopyFrom {
+            database,
+            table,
+            source,
+            format,
+            options,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CopyFrom {
+                database: db,
+                table,
+                source,
+                format,
+                options,
+            }
         }
-        DdlCommand::CopyTo { database, table, destination, format, options } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::CopyTo { database: db, table, destination, format, options }
+        DdlCommand::CopyTo {
+            database,
+            table,
+            destination,
+            format,
+            options,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CopyTo {
+                database: db,
+                table,
+                destination,
+                format,
+                options,
+            }
         }
-        DdlCommand::AddConstraint { database, table, constraint } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::AddConstraint { database: db, table, constraint }
+        DdlCommand::AddConstraint {
+            database,
+            table,
+            constraint,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::AddConstraint {
+                database: db,
+                table,
+                constraint,
+            }
         }
-        DdlCommand::DropConstraint { database, table, constraint_name } => {
-            let db = if database == "default" { effective_db.to_string() } else { database };
-            DdlCommand::DropConstraint { database: db, table, constraint_name }
+        DdlCommand::DropConstraint {
+            database,
+            table,
+            constraint_name,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropConstraint {
+                database: db,
+                table,
+                constraint_name,
+            }
         }
     }
 }

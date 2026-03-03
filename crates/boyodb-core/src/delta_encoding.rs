@@ -40,7 +40,10 @@ pub fn delta_decode_i64(data: &[u8]) -> io::Result<Vec<i64>> {
     }
 
     if data.len() < 16 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "buffer too small for header"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "buffer too small for header",
+        ));
     }
 
     // Read base value
@@ -146,11 +149,17 @@ fn read_varint_u64(data: &[u8]) -> io::Result<(u64, usize)> {
         }
         shift += 7;
         if shift >= 64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "varint too long"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint too long",
+            ));
         }
     }
 
-    Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of varint"))
+    Err(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "unexpected end of varint",
+    ))
 }
 
 /// Double-delta encoding for highly regular timestamps (e.g., fixed intervals)
@@ -320,8 +329,10 @@ mod tests {
         let double_encoded = double_delta_encode_i64(&values);
 
         // Double delta should be even smaller for regular intervals
-        assert!(double_encoded.len() <= single_encoded.len(),
-                "Double delta should be <= single delta for regular intervals");
+        assert!(
+            double_encoded.len() <= single_encoded.len(),
+            "Double delta should be <= single delta for regular intervals"
+        );
 
         // Verify roundtrip
         let decoded = double_delta_decode_i64(&double_encoded).unwrap();
@@ -391,10 +402,17 @@ mod tests {
     fn test_varint_encoding() {
         // Test various varint sizes
         let test_values = vec![
-            0i64, 1, -1, 127, -128,
-            16383, -16384,  // 2 bytes
-            2097151, -2097152,  // 3 bytes
-            i64::MAX, i64::MIN,
+            0i64,
+            1,
+            -1,
+            127,
+            -128,
+            16383,
+            -16384, // 2 bytes
+            2097151,
+            -2097152, // 3 bytes
+            i64::MAX,
+            i64::MIN,
         ];
 
         for &val in &test_values {

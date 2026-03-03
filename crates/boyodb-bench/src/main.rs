@@ -65,13 +65,13 @@ async fn main() -> Result<()> {
         .with_cache_hot_segments(args.cache_hot_segments)
         .with_cache_warm_segments(args.cache_warm_segments)
         .with_cache_cold_segments(args.cache_cold_segments);
-    
+
     // Db::open is synchronous
     let db = Db::open(config)?;
-    
+
     // Create Database
     db.create_database("default")?;
-    
+
     // Create Table
     // define schema json
     let schema_json = r#"[
@@ -81,13 +81,9 @@ async fn main() -> Result<()> {
         {"name": "status_code", "type": "uint64", "nullable": false},
         {"name": "request_id", "type": "string", "nullable": false}
     ]"#;
-    
+
     // create_table only takes 3 args
-    db.create_table(
-        "default",
-        "logs",
-        Some(schema_json.to_string()),
-    )?;
+    db.create_table("default", "logs", Some(schema_json.to_string()))?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("event_time", DataType::UInt64, false),
@@ -101,8 +97,8 @@ async fn main() -> Result<()> {
     println!("Generating and ingesting data...");
     let start_ingest = Instant::now();
     let mut rng = StdRng::seed_from_u64(42);
-    
-    let total_batches = (args.rows + args.batch_size - 1) / args.batch_size;
+
+    let total_batches = args.rows.div_ceil(args.batch_size);
     let mut ingest_bytes: usize = 0;
 
     for b in 0..total_batches {
@@ -118,12 +114,12 @@ async fn main() -> Result<()> {
         let mut latencies = Vec::with_capacity(this_batch);
         let mut status_codes = Vec::with_capacity(this_batch);
         let mut request_ids = Vec::with_capacity(this_batch);
-        
-        // Simulate clustered status codes: 
+
+        // Simulate clustered status codes:
         // Batches 0-8: STRICTLY 200 (Min=200, Max=200) -> Pruned when querying 500
         // Batch 9: STRICTLY 500 (Min=500, Max=500) -> Scanned
         let status_val = if b % 10 == 9 { 500 } else { 200 };
-        
+
         // Ensure monotonically increasing event_time for time pruning
         let start_time = b as u64 * 1000 * args.batch_size as u64;
 
@@ -134,7 +130,7 @@ async fn main() -> Result<()> {
             status_codes.push(status_val);
             request_ids.push(format!("req-{}", rng.gen::<u64>()));
         }
-        
+
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -145,16 +141,16 @@ async fn main() -> Result<()> {
                 Arc::new(StringArray::from(request_ids)),
             ],
         )?;
-        
+
         // Write to IPC
         let mut payload = Vec::new();
         {
-             let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut payload, &schema)?;
-             writer.write(&batch)?;
-             writer.finish()?;
+            let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut payload, &schema)?;
+            writer.write(&batch)?;
+            writer.finish()?;
         }
-           ingest_bytes += payload.len();
-        
+        ingest_bytes += payload.len();
+
         // Ingest Sync
         let ingest_batch = boyodb_core::engine::IngestBatch {
             payload_ipc: payload,
@@ -165,7 +161,7 @@ async fn main() -> Result<()> {
         };
         db.ingest_ipc(ingest_batch)?;
     }
-    
+
     let ingest_elapsed = start_ingest.elapsed();
     let ingest_rps = args.rows as f64 / ingest_elapsed.as_secs_f64();
     let ingest_mib = ingest_bytes as f64 / (1024.0 * 1024.0);
@@ -174,23 +170,24 @@ async fn main() -> Result<()> {
         "Ingest took {:?} | {:.1} rows/s | {:.1} MiB/s",
         ingest_elapsed, ingest_rps, ingest_mibps
     );
-    
+
     // Validate count
     // Use Db::query with blocking API
-    let resp = db.query(boyodb_core::engine::QueryRequest {
-        sql: "SELECT count(*) FROM logs".to_string(),
-        timeout_millis: 10000,
-        collect_stats: false,
-    }).map_err(|e| anyhow::anyhow!("query failed: {e}"))?;
-    
+    let resp = db
+        .query(boyodb_core::engine::QueryRequest {
+            sql: "SELECT count(*) FROM logs".to_string(),
+            timeout_millis: 10000,
+            collect_stats: false,
+        })
+        .map_err(|e| anyhow::anyhow!("query failed: {e}"))?;
+
     // Decode response IPC to print
     let cursor = std::io::Cursor::new(&resp.records_ipc);
-    let mut reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)?;
-    while let Some(batch) = reader.next() {
+    let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None)?;
+    for batch in reader {
         let b = batch?;
         arrow::util::pretty::print_batches(&[b])?;
     }
-
 
     println!("\n--- Running Queries ---");
 
@@ -202,31 +199,35 @@ async fn main() -> Result<()> {
     // This should prune ~90% of segments (the ones strictly 200).
     let q2 = "SELECT count(*) FROM logs WHERE status_code = 500";
     measure_query(&db, "New Index (Clustered)", q2, args.query_iters)?;
-    
+
     // 3. Control: Random Latency
     let q3 = "SELECT count(*) FROM logs WHERE latency > 0.95";
     measure_query(&db, "Control (Random Col)", q3, args.query_iters)?;
-    
+
     Ok(())
 }
 
 fn measure_query(db: &Db, name: &str, sql: &str, iters: usize) -> Result<()> {
     print!("{}: ", name);
     // Warmup
-    let _ = db.query(boyodb_core::engine::QueryRequest {
-        sql: sql.to_string(),
-        timeout_millis: 10000,
-        collect_stats: false,
-    }).map_err(|e| anyhow::anyhow!(e))?;
+    let _ = db
+        .query(boyodb_core::engine::QueryRequest {
+            sql: sql.to_string(),
+            timeout_millis: 10000,
+            collect_stats: false,
+        })
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let mut durs = Vec::with_capacity(iters);
     for _ in 0..iters {
         let start = Instant::now();
-        let _ = db.query(boyodb_core::engine::QueryRequest {
-            sql: sql.to_string(),
-            timeout_millis: 10000,
-            collect_stats: false,
-        }).map_err(|e| anyhow::anyhow!(e))?;
+        let _ = db
+            .query(boyodb_core::engine::QueryRequest {
+                sql: sql.to_string(),
+                timeout_millis: 10000,
+                collect_stats: false,
+            })
+            .map_err(|e| anyhow::anyhow!(e))?;
         durs.push(start.elapsed());
     }
 
@@ -236,10 +237,7 @@ fn measure_query(db: &Db, name: &str, sql: &str, iters: usize) -> Result<()> {
     let p99 = percentile(&durs, 0.99);
     let avg = durs.iter().sum::<Duration>() / (durs.len() as u32);
 
-    println!(
-        "avg={:?} p50={:?} p90={:?} p99={:?}",
-        avg, p50, p90, p99
-    );
+    println!("avg={:?} p50={:?} p90={:?} p99={:?}", avg, p50, p90, p99);
     Ok(())
 }
 

@@ -181,8 +181,11 @@ impl ClusterManager {
 
         let local_node = NodeMeta::new(node_id.clone(), config.rpc_addr, config.gossip_addr);
 
-        let membership =
-            Membership::new(config.cluster_id.clone(), local_node, config.seed_nodes.clone());
+        let membership = Membership::new(
+            config.cluster_id.clone(),
+            local_node,
+            config.seed_nodes.clone(),
+        );
 
         let gossip = GossipProtocol::new(config.gossip_config.clone(), membership);
         let election = ElectionState::new(node_id.clone(), config.election_config.clone());
@@ -263,10 +266,8 @@ impl ClusterManager {
             leader_id: election.current_leader.clone(),
             alive_nodes: gossip.alive_node_count(),
             total_nodes: gossip.total_node_count(),
-            has_quorum: election.has_write_quorum(
-                gossip.alive_node_count(),
-                gossip.total_node_count(),
-            ),
+            has_quorum: election
+                .has_write_quorum(gossip.alive_node_count(), gossip.total_node_count()),
         }
     }
 
@@ -350,7 +351,10 @@ impl ClusterManager {
                 None
             }
 
-            ElectionMessage::StepDown { term, ref leader_id } => {
+            ElectionMessage::StepDown {
+                term,
+                ref leader_id,
+            } => {
                 election.handle_step_down(term, leader_id);
                 self.gossip.write().membership.set_leader(None, None);
                 None
@@ -358,10 +362,7 @@ impl ClusterManager {
         }
     }
 
-    async fn handle_election_message(
-        &self,
-        msg: ElectionMessage,
-    ) -> Result<(), EngineError> {
+    async fn handle_election_message(&self, msg: ElectionMessage) -> Result<(), EngineError> {
         let response = self.handle_election_message_sync(msg);
 
         // Broadcast response if any
@@ -408,7 +409,12 @@ impl ClusterManager {
     /// Run the election protocol tick (sync part).
     fn election_tick_sync(
         &self,
-    ) -> (bool, Option<ElectionMessage>, Option<ElectionMessage>, Option<ElectionMessage>) {
+    ) -> (
+        bool,
+        Option<ElectionMessage>,
+        Option<ElectionMessage>,
+        Option<ElectionMessage>,
+    ) {
         // Check lease expiry
         let mut stepdown: Option<ElectionMessage> = None;
         {
@@ -522,11 +528,9 @@ impl ClusterManager {
                     .max()
                     .unwrap_or(0);
 
-                let _ = pw
-                    .result_tx
-                    .send(WriteResult::Success {
-                        manifest_version: max_version,
-                    });
+                let _ = pw.result_tx.send(WriteResult::Success {
+                    manifest_version: max_version,
+                });
             }
         }
     }
@@ -577,10 +581,7 @@ pub async fn start_gossip_listener(
     let mut buf = vec![0u8; 65536];
 
     loop {
-        if manager
-            .shutdown
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if manager.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
 
@@ -637,10 +638,7 @@ pub async fn start_cluster_tasks(manager: Arc<ClusterManager>) {
     let mut election_ticker = tokio::time::interval(election_check_interval);
 
     loop {
-        if manager
-            .shutdown
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if manager.shutdown.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
 

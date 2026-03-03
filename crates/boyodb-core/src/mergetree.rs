@@ -9,8 +9,8 @@
 //! allowing binary search to find the approximate position of any key.
 
 use arrow_array::{
-    cast::AsArray, Array, ArrayRef, Int64Array, RecordBatch, StringArray, UInt64Array,
-    TimestampMicrosecondArray,
+    cast::AsArray, Array, ArrayRef, Int64Array, RecordBatch, StringArray,
+    TimestampMicrosecondArray, UInt64Array,
 };
 use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 use arrow_schema::{DataType, Schema};
@@ -102,7 +102,10 @@ impl KeyValue {
                 KeyValue::String(arr.value(idx).to_string())
             }
             DataType::Timestamp(_, _) => {
-                let arr = arr.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+                let arr = arr
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap();
                 KeyValue::Timestamp(arr.value(idx))
             }
             _ => {
@@ -128,11 +131,7 @@ pub struct SparseIndex {
 
 impl SparseIndex {
     /// Build a sparse index from sorted record batches
-    pub fn build(
-        batches: &[RecordBatch],
-        key_columns: &[String],
-        granularity: usize,
-    ) -> Self {
+    pub fn build(batches: &[RecordBatch], key_columns: &[String], granularity: usize) -> Self {
         let mut marks = Vec::new();
         let mut current_row: u64 = 0;
 
@@ -143,7 +142,11 @@ impl SparseIndex {
             let key_arrays: Vec<&dyn Array> = key_columns
                 .iter()
                 .filter_map(|col| {
-                    batch.schema().index_of(col).ok().map(|idx| batch.column(idx).as_ref())
+                    batch
+                        .schema()
+                        .index_of(col)
+                        .ok()
+                        .map(|idx| batch.column(idx).as_ref())
                 })
                 .collect();
 
@@ -188,9 +191,9 @@ impl SparseIndex {
         }
 
         // Binary search for the first mark >= target
-        let pos = self.marks.partition_point(|mark| {
-            compare_keys(&mark.key_values, target_key) == Ordering::Less
-        });
+        let pos = self
+            .marks
+            .partition_point(|mark| compare_keys(&mark.key_values, target_key) == Ordering::Less);
 
         let start = if pos > 0 {
             self.marks[pos - 1].row_offset
@@ -371,9 +374,15 @@ pub struct MergeSettings {
     pub min_age_to_merge_seconds: u64,
 }
 
-fn default_min_parts() -> usize { 3 }
-fn default_max_parts() -> usize { 10 }
-fn default_target_size() -> u64 { 150 * 1024 * 1024 } // 150MB
+fn default_min_parts() -> usize {
+    3
+}
+fn default_max_parts() -> usize {
+    10
+}
+fn default_target_size() -> u64 {
+    150 * 1024 * 1024
+} // 150MB
 
 impl Default for MergeSettings {
     fn default() -> Self {
@@ -423,11 +432,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_primary_key() {
-        let batch = make_test_batch(
-            &[3, 1, 2],
-            &["c", "a", "b"],
-            &[300, 100, 200],
-        );
+        let batch = make_test_batch(&[3, 1, 2], &["c", "a", "b"], &[300, 100, 200]);
 
         let sorted = sort_by_primary_key(vec![batch], &["id".to_string()]).unwrap();
         assert_eq!(sorted.len(), 1);
@@ -445,16 +450,10 @@ mod tests {
 
     #[test]
     fn test_sort_by_composite_key() {
-        let batch = make_test_batch(
-            &[1, 1, 2, 2],
-            &["b", "a", "d", "c"],
-            &[100, 200, 300, 400],
-        );
+        let batch = make_test_batch(&[1, 1, 2, 2], &["b", "a", "d", "c"], &[100, 200, 300, 400]);
 
-        let sorted = sort_by_primary_key(
-            vec![batch],
-            &["id".to_string(), "name".to_string()],
-        ).unwrap();
+        let sorted =
+            sort_by_primary_key(vec![batch], &["id".to_string(), "name".to_string()]).unwrap();
 
         let sorted_names: Vec<&str> = sorted[0]
             .column(1)
@@ -506,7 +505,7 @@ mod tests {
         // Search for id=35 (between 30 and 40)
         let (start, end) = index.find_range(&[KeyValue::Int64(35)]);
         assert!(start <= 3); // Should start at or before row 3 (id=40)
-        assert!(end >= 6);   // Should end at or after row 6 (id=70)
+        assert!(end >= 6); // Should end at or after row 6 (id=70)
 
         // Search for id=5 (before all data)
         let (start, end) = index.find_range(&[KeyValue::Int64(5)]);
@@ -522,11 +521,9 @@ mod tests {
         let batch1 = make_test_batch(&[1, 3, 5], &["a", "c", "e"], &[100, 300, 500]);
         let batch2 = make_test_batch(&[2, 4, 6], &["b", "d", "f"], &[200, 400, 600]);
 
-        let merged = merge_sorted_segments(
-            vec![vec![batch1], vec![batch2]],
-            &["id".to_string()],
-            1000,
-        ).unwrap();
+        let merged =
+            merge_sorted_segments(vec![vec![batch1], vec![batch2]], &["id".to_string()], 1000)
+                .unwrap();
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].num_rows(), 6);
@@ -559,7 +556,10 @@ mod tests {
     fn test_key_value_comparison() {
         assert_eq!(KeyValue::Int64(1).cmp(&KeyValue::Int64(2)), Ordering::Less);
         assert_eq!(KeyValue::Int64(2).cmp(&KeyValue::Int64(2)), Ordering::Equal);
-        assert_eq!(KeyValue::Int64(3).cmp(&KeyValue::Int64(2)), Ordering::Greater);
+        assert_eq!(
+            KeyValue::Int64(3).cmp(&KeyValue::Int64(2)),
+            Ordering::Greater
+        );
 
         assert_eq!(
             KeyValue::String("abc".to_string()).cmp(&KeyValue::String("abd".to_string())),

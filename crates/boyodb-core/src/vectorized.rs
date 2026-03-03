@@ -196,24 +196,66 @@ fn aggregate_single_batch(
     let group_arr = batch.column(group_idx);
 
     // Extract group keys as u64 (works for most integer types)
-    let group_keys: Vec<Option<u64>> = if let Some(arr) = group_arr.as_any().downcast_ref::<UInt64Array>() {
-        (0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }).collect()
-    } else if let Some(arr) = group_arr.as_any().downcast_ref::<Int64Array>() {
-        (0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i) as u64) }).collect()
-    } else {
-        return result; // Unsupported group key type
-    };
+    let group_keys: Vec<Option<u64>> =
+        if let Some(arr) = group_arr.as_any().downcast_ref::<UInt64Array>() {
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
+                .collect()
+        } else if let Some(arr) = group_arr.as_any().downcast_ref::<Int64Array>() {
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i) as u64)
+                    }
+                })
+                .collect()
+        } else {
+            return result; // Unsupported group key type
+        };
 
     // Extract values
-    let values: Vec<Option<f64>> = if let Some(arr) = value_arr.as_any().downcast_ref::<Float64Array>() {
-        (0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) }).collect()
-    } else if let Some(arr) = value_arr.as_any().downcast_ref::<Int64Array>() {
-        (0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i) as f64) }).collect()
-    } else if let Some(arr) = value_arr.as_any().downcast_ref::<UInt64Array>() {
-        (0..arr.len()).map(|i| if arr.is_null(i) { None } else { Some(arr.value(i) as f64) }).collect()
-    } else {
-        return result;
-    };
+    let values: Vec<Option<f64>> =
+        if let Some(arr) = value_arr.as_any().downcast_ref::<Float64Array>() {
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i))
+                    }
+                })
+                .collect()
+        } else if let Some(arr) = value_arr.as_any().downcast_ref::<Int64Array>() {
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i) as f64)
+                    }
+                })
+                .collect()
+        } else if let Some(arr) = value_arr.as_any().downcast_ref::<UInt64Array>() {
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        None
+                    } else {
+                        Some(arr.value(i) as f64)
+                    }
+                })
+                .collect()
+        } else {
+            return result;
+        };
 
     // Hash-based aggregation (vectorized over the batch)
     for (key_opt, val_opt) in group_keys.iter().zip(values.iter()) {
@@ -222,10 +264,14 @@ fn aggregate_single_batch(
             *result.counts.entry(*key).or_insert(0) += 1;
 
             let min_entry = result.mins.entry(*key).or_insert(f64::INFINITY);
-            if *val < *min_entry { *min_entry = *val; }
+            if *val < *min_entry {
+                *min_entry = *val;
+            }
 
             let max_entry = result.maxs.entry(*key).or_insert(f64::NEG_INFINITY);
-            if *val > *max_entry { *max_entry = *val; }
+            if *val > *max_entry {
+                *max_entry = *val;
+            }
         }
     }
 
@@ -241,24 +287,22 @@ pub fn parallel_count_star(batches: &[RecordBatch]) -> u64 {
 pub fn parallel_sum(batches: &[RecordBatch], col: &str) -> f64 {
     batches
         .par_iter()
-        .map(|batch| {
-            match batch.schema().index_of(col) {
-                Ok(idx) => {
-                    let arr = batch.column(idx);
-                    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
-                        vectorized_sum_f64(a)
-                    } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-                        vectorized_sum_i64(a) as f64
-                    } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
-                        vectorized_sum_u64(a) as f64
-                    } else if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
-                        aggregate::sum(a).unwrap_or(0) as f64
-                    } else {
-                        0.0
-                    }
+        .map(|batch| match batch.schema().index_of(col) {
+            Ok(idx) => {
+                let arr = batch.column(idx);
+                if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+                    vectorized_sum_f64(a)
+                } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                    vectorized_sum_i64(a) as f64
+                } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+                    vectorized_sum_u64(a) as f64
+                } else if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
+                    aggregate::sum(a).unwrap_or(0) as f64
+                } else {
+                    0.0
                 }
-                Err(_) => 0.0,
             }
+            Err(_) => 0.0,
         })
         .sum()
 }
@@ -267,22 +311,20 @@ pub fn parallel_sum(batches: &[RecordBatch], col: &str) -> f64 {
 pub fn parallel_min(batches: &[RecordBatch], col: &str) -> Option<f64> {
     let mins: Vec<Option<f64>> = batches
         .par_iter()
-        .map(|batch| {
-            match batch.schema().index_of(col) {
-                Ok(idx) => {
-                    let arr = batch.column(idx);
-                    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
-                        vectorized_min_f64(a)
-                    } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-                        vectorized_min_i64(a).map(|v| v as f64)
-                    } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
-                        aggregate::min(a).map(|v| v as f64)
-                    } else {
-                        None
-                    }
+        .map(|batch| match batch.schema().index_of(col) {
+            Ok(idx) => {
+                let arr = batch.column(idx);
+                if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+                    vectorized_min_f64(a)
+                } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                    vectorized_min_i64(a).map(|v| v as f64)
+                } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+                    aggregate::min(a).map(|v| v as f64)
+                } else {
+                    None
                 }
-                Err(_) => None,
             }
+            Err(_) => None,
         })
         .collect();
 
@@ -293,22 +335,20 @@ pub fn parallel_min(batches: &[RecordBatch], col: &str) -> Option<f64> {
 pub fn parallel_max(batches: &[RecordBatch], col: &str) -> Option<f64> {
     let maxs: Vec<Option<f64>> = batches
         .par_iter()
-        .map(|batch| {
-            match batch.schema().index_of(col) {
-                Ok(idx) => {
-                    let arr = batch.column(idx);
-                    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
-                        vectorized_max_f64(a)
-                    } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-                        vectorized_max_i64(a).map(|v| v as f64)
-                    } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
-                        aggregate::max(a).map(|v| v as f64)
-                    } else {
-                        None
-                    }
+        .map(|batch| match batch.schema().index_of(col) {
+            Ok(idx) => {
+                let arr = batch.column(idx);
+                if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+                    vectorized_max_f64(a)
+                } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                    vectorized_max_i64(a).map(|v| v as f64)
+                } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+                    aggregate::max(a).map(|v| v as f64)
+                } else {
+                    None
                 }
-                Err(_) => None,
             }
+            Err(_) => None,
         })
         .collect();
 
@@ -433,16 +473,24 @@ pub fn simd_minmax_f64_batched(data: &[f64]) -> (f64, f64) {
         // Find min/max in this batch
         for i in 0..SIMD_BATCH_SIZE {
             let v = data[base + i];
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
     }
 
     // Process remaining
     for i in (chunks * SIMD_BATCH_SIZE)..len {
         let v = data[i];
-        if v < min { min = v; }
-        if v > max { max = v; }
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
     }
 
     (min, max)
@@ -472,8 +520,12 @@ pub fn simd_aggregate_f64_pipelined(data: &[f64]) -> (u64, f64, f64, f64) {
         for i in 0..SIMD_BATCH_SIZE {
             let v = data[base + i];
             sum += v;
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
     }
 
@@ -481,8 +533,12 @@ pub fn simd_aggregate_f64_pipelined(data: &[f64]) -> (u64, f64, f64, f64) {
     for i in (chunks * SIMD_BATCH_SIZE)..len {
         let v = data[i];
         sum += v;
-        if v < min { min = v; }
-        if v > max { max = v; }
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
     }
 
     (count, sum, min, max)
@@ -575,7 +631,11 @@ impl SimdStats {
             total_values: total,
             simd_batches: batches,
             remainder_values: remainder,
-            simd_efficiency: if total > 0 { simd_processed as f64 / total as f64 * 100.0 } else { 0.0 },
+            simd_efficiency: if total > 0 {
+                simd_processed as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -600,38 +660,42 @@ mod tests {
 
     #[test]
     fn test_parallel_count_star() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch1 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![4, 5]))],
-        ).unwrap();
+        let batch2 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![4, 5]))])
+                .unwrap();
 
         assert_eq!(parallel_count_star(&[batch1, batch2]), 5);
     }
 
     #[test]
     fn test_parallel_sum() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
 
         let batch1 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let batch2 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![4, 5]))],
-        ).unwrap();
+        let batch2 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![4, 5]))])
+                .unwrap();
 
         assert_eq!(parallel_sum(&[batch1, batch2], "value"), 15.0);
     }
@@ -651,7 +715,8 @@ mod tests {
                 Arc::new(UInt64Array::from(vec![1, 2, 1, 2, 2])),
                 Arc::new(Float64Array::from(vec![10.0, 5.0, 20.0, 15.0, 25.0])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = parallel_aggregate_batches(&[batch], "value", Some("group_id"));
 
@@ -753,7 +818,13 @@ mod tests {
     fn test_simd_empty_arrays() {
         assert_eq!(simd_sum_f64_batched(&[]), 0.0);
         assert_eq!(simd_sum_i64_batched(&[]), 0);
-        assert_eq!(simd_minmax_f64_batched(&[]), (f64::INFINITY, f64::NEG_INFINITY));
-        assert_eq!(simd_aggregate_f64_pipelined(&[]), (0, 0.0, f64::INFINITY, f64::NEG_INFINITY));
+        assert_eq!(
+            simd_minmax_f64_batched(&[]),
+            (f64::INFINITY, f64::NEG_INFINITY)
+        );
+        assert_eq!(
+            simd_aggregate_f64_pipelined(&[]),
+            (0, 0.0, f64::INFINITY, f64::NEG_INFINITY)
+        );
     }
 }

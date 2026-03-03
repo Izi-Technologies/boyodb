@@ -1,26 +1,29 @@
 use boyodb_core::engine::{Db, QueryRequest};
 use boyodb_core::AuthManager;
-use pgwire::api::auth::StartupHandler;
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{DataRowEncoder, FieldInfo, QueryResponse, Response, FieldFormat, DescribeStatementResponse, DescribePortalResponse, Tag};
-use pgwire::api::{ClientInfo, Type, MakeHandler};
-use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use pgwire::messages::PgWireFrontendMessage;
-use pgwire::messages::extendedquery::{Bind, Parse, ParseComplete, BindComplete};
-use std::sync::Arc;
 use futures::stream;
-use pgwire::api::portal::Portal;
-use pgwire::api::stmt::NoopQueryParser;
-use pgwire::api::ClientPortalStore;
-use pgwire::api::store::PortalStore;
-use pgwire::api::stmt::StoredStatement;
-use std::fmt::Debug;
 use futures::{Sink, SinkExt};
-use pgwire::messages::{PgWireBackendMessage, startup::Authentication};
-use pgwire::messages::response::ErrorResponse;
+use pgwire::api::auth::StartupHandler;
 use pgwire::api::auth::{self, DefaultServerParameterProvider};
+use pgwire::api::portal::Portal;
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::results::{
+    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo,
+    QueryResponse, Response, Tag,
+};
+use pgwire::api::stmt::NoopQueryParser;
+use pgwire::api::stmt::StoredStatement;
+use pgwire::api::store::PortalStore;
+use pgwire::api::ClientPortalStore;
 use pgwire::api::PgWireConnectionState;
+use pgwire::api::{ClientInfo, MakeHandler, Type};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::extendedquery::{Bind, BindComplete, Parse, ParseComplete};
+use pgwire::messages::response::ErrorResponse;
+use pgwire::messages::PgWireFrontendMessage;
+use pgwire::messages::{startup::Authentication, PgWireBackendMessage};
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 #[derive(Clone)]
@@ -118,7 +121,7 @@ pub struct BoyodbPgHandler {
 
 impl BoyodbPgHandler {
     pub fn new(db: Arc<Db>) -> Self {
-        Self { 
+        Self {
             db,
             query_parser: Arc::new(NoopQueryParser::new()),
             statements: Arc::new(Mutex::new(HashMap::new())),
@@ -175,15 +178,17 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         };
 
         let db = self.db.clone();
-        let resp = tokio::task::spawn_blocking(move || {
-            db.query(req)
-        }).await.map_err(|e| PgWireError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let resp = tokio::task::spawn_blocking(move || db.query(req))
+            .await
+            .map_err(|e| PgWireError::IoError(std::io::Error::other(e)))?;
 
         match resp {
             Ok(result) => {
-                 if result.records_ipc.is_empty() {
+                if result.records_ipc.is_empty() {
                     let tag_str = query.trim().to_uppercase();
-                    let tag = if tag_str.starts_with("BEGIN") || tag_str.starts_with("START TRANSACTION") {
+                    let tag = if tag_str.starts_with("BEGIN")
+                        || tag_str.starts_with("START TRANSACTION")
+                    {
                         "BEGIN"
                     } else if tag_str.starts_with("COMMIT") || tag_str.starts_with("END") {
                         "COMMIT"
@@ -193,16 +198,20 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
                         "OK"
                     };
                     return Ok(Response::Execution(Tag::new(tag)));
-                 }
+                }
 
-                 let batches = boyodb_core::engine::read_ipc_batches(&result.records_ipc)
+                let batches = boyodb_core::engine::read_ipc_batches(&result.records_ipc)
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-                 let schema = batches[0].schema();
-                 let fields: Vec<FieldInfo> = schema.fields().iter().map(|f| {
-                    let pg_type = arrow_to_pg_type(f.data_type());
-                    FieldInfo::new(f.name().clone(), None, None, pg_type, FieldFormat::Text)
-                }).collect();
+                let schema = batches[0].schema();
+                let fields: Vec<FieldInfo> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        let pg_type = arrow_to_pg_type(f.data_type());
+                        FieldInfo::new(f.name().clone(), None, None, pg_type, FieldFormat::Text)
+                    })
+                    .collect();
 
                 let field_infos = Arc::new(fields);
                 let mut results = Vec::new();
@@ -217,7 +226,10 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
                         results.push(encoder.finish());
                     }
                 }
-                Ok(Response::Query(QueryResponse::new(field_infos, stream::iter(results))))
+                Ok(Response::Query(QueryResponse::new(
+                    field_infos,
+                    stream::iter(results),
+                )))
             }
             Err(e) => Err(engine_error_to_pg(e)),
         }
@@ -234,7 +246,7 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-         Ok(DescribeStatementResponse::new(vec![], vec![]))
+        Ok(DescribeStatementResponse::new(vec![], vec![]))
     }
 
     async fn do_describe_portal<C>(
@@ -248,42 +260,44 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-         Ok(DescribePortalResponse::new(vec![]))
+        Ok(DescribePortalResponse::new(vec![]))
     }
 
-    async fn on_bind<C>(
-        &self,
-        client: &mut C,
-        msg: Bind,
-    ) -> PgWireResult<()>
+    async fn on_bind<C>(&self, client: &mut C, msg: Bind) -> PgWireResult<()>
     where
         C: ClientInfo + Unpin + Send + Sync + ClientPortalStore + Sink<PgWireBackendMessage>,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        tracing::debug!("PG Bind: portal={:?} stmt={:?}", msg.portal_name, msg.statement_name);
-        let _portal_name = msg.portal_name.clone().unwrap_or_else(|| "".to_string());
-        let stmt_name = msg.statement_name.clone().unwrap_or_else(|| "".to_string());
-        
-        let stmt = client.portal_store().get_statement(&stmt_name)
-            .ok_or_else(|| PgWireError::ApiError(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Statement not found"))))?;
-        
-        let portal = Portal::try_new(&msg, stmt)
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            
+        tracing::debug!(
+            "PG Bind: portal={:?} stmt={:?}",
+            msg.portal_name,
+            msg.statement_name
+        );
+        let _portal_name = msg.portal_name.clone().unwrap_or_default();
+        let stmt_name = msg.statement_name.clone().unwrap_or_default();
+
+        let stmt = client
+            .portal_store()
+            .get_statement(&stmt_name)
+            .ok_or_else(|| {
+                PgWireError::ApiError(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Statement not found",
+                )))
+            })?;
+
+        let portal = Portal::try_new(&msg, stmt).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
         client.portal_store().put_portal(Arc::new(portal));
-        client.send(PgWireBackendMessage::BindComplete(BindComplete::new())).await?;
+        client
+            .send(PgWireBackendMessage::BindComplete(BindComplete::new()))
+            .await?;
         Ok(())
     }
 
-
-
-    async fn on_parse<C>(
-        &self,
-        client: &mut C,
-        msg: Parse,
-    ) -> PgWireResult<()>
+    async fn on_parse<C>(&self, client: &mut C, msg: Parse) -> PgWireResult<()>
     where
         C: ClientInfo + Unpin + Send + Sync + ClientPortalStore + Sink<PgWireBackendMessage>,
         C::PortalStore: PortalStore<Statement = Self::Statement>,
@@ -291,12 +305,14 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         // println!("DEBUG: In on_parse name={:?}", msg.name);
-        let name = msg.name.clone().unwrap_or_else(|| "".to_string());
+        let name = msg.name.clone().unwrap_or_default();
         let query = msg.query.clone();
-        
+
         let stmt = StoredStatement::new(name.clone(), query, vec![]);
         client.portal_store().put_statement(Arc::new(stmt));
-        client.send(PgWireBackendMessage::ParseComplete(ParseComplete::new())).await?;
+        client
+            .send(PgWireBackendMessage::ParseComplete(ParseComplete::new()))
+            .await?;
         Ok(())
     }
 }
@@ -325,15 +341,17 @@ impl SimpleQueryHandler for BoyodbPgHandler {
         };
 
         let db = self.db.clone();
-        let resp = tokio::task::spawn_blocking(move || {
-            db.query(req)
-        }).await.map_err(|e| PgWireError::IoError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let resp = tokio::task::spawn_blocking(move || db.query(req))
+            .await
+            .map_err(|e| PgWireError::IoError(std::io::Error::other(e)))?;
 
         match resp {
             Ok(result) => {
                 if result.records_ipc.is_empty() {
                     let tag_str = query.trim().to_uppercase();
-                    let tag = if tag_str.starts_with("BEGIN") || tag_str.starts_with("START TRANSACTION") {
+                    let tag = if tag_str.starts_with("BEGIN")
+                        || tag_str.starts_with("START TRANSACTION")
+                    {
                         "BEGIN"
                     } else if tag_str.starts_with("COMMIT") || tag_str.starts_with("END") {
                         "COMMIT"
@@ -349,10 +367,14 @@ impl SimpleQueryHandler for BoyodbPgHandler {
                     .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
                 let schema = batches[0].schema();
-                let fields: Vec<FieldInfo> = schema.fields().iter().map(|f| {
-                    let pg_type = arrow_to_pg_type(f.data_type());
-                    FieldInfo::new(f.name().clone(), None, None, pg_type, FieldFormat::Text)
-                }).collect();
+                let fields: Vec<FieldInfo> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        let pg_type = arrow_to_pg_type(f.data_type());
+                        FieldInfo::new(f.name().clone(), None, None, pg_type, FieldFormat::Text)
+                    })
+                    .collect();
 
                 let field_infos = Arc::new(fields);
                 let mut results = Vec::new();
@@ -370,8 +392,11 @@ impl SimpleQueryHandler for BoyodbPgHandler {
                 }
 
                 let stream = stream::iter(results);
-                
-                Ok(vec![Response::Query(QueryResponse::new(field_infos, stream))])
+
+                Ok(vec![Response::Query(QueryResponse::new(
+                    field_infos,
+                    stream,
+                ))])
             }
             Err(e) => Err(engine_error_to_pg(e)),
         }
@@ -451,71 +476,103 @@ fn encode_arrow_value(
     use arrow_schema::DataType;
 
     if array.is_null(row) {
-        encoder.encode_field(&None::<i32>).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&None::<i32>)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         return Ok(());
     }
 
     match data_type {
         DataType::Boolean => {
             let val = downcast_array::<BooleanArray>(array, "Boolean")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int8 => {
             let val = downcast_array::<Int8Array>(array, "Int8")?.value(row);
-            encoder.encode_field(&(val as i16)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&(val as i16))
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int16 => {
             let val = downcast_array::<Int16Array>(array, "Int16")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int32 => {
             let val = downcast_array::<Int32Array>(array, "Int32")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Int64 => {
             let val = downcast_array::<Int64Array>(array, "Int64")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt8 => {
             let val = downcast_array::<UInt8Array>(array, "UInt8")?.value(row);
-            encoder.encode_field(&(val as i16)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&(val as i16))
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt16 => {
             let val = downcast_array::<UInt16Array>(array, "UInt16")?.value(row);
-            encoder.encode_field(&(val as i32)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&(val as i32))
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt32 => {
             let val = downcast_array::<UInt32Array>(array, "UInt32")?.value(row);
-            encoder.encode_field(&(val as i64)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&(val as i64))
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::UInt64 => {
             let val = downcast_array::<UInt64Array>(array, "UInt64")?.value(row);
             // Cast to i64 (may lose precision for very large values)
-            encoder.encode_field(&(val as i64)).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&(val as i64))
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Float32 => {
             let val = downcast_array::<Float32Array>(array, "Float32")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Float64 => {
             let val = downcast_array::<Float64Array>(array, "Float64")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Utf8 => {
             let val = downcast_array::<StringArray>(array, "Utf8")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::LargeUtf8 => {
             let val = downcast_array::<LargeStringArray>(array, "LargeUtf8")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Binary => {
             let val = downcast_array::<BinaryArray>(array, "Binary")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::LargeBinary => {
             let val = downcast_array::<LargeBinaryArray>(array, "LargeBinary")?.value(row);
-            encoder.encode_field(&val).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&val)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         DataType::Date32 => {
             // Days since Unix epoch -> convert to ISO date string
@@ -523,9 +580,13 @@ fn encode_arrow_value(
             let date = chrono::NaiveDate::from_num_days_from_ce_opt(val + 719163); // Days from 0001-01-01 to 1970-01-01
             if let Some(d) = date {
                 let date_str: String = d.to_string();
-                encoder.encode_field(&date_str).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&date_str)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             } else {
-                encoder.encode_field(&None::<i32>).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&None::<i32>)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             }
         }
         DataType::Date64 => {
@@ -536,25 +597,35 @@ fn encode_arrow_value(
             let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs);
             if let Some(dt) = ts {
                 let date_str = dt.format("%Y-%m-%d").to_string();
-                encoder.encode_field(&date_str).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&date_str)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             } else {
-                encoder.encode_field(&None::<i32>).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&None::<i32>)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             }
         }
         DataType::Timestamp(unit, _tz) => {
             use arrow_schema::TimeUnit;
             let micros = match unit {
                 TimeUnit::Second => {
-                    downcast_array::<TimestampSecondArray>(array, "TimestampSecond")?.value(row) * 1_000_000
+                    downcast_array::<TimestampSecondArray>(array, "TimestampSecond")?.value(row)
+                        * 1_000_000
                 }
                 TimeUnit::Millisecond => {
-                    downcast_array::<TimestampMillisecondArray>(array, "TimestampMillisecond")?.value(row) * 1_000
+                    downcast_array::<TimestampMillisecondArray>(array, "TimestampMillisecond")?
+                        .value(row)
+                        * 1_000
                 }
                 TimeUnit::Microsecond => {
-                    downcast_array::<TimestampMicrosecondArray>(array, "TimestampMicrosecond")?.value(row)
+                    downcast_array::<TimestampMicrosecondArray>(array, "TimestampMicrosecond")?
+                        .value(row)
                 }
                 TimeUnit::Nanosecond => {
-                    downcast_array::<TimestampNanosecondArray>(array, "TimestampNanosecond")?.value(row) / 1_000
+                    downcast_array::<TimestampNanosecondArray>(array, "TimestampNanosecond")?
+                        .value(row)
+                        / 1_000
                 }
             };
             let secs = micros / 1_000_000;
@@ -562,9 +633,13 @@ fn encode_arrow_value(
             let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, nsecs);
             if let Some(dt) = ts {
                 let ts_str = dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
-                encoder.encode_field(&ts_str).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&ts_str)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             } else {
-                encoder.encode_field(&None::<i32>).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                encoder
+                    .encode_field(&None::<i32>)
+                    .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             }
         }
         DataType::Decimal128(_, scale) => {
@@ -574,11 +649,15 @@ fn encode_arrow_value(
             let int_part = val / divisor;
             let frac_part = (val % divisor).abs();
             let formatted = format!("{}.{:0width$}", int_part, frac_part, width = scale as usize);
-            encoder.encode_field(&formatted).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&formatted)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
         _ => {
             // Fallback: encode as string representation
-            encoder.encode_field(&"?".to_string()).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&"?".to_string())
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         }
     }
     Ok(())
@@ -586,12 +665,17 @@ fn encode_arrow_value(
 
 /// Handle introspection queries that PostgreSQL clients expect.
 /// Returns Some(response) if this is an introspection query, None otherwise.
-fn handle_introspection_query<'a>(query: &str, db: &Arc<Db>) -> Option<PgWireResult<Vec<Response<'a>>>> {
+fn handle_introspection_query<'a>(
+    query: &str,
+    db: &Arc<Db>,
+) -> Option<PgWireResult<Vec<Response<'a>>>> {
     let query_upper = query.trim().to_uppercase();
     let query_normalized = query_upper.replace('\n', " ").replace('\r', "");
 
     // Handle version() function
-    if query_normalized.contains("SELECT VERSION()") || query_normalized.starts_with("SELECT VERSION()") {
+    if query_normalized.contains("SELECT VERSION()")
+        || query_normalized.starts_with("SELECT VERSION()")
+    {
         return Some(make_single_row_response(
             "version",
             Type::VARCHAR,
@@ -601,7 +685,9 @@ fn handle_introspection_query<'a>(query: &str, db: &Arc<Db>) -> Option<PgWireRes
 
     // Handle current_database()
     if query_normalized.contains("CURRENT_DATABASE()") {
-        let db_name = db.current_database().unwrap_or_else(|| "boyodb".to_string());
+        let db_name = db
+            .current_database()
+            .unwrap_or_else(|| "boyodb".to_string());
         return Some(make_single_row_response(
             "current_database",
             Type::VARCHAR,
@@ -687,34 +773,70 @@ fn handle_introspection_query<'a>(query: &str, db: &Arc<Db>) -> Option<PgWireRes
 
 fn handle_show_command<'a>(query: &str) -> Option<PgWireResult<Vec<Response<'a>>>> {
     if query.contains("SERVER_VERSION") {
-        return Some(make_single_row_response("server_version", Type::VARCHAR, "14.0"));
+        return Some(make_single_row_response(
+            "server_version",
+            Type::VARCHAR,
+            "14.0",
+        ));
     }
     if query.contains("CLIENT_ENCODING") {
-        return Some(make_single_row_response("client_encoding", Type::VARCHAR, "UTF8"));
+        return Some(make_single_row_response(
+            "client_encoding",
+            Type::VARCHAR,
+            "UTF8",
+        ));
     }
     if query.contains("SERVER_ENCODING") {
-        return Some(make_single_row_response("server_encoding", Type::VARCHAR, "UTF8"));
+        return Some(make_single_row_response(
+            "server_encoding",
+            Type::VARCHAR,
+            "UTF8",
+        ));
     }
     if query.contains("STANDARD_CONFORMING_STRINGS") {
-        return Some(make_single_row_response("standard_conforming_strings", Type::VARCHAR, "on"));
+        return Some(make_single_row_response(
+            "standard_conforming_strings",
+            Type::VARCHAR,
+            "on",
+        ));
     }
     if query.contains("TRANSACTION ISOLATION") || query.contains("TRANSACTION_ISOLATION") {
-        return Some(make_single_row_response("transaction_isolation", Type::VARCHAR, "read committed"));
+        return Some(make_single_row_response(
+            "transaction_isolation",
+            Type::VARCHAR,
+            "read committed",
+        ));
     }
     if query.contains("DATESTYLE") || query.contains("DATE_STYLE") {
-        return Some(make_single_row_response("DateStyle", Type::VARCHAR, "ISO, MDY"));
+        return Some(make_single_row_response(
+            "DateStyle",
+            Type::VARCHAR,
+            "ISO, MDY",
+        ));
     }
     if query.contains("TIMEZONE") || query.contains("TIME ZONE") {
         return Some(make_single_row_response("TimeZone", Type::VARCHAR, "UTC"));
     }
     if query.contains("SEARCH_PATH") {
-        return Some(make_single_row_response("search_path", Type::VARCHAR, "\"$user\", public"));
+        return Some(make_single_row_response(
+            "search_path",
+            Type::VARCHAR,
+            "\"$user\", public",
+        ));
     }
     if query.contains("IS_SUPERUSER") {
-        return Some(make_single_row_response("is_superuser", Type::VARCHAR, "on"));
+        return Some(make_single_row_response(
+            "is_superuser",
+            Type::VARCHAR,
+            "on",
+        ));
     }
     if query.contains("SESSION_AUTHORIZATION") {
-        return Some(make_single_row_response("session_authorization", Type::VARCHAR, "boyodb"));
+        return Some(make_single_row_response(
+            "session_authorization",
+            Type::VARCHAR,
+            "boyodb",
+        ));
     }
     // Default for unknown SHOW commands
     Some(make_single_row_response("", Type::VARCHAR, ""))
@@ -740,27 +862,54 @@ fn handle_pg_type_query<'a>(_query: &str) -> PgWireResult<Vec<Response<'a>>> {
 
     let fields = vec![
         FieldInfo::new("oid".to_string(), None, None, Type::INT4, FieldFormat::Text),
-        FieldInfo::new("typname".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
-        FieldInfo::new("typtype".to_string(), None, None, Type::CHAR, FieldFormat::Text),
+        FieldInfo::new(
+            "typname".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "typtype".to_string(),
+            None,
+            None,
+            Type::CHAR,
+            FieldFormat::Text,
+        ),
     ];
     let field_infos = Arc::new(fields);
 
     let mut results = Vec::new();
     for (oid, name, typtype) in types {
         let mut encoder = DataRowEncoder::new(field_infos.clone());
-        encoder.encode_field(&oid).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        encoder.encode_field(&name).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        encoder.encode_field(&typtype).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&oid)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&name)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&typtype)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         results.push(encoder.finish());
     }
 
-    Ok(vec![Response::Query(QueryResponse::new(field_infos, stream::iter(results)))])
+    Ok(vec![Response::Query(QueryResponse::new(
+        field_infos,
+        stream::iter(results),
+    ))])
 }
 
 fn handle_pg_namespace_query<'a>() -> PgWireResult<Vec<Response<'a>>> {
     let fields = vec![
         FieldInfo::new("oid".to_string(), None, None, Type::INT4, FieldFormat::Text),
-        FieldInfo::new("nspname".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
+        FieldInfo::new(
+            "nspname".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
     ];
     let field_infos = Arc::new(fields);
 
@@ -768,24 +917,53 @@ fn handle_pg_namespace_query<'a>() -> PgWireResult<Vec<Response<'a>>> {
 
     // Public schema
     let mut encoder = DataRowEncoder::new(field_infos.clone());
-    encoder.encode_field(&2200i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-    encoder.encode_field(&"public").map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder
+        .encode_field(&2200i32)
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder
+        .encode_field(&"public")
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
     results.push(encoder.finish());
 
     // pg_catalog schema
     let mut encoder = DataRowEncoder::new(field_infos.clone());
-    encoder.encode_field(&11i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-    encoder.encode_field(&"pg_catalog").map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder
+        .encode_field(&11i32)
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder
+        .encode_field(&"pg_catalog")
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
     results.push(encoder.finish());
 
-    Ok(vec![Response::Query(QueryResponse::new(field_infos, stream::iter(results)))])
+    Ok(vec![Response::Query(QueryResponse::new(
+        field_infos,
+        stream::iter(results),
+    ))])
 }
 
 fn handle_pg_tables_query<'a>(db: &Arc<Db>) -> PgWireResult<Vec<Response<'a>>> {
     let fields = vec![
-        FieldInfo::new("schemaname".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
-        FieldInfo::new("tablename".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
-        FieldInfo::new("tableowner".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
+        FieldInfo::new(
+            "schemaname".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "tablename".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "tableowner".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
     ];
     let field_infos = Arc::new(fields);
 
@@ -795,21 +973,48 @@ fn handle_pg_tables_query<'a>(db: &Arc<Db>) -> PgWireResult<Vec<Response<'a>>> {
     if let Ok(tables) = db.list_tables(None) {
         for table in tables {
             let mut encoder = DataRowEncoder::new(field_infos.clone());
-            encoder.encode_field(&"public").map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            encoder.encode_field(&table.name.as_str()).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            encoder.encode_field(&"boyodb").map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&"public")
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&table.name.as_str())
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&"boyodb")
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
             results.push(encoder.finish());
         }
     }
 
-    Ok(vec![Response::Query(QueryResponse::new(field_infos, stream::iter(results)))])
+    Ok(vec![Response::Query(QueryResponse::new(
+        field_infos,
+        stream::iter(results),
+    ))])
 }
 
 fn handle_pg_database_query<'a>(db: &Arc<Db>) -> PgWireResult<Vec<Response<'a>>> {
     let fields = vec![
-        FieldInfo::new("datname".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
-        FieldInfo::new("datdba".to_string(), None, None, Type::INT4, FieldFormat::Text),
-        FieldInfo::new("encoding".to_string(), None, None, Type::INT4, FieldFormat::Text),
+        FieldInfo::new(
+            "datname".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "datdba".to_string(),
+            None,
+            None,
+            Type::INT4,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "encoding".to_string(),
+            None,
+            None,
+            Type::INT4,
+            FieldFormat::Text,
+        ),
     ];
     let field_infos = Arc::new(fields);
 
@@ -819,28 +1024,57 @@ fn handle_pg_database_query<'a>(db: &Arc<Db>) -> PgWireResult<Vec<Response<'a>>>
     if let Ok(databases) = db.list_databases() {
         for dbname in databases {
             let mut encoder = DataRowEncoder::new(field_infos.clone());
-            encoder.encode_field(&dbname.as_str()).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            encoder.encode_field(&10i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;  // owner OID
-            encoder.encode_field(&6i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;   // UTF8 encoding
+            encoder
+                .encode_field(&dbname.as_str())
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            encoder
+                .encode_field(&10i32)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?; // owner OID
+            encoder
+                .encode_field(&6i32)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?; // UTF8 encoding
             results.push(encoder.finish());
         }
     } else {
         // Return default database
         let mut encoder = DataRowEncoder::new(field_infos.clone());
-        let db_name = db.current_database().unwrap_or_else(|| "boyodb".to_string());
-        encoder.encode_field(&db_name.as_str()).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        encoder.encode_field(&10i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        encoder.encode_field(&6i32).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let db_name = db
+            .current_database()
+            .unwrap_or_else(|| "boyodb".to_string());
+        encoder
+            .encode_field(&db_name.as_str())
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&10i32)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&6i32)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         results.push(encoder.finish());
     }
 
-    Ok(vec![Response::Query(QueryResponse::new(field_infos, stream::iter(results)))])
+    Ok(vec![Response::Query(QueryResponse::new(
+        field_infos,
+        stream::iter(results),
+    ))])
 }
 
 fn handle_pg_settings_query<'a>() -> PgWireResult<Vec<Response<'a>>> {
     let fields = vec![
-        FieldInfo::new("name".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
-        FieldInfo::new("setting".to_string(), None, None, Type::VARCHAR, FieldFormat::Text),
+        FieldInfo::new(
+            "name".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
+        FieldInfo::new(
+            "setting".to_string(),
+            None,
+            None,
+            Type::VARCHAR,
+            FieldFormat::Text,
+        ),
     ];
     let field_infos = Arc::new(fields);
 
@@ -856,12 +1090,19 @@ fn handle_pg_settings_query<'a>() -> PgWireResult<Vec<Response<'a>>> {
     let mut results = Vec::new();
     for (name, value) in settings {
         let mut encoder = DataRowEncoder::new(field_infos.clone());
-        encoder.encode_field(&name).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        encoder.encode_field(&value).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&name)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        encoder
+            .encode_field(&value)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         results.push(encoder.finish());
     }
 
-    Ok(vec![Response::Query(QueryResponse::new(field_infos, stream::iter(results)))])
+    Ok(vec![Response::Query(QueryResponse::new(
+        field_infos,
+        stream::iter(results),
+    ))])
 }
 
 fn make_single_row_response<'a>(
@@ -879,7 +1120,9 @@ fn make_single_row_response<'a>(
     let field_infos = Arc::new(fields);
 
     let mut encoder = DataRowEncoder::new(field_infos.clone());
-    encoder.encode_field(&value).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+    encoder
+        .encode_field(&value)
+        .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
     let row = encoder.finish();
 
     Ok(vec![Response::Query(QueryResponse::new(
@@ -906,19 +1149,19 @@ fn make_empty_response<'a>() -> PgWireResult<Vec<Response<'a>>> {
 /// PostgreSQL SQLSTATE codes for common errors
 /// See: https://www.postgresql.org/docs/current/errcodes-appendix.html
 mod sqlstate {
-    pub const SYNTAX_ERROR: &str = "42601";           // Syntax error
-    pub const UNDEFINED_TABLE: &str = "42P01";        // Table does not exist
-    pub const UNDEFINED_COLUMN: &str = "42703";       // Column does not exist
-    pub const UNDEFINED_FUNCTION: &str = "42883";     // Function does not exist
-    pub const UNDEFINED_DATABASE: &str = "3D000";     // Database does not exist
-    pub const INVALID_CATALOG_NAME: &str = "3D000";   // Invalid catalog name
-    pub const DATA_EXCEPTION: &str = "22000";         // Data exception
-    pub const INTEGRITY_CONSTRAINT: &str = "23000";   // Integrity constraint violation
-    pub const INVALID_AUTH: &str = "28000";           // Invalid authorization
-    pub const INTERNAL_ERROR: &str = "XX000";         // Internal error
-    pub const CONNECTION_EXCEPTION: &str = "08000";   // Connection exception
-    pub const FEATURE_NOT_SUPPORTED: &str = "0A000";  // Feature not supported
-    pub const QUERY_CANCELED: &str = "57014";         // Query canceled
+    pub const SYNTAX_ERROR: &str = "42601"; // Syntax error
+    pub const UNDEFINED_TABLE: &str = "42P01"; // Table does not exist
+    pub const UNDEFINED_COLUMN: &str = "42703"; // Column does not exist
+    pub const UNDEFINED_FUNCTION: &str = "42883"; // Function does not exist
+    pub const UNDEFINED_DATABASE: &str = "3D000"; // Database does not exist
+    pub const INVALID_CATALOG_NAME: &str = "3D000"; // Invalid catalog name
+    pub const DATA_EXCEPTION: &str = "22000"; // Data exception
+    pub const INTEGRITY_CONSTRAINT: &str = "23000"; // Integrity constraint violation
+    pub const INVALID_AUTH: &str = "28000"; // Invalid authorization
+    pub const INTERNAL_ERROR: &str = "XX000"; // Internal error
+    pub const CONNECTION_EXCEPTION: &str = "08000"; // Connection exception
+    pub const FEATURE_NOT_SUPPORTED: &str = "0A000"; // Feature not supported
+    pub const QUERY_CANCELED: &str = "57014"; // Query canceled
     pub const INSUFFICIENT_PRIVILEGE: &str = "42501"; // Insufficient privilege
 }
 
@@ -930,11 +1173,20 @@ fn engine_error_to_pg(e: boyodb_core::engine::EngineError) -> PgWireError {
         EngineError::NotFound(msg) => {
             // Determine if it's a table, column, or database based on message content
             if msg.to_lowercase().contains("table") {
-                (sqlstate::UNDEFINED_TABLE, format!("table does not exist: {}", msg))
+                (
+                    sqlstate::UNDEFINED_TABLE,
+                    format!("table does not exist: {}", msg),
+                )
             } else if msg.to_lowercase().contains("column") {
-                (sqlstate::UNDEFINED_COLUMN, format!("column does not exist: {}", msg))
+                (
+                    sqlstate::UNDEFINED_COLUMN,
+                    format!("column does not exist: {}", msg),
+                )
             } else if msg.to_lowercase().contains("database") {
-                (sqlstate::UNDEFINED_DATABASE, format!("database does not exist: {}", msg))
+                (
+                    sqlstate::UNDEFINED_DATABASE,
+                    format!("database does not exist: {}", msg),
+                )
             } else {
                 (sqlstate::INTERNAL_ERROR, format!("not found: {}", msg))
             }
@@ -944,15 +1196,32 @@ fn engine_error_to_pg(e: boyodb_core::engine::EngineError) -> PgWireError {
             if msg.to_lowercase().contains("syntax") || msg.to_lowercase().contains("parse") {
                 (sqlstate::SYNTAX_ERROR, format!("syntax error: {}", msg))
             } else {
-                (sqlstate::DATA_EXCEPTION, format!("invalid argument: {}", msg))
+                (
+                    sqlstate::DATA_EXCEPTION,
+                    format!("invalid argument: {}", msg),
+                )
             }
         }
-        EngineError::Internal(msg) => (sqlstate::INTERNAL_ERROR, format!("internal error: {}", msg)),
-        EngineError::NotImplemented(msg) => (sqlstate::FEATURE_NOT_SUPPORTED, format!("feature not supported: {}", msg)),
+        EngineError::Internal(msg) => {
+            (sqlstate::INTERNAL_ERROR, format!("internal error: {}", msg))
+        }
+        EngineError::NotImplemented(msg) => (
+            sqlstate::FEATURE_NOT_SUPPORTED,
+            format!("feature not supported: {}", msg),
+        ),
         EngineError::Io(msg) => (sqlstate::INTERNAL_ERROR, format!("I/O error: {}", msg)),
-        EngineError::Timeout(msg) => (sqlstate::QUERY_CANCELED, format!("query timed out: {}", msg)),
-        EngineError::Remote(msg) => (sqlstate::CONNECTION_EXCEPTION, format!("remote error: {}", msg)),
-        EngineError::Configuration(msg) => (sqlstate::INTERNAL_ERROR, format!("configuration error: {}", msg)),
+        EngineError::Timeout(msg) => (
+            sqlstate::QUERY_CANCELED,
+            format!("query timed out: {}", msg),
+        ),
+        EngineError::Remote(msg) => (
+            sqlstate::CONNECTION_EXCEPTION,
+            format!("remote error: {}", msg),
+        ),
+        EngineError::Configuration(msg) => (
+            sqlstate::INTERNAL_ERROR,
+            format!("configuration error: {}", msg),
+        ),
     };
 
     let error_info = ErrorInfo::new("ERROR".to_string(), code.to_string(), message);

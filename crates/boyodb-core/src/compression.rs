@@ -8,7 +8,7 @@
 //! - Bit-packing for small integers
 
 use std::collections::HashMap;
-use std::io::{Read, Write, Cursor};
+use std::io::{Cursor, Read, Write};
 
 // ============================================================================
 // Compression Codec Abstraction
@@ -167,7 +167,9 @@ impl DictionaryEncoder {
 
     /// Get value for an index
     pub fn get_value(&self, index: u32) -> Option<&[u8]> {
-        self.index_to_value.get(index as usize).map(|v| v.as_slice())
+        self.index_to_value
+            .get(index as usize)
+            .map(|v| v.as_slice())
     }
 
     /// Get dictionary size
@@ -330,7 +332,11 @@ impl DictionaryEncoded {
 
         // Fallbacks
         result.extend_from_slice(&(self.fallback_values.len() as u32).to_le_bytes());
-        for (i, value) in self.fallback_indices.iter().zip(self.fallback_values.iter()) {
+        for (i, value) in self
+            .fallback_indices
+            .iter()
+            .zip(self.fallback_values.iter())
+        {
             result.extend_from_slice(&i.to_le_bytes());
             result.extend_from_slice(&(value.len() as u32).to_le_bytes());
             result.extend_from_slice(value);
@@ -613,7 +619,11 @@ impl Lz4Codec {
 
         for i in search_start..pos {
             let mut len = 0;
-            while pos + len < data.len() && i + len < pos && data[i + len] == data[pos + len] && len < 255 {
+            while pos + len < data.len()
+                && i + len < pos
+                && data[i + len] == data[pos + len]
+                && len < 255
+            {
                 len += 1;
             }
 
@@ -705,7 +715,9 @@ impl Codec for ZstdCodec {
 
         // Check magic
         if &data[0..4] != &[0x28, 0xB5, 0x2F, 0xFD] {
-            return Err(CompressionError::InvalidData("Invalid ZSTD magic".to_string()));
+            return Err(CompressionError::InvalidData(
+                "Invalid ZSTD magic".to_string(),
+            ));
         }
 
         // Read frame header
@@ -838,7 +850,9 @@ impl DeltaEncoder {
             }
         }
 
-        Err(CompressionError::InvalidData("Truncated varint".to_string()))
+        Err(CompressionError::InvalidData(
+            "Truncated varint".to_string(),
+        ))
     }
 }
 
@@ -994,7 +1008,9 @@ impl DoubleDeltaEncoder {
             let value = i64::from_le_bytes(data[1..9].try_into().unwrap());
             Ok((value, 9))
         } else {
-            Err(CompressionError::InvalidData("Invalid encoding".to_string()))
+            Err(CompressionError::InvalidData(
+                "Invalid encoding".to_string(),
+            ))
         }
     }
 }
@@ -1100,7 +1116,9 @@ impl RleEncoder {
                 // Literals
                 let literal_len = control as usize;
                 if pos + literal_len > data.len() {
-                    return Err(CompressionError::InvalidData("Truncated literals".to_string()));
+                    return Err(CompressionError::InvalidData(
+                        "Truncated literals".to_string(),
+                    ));
                 }
 
                 for &byte in &data[pos..pos + literal_len] {
@@ -1133,7 +1151,8 @@ impl RleEncoder {
             let mut run_len = 1usize;
 
             // Count run length
-            while pos + run_len < values.len() && values[pos + run_len] == value && run_len < 65535 {
+            while pos + run_len < values.len() && values[pos + run_len] == value && run_len < 65535
+            {
                 run_len += 1;
             }
 
@@ -1209,7 +1228,11 @@ impl BitPackEncoder {
 
         // Pack values
         let mut bit_pos = 0usize;
-        let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
 
         // Pre-allocate packed bytes
         result.resize(result.len() + num_bytes, 0);
@@ -1248,10 +1271,16 @@ impl BitPackEncoder {
         let bits = data[4];
 
         if bits == 0 || bits > 64 {
-            return Err(CompressionError::InvalidData("Invalid bit width".to_string()));
+            return Err(CompressionError::InvalidData(
+                "Invalid bit width".to_string(),
+            ));
         }
 
-        let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         let mut result = Vec::with_capacity(num_values);
         let packed = &data[5..];
 
@@ -1342,7 +1371,11 @@ impl CompressionManager {
     }
 
     /// Compress with automatic codec selection
-    pub fn compress_auto(&self, data: &[u8], data_type: &str) -> Result<(CodecType, Vec<u8>), CompressionError> {
+    pub fn compress_auto(
+        &self,
+        data: &[u8],
+        data_type: &str,
+    ) -> Result<(CodecType, Vec<u8>), CompressionError> {
         let codec = self.recommend_codec(data, data_type);
         let compressed = self.compress(data, codec)?;
         Ok((codec, compressed))

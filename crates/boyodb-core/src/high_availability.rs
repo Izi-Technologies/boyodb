@@ -3,13 +3,13 @@
 // Automatic failover, read replicas, quorum writes, and health monitoring
 // for production-grade fault tolerance.
 
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Replica Configuration
@@ -21,7 +21,7 @@ pub enum ReplicaRole {
     Leader,
     Follower,
     Candidate,
-    Observer,  // Read-only, doesn't participate in elections
+    Observer, // Read-only, doesn't participate in elections
 }
 
 /// Replica state
@@ -48,7 +48,7 @@ pub struct ReplicaInfo {
     pub commit_index: u64,
     pub zone: Option<String>,
     pub rack: Option<String>,
-    pub priority: i32,  // Higher = more likely to become leader
+    pub priority: i32, // Higher = more likely to become leader
 }
 
 impl ReplicaInfo {
@@ -255,7 +255,9 @@ impl LeaderElection {
 
     /// Add a replica
     pub fn add_replica(&self, replica: ReplicaInfo) {
-        self.replicas.write().insert(replica.replica_id.clone(), replica);
+        self.replicas
+            .write()
+            .insert(replica.replica_id.clone(), replica);
     }
 
     /// Remove a replica
@@ -270,7 +272,7 @@ impl LeaderElection {
 
         state.current_term += 1;
         state.voted_for = Some(self.node_id.clone());
-        state.vote_count = 1;  // Vote for self
+        state.vote_count = 1; // Vote for self
         state.votes_received.clear();
         state.votes_received.insert(self.node_id.clone());
         state.election_start = Some(Instant::now());
@@ -282,7 +284,8 @@ impl LeaderElection {
         let last_log_term = log.last().map(|e| e.term).unwrap_or(0);
 
         let replicas = self.replicas.read();
-        replicas.keys()
+        replicas
+            .keys()
             .filter(|id| *id != &self.node_id)
             .map(|_| VoteRequest {
                 term: state.current_term,
@@ -309,12 +312,13 @@ impl LeaderElection {
         let last_log_term = log.last().map(|e| e.term).unwrap_or(0);
 
         // Check if we can grant vote
-        let log_ok = request.last_log_term > last_log_term ||
-            (request.last_log_term == last_log_term && request.last_log_index >= last_log_index);
+        let log_ok = request.last_log_term > last_log_term
+            || (request.last_log_term == last_log_term && request.last_log_index >= last_log_index);
 
-        let vote_granted = request.term >= state.current_term &&
-            (state.voted_for.is_none() || state.voted_for.as_ref() == Some(&request.candidate_id)) &&
-            log_ok;
+        let vote_granted = request.term >= state.current_term
+            && (state.voted_for.is_none()
+                || state.voted_for.as_ref() == Some(&request.candidate_id))
+            && log_ok;
 
         if vote_granted {
             state.voted_for = Some(request.candidate_id.clone());
@@ -525,11 +529,15 @@ impl ReplicaSelector {
     }
 
     pub fn update_connection_count(&self, replica_id: &str, count: u64) {
-        self.connections.write().insert(replica_id.to_string(), count);
+        self.connections
+            .write()
+            .insert(replica_id.to_string(), count);
     }
 
     pub fn update_latency(&self, replica_id: &str, latency_ms: f64) {
-        self.latencies.write().insert(replica_id.to_string(), latency_ms);
+        self.latencies
+            .write()
+            .insert(replica_id.to_string(), latency_ms);
     }
 
     /// Select replica based on read preference
@@ -537,52 +545,53 @@ impl ReplicaSelector {
         let replicas = self.replicas.read();
 
         let candidates: Vec<_> = match preference {
-            ReadPreference::Primary => {
-                replicas.iter()
-                    .filter(|r| r.role == ReplicaRole::Leader && r.is_available())
-                    .cloned()
-                    .collect()
-            }
+            ReadPreference::Primary => replicas
+                .iter()
+                .filter(|r| r.role == ReplicaRole::Leader && r.is_available())
+                .cloned()
+                .collect(),
             ReadPreference::PrimaryPreferred => {
-                let leaders: Vec<_> = replicas.iter()
+                let leaders: Vec<_> = replicas
+                    .iter()
                     .filter(|r| r.role == ReplicaRole::Leader && r.is_available())
                     .cloned()
                     .collect();
                 if !leaders.is_empty() {
                     leaders
                 } else {
-                    replicas.iter()
+                    replicas
+                        .iter()
                         .filter(|r| r.is_available())
                         .cloned()
                         .collect()
                 }
             }
-            ReadPreference::Secondary => {
-                replicas.iter()
-                    .filter(|r| r.role == ReplicaRole::Follower && r.is_available())
-                    .cloned()
-                    .collect()
-            }
+            ReadPreference::Secondary => replicas
+                .iter()
+                .filter(|r| r.role == ReplicaRole::Follower && r.is_available())
+                .cloned()
+                .collect(),
             ReadPreference::SecondaryPreferred => {
-                let followers: Vec<_> = replicas.iter()
+                let followers: Vec<_> = replicas
+                    .iter()
                     .filter(|r| r.role == ReplicaRole::Follower && r.is_available())
                     .cloned()
                     .collect();
                 if !followers.is_empty() {
                     followers
                 } else {
-                    replicas.iter()
+                    replicas
+                        .iter()
                         .filter(|r| r.is_available())
                         .cloned()
                         .collect()
                 }
             }
-            ReadPreference::Nearest => {
-                replicas.iter()
-                    .filter(|r| r.is_available())
-                    .cloned()
-                    .collect()
-            }
+            ReadPreference::Nearest => replicas
+                .iter()
+                .filter(|r| r.is_available())
+                .cloned()
+                .collect(),
         };
 
         if candidates.is_empty() {
@@ -613,15 +622,14 @@ impl ReplicaSelector {
             }
             LoadBalanceStrategy::LeastConnections => {
                 let conns = self.connections.read();
-                candidates.iter()
+                candidates
+                    .iter()
                     .min_by_key(|r| conns.get(&r.replica_id).copied().unwrap_or(0))
                     .cloned()
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
                 // Use priority as weight
-                let total_weight: i32 = candidates.iter()
-                    .map(|r| r.priority.max(1))
-                    .sum();
+                let total_weight: i32 = candidates.iter().map(|r| r.priority.max(1)).sum();
 
                 let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) as i32;
                 let target = index % total_weight;
@@ -637,11 +645,14 @@ impl ReplicaSelector {
             }
             LoadBalanceStrategy::LeastLatency => {
                 let latencies = self.latencies.read();
-                candidates.iter()
+                candidates
+                    .iter()
                     .min_by(|a, b| {
                         let lat_a = latencies.get(&a.replica_id).copied().unwrap_or(f64::MAX);
                         let lat_b = latencies.get(&b.replica_id).copied().unwrap_or(f64::MAX);
-                        lat_a.partial_cmp(&lat_b).unwrap_or(std::cmp::Ordering::Equal)
+                        lat_a
+                            .partial_cmp(&lat_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .cloned()
             }
@@ -654,7 +665,8 @@ impl ReplicaSelector {
 
         if let Some(ref local_zone) = self.local_zone {
             // First try to find in local zone
-            let local_candidates: Vec<_> = replicas.iter()
+            let local_candidates: Vec<_> = replicas
+                .iter()
                 .filter(|r| r.zone.as_ref() == Some(local_zone) && r.is_available())
                 .filter(|r| match preference {
                     ReadPreference::Primary => r.role == ReplicaRole::Leader,
@@ -747,9 +759,7 @@ impl PendingWrite {
     }
 
     pub fn is_complete(&self) -> bool {
-        let success_count = self.received_acks.iter()
-            .filter(|a| a.success)
-            .count();
+        let success_count = self.received_acks.iter().filter(|a| a.success).count();
         success_count >= self.required_acks
     }
 
@@ -832,27 +842,26 @@ impl QuorumWriter {
         let replicas = self.replicas.read();
 
         match consistency {
-            WriteConsistency::One => {
-                replicas.iter()
-                    .filter(|r| r.is_available())
-                    .take(1)
-                    .cloned()
-                    .collect()
-            }
+            WriteConsistency::One => replicas
+                .iter()
+                .filter(|r| r.is_available())
+                .take(1)
+                .cloned()
+                .collect(),
             WriteConsistency::Quorum | WriteConsistency::LocalQuorum => {
                 let quorum_size = replicas.len() / 2 + 1;
-                replicas.iter()
+                replicas
+                    .iter()
                     .filter(|r| r.is_available())
                     .take(quorum_size)
                     .cloned()
                     .collect()
             }
-            WriteConsistency::All | WriteConsistency::EachQuorum => {
-                replicas.iter()
-                    .filter(|r| r.is_available())
-                    .cloned()
-                    .collect()
-            }
+            WriteConsistency::All | WriteConsistency::EachQuorum => replicas
+                .iter()
+                .filter(|r| r.is_available())
+                .cloned()
+                .collect(),
         }
     }
 
@@ -871,7 +880,8 @@ impl QuorumWriter {
     /// Clean up timed out writes
     pub fn cleanup_timeouts(&self) -> Vec<u64> {
         let mut pending = self.pending_writes.write();
-        let timed_out: Vec<u64> = pending.iter()
+        let timed_out: Vec<u64> = pending
+            .iter()
             .filter(|(_, w)| w.is_timed_out())
             .map(|(id, _)| *id)
             .collect();
@@ -921,16 +931,16 @@ impl HealthMonitor {
     pub fn record_check(&self, replica_id: &str, healthy: bool, latency_ms: f64) -> ReplicaState {
         let mut results = self.results.write();
 
-        let result = results.entry(replica_id.to_string()).or_insert_with(|| {
-            HealthCheckResult {
+        let result = results
+            .entry(replica_id.to_string())
+            .or_insert_with(|| HealthCheckResult {
                 replica_id: replica_id.to_string(),
                 healthy: true,
                 latency_ms: 0.0,
                 last_check: Instant::now(),
                 consecutive_failures: 0,
                 details: HashMap::new(),
-            }
-        });
+            });
 
         result.last_check = Instant::now();
         result.latency_ms = latency_ms;
@@ -977,7 +987,8 @@ impl HealthMonitor {
     /// Get all unhealthy replicas
     pub fn get_unhealthy(&self) -> Vec<String> {
         let results = self.results.read();
-        results.iter()
+        results
+            .iter()
             .filter(|(_, r)| !r.healthy)
             .map(|(id, _)| id.clone())
             .collect()
@@ -1139,11 +1150,7 @@ impl FailoverManager {
     /// Get recent failover events
     pub fn get_events(&self, limit: usize) -> Vec<FailoverEvent> {
         let events = self.events.read();
-        events.iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        events.iter().rev().take(limit).cloned().collect()
     }
 
     /// Check for split brain
@@ -1230,7 +1237,9 @@ impl HaManager {
     pub fn tick(&self) {
         // Check for failover
         if self.failover_manager.check_failover_needed() {
-            let _ = self.failover_manager.trigger_failover("Leader health check failed");
+            let _ = self
+                .failover_manager
+                .trigger_failover("Leader health check failed");
         }
 
         // Cleanup timed out writes
@@ -1243,7 +1252,7 @@ impl HaManager {
             leader: self.election.leader(),
             term: self.election.term(),
             role: self.election.role(),
-            healthy_replicas: 0,  // Would count from health monitor
+            healthy_replicas: 0, // Would count from health monitor
             total_replicas: 0,
             quorum_available: true,
         }
@@ -1323,8 +1332,14 @@ mod tests {
         let election = LeaderElection::new("node1".to_string(), config);
 
         // Add some replicas
-        election.add_replica(ReplicaInfo::new("node2".to_string(), "127.0.0.1:8081".to_string()));
-        election.add_replica(ReplicaInfo::new("node3".to_string(), "127.0.0.1:8082".to_string()));
+        election.add_replica(ReplicaInfo::new(
+            "node2".to_string(),
+            "127.0.0.1:8081".to_string(),
+        ));
+        election.add_replica(ReplicaInfo::new(
+            "node3".to_string(),
+            "127.0.0.1:8082".to_string(),
+        ));
 
         let requests = election.start_election();
         assert_eq!(requests.len(), 2);
@@ -1354,8 +1369,14 @@ mod tests {
         let config = HaConfig::default();
         let election = LeaderElection::new("node1".to_string(), config);
 
-        election.add_replica(ReplicaInfo::new("node2".to_string(), "127.0.0.1:8081".to_string()));
-        election.add_replica(ReplicaInfo::new("node3".to_string(), "127.0.0.1:8082".to_string()));
+        election.add_replica(ReplicaInfo::new(
+            "node2".to_string(),
+            "127.0.0.1:8081".to_string(),
+        ));
+        election.add_replica(ReplicaInfo::new(
+            "node3".to_string(),
+            "127.0.0.1:8082".to_string(),
+        ));
 
         election.start_election();
 
@@ -1549,7 +1570,9 @@ mod tests {
 
         selector.update_replicas(replicas);
 
-        let selected = selector.select_zone_aware(ReadPreference::Secondary).unwrap();
+        let selected = selector
+            .select_zone_aware(ReadPreference::Secondary)
+            .unwrap();
         assert_eq!(selected.zone, Some("us-east-1a".to_string()));
     }
 

@@ -2,7 +2,7 @@ use crate::engine::{EngineConfig, EngineError};
 use crate::replication::{ManifestEntry, SegmentTier};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjPath;
-use object_store::{ObjectStore, GetResult};
+use object_store::{GetResult, ObjectStore};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -17,8 +17,9 @@ pub struct TieredStorage {
 impl TieredStorage {
     pub fn new(cfg: &EngineConfig) -> Result<Self, EngineError> {
         // We capture the handle of the runtime creating the DB (should be a Tokio runtime)
-        let runtime = Handle::try_current()
-            .map_err(|_| EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into()))?;
+        let runtime = Handle::try_current().map_err(|_| {
+            EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into())
+        })?;
 
         let remote = if let (Some(bucket), Some(region)) = (&cfg.s3_bucket, &cfg.s3_region) {
             let mut builder = AmazonS3Builder::new()
@@ -74,7 +75,8 @@ impl TieredStorage {
                 // Also reject keys that are too short (real AWS keys are 20+ chars)
                 if ak_trimmed.len() < 16 || sk_trimmed.len() < 16 {
                     return Err(EngineError::Configuration(
-                        "s3_access_key and s3_secret_key appear too short to be valid credentials".into(),
+                        "s3_access_key and s3_secret_key appear too short to be valid credentials"
+                            .into(),
                     ));
                 }
                 builder = builder
@@ -99,9 +101,13 @@ impl TieredStorage {
         })
     }
 
-    pub fn new_with_remote(cfg: &EngineConfig, remote: Arc<dyn ObjectStore>) -> Result<Self, EngineError> {
-        let runtime = Handle::try_current()
-            .map_err(|_| EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into()))?;
+    pub fn new_with_remote(
+        cfg: &EngineConfig,
+        remote: Arc<dyn ObjectStore>,
+    ) -> Result<Self, EngineError> {
+        let runtime = Handle::try_current().map_err(|_| {
+            EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into())
+        })?;
         Ok(Self {
             remote: Some(remote),
             runtime,
@@ -152,11 +158,13 @@ impl TieredStorage {
                     tokio::task::block_in_place(move || {
                         self.runtime.block_on(async {
                             let get_future = remote.get(&path);
-                            let result: GetResult = get_future.await
+                            let result: GetResult = get_future
+                                .await
                                 .map_err(|e| EngineError::Io(format!("s3 get failed: {}", e)))?;
 
                             let data_future = result.bytes();
-                            let bytes = data_future.await
+                            let bytes = data_future
+                                .await
                                 .map_err(|e| EngineError::Io(format!("s3 bytes failed: {}", e)))?;
                             Ok(bytes.to_vec())
                         })
@@ -201,7 +209,7 @@ impl TieredStorage {
 
         let path = self.local_root.join(format!("{}.ipc", segment_id));
         let tmp_path = path.with_extension("tmp");
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -215,17 +223,17 @@ impl TieredStorage {
                 .truncate(true)
                 .open(&tmp_path)
                 .map_err(|e| EngineError::Io(format!("open segment tmp failed: {}", e)))?;
-            
+
             file.write_all(data)
                 .map_err(|e| EngineError::Io(format!("write segment tmp failed: {}", e)))?;
-                
+
             file.sync_all()
                 .map_err(|e| EngineError::Io(format!("fsync segment tmp failed: {}", e)))?;
         }
-        
+
         fs::rename(&tmp_path, &path)
             .map_err(|e| EngineError::Io(format!("rename segment failed: {}", e)))?;
-            
+
         // Sync parent directory
         if let Some(parent) = path.parent() {
             let dir = std::fs::File::open(parent)
@@ -233,7 +241,7 @@ impl TieredStorage {
             dir.sync_all()
                 .map_err(|e| EngineError::Io(format!("fsync dir failed: {}", e)))?;
         }
-        
+
         Ok(())
     }
 

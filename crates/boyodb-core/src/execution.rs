@@ -3,6 +3,7 @@
 // Parallel query execution, spill-to-disk for large queries, and adaptive join strategies
 // for high-performance analytical query processing.
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -10,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use parking_lot::{Mutex, RwLock};
 
 // ============================================================================
 // Parallel Query Execution
@@ -38,7 +38,9 @@ pub struct ExecutionConfig {
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
-            max_threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            max_threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
             batch_size: 65536,
             memory_limit: 1024 * 1024 * 1024, // 1GB
             spill_threshold: 0.8,
@@ -77,7 +79,10 @@ impl DataBatch {
     }
 
     pub fn empty() -> Self {
-        Self { columns: vec![], row_count: 0 }
+        Self {
+            columns: vec![],
+            row_count: 0,
+        }
     }
 
     pub fn memory_size(&self) -> usize {
@@ -98,7 +103,10 @@ pub enum ColumnData {
     String(Vec<String>),
     Bytes(Vec<Vec<u8>>),
     Bool(Vec<bool>),
-    Nullable { data: Box<ColumnData>, nulls: Vec<bool> },
+    Nullable {
+        data: Box<ColumnData>,
+        nulls: Vec<bool>,
+    },
 }
 
 impl ColumnData {
@@ -205,8 +213,12 @@ pub struct DataPartition {
 pub trait PipelineStage: Send + Sync {
     fn name(&self) -> &str;
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError>;
-    fn is_parallel(&self) -> bool { true }
-    fn memory_estimate(&self, input_rows: usize) -> usize { input_rows * 100 }
+    fn is_parallel(&self) -> bool {
+        true
+    }
+    fn memory_estimate(&self, input_rows: usize) -> usize {
+        input_rows * 100
+    }
 }
 
 /// Query pipeline for execution
@@ -243,11 +255,15 @@ impl QueryPipeline {
         self.execute_parallel(partitions, num_threads)
     }
 
-    fn execute_sequential(&self, partitions: Vec<DataPartition>) -> Result<DataBatch, ExecutionError> {
+    fn execute_sequential(
+        &self,
+        partitions: Vec<DataPartition>,
+    ) -> Result<DataBatch, ExecutionError> {
         let mut results = Vec::new();
 
         for partition in partitions {
-            let batch = partition.memory_data
+            let batch = partition
+                .memory_data
                 .map(|d| (*d).clone())
                 .unwrap_or_else(DataBatch::empty);
 
@@ -264,10 +280,15 @@ impl QueryPipeline {
         Self::merge_batches(results)
     }
 
-    fn execute_parallel(&self, partitions: Vec<DataPartition>, num_threads: usize) -> Result<DataBatch, ExecutionError> {
+    fn execute_parallel(
+        &self,
+        partitions: Vec<DataPartition>,
+        num_threads: usize,
+    ) -> Result<DataBatch, ExecutionError> {
         let results: Arc<Mutex<Vec<DataBatch>>> = Arc::new(Mutex::new(Vec::new()));
         let errors: Arc<Mutex<Vec<ExecutionError>>> = Arc::new(Mutex::new(Vec::new()));
-        let partition_queue: Arc<Mutex<VecDeque<DataPartition>>> = Arc::new(Mutex::new(partitions.into()));
+        let partition_queue: Arc<Mutex<VecDeque<DataPartition>>> =
+            Arc::new(Mutex::new(partitions.into()));
         let cancelled = Arc::new(AtomicBool::new(false));
 
         let mut handles = Vec::new();
@@ -295,7 +316,8 @@ impl QueryPipeline {
                     };
 
                     // Process partition (simplified - in real impl would use actual stages)
-                    let batch = partition.memory_data
+                    let batch = partition
+                        .memory_data
                         .map(|d| (*d).clone())
                         .unwrap_or_else(DataBatch::empty);
 
@@ -336,9 +358,8 @@ impl QueryPipeline {
         let mut merged_columns = Vec::with_capacity(num_columns);
 
         for col_idx in 0..num_columns {
-            let merged_col = Self::merge_columns(
-                batches.iter().map(|b| &b.columns[col_idx]).collect()
-            )?;
+            let merged_col =
+                Self::merge_columns(batches.iter().map(|b| &b.columns[col_idx]).collect())?;
             merged_columns.push(merged_col);
         }
 
@@ -347,7 +368,9 @@ impl QueryPipeline {
 
     fn merge_columns(columns: Vec<&ColumnData>) -> Result<ColumnData, ExecutionError> {
         if columns.is_empty() {
-            return Err(ExecutionError::InvalidData("No columns to merge".to_string()));
+            return Err(ExecutionError::InvalidData(
+                "No columns to merge".to_string(),
+            ));
         }
 
         match columns[0] {
@@ -535,16 +558,17 @@ impl SpillManager {
         let spill_id = self.spill_counter.fetch_add(1, Ordering::SeqCst);
         let file_path = self.config.temp_dir.join(format!("spill_{}.bin", spill_id));
 
-        let file = File::create(&file_path)
-            .map_err(|e| ExecutionError::IoError(e.to_string()))?;
+        let file = File::create(&file_path).map_err(|e| ExecutionError::IoError(e.to_string()))?;
         let mut writer = BufWriter::new(file);
 
         // Write header
         let row_count = batch.row_count as u64;
         let column_count = batch.columns.len();
-        writer.write_all(&row_count.to_le_bytes())
+        writer
+            .write_all(&row_count.to_le_bytes())
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
-        writer.write_all(&(column_count as u64).to_le_bytes())
+        writer
+            .write_all(&(column_count as u64).to_le_bytes())
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
 
         // Write each column
@@ -552,10 +576,13 @@ impl SpillManager {
             self.write_column(&mut writer, col)?;
         }
 
-        let byte_size = writer.stream_position()
+        let byte_size = writer
+            .stream_position()
             .map_err(|e| ExecutionError::IoError(e.to_string()))? as u64;
 
-        writer.flush().map_err(|e| ExecutionError::IoError(e.to_string()))?;
+        writer
+            .flush()
+            .map_err(|e| ExecutionError::IoError(e.to_string()))?;
 
         let metadata = SpillMetadata {
             file_path: file_path.clone(),
@@ -572,7 +599,11 @@ impl SpillManager {
         Ok(metadata)
     }
 
-    fn write_column<W: Write>(&self, writer: &mut W, col: &ColumnData) -> Result<(), ExecutionError> {
+    fn write_column<W: Write>(
+        &self,
+        writer: &mut W,
+        col: &ColumnData,
+    ) -> Result<(), ExecutionError> {
         // Write column type tag
         let type_tag: u8 = match col {
             ColumnData::Int64(_) => 0,
@@ -583,69 +614,86 @@ impl SpillManager {
             ColumnData::Bool(_) => 5,
             ColumnData::Nullable { .. } => 6,
         };
-        writer.write_all(&[type_tag])
+        writer
+            .write_all(&[type_tag])
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
 
         match col {
             ColumnData::Int64(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
-                    writer.write_all(&val.to_le_bytes())
+                    writer
+                        .write_all(&val.to_le_bytes())
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::UInt64(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
-                    writer.write_all(&val.to_le_bytes())
+                    writer
+                        .write_all(&val.to_le_bytes())
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::Float64(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
-                    writer.write_all(&val.to_le_bytes())
+                    writer
+                        .write_all(&val.to_le_bytes())
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::String(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
                     let bytes = val.as_bytes();
-                    writer.write_all(&(bytes.len() as u64).to_le_bytes())
+                    writer
+                        .write_all(&(bytes.len() as u64).to_le_bytes())
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
-                    writer.write_all(bytes)
+                    writer
+                        .write_all(bytes)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::Bytes(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
-                    writer.write_all(&(val.len() as u64).to_le_bytes())
+                    writer
+                        .write_all(&(val.len() as u64).to_le_bytes())
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
-                    writer.write_all(val)
+                    writer
+                        .write_all(val)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::Bool(v) => {
-                writer.write_all(&(v.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(v.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in v {
-                    writer.write_all(&[if *val { 1 } else { 0 }])
+                    writer
+                        .write_all(&[if *val { 1 } else { 0 }])
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
             }
             ColumnData::Nullable { data, nulls } => {
                 // Write nulls bitmap
-                writer.write_all(&(nulls.len() as u64).to_le_bytes())
+                writer
+                    .write_all(&(nulls.len() as u64).to_le_bytes())
                     .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 for val in nulls {
-                    writer.write_all(&[if *val { 1 } else { 0 }])
+                    writer
+                        .write_all(&[if *val { 1 } else { 0 }])
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                 }
                 // Write nested column
@@ -658,17 +706,19 @@ impl SpillManager {
 
     /// Read a spilled batch back from disk
     pub fn restore(&self, metadata: &SpillMetadata) -> Result<DataBatch, ExecutionError> {
-        let file = File::open(&metadata.file_path)
-            .map_err(|e| ExecutionError::IoError(e.to_string()))?;
+        let file =
+            File::open(&metadata.file_path).map_err(|e| ExecutionError::IoError(e.to_string()))?;
         let mut reader = BufReader::new(file);
 
         // Read header
         let mut buf8 = [0u8; 8];
-        reader.read_exact(&mut buf8)
+        reader
+            .read_exact(&mut buf8)
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
         let row_count = u64::from_le_bytes(buf8) as usize;
 
-        reader.read_exact(&mut buf8)
+        reader
+            .read_exact(&mut buf8)
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
         let column_count = u64::from_le_bytes(buf8) as usize;
 
@@ -683,84 +733,104 @@ impl SpillManager {
 
     fn read_column<R: Read>(&self, reader: &mut R) -> Result<ColumnData, ExecutionError> {
         let mut type_tag = [0u8; 1];
-        reader.read_exact(&mut type_tag)
+        reader
+            .read_exact(&mut type_tag)
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
 
         let mut buf8 = [0u8; 8];
-        reader.read_exact(&mut buf8)
+        reader
+            .read_exact(&mut buf8)
             .map_err(|e| ExecutionError::IoError(e.to_string()))?;
         let len = u64::from_le_bytes(buf8) as usize;
 
         match type_tag[0] {
-            0 => { // Int64
+            0 => {
+                // Int64
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
-                    reader.read_exact(&mut buf8)
+                    reader
+                        .read_exact(&mut buf8)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     data.push(i64::from_le_bytes(buf8));
                 }
                 Ok(ColumnData::Int64(data))
             }
-            1 => { // UInt64
+            1 => {
+                // UInt64
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
-                    reader.read_exact(&mut buf8)
+                    reader
+                        .read_exact(&mut buf8)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     data.push(u64::from_le_bytes(buf8));
                 }
                 Ok(ColumnData::UInt64(data))
             }
-            2 => { // Float64
+            2 => {
+                // Float64
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
-                    reader.read_exact(&mut buf8)
+                    reader
+                        .read_exact(&mut buf8)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     data.push(f64::from_le_bytes(buf8));
                 }
                 Ok(ColumnData::Float64(data))
             }
-            3 => { // String
+            3 => {
+                // String
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
-                    reader.read_exact(&mut buf8)
+                    reader
+                        .read_exact(&mut buf8)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     let str_len = u64::from_le_bytes(buf8) as usize;
                     let mut str_buf = vec![0u8; str_len];
-                    reader.read_exact(&mut str_buf)
+                    reader
+                        .read_exact(&mut str_buf)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
-                    data.push(String::from_utf8(str_buf)
-                        .map_err(|e| ExecutionError::InvalidData(e.to_string()))?);
+                    data.push(
+                        String::from_utf8(str_buf)
+                            .map_err(|e| ExecutionError::InvalidData(e.to_string()))?,
+                    );
                 }
                 Ok(ColumnData::String(data))
             }
-            4 => { // Bytes
+            4 => {
+                // Bytes
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
-                    reader.read_exact(&mut buf8)
+                    reader
+                        .read_exact(&mut buf8)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     let bytes_len = u64::from_le_bytes(buf8) as usize;
                     let mut bytes_buf = vec![0u8; bytes_len];
-                    reader.read_exact(&mut bytes_buf)
+                    reader
+                        .read_exact(&mut bytes_buf)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     data.push(bytes_buf);
                 }
                 Ok(ColumnData::Bytes(data))
             }
-            5 => { // Bool
+            5 => {
+                // Bool
                 let mut data = Vec::with_capacity(len);
                 for _ in 0..len {
                     let mut b = [0u8; 1];
-                    reader.read_exact(&mut b)
+                    reader
+                        .read_exact(&mut b)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     data.push(b[0] != 0);
                 }
                 Ok(ColumnData::Bool(data))
             }
-            6 => { // Nullable
+            6 => {
+                // Nullable
                 let mut nulls = Vec::with_capacity(len);
                 for _ in 0..len {
                     let mut b = [0u8; 1];
-                    reader.read_exact(&mut b)
+                    reader
+                        .read_exact(&mut b)
                         .map_err(|e| ExecutionError::IoError(e.to_string()))?;
                     nulls.push(b[0] != 0);
                 }
@@ -770,7 +840,10 @@ impl SpillManager {
                     nulls,
                 })
             }
-            _ => Err(ExecutionError::InvalidData(format!("Unknown column type: {}", type_tag[0]))),
+            _ => Err(ExecutionError::InvalidData(format!(
+                "Unknown column type: {}",
+                type_tag[0]
+            ))),
         }
     }
 
@@ -854,8 +927,8 @@ pub struct JoinConfig {
     pub join_type: JoinType,
     pub left_keys: Vec<String>,
     pub right_keys: Vec<String>,
-    pub algorithm: Option<JoinAlgorithm>,  // None = adaptive
-    pub broadcast_threshold: u64,  // Max bytes to broadcast
+    pub algorithm: Option<JoinAlgorithm>, // None = adaptive
+    pub broadcast_threshold: u64,         // Max bytes to broadcast
     pub hash_table_memory_limit: usize,
 }
 
@@ -991,7 +1064,11 @@ impl AdaptiveJoinExecutor {
         self.build_join_result(&left, &result_indices_left, &right, &result_indices_right)
     }
 
-    fn nested_loop_join(&self, left: DataBatch, right: DataBatch) -> Result<DataBatch, ExecutionError> {
+    fn nested_loop_join(
+        &self,
+        left: DataBatch,
+        right: DataBatch,
+    ) -> Result<DataBatch, ExecutionError> {
         if left.is_empty() || right.is_empty() {
             return Ok(DataBatch::empty());
         }
@@ -1014,7 +1091,11 @@ impl AdaptiveJoinExecutor {
         self.build_join_result(&left, &result_indices_left, &right, &result_indices_right)
     }
 
-    fn sort_merge_join(&self, left: DataBatch, right: DataBatch) -> Result<DataBatch, ExecutionError> {
+    fn sort_merge_join(
+        &self,
+        left: DataBatch,
+        right: DataBatch,
+    ) -> Result<DataBatch, ExecutionError> {
         // For now, fall back to hash join
         // In real implementation, would sort both sides and merge
         self.hash_join(left, right)
@@ -1027,8 +1108,8 @@ impl AdaptiveJoinExecutor {
     }
 
     fn compute_hash(&self, col: &ColumnData, row: usize) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
 
@@ -1053,18 +1134,10 @@ impl AdaptiveJoinExecutor {
 
     fn values_equal(&self, col1: &ColumnData, row1: usize, col2: &ColumnData, row2: usize) -> bool {
         match (col1, col2) {
-            (ColumnData::Int64(v1), ColumnData::Int64(v2)) => {
-                v1.get(row1) == v2.get(row2)
-            }
-            (ColumnData::UInt64(v1), ColumnData::UInt64(v2)) => {
-                v1.get(row1) == v2.get(row2)
-            }
-            (ColumnData::Float64(v1), ColumnData::Float64(v2)) => {
-                v1.get(row1) == v2.get(row2)
-            }
-            (ColumnData::String(v1), ColumnData::String(v2)) => {
-                v1.get(row1) == v2.get(row2)
-            }
+            (ColumnData::Int64(v1), ColumnData::Int64(v2)) => v1.get(row1) == v2.get(row2),
+            (ColumnData::UInt64(v1), ColumnData::UInt64(v2)) => v1.get(row1) == v2.get(row2),
+            (ColumnData::Float64(v1), ColumnData::Float64(v2)) => v1.get(row1) == v2.get(row2),
+            (ColumnData::String(v1), ColumnData::String(v2)) => v1.get(row1) == v2.get(row2),
             _ => false,
         }
     }
@@ -1163,7 +1236,9 @@ pub struct ScanStage {
 }
 
 impl PipelineStage for ScanStage {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError> {
         Ok(input)
@@ -1177,7 +1252,9 @@ pub struct FilterStage {
 }
 
 impl PipelineStage for FilterStage {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError> {
         if input.is_empty() {
@@ -1192,7 +1269,9 @@ impl PipelineStage for FilterStage {
         }
 
         // Gather kept rows
-        let columns: Vec<ColumnData> = input.columns.iter()
+        let columns: Vec<ColumnData> = input
+            .columns
+            .iter()
             .map(|col| gather_by_indices(col, &keep_indices))
             .collect();
 
@@ -1205,7 +1284,9 @@ fn gather_by_indices(col: &ColumnData, indices: &[usize]) -> ColumnData {
         ColumnData::Int64(v) => ColumnData::Int64(indices.iter().map(|&i| v[i]).collect()),
         ColumnData::UInt64(v) => ColumnData::UInt64(indices.iter().map(|&i| v[i]).collect()),
         ColumnData::Float64(v) => ColumnData::Float64(indices.iter().map(|&i| v[i]).collect()),
-        ColumnData::String(v) => ColumnData::String(indices.iter().map(|&i| v[i].clone()).collect()),
+        ColumnData::String(v) => {
+            ColumnData::String(indices.iter().map(|&i| v[i].clone()).collect())
+        }
         ColumnData::Bytes(v) => ColumnData::Bytes(indices.iter().map(|&i| v[i].clone()).collect()),
         ColumnData::Bool(v) => ColumnData::Bool(indices.iter().map(|&i| v[i]).collect()),
         ColumnData::Nullable { data, nulls } => ColumnData::Nullable {
@@ -1226,7 +1307,7 @@ pub struct AggregateStage {
 #[derive(Debug, Clone)]
 pub enum AggregateFunction {
     Count,
-    Sum(usize),      // Column index
+    Sum(usize), // Column index
     Avg(usize),
     Min(usize),
     Max(usize),
@@ -1234,7 +1315,9 @@ pub enum AggregateFunction {
 }
 
 impl PipelineStage for AggregateStage {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError> {
         if input.is_empty() {
@@ -1250,7 +1333,9 @@ impl PipelineStage for AggregateStage {
         self.aggregate_grouped(input)
     }
 
-    fn is_parallel(&self) -> bool { false } // Aggregation needs coordination
+    fn is_parallel(&self) -> bool {
+        false
+    } // Aggregation needs coordination
 }
 
 impl AggregateStage {
@@ -1259,16 +1344,18 @@ impl AggregateStage {
 
         for agg in &self.aggregates {
             let col = match agg {
-                AggregateFunction::Count => {
-                    ColumnData::UInt64(vec![input.row_count as u64])
-                }
+                AggregateFunction::Count => ColumnData::UInt64(vec![input.row_count as u64]),
                 AggregateFunction::Sum(idx) => {
                     let sum = self.compute_sum(&input.columns[*idx]);
                     ColumnData::Float64(vec![sum])
                 }
                 AggregateFunction::Avg(idx) => {
                     let sum = self.compute_sum(&input.columns[*idx]);
-                    let avg = if input.row_count > 0 { sum / input.row_count as f64 } else { 0.0 };
+                    let avg = if input.row_count > 0 {
+                        sum / input.row_count as f64
+                    } else {
+                        0.0
+                    };
                     ColumnData::Float64(vec![avg])
                 }
                 AggregateFunction::Min(idx) => {
@@ -1316,8 +1403,14 @@ impl AggregateStage {
 
     fn compute_max(&self, col: &ColumnData) -> f64 {
         match col {
-            ColumnData::Int64(v) => v.iter().map(|&x| x as f64).fold(f64::NEG_INFINITY, f64::max),
-            ColumnData::UInt64(v) => v.iter().map(|&x| x as f64).fold(f64::NEG_INFINITY, f64::max),
+            ColumnData::Int64(v) => v
+                .iter()
+                .map(|&x| x as f64)
+                .fold(f64::NEG_INFINITY, f64::max),
+            ColumnData::UInt64(v) => v
+                .iter()
+                .map(|&x| x as f64)
+                .fold(f64::NEG_INFINITY, f64::max),
             ColumnData::Float64(v) => v.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
             _ => 0.0,
         }
@@ -1351,7 +1444,9 @@ pub struct SortStage {
 }
 
 impl PipelineStage for SortStage {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError> {
         if input.is_empty() || self.sort_columns.is_empty() {
@@ -1366,11 +1461,17 @@ impl PipelineStage for SortStage {
 
         indices.sort_by(|&a, &b| {
             let cmp = self.compare_values(col, a, b);
-            if ascending { cmp } else { cmp.reverse() }
+            if ascending {
+                cmp
+            } else {
+                cmp.reverse()
+            }
         });
 
         // Reorder all columns
-        let columns: Vec<ColumnData> = input.columns.iter()
+        let columns: Vec<ColumnData> = input
+            .columns
+            .iter()
             .map(|col| gather_by_indices(col, &indices))
             .collect();
 
@@ -1398,7 +1499,9 @@ pub struct LimitStage {
 }
 
 impl PipelineStage for LimitStage {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 
     fn process(&self, input: DataBatch) -> Result<DataBatch, ExecutionError> {
         if input.is_empty() {
@@ -1412,7 +1515,9 @@ impl PipelineStage for LimitStage {
             return Ok(DataBatch::empty());
         }
 
-        let columns: Vec<ColumnData> = input.columns.iter()
+        let columns: Vec<ColumnData> = input
+            .columns
+            .iter()
             .map(|col| col.slice(start, end))
             .collect();
 
@@ -1496,15 +1601,15 @@ mod tests {
         };
         let pipeline = QueryPipeline::new(config);
 
-        let partitions: Vec<DataPartition> = (0..4).map(|i| {
-            DataPartition {
+        let partitions: Vec<DataPartition> = (0..4)
+            .map(|i| DataPartition {
                 partition_id: i,
                 start_row: (i * 100) as u64,
                 end_row: ((i + 1) * 100) as u64,
                 file_path: None,
                 memory_data: Some(Arc::new(make_test_batch(100))),
-            }
-        }).collect();
+            })
+            .collect();
 
         let result = pipeline.execute(partitions).unwrap();
         assert_eq!(result.row_count, 400);
@@ -1537,7 +1642,8 @@ mod tests {
 
         // Verify data
         if let (ColumnData::Int64(orig), ColumnData::Int64(rest)) =
-            (&batch.columns[0], &restored.columns[0]) {
+            (&batch.columns[0], &restored.columns[0])
+        {
             assert_eq!(orig, rest);
         }
 
@@ -1554,8 +1660,8 @@ mod tests {
         };
         let manager = SpillManager::new(config);
 
-        assert!(!manager.should_spill(700));  // 70% - below threshold
-        assert!(manager.should_spill(900));   // 90% - above threshold
+        assert!(!manager.should_spill(700)); // 70% - below threshold
+        assert!(manager.should_spill(900)); // 90% - above threshold
     }
 
     // Join Tests
@@ -1611,12 +1717,8 @@ mod tests {
         let spill_mgr = Arc::new(SpillManager::new(ExecutionConfig::default()));
         let executor = AdaptiveJoinExecutor::new(config, spill_mgr);
 
-        let left = DataBatch::new(vec![
-            ColumnData::Int64(vec![1, 2, 3, 4, 5]),
-        ]);
-        let right = DataBatch::new(vec![
-            ColumnData::Int64(vec![3, 4, 5, 6, 7]),
-        ]);
+        let left = DataBatch::new(vec![ColumnData::Int64(vec![1, 2, 3, 4, 5])]);
+        let right = DataBatch::new(vec![ColumnData::Int64(vec![3, 4, 5, 6, 7])]);
 
         let result = executor.execute(left, right).unwrap();
         assert_eq!(result.row_count, 3); // 3, 4, 5 match
@@ -1631,12 +1733,8 @@ mod tests {
         let spill_mgr = Arc::new(SpillManager::new(ExecutionConfig::default()));
         let executor = AdaptiveJoinExecutor::new(config, spill_mgr);
 
-        let left = DataBatch::new(vec![
-            ColumnData::Int64(vec![1, 2, 3]),
-        ]);
-        let right = DataBatch::new(vec![
-            ColumnData::Int64(vec![2, 3, 4]),
-        ]);
+        let left = DataBatch::new(vec![ColumnData::Int64(vec![1, 2, 3])]);
+        let right = DataBatch::new(vec![ColumnData::Int64(vec![2, 3, 4])]);
 
         let result = executor.execute(left, right).unwrap();
         assert_eq!(result.row_count, 2); // 2, 3 match
@@ -1687,9 +1785,7 @@ mod tests {
             aggregates: vec![AggregateFunction::Sum(0)],
         };
 
-        let batch = DataBatch::new(vec![
-            ColumnData::Int64(vec![1, 2, 3, 4, 5]),
-        ]);
+        let batch = DataBatch::new(vec![ColumnData::Int64(vec![1, 2, 3, 4, 5])]);
         let result = stage.process(batch).unwrap();
 
         if let ColumnData::Float64(v) = &result.columns[0] {
@@ -1704,9 +1800,7 @@ mod tests {
             sort_columns: vec![(0, false)], // Descending
         };
 
-        let batch = DataBatch::new(vec![
-            ColumnData::Int64(vec![3, 1, 4, 1, 5, 9, 2, 6]),
-        ]);
+        let batch = DataBatch::new(vec![ColumnData::Int64(vec![3, 1, 4, 1, 5, 9, 2, 6])]);
         let result = stage.process(batch).unwrap();
 
         if let ColumnData::Int64(v) = &result.columns[0] {
@@ -1754,9 +1848,7 @@ mod tests {
             aggregates: vec![AggregateFunction::Avg(0)],
         };
 
-        let batch = DataBatch::new(vec![
-            ColumnData::Int64(vec![10, 20, 30, 40, 50]),
-        ]);
+        let batch = DataBatch::new(vec![ColumnData::Int64(vec![10, 20, 30, 40, 50])]);
         let result = stage.process(batch).unwrap();
 
         if let ColumnData::Float64(v) = &result.columns[0] {
@@ -1769,15 +1861,10 @@ mod tests {
         let stage = AggregateStage {
             name: "agg".to_string(),
             group_by_columns: vec![],
-            aggregates: vec![
-                AggregateFunction::Min(0),
-                AggregateFunction::Max(0),
-            ],
+            aggregates: vec![AggregateFunction::Min(0), AggregateFunction::Max(0)],
         };
 
-        let batch = DataBatch::new(vec![
-            ColumnData::Int64(vec![5, 2, 8, 1, 9]),
-        ]);
+        let batch = DataBatch::new(vec![ColumnData::Int64(vec![5, 2, 8, 1, 9])]);
         let result = stage.process(batch).unwrap();
 
         if let ColumnData::Float64(v) = &result.columns[0] {
@@ -1796,9 +1883,7 @@ mod tests {
             aggregates: vec![AggregateFunction::CountDistinct(0)],
         };
 
-        let batch = DataBatch::new(vec![
-            ColumnData::Int64(vec![1, 2, 2, 3, 3, 3, 4]),
-        ]);
+        let batch = DataBatch::new(vec![ColumnData::Int64(vec![1, 2, 2, 3, 3, 3, 4])]);
         let result = stage.process(batch).unwrap();
 
         if let ColumnData::UInt64(v) = &result.columns[0] {

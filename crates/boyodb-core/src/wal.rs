@@ -114,7 +114,11 @@ impl Wal {
         Ok(())
     }
 
-    pub fn replay(&mut self, storage: &crate::storage::TieredStorage, manifest_path: &Path) -> Result<(), EngineError> {
+    pub fn replay(
+        &mut self,
+        storage: &crate::storage::TieredStorage,
+        manifest_path: &Path,
+    ) -> Result<(), EngineError> {
         let mut manifest = load_manifest(manifest_path)?;
 
         // Build HashSet of existing segment IDs for O(1) lookup during replay
@@ -222,7 +226,6 @@ impl Wal {
         cleanup_old_segments(&self.path, self.max_segments)?;
         Ok(())
     }
-
 }
 
 fn rotate_path(path: &Path) -> Result<PathBuf, EngineError> {
@@ -335,10 +338,8 @@ fn replay_wal_file_parallel(
                     )));
                 }
                 if let Some(expected_schema_hash) = entry.schema_hash {
-                    let actual_schema_hash = compute_schema_hash_from_payload(
-                        &payload,
-                        entry.compression.as_deref(),
-                    )?;
+                    let actual_schema_hash =
+                        compute_schema_hash_from_payload(&payload, entry.compression.as_deref())?;
                     if actual_schema_hash != expected_schema_hash {
                         return Err(EngineError::Io(format!(
                             "wal schema hash mismatch for segment {} expected={} actual={}",
@@ -388,11 +389,9 @@ mod tests {
 
     fn build_payload(values: Vec<u64>) -> Vec<u8> {
         let schema = Schema::new(vec![Field::new("event_time", DataType::UInt64, false)]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(UInt64Array::from(values))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(UInt64Array::from(values))])
+                .unwrap();
 
         let mut payload = Vec::new();
         {

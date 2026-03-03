@@ -46,7 +46,9 @@ impl ConsumerOffsets {
     }
 
     pub fn get(&self, topic: &str, partition: u32) -> Option<u64> {
-        self.offsets.get(topic).and_then(|p| p.get(&partition).copied())
+        self.offsets
+            .get(topic)
+            .and_then(|p| p.get(&partition).copied())
     }
 
     pub fn set(&mut self, topic: &str, partition: u32, offset: u64) {
@@ -214,9 +216,7 @@ pub struct KafkaConsumer {
 impl KafkaConsumer {
     pub fn new(config: StreamSourceConfig) -> Self {
         // Build initial assignment from topics (assuming 1 partition each for simplicity)
-        let assignment: Vec<_> = config.topics.iter()
-            .map(|t| (t.clone(), 0u32))
-            .collect();
+        let assignment: Vec<_> = config.topics.iter().map(|t| (t.clone(), 0u32)).collect();
 
         Self {
             config,
@@ -602,7 +602,8 @@ impl MaterializedView {
     fn build_group_key(&self, values: &HashMap<String, DeltaValue>) -> String {
         let mut parts = Vec::new();
         for col in &self.def.group_by {
-            let val = values.get(col)
+            let val = values
+                .get(col)
                 .and_then(|v| v.as_string())
                 .unwrap_or_else(|| "NULL".to_string());
             parts.push(val);
@@ -638,12 +639,16 @@ impl MaterializedView {
         for col in &self.def.columns {
             if let Some(ref agg) = col.aggregate {
                 if let Some(state) = group_state.get_mut(&col.name) {
-                    let value = col.source_column.as_ref()
+                    let value = col
+                        .source_column
+                        .as_ref()
                         .and_then(|src| delta.values.get(src))
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
 
-                    let distinct_key = col.source_column.as_ref()
+                    let distinct_key = col
+                        .source_column
+                        .as_ref()
                         .and_then(|src| delta.values.get(src))
                         .and_then(|v| v.as_string());
 
@@ -702,7 +707,8 @@ impl MaterializedView {
 
     /// Get aggregate value for a specific group
     pub fn get(&self, group_key: &str, column: &str) -> Option<f64> {
-        self.state.get(group_key)
+        self.state
+            .get(group_key)
             .and_then(|g| g.get(column))
             .and_then(|s| s.value())
     }
@@ -1021,7 +1027,9 @@ impl ExactlyOnceIngestor {
 
     /// Add a record to the transaction
     pub fn add_record(&mut self, txn_id: &str, record: IngestRecord) -> Result<(), IngestionError> {
-        let txn = self.transactions.get_mut(txn_id)
+        let txn = self
+            .transactions
+            .get_mut(txn_id)
             .ok_or(IngestionError::TransactionNotFound)?;
 
         if txn.state != IngestionState::Started {
@@ -1051,8 +1059,14 @@ impl ExactlyOnceIngestor {
     }
 
     /// Set source offsets for the transaction
-    pub fn set_offsets(&mut self, txn_id: &str, offsets: ConsumerOffsets) -> Result<(), IngestionError> {
-        let txn = self.transactions.get_mut(txn_id)
+    pub fn set_offsets(
+        &mut self,
+        txn_id: &str,
+        offsets: ConsumerOffsets,
+    ) -> Result<(), IngestionError> {
+        let txn = self
+            .transactions
+            .get_mut(txn_id)
             .ok_or(IngestionError::TransactionNotFound)?;
 
         txn.source_offsets = offsets;
@@ -1061,7 +1075,9 @@ impl ExactlyOnceIngestor {
 
     /// Prepare transaction (write to WAL but don't commit)
     pub fn prepare(&mut self, txn_id: &str) -> Result<(), IngestionError> {
-        let txn = self.transactions.get_mut(txn_id)
+        let txn = self
+            .transactions
+            .get_mut(txn_id)
             .ok_or(IngestionError::TransactionNotFound)?;
 
         if txn.state != IngestionState::Started {
@@ -1075,7 +1091,9 @@ impl ExactlyOnceIngestor {
 
     /// Commit transaction
     pub fn commit(&mut self, txn_id: &str) -> Result<Vec<IngestRecord>, IngestionError> {
-        let txn = self.transactions.get_mut(txn_id)
+        let txn = self
+            .transactions
+            .get_mut(txn_id)
             .ok_or(IngestionError::TransactionNotFound)?;
 
         if txn.state != IngestionState::Started && txn.state != IngestionState::Prepared {
@@ -1107,7 +1125,9 @@ impl ExactlyOnceIngestor {
 
     /// Abort transaction
     pub fn abort(&mut self, txn_id: &str) -> Result<(), IngestionError> {
-        let txn = self.transactions.get_mut(txn_id)
+        let txn = self
+            .transactions
+            .get_mut(txn_id)
             .ok_or(IngestionError::TransactionNotFound)?;
 
         txn.state = IngestionState::Aborted;
@@ -1133,8 +1153,12 @@ impl ExactlyOnceIngestor {
 
         // Clean up timed-out transactions
         let timeout_threshold = now.saturating_sub(self.transaction_timeout_ms);
-        let timed_out: Vec<_> = self.transactions.iter()
-            .filter(|(_, txn)| txn.start_time < timeout_threshold && txn.state == IngestionState::Started)
+        let timed_out: Vec<_> = self
+            .transactions
+            .iter()
+            .filter(|(_, txn)| {
+                txn.start_time < timeout_threshold && txn.state == IngestionState::Started
+            })
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -1218,7 +1242,10 @@ where
     F: Fn(&StreamMessage) -> bool + Send + Sync,
 {
     fn process(&mut self, messages: Vec<StreamMessage>) -> Result<Vec<StreamMessage>, StreamError> {
-        Ok(messages.into_iter().filter(|m| (self.predicate)(m)).collect())
+        Ok(messages
+            .into_iter()
+            .filter(|m| (self.predicate)(m))
+            .collect())
     }
 
     fn flush(&mut self) -> Result<Vec<StreamMessage>, StreamError> {
@@ -1275,7 +1302,12 @@ pub struct WindowAggregateStage {
 }
 
 impl WindowAggregateStage {
-    pub fn tumbling(window_size_ms: u64, key_column: &str, value_column: &str, aggregate: AggregateFunction) -> Self {
+    pub fn tumbling(
+        window_size_ms: u64,
+        key_column: &str,
+        value_column: &str,
+        aggregate: AggregateFunction,
+    ) -> Self {
         Self {
             window_size_ms,
             slide_ms: window_size_ms, // Tumbling = slide equals size
@@ -1287,7 +1319,13 @@ impl WindowAggregateStage {
         }
     }
 
-    pub fn sliding(window_size_ms: u64, slide_ms: u64, key_column: &str, value_column: &str, aggregate: AggregateFunction) -> Self {
+    pub fn sliding(
+        window_size_ms: u64,
+        slide_ms: u64,
+        key_column: &str,
+        value_column: &str,
+        aggregate: AggregateFunction,
+    ) -> Self {
         Self {
             window_size_ms,
             slide_ms,
@@ -1307,7 +1345,9 @@ impl WindowAggregateStage {
         let mut result = Vec::new();
         let closed_threshold = self.watermark.saturating_sub(self.window_size_ms);
 
-        let closed_windows: Vec<_> = self.windows.keys()
+        let closed_windows: Vec<_> = self
+            .windows
+            .keys()
             .filter(|&&start| start + self.window_size_ms <= closed_threshold)
             .copied()
             .collect();
@@ -1318,7 +1358,10 @@ impl WindowAggregateStage {
                     if let Some(value) = state.value() {
                         let mut headers = HashMap::new();
                         headers.insert("window_start".to_string(), window_start.to_string());
-                        headers.insert("window_end".to_string(), (window_start + self.window_size_ms).to_string());
+                        headers.insert(
+                            "window_end".to_string(),
+                            (window_start + self.window_size_ms).to_string(),
+                        );
                         headers.insert("key".to_string(), key);
                         headers.insert("value".to_string(), value.to_string());
 
@@ -1349,11 +1392,15 @@ impl StreamStage for WindowAggregateStage {
             }
 
             // Extract key and value from headers (simplified)
-            let key = msg.headers.get(&self.key_column)
+            let key = msg
+                .headers
+                .get(&self.key_column)
                 .cloned()
                 .unwrap_or_else(|| "default".to_string());
 
-            let value: f64 = msg.headers.get(&self.value_column)
+            let value: f64 = msg
+                .headers
+                .get(&self.value_column)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.0); // Default to 1 for count
 
@@ -1364,7 +1411,8 @@ impl StreamStage for WindowAggregateStage {
             let mut ws = window_start;
             while ws + self.window_size_ms > msg.timestamp {
                 let window_aggs = self.windows.entry(ws).or_default();
-                let state = window_aggs.entry(key.clone())
+                let state = window_aggs
+                    .entry(key.clone())
                     .or_insert_with(|| AggregateState::new(&self.aggregate));
                 state.apply_insert(value, Some(&key));
 
@@ -1401,7 +1449,10 @@ impl StreamPipeline {
         self
     }
 
-    pub fn process(&mut self, messages: Vec<StreamMessage>) -> Result<Vec<StreamMessage>, StreamError> {
+    pub fn process(
+        &mut self,
+        messages: Vec<StreamMessage>,
+    ) -> Result<Vec<StreamMessage>, StreamError> {
         let mut current = messages;
         for stage in &mut self.stages {
             current = stage.process(current)?;
@@ -1495,17 +1546,15 @@ mod tests {
 
         let mut consumer = KafkaConsumer::new(config);
 
-        consumer.inject_messages(vec![
-            StreamMessage {
-                topic: "test-topic".to_string(),
-                partition: 0,
-                offset: 0,
-                key: None,
-                payload: b"value1".to_vec(),
-                timestamp: 1000,
-                headers: HashMap::new(),
-            },
-        ]);
+        consumer.inject_messages(vec![StreamMessage {
+            topic: "test-topic".to_string(),
+            partition: 0,
+            offset: 0,
+            key: None,
+            payload: b"value1".to_vec(),
+            timestamp: 1000,
+            headers: HashMap::new(),
+        }]);
 
         // Pause partition 0
         consumer.pause("test-topic", &[0]).unwrap();
@@ -1528,17 +1577,15 @@ mod tests {
             vec!["test-topic".to_string()],
         );
 
-        consumer.inject_messages(vec![
-            StreamMessage {
-                topic: "test-topic".to_string(),
-                partition: 0,
-                offset: 0,
-                key: None,
-                payload: b"pulsar-msg".to_vec(),
-                timestamp: 1000,
-                headers: HashMap::new(),
-            },
-        ]);
+        consumer.inject_messages(vec![StreamMessage {
+            topic: "test-topic".to_string(),
+            partition: 0,
+            offset: 0,
+            key: None,
+            payload: b"pulsar-msg".to_vec(),
+            timestamp: 1000,
+            headers: HashMap::new(),
+        }]);
 
         let messages = consumer.poll().unwrap();
         assert_eq!(messages.len(), 1);
@@ -1551,13 +1598,11 @@ mod tests {
             name: "user_counts".to_string(),
             source_table: "events".to_string(),
             group_by: vec!["user_id".to_string()],
-            columns: vec![
-                MaterializedColumn {
-                    name: "event_count".to_string(),
-                    source_column: None,
-                    aggregate: Some(AggregateFunction::Count),
-                },
-            ],
+            columns: vec![MaterializedColumn {
+                name: "event_count".to_string(),
+                source_column: None,
+                aggregate: Some(AggregateFunction::Count),
+            }],
             filter: None,
             refresh_mode: RefreshMode::Immediate,
         };
@@ -1567,7 +1612,10 @@ mod tests {
         // Insert events for user1
         for _ in 0..5 {
             let mut values = HashMap::new();
-            values.insert("user_id".to_string(), DeltaValue::String("user1".to_string()));
+            values.insert(
+                "user_id".to_string(),
+                DeltaValue::String("user1".to_string()),
+            );
             view.apply_delta(&RowDelta {
                 op: DeltaOp::Insert,
                 values,
@@ -1578,7 +1626,10 @@ mod tests {
         // Insert events for user2
         for _ in 0..3 {
             let mut values = HashMap::new();
-            values.insert("user_id".to_string(), DeltaValue::String("user2".to_string()));
+            values.insert(
+                "user_id".to_string(),
+                DeltaValue::String("user2".to_string()),
+            );
             view.apply_delta(&RowDelta {
                 op: DeltaOp::Insert,
                 values,
@@ -1596,13 +1647,11 @@ mod tests {
             name: "revenue".to_string(),
             source_table: "orders".to_string(),
             group_by: vec!["product".to_string()],
-            columns: vec![
-                MaterializedColumn {
-                    name: "total_revenue".to_string(),
-                    source_column: Some("amount".to_string()),
-                    aggregate: Some(AggregateFunction::Sum),
-                },
-            ],
+            columns: vec![MaterializedColumn {
+                name: "total_revenue".to_string(),
+                source_column: Some("amount".to_string()),
+                aggregate: Some(AggregateFunction::Sum),
+            }],
             filter: None,
             refresh_mode: RefreshMode::Immediate,
         };
@@ -1612,7 +1661,10 @@ mod tests {
         let amounts = [100.0, 200.0, 150.0];
         for amount in amounts {
             let mut values = HashMap::new();
-            values.insert("product".to_string(), DeltaValue::String("widget".to_string()));
+            values.insert(
+                "product".to_string(),
+                DeltaValue::String("widget".to_string()),
+            );
             values.insert("amount".to_string(), DeltaValue::Float(amount));
             view.apply_delta(&RowDelta {
                 op: DeltaOp::Insert,
@@ -1630,13 +1682,11 @@ mod tests {
             name: "avg_latency".to_string(),
             source_table: "requests".to_string(),
             group_by: vec!["endpoint".to_string()],
-            columns: vec![
-                MaterializedColumn {
-                    name: "avg_latency_ms".to_string(),
-                    source_column: Some("latency".to_string()),
-                    aggregate: Some(AggregateFunction::Avg),
-                },
-            ],
+            columns: vec![MaterializedColumn {
+                name: "avg_latency_ms".to_string(),
+                source_column: Some("latency".to_string()),
+                aggregate: Some(AggregateFunction::Avg),
+            }],
             filter: None,
             refresh_mode: RefreshMode::Immediate,
         };
@@ -1646,7 +1696,10 @@ mod tests {
         let latencies = [10.0, 20.0, 30.0, 40.0];
         for latency in latencies {
             let mut values = HashMap::new();
-            values.insert("endpoint".to_string(), DeltaValue::String("/api/users".to_string()));
+            values.insert(
+                "endpoint".to_string(),
+                DeltaValue::String("/api/users".to_string()),
+            );
             values.insert("latency".to_string(), DeltaValue::Float(latency));
             view.apply_delta(&RowDelta {
                 op: DeltaOp::Insert,
@@ -1664,13 +1717,11 @@ mod tests {
             name: "periodic_count".to_string(),
             source_table: "events".to_string(),
             group_by: vec!["category".to_string()],
-            columns: vec![
-                MaterializedColumn {
-                    name: "count".to_string(),
-                    source_column: None,
-                    aggregate: Some(AggregateFunction::Count),
-                },
-            ],
+            columns: vec![MaterializedColumn {
+                name: "count".to_string(),
+                source_column: None,
+                aggregate: Some(AggregateFunction::Count),
+            }],
             filter: None,
             refresh_mode: RefreshMode::Periodic,
         };
@@ -1900,10 +1951,16 @@ mod tests {
 
         ingestor.add_record(&txn_id, record).unwrap();
 
-        assert_eq!(ingestor.transaction_state(&txn_id), Some(IngestionState::Started));
+        assert_eq!(
+            ingestor.transaction_state(&txn_id),
+            Some(IngestionState::Started)
+        );
 
         ingestor.prepare(&txn_id).unwrap();
-        assert_eq!(ingestor.transaction_state(&txn_id), Some(IngestionState::Prepared));
+        assert_eq!(
+            ingestor.transaction_state(&txn_id),
+            Some(IngestionState::Prepared)
+        );
 
         ingestor.commit(&txn_id).unwrap();
         assert_eq!(ingestor.transaction_state(&txn_id), None); // Transaction removed
@@ -1942,26 +1999,28 @@ mod tests {
 
     #[test]
     fn test_stream_pipeline_transform() {
-        let mut pipeline = StreamPipeline::new()
-            .add_stage(TransformStage::new(|mut m: StreamMessage| {
-                m.headers.insert("processed".to_string(), "true".to_string());
+        let mut pipeline =
+            StreamPipeline::new().add_stage(TransformStage::new(|mut m: StreamMessage| {
+                m.headers
+                    .insert("processed".to_string(), "true".to_string());
                 m
             }));
 
-        let messages = vec![
-            StreamMessage {
-                topic: "test".to_string(),
-                partition: 0,
-                offset: 0,
-                key: None,
-                payload: vec![],
-                timestamp: 1000,
-                headers: HashMap::new(),
-            },
-        ];
+        let messages = vec![StreamMessage {
+            topic: "test".to_string(),
+            partition: 0,
+            offset: 0,
+            key: None,
+            payload: vec![],
+            timestamp: 1000,
+            headers: HashMap::new(),
+        }];
 
         let result = pipeline.process(messages).unwrap();
-        assert_eq!(result[0].headers.get("processed"), Some(&"true".to_string()));
+        assert_eq!(
+            result[0].headers.get("processed"),
+            Some(&"true".to_string())
+        );
     }
 
     #[test]
@@ -2044,8 +2103,7 @@ mod tests {
 
     #[test]
     fn test_deduplication_cleanup() {
-        let mut ingestor = ExactlyOnceIngestor::new()
-            .with_dedup_ttl(100); // 100ms TTL
+        let mut ingestor = ExactlyOnceIngestor::new().with_dedup_ttl(100); // 100ms TTL
 
         let txn_id = ingestor.begin();
 

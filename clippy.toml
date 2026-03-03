@@ -1,0 +1,7 @@
+# Clippy configuration for BoyoDB
+
+# Allow complex types - this is a database engine with complex data structures
+type-complexity-threshold = 500
+
+# Allow more function arguments for database APIs
+too-many-arguments-threshold = 12

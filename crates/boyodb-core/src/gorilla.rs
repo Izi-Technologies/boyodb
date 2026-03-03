@@ -17,11 +17,11 @@ use std::io::{self, Read, Write};
 /// Gorilla encoder for f64 values
 pub struct GorillaEncoder {
     buffer: Vec<u8>,
-    bit_pos: usize,      // Current bit position in current byte
-    prev_value: u64,     // Previous value (as bits)
-    prev_leading: u8,    // Previous leading zeros
-    prev_trailing: u8,   // Previous trailing zeros
-    first_value: bool,   // Is this the first value?
+    bit_pos: usize,    // Current bit position in current byte
+    prev_value: u64,   // Previous value (as bits)
+    prev_leading: u8,  // Previous leading zeros
+    prev_trailing: u8, // Previous trailing zeros
+    first_value: bool, // Is this the first value?
 }
 
 impl GorillaEncoder {
@@ -246,7 +246,10 @@ pub fn gorilla_decode_f64(data: &[u8]) -> io::Result<Vec<f64>> {
     }
 
     if data.len() < 8 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "buffer too small"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "buffer too small",
+        ));
     }
 
     let count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
@@ -334,7 +337,11 @@ mod tests {
         let compressed_size = encoded.len();
         let ratio = original_size as f64 / compressed_size as f64;
 
-        assert!(ratio > 10.0, "Expected >10x compression for identical values, got {:.2}x", ratio);
+        assert!(
+            ratio > 10.0,
+            "Expected >10x compression for identical values, got {:.2}x",
+            ratio
+        );
 
         // Verify roundtrip
         let decoded = gorilla_decode_f64(&encoded).unwrap();
@@ -364,8 +371,12 @@ mod tests {
         }
 
         // Compression ratio depends on data pattern - just verify it works
-        println!("Time series: original={}, compressed={}, ratio={:.2}x",
-            original_size, encoded.len(), original_size as f64 / encoded.len() as f64);
+        println!(
+            "Time series: original={}, compressed={}, ratio={:.2}x",
+            original_size,
+            encoded.len(),
+            original_size as f64 / encoded.len() as f64
+        );
     }
 
     #[test]

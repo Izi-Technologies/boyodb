@@ -175,21 +175,41 @@ pub struct QueryFilter {
 pub enum AggKind {
     CountStar,
     /// COUNT(DISTINCT column)
-    CountDistinct { column: String },
-    Sum { column: String },
-    Avg { column: String },
-    Min { column: String },
-    Max { column: String },
+    CountDistinct {
+        column: String,
+    },
+    Sum {
+        column: String,
+    },
+    Avg {
+        column: String,
+    },
+    Min {
+        column: String,
+    },
+    Max {
+        column: String,
+    },
     /// STDDEV/STDDEV_SAMP - sample standard deviation
-    StddevSamp { column: String },
+    StddevSamp {
+        column: String,
+    },
     /// STDDEV_POP - population standard deviation
-    StddevPop { column: String },
+    StddevPop {
+        column: String,
+    },
     /// VARIANCE/VAR_SAMP - sample variance
-    VarianceSamp { column: String },
+    VarianceSamp {
+        column: String,
+    },
     /// VAR_POP - population variance
-    VariancePop { column: String },
+    VariancePop {
+        column: String,
+    },
     /// APPROX_COUNT_DISTINCT - HyperLogLog distinct count
-    ApproxCountDistinct { column: String },
+    ApproxCountDistinct {
+        column: String,
+    },
 }
 
 /// HAVING clause condition
@@ -505,10 +525,7 @@ pub enum SelectExpr {
         right: Box<SelectExpr>,
     },
     /// Unary operation (-a, NOT a)
-    UnaryOp {
-        op: String,
-        expr: Box<SelectExpr>,
-    },
+    UnaryOp { op: String, expr: Box<SelectExpr> },
     /// CASE expression
     Case {
         operand: Option<Box<SelectExpr>>,
@@ -971,7 +988,9 @@ pub fn parse_sql(sql: &str) -> Result<SqlStatement, EngineError> {
             if let Some(stmt) = parse_drop_database_fallback(sql) {
                 return Ok(stmt);
             }
-            return Err(EngineError::InvalidArgument(format!("SQL parse error: {e}")));
+            return Err(EngineError::InvalidArgument(format!(
+                "SQL parse error: {e}"
+            )));
         }
     };
 
@@ -1061,7 +1080,8 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         return Ok(Some(DdlCommand::ShowViews { database: None }));
     }
 
-    if upper_trimmed.starts_with("SHOW VIEWS IN ") || upper_trimmed.starts_with("SHOW VIEWS FROM ") {
+    if upper_trimmed.starts_with("SHOW VIEWS IN ") || upper_trimmed.starts_with("SHOW VIEWS FROM ")
+    {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
         if tokens.len() >= 4 {
             let db_name = tokens[3].trim_end_matches(';');
@@ -1138,9 +1158,7 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             ));
         }
 
-        let (full, table_idx) = if tokens.len() >= 2
-            && tokens[1].eq_ignore_ascii_case("FULL")
-        {
+        let (full, table_idx) = if tokens.len() >= 2 && tokens[1].eq_ignore_ascii_case("FULL") {
             (true, 2)
         } else {
             (false, 1)
@@ -1190,9 +1208,7 @@ fn parse_create_materialized_view(sql: &str) -> Result<Option<DdlCommand>, Engin
 
     // Find the AS keyword to split view name from query
     let as_pos = upper.find(" AS ").ok_or_else(|| {
-        EngineError::InvalidArgument(
-            "CREATE MATERIALIZED VIEW requires AS keyword".into(),
-        )
+        EngineError::InvalidArgument("CREATE MATERIALIZED VIEW requires AS keyword".into())
     })?;
 
     // Extract the view name part
@@ -1426,9 +1442,7 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
             .ok_or_else(|| EngineError::InvalidArgument("DROP USER requires username".into()))?;
         let username = unquote(username);
         validate_ident(&username, false, "username")?;
-        return Ok(Some(AuthCommand::DropUser {
-            username,
-        }));
+        return Ok(Some(AuthCommand::DropUser { username }));
     }
 
     // ALTER USER username SET PASSWORD 'newpass'
@@ -1445,9 +1459,7 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
             .ok_or_else(|| EngineError::InvalidArgument("LOCK USER requires username".into()))?;
         let username = unquote(username);
         validate_ident(&username, false, "username")?;
-        return Ok(Some(AuthCommand::LockUser {
-            username,
-        }));
+        return Ok(Some(AuthCommand::LockUser { username }));
     }
 
     // UNLOCK USER username
@@ -1457,9 +1469,7 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
             .ok_or_else(|| EngineError::InvalidArgument("UNLOCK USER requires username".into()))?;
         let username = unquote(username);
         validate_ident(&username, false, "username")?;
-        return Ok(Some(AuthCommand::UnlockUser {
-            username,
-        }));
+        return Ok(Some(AuthCommand::UnlockUser { username }));
     }
 
     // CREATE ROLE rolename [WITH DESCRIPTION 'desc']
@@ -1474,9 +1484,7 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
             .ok_or_else(|| EngineError::InvalidArgument("DROP ROLE requires role name".into()))?;
         let name = unquote(name);
         validate_ident(&name, false, "role name")?;
-        return Ok(Some(AuthCommand::DropRole {
-            name,
-        }));
+        return Ok(Some(AuthCommand::DropRole { name }));
     }
 
     // GRANT ... TO ...
@@ -1506,9 +1514,7 @@ fn try_parse_auth_command(sql: &str) -> Result<Option<AuthCommand>, EngineError>
         })?;
         let username = unquote(username).trim_end_matches(';').to_string();
         validate_ident(&username, false, "username")?;
-        return Ok(Some(AuthCommand::ShowGrants {
-            username,
-        }));
+        return Ok(Some(AuthCommand::ShowGrants { username }));
     }
 
     Ok(None)
@@ -1531,16 +1537,17 @@ fn parse_create_user(sql: &str) -> Result<AuthCommand, EngineError> {
         .ok_or_else(|| EngineError::InvalidArgument("CREATE USER requires PASSWORD".into()))?;
 
     // Extract password (look for quoted string after PASSWORD)
-    let after_password = tokens
-        .iter()
-        .skip(password_token_idx + 1)
-        .fold(String::new(), |mut acc, t| {
-            if !acc.is_empty() {
-                acc.push(' ');
-            }
-            acc.push_str(t);
-            acc
-        });
+    let after_password =
+        tokens
+            .iter()
+            .skip(password_token_idx + 1)
+            .fold(String::new(), |mut acc, t| {
+                if !acc.is_empty() {
+                    acc.push(' ');
+                }
+                acc.push_str(t);
+                acc
+            });
 
     let password = extract_quoted_string(&after_password).ok_or_else(|| {
         EngineError::InvalidArgument("PASSWORD must be followed by a quoted string".into())
@@ -1692,10 +1699,7 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
             validate_ident(&role, false, "role name")?;
             validate_ident(&username, false, "username")?;
 
-            return Ok(AuthCommand::GrantRole {
-                role,
-                username,
-            });
+            return Ok(AuthCommand::GrantRole { role, username });
         }
     }
 
@@ -1763,10 +1767,7 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
             validate_ident(&role, false, "role name")?;
             validate_ident(&username, false, "username")?;
 
-            return Ok(AuthCommand::RevokeRole {
-                role,
-                username,
-            });
+            return Ok(AuthCommand::RevokeRole { role, username });
         }
     }
 
@@ -1883,9 +1884,9 @@ fn validate_ident(name: &str, allow_dot: bool, context: &str) -> Result<(), Engi
     };
     for part in parts {
         let mut chars = part.chars();
-        let first = chars.next().ok_or_else(|| {
-            EngineError::InvalidArgument(format!("{} cannot be empty", context))
-        })?;
+        let first = chars
+            .next()
+            .ok_or_else(|| EngineError::InvalidArgument(format!("{} cannot be empty", context)))?;
         if !(first.is_ascii_alphabetic() || first == '_') {
             return Err(EngineError::InvalidArgument(format!(
                 "{} has invalid start character",
@@ -1986,19 +1987,11 @@ pub enum TableConstraint {
         name: Option<String>,
     },
     /// CHECK constraint
-    Check {
-        expr: String,
-        name: Option<String>,
-    },
+    Check { expr: String, name: Option<String> },
     /// NOT NULL constraint (column-level)
-    NotNull {
-        column: String,
-    },
+    NotNull { column: String },
     /// DEFAULT value constraint
-    Default {
-        column: String,
-        value: String,
-    },
+    Default { column: String, value: String },
 }
 
 /// Column definition for CREATE TABLE
@@ -2054,8 +2047,11 @@ pub enum SqlStatement {
 fn sql_type_to_boyodb_type(sql_type: &sqlparser::ast::DataType) -> String {
     use sqlparser::ast::DataType;
     match sql_type {
-        DataType::Int(_) | DataType::Integer(_) | DataType::BigInt(_) |
-        DataType::SmallInt(_) | DataType::TinyInt(_) => "int64".to_string(),
+        DataType::Int(_)
+        | DataType::Integer(_)
+        | DataType::BigInt(_)
+        | DataType::SmallInt(_)
+        | DataType::TinyInt(_) => "int64".to_string(),
         DataType::Float(_) | DataType::Real | DataType::Double => "float64".to_string(),
         DataType::Boolean => "bool".to_string(),
         DataType::Custom(name, _) => {
@@ -2069,8 +2065,9 @@ fn sql_type_to_boyodb_type(sql_type: &sqlparser::ast::DataType) -> String {
                 _ => "string".to_string(),
             }
         }
-        DataType::Varchar(_) | DataType::Char(_) | DataType::Text |
-        DataType::String(_) => "string".to_string(),
+        DataType::Varchar(_) | DataType::Char(_) | DataType::Text | DataType::String(_) => {
+            "string".to_string()
+        }
         DataType::Timestamp(_, _) | DataType::Datetime(_) => "timestamp".to_string(),
         DataType::Date => "date".to_string(),
         DataType::Time(_, _) => "time".to_string(),
@@ -2083,7 +2080,13 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
     match stmt {
         Statement::Query(query) => {
             // Check if this is a set operation (UNION, INTERSECT, EXCEPT)
-            if let SetExpr::SetOperation { op, set_quantifier, left, right } = query.body.as_ref() {
+            if let SetExpr::SetOperation {
+                op,
+                set_quantifier,
+                left,
+                right,
+            } = query.body.as_ref()
+            {
                 let op_type = match (op, set_quantifier) {
                     (SetOperator::Union, SetQuantifier::All) => SetOpType::UnionAll,
                     (SetOperator::Union, _) => SetOpType::Union,
@@ -2137,7 +2140,9 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             returning,
             ..
         } => parse_insert(table_name, columns, source, returning),
-        Statement::StartTransaction { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Start)),
+        Statement::StartTransaction { .. } => {
+            Ok(SqlStatement::Transaction(TransactionCommand::Start))
+        }
         Statement::Commit { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Commit)),
         Statement::Rollback { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Rollback)),
         Statement::CreateDatabase { db_name, .. } => {
@@ -2152,17 +2157,21 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             let schema_json = if columns.is_empty() {
                 None
             } else {
-                let schema_fields: Vec<serde_json::Value> = columns.iter().map(|col| {
-                    let data_type = sql_type_to_boyodb_type(&col.data_type);
-                    let nullable = !col.options.iter().any(|opt| {
-                        matches!(opt.option, sqlparser::ast::ColumnOption::NotNull)
-                    });
-                    serde_json::json!({
-                        "name": col.name.value,
-                        "type": data_type,
-                        "nullable": nullable
+                let schema_fields: Vec<serde_json::Value> = columns
+                    .iter()
+                    .map(|col| {
+                        let data_type = sql_type_to_boyodb_type(&col.data_type);
+                        let nullable = !col
+                            .options
+                            .iter()
+                            .any(|opt| matches!(opt.option, sqlparser::ast::ColumnOption::NotNull));
+                        serde_json::json!({
+                            "name": col.name.value,
+                            "type": data_type,
+                            "nullable": nullable
+                        })
                     })
-                }).collect();
+                    .collect();
                 Some(serde_json::to_string(&schema_fields).unwrap_or_default())
             };
             Ok(SqlStatement::Ddl(DdlCommand::CreateTable {
@@ -2251,9 +2260,7 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             }))
         }
         Statement::AlterTable {
-            name,
-            operations,
-            ..
+            name, operations, ..
         } => {
             let full_name = name.to_string();
             let (database, table) = parse_table_name(&full_name)?;
@@ -2319,18 +2326,21 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
                 .as_ref()
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| format!("idx_{}_{}", table, columns.len()));
-            let column_names: Vec<String> = columns
-                .iter()
-                .map(|c| c.expr.to_string())
-                .collect();
-            let index_type = match using.as_ref().map(|i| i.to_string().to_uppercase()).as_deref() {
+            let column_names: Vec<String> = columns.iter().map(|c| c.expr.to_string()).collect();
+            let index_type = match using
+                .as_ref()
+                .map(|i| i.to_string().to_uppercase())
+                .as_deref()
+            {
                 Some("BTREE") | None => IndexType::BTree,
                 Some("HASH") => IndexType::Hash,
                 Some("BLOOM") => IndexType::Bloom,
                 Some("BITMAP") => IndexType::Bitmap,
-                Some(other) => return Err(EngineError::InvalidArgument(format!(
-                    "unsupported index type: {other}"
-                ))),
+                Some(other) => {
+                    return Err(EngineError::InvalidArgument(format!(
+                        "unsupported index type: {other}"
+                    )))
+                }
             };
             Ok(SqlStatement::Ddl(DdlCommand::CreateIndex {
                 database,
@@ -2342,9 +2352,7 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             }))
         }
         Statement::Explain {
-            analyze,
-            statement,
-            ..
+            analyze, statement, ..
         } => {
             // Parse EXPLAIN [ANALYZE] SELECT ...
             let explained = parse_statement(statement)?;
@@ -2356,7 +2364,10 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
         Statement::Analyze { table_name, .. } => {
             let full_name = table_name.to_string();
             let (database, table) = parse_table_name(&full_name)?;
-            Ok(SqlStatement::Ddl(DdlCommand::AnalyzeTable { database, table }))
+            Ok(SqlStatement::Ddl(DdlCommand::AnalyzeTable {
+                database,
+                table,
+            }))
         }
         _ => Err(EngineError::NotImplemented(format!(
             "unsupported SQL statement type: {stmt}"
@@ -2366,7 +2377,13 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
 
 /// Parse a query that might be a simple SELECT or a set operation
 fn parse_query_or_setop(query: &Query) -> Result<SqlStatement, EngineError> {
-    if let SetExpr::SetOperation { op, set_quantifier, left, right } = query.body.as_ref() {
+    if let SetExpr::SetOperation {
+        op,
+        set_quantifier,
+        left,
+        right,
+    } = query.body.as_ref()
+    {
         let op_type = match (op, set_quantifier) {
             (SetOperator::Union, SetQuantifier::All) => SetOpType::UnionAll,
             (SetOperator::Union, _) => SetOpType::Union,
@@ -2428,7 +2445,8 @@ fn parse_query(query: &Query) -> Result<ParsedQuery, EngineError> {
 
     // Parse projection and detect aggregations
     // Parse projection and detect aggregations
-    let (projection, aggregation, computed_columns) = parse_select_items(&select.selection, &select.projection)?;
+    let (projection, aggregation, computed_columns) =
+        parse_select_items(&select.selection, &select.projection)?;
 
     // Parse WHERE clause
     let mut filter = QueryFilter::default();
@@ -2540,7 +2558,9 @@ fn parse_table_name(full_name: &str) -> Result<(String, String), EngineError> {
     }
 }
 
-fn parse_from_clause(select: &Select) -> Result<(Option<String>, Option<String>, Vec<JoinClause>), EngineError> {
+fn parse_from_clause(
+    select: &Select,
+) -> Result<(Option<String>, Option<String>, Vec<JoinClause>), EngineError> {
     if select.from.is_empty() {
         return Ok((None, None, Vec::new()));
     }
@@ -2574,11 +2594,7 @@ fn parse_joins(joins: &[Join]) -> Result<Vec<JoinClause>, EngineError> {
             JoinOperator::RightOuter(_) => JoinType::Right,
             JoinOperator::FullOuter(_) => JoinType::FullOuter,
             JoinOperator::CrossJoin => JoinType::Cross,
-            _ => {
-                return Err(EngineError::NotImplemented(
-                    "unsupported JOIN type".into(),
-                ))
-            }
+            _ => return Err(EngineError::NotImplemented("unsupported JOIN type".into())),
         };
 
         // Extract the joined table name and alias
@@ -2666,7 +2682,9 @@ fn extract_column_name(expr: &Expr) -> Result<String, EngineError> {
             if let Some(last) = parts.last() {
                 Ok(last.value.clone())
             } else {
-                Err(EngineError::InvalidArgument("empty compound identifier".into()))
+                Err(EngineError::InvalidArgument(
+                    "empty compound identifier".into(),
+                ))
             }
         }
         _ => Err(EngineError::NotImplemented(format!(
@@ -2697,19 +2715,31 @@ fn parse_select_items(
                     });
                 }
                 Expr::Value(val) => {
-                     let se = match val {
-                         Value::Number(n, _) => SelectExpr::Literal(LiteralValue::Integer(n.parse().unwrap_or(0))),
-                         Value::SingleQuotedString(s) => SelectExpr::Literal(LiteralValue::String(s.clone())),
-                         _ => return Err(EngineError::NotImplemented(format!("unsupported value type: {val}"))),
-                     };
-                     computed_columns.push(SelectColumn { expr: se, alias: None });
+                    let se = match val {
+                        Value::Number(n, _) => {
+                            SelectExpr::Literal(LiteralValue::Integer(n.parse().unwrap_or(0)))
+                        }
+                        Value::SingleQuotedString(s) => {
+                            SelectExpr::Literal(LiteralValue::String(s.clone()))
+                        }
+                        _ => {
+                            return Err(EngineError::NotImplemented(format!(
+                                "unsupported value type: {val}"
+                            )))
+                        }
+                    };
+                    computed_columns.push(SelectColumn {
+                        expr: se,
+                        alias: None,
+                    });
                 }
                 Expr::Function(func) => {
                     if let Some(agg) = parse_aggregate_function(func)? {
                         aggs.push(agg);
                     } else {
                         return Err(EngineError::NotImplemented(format!(
-                            "unsupported function: {}", func.name
+                            "unsupported function: {}",
+                            func.name
                         )));
                     }
                 }
@@ -2719,39 +2749,49 @@ fn parse_select_items(
                     )));
                 }
             },
-            SelectItem::ExprWithAlias { expr, alias } => {
-                match expr {
-                    Expr::Identifier(ident) => {
-                        columns.push(ident.value.clone());
-                        computed_columns.push(SelectColumn {
-                            expr: SelectExpr::Column(ident.value.clone()),
-                            alias: Some(alias.value.clone()),
-                        });
-                    }
-                    Expr::Value(val) => {
-                         let se = match val {
-                             Value::Number(n, _) => SelectExpr::Literal(LiteralValue::Integer(n.parse().unwrap_or(0))),
-                             Value::SingleQuotedString(s) => SelectExpr::Literal(LiteralValue::String(s.clone())),
-                             _ => return Err(EngineError::NotImplemented(format!("unsupported value type: {val}"))),
-                         };
-                         computed_columns.push(SelectColumn { expr: se, alias: Some(alias.value.clone()) });
-                    }
-                    Expr::Function(func) => {
-                        if let Some(agg) = parse_aggregate_function(func)? {
-                            aggs.push(agg);
-                        } else {
-                            return Err(EngineError::NotImplemented(format!(
-                                "unsupported function: {}", func.name
-                            )));
+            SelectItem::ExprWithAlias { expr, alias } => match expr {
+                Expr::Identifier(ident) => {
+                    columns.push(ident.value.clone());
+                    computed_columns.push(SelectColumn {
+                        expr: SelectExpr::Column(ident.value.clone()),
+                        alias: Some(alias.value.clone()),
+                    });
+                }
+                Expr::Value(val) => {
+                    let se = match val {
+                        Value::Number(n, _) => {
+                            SelectExpr::Literal(LiteralValue::Integer(n.parse().unwrap_or(0)))
                         }
-                    }
-                    _ => {
+                        Value::SingleQuotedString(s) => {
+                            SelectExpr::Literal(LiteralValue::String(s.clone()))
+                        }
+                        _ => {
+                            return Err(EngineError::NotImplemented(format!(
+                                "unsupported value type: {val}"
+                            )))
+                        }
+                    };
+                    computed_columns.push(SelectColumn {
+                        expr: se,
+                        alias: Some(alias.value.clone()),
+                    });
+                }
+                Expr::Function(func) => {
+                    if let Some(agg) = parse_aggregate_function(func)? {
+                        aggs.push(agg);
+                    } else {
                         return Err(EngineError::NotImplemented(format!(
-                            "unsupported expression in SELECT: {expr}"
+                            "unsupported function: {}",
+                            func.name
                         )));
                     }
                 }
-            }
+                _ => {
+                    return Err(EngineError::NotImplemented(format!(
+                        "unsupported expression in SELECT: {expr}"
+                    )));
+                }
+            },
             _ => {
                 return Err(EngineError::NotImplemented(format!(
                     "unsupported SELECT item: {item}"
@@ -2764,7 +2804,11 @@ fn parse_select_items(
         // If we have columns but also aggs, they must be part of GROUP BY or valid
         // For now we return both
         Ok((
-            if columns.is_empty() { None } else { Some(columns) },
+            if columns.is_empty() {
+                None
+            } else {
+                Some(columns)
+            },
             Some(AggPlan {
                 group_by: GroupBy::None,
                 aggs,
@@ -2774,7 +2818,11 @@ fn parse_select_items(
         ))
     } else {
         Ok((
-            if columns.is_empty() { None } else { Some(columns) },
+            if columns.is_empty() {
+                None
+            } else {
+                Some(columns)
+            },
             None,
             computed_columns,
         ))
@@ -2782,7 +2830,9 @@ fn parse_select_items(
 }
 
 /// Parse an aggregate function from SQL AST
-fn parse_aggregate_function(func: &sqlparser::ast::Function) -> Result<Option<AggKind>, EngineError> {
+fn parse_aggregate_function(
+    func: &sqlparser::ast::Function,
+) -> Result<Option<AggKind>, EngineError> {
     let func_name = func.name.to_string().to_lowercase();
 
     match func_name.as_str() {
@@ -2795,7 +2845,9 @@ fn parse_aggregate_function(func: &sqlparser::ast::Function) -> Result<Option<Ag
                 // Check if it's COUNT(*) or COUNT(column)
                 if func.args.is_empty() {
                     Ok(Some(AggKind::CountStar))
-                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) = func.args.first() {
+                } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
+                    func.args.first()
+                {
                     Ok(Some(AggKind::CountStar))
                 } else {
                     // COUNT(column) - treat as COUNT(*)
@@ -2873,7 +2925,8 @@ fn parse_where_expr(expr: &Expr, filter: &mut QueryFilter) -> Result<(), EngineE
                 BinaryOperator::Or => {
                     // Handle OR by collecting equality conditions into IN filters
                     // For example: tenant_id = 1 OR tenant_id = 3 becomes tenant_id IN (1, 3)
-                    let mut or_values: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+                    let mut or_values: std::collections::HashMap<String, Vec<u64>> =
+                        std::collections::HashMap::new();
                     collect_or_equalities(expr, &mut or_values);
 
                     // Convert collected OR equalities into IN filters
@@ -2941,7 +2994,9 @@ fn parse_where_expr(expr: &Expr, filter: &mut QueryFilter) -> Result<(), EngineE
                                 }
                             } else if let Some(string_val) = extract_string_value(right) {
                                 // String equality for other columns
-                                filter.string_eq_filters.push((col_name.clone(), string_val));
+                                filter
+                                    .string_eq_filters
+                                    .push((col_name.clone(), string_val));
                             }
                         }
                     }
@@ -3131,29 +3186,34 @@ fn parse_where_expr(expr: &Expr, filter: &mut QueryFilter) -> Result<(), EngineE
                     // Try to extract as numeric list first
                     let numeric_values: Vec<i64> = list
                         .iter()
-                        .filter_map(|e| {
-                            match e {
-                                Expr::Value(Value::Number(n, _)) => n.parse::<i64>().ok(),
-                                Expr::UnaryOp { op: UnaryOperator::Minus, expr } => {
-                                    if let Expr::Value(Value::Number(n, _)) = expr.as_ref() {
-                                        n.parse::<i64>().ok().map(|v| -v)
-                                    } else {
-                                        None
-                                    }
+                        .filter_map(|e| match e {
+                            Expr::Value(Value::Number(n, _)) => n.parse::<i64>().ok(),
+                            Expr::UnaryOp {
+                                op: UnaryOperator::Minus,
+                                expr,
+                            } => {
+                                if let Expr::Value(Value::Number(n, _)) = expr.as_ref() {
+                                    n.parse::<i64>().ok().map(|v| -v)
+                                } else {
+                                    None
                                 }
-                                _ => None,
                             }
+                            _ => None,
                         })
                         .collect();
 
                     if numeric_values.len() == list.len() && !numeric_values.is_empty() {
                         // Handle special columns tenant_id and route_id
                         if col_name == "tenant_id" {
-                            filter.tenant_id_in = Some(numeric_values.iter().map(|&v| v as u64).collect());
+                            filter.tenant_id_in =
+                                Some(numeric_values.iter().map(|&v| v as u64).collect());
                         } else if col_name == "route_id" {
-                            filter.route_id_in = Some(numeric_values.iter().map(|&v| v as u64).collect());
+                            filter.route_id_in =
+                                Some(numeric_values.iter().map(|&v| v as u64).collect());
                         } else {
-                            filter.numeric_in_filters.push((ident.value.clone(), numeric_values));
+                            filter
+                                .numeric_in_filters
+                                .push((ident.value.clone(), numeric_values));
                         }
                     } else {
                         // Try to extract as string list
@@ -3207,7 +3267,9 @@ fn parse_where_expr(expr: &Expr, filter: &mut QueryFilter) -> Result<(), EngineE
                         });
                     }
                     // Legacy handling for special columns
-                    if let (Ok(low_u64), Ok(high_u64)) = (extract_u64_value(low), extract_u64_value(high)) {
+                    if let (Ok(low_u64), Ok(high_u64)) =
+                        (extract_u64_value(low), extract_u64_value(high))
+                    {
                         match col_name.to_lowercase().as_str() {
                             "event_time" => {
                                 filter.event_time_ge = Some(low_u64);
@@ -3316,12 +3378,20 @@ fn try_extract_column_name(expr: &Expr) -> Option<String> {
 /// For example: `a = 1 OR a = 2 OR b = 3` collects {a: [1, 2], b: [3]}
 fn collect_or_equalities(expr: &Expr, values: &mut std::collections::HashMap<String, Vec<u64>>) {
     match expr {
-        Expr::BinaryOp { left, op: BinaryOperator::Or, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => {
             // Recursively collect from both sides of OR
             collect_or_equalities(left, values);
             collect_or_equalities(right, values);
         }
-        Expr::BinaryOp { left, op: BinaryOperator::Eq, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => {
             // Extract column = value equality
             if let Some(col_name) = try_extract_column_name(left) {
                 if let Some(val) = try_extract_u64_value(right) {
@@ -3346,7 +3416,10 @@ fn collect_or_equalities(expr: &Expr, values: &mut std::collections::HashMap<Str
 fn try_extract_u64_value(expr: &Expr) -> Option<u64> {
     match expr {
         Expr::Value(Value::Number(n, _)) => n.parse().ok(),
-        Expr::UnaryOp { op: UnaryOperator::Plus, expr } => try_extract_u64_value(expr),
+        Expr::UnaryOp {
+            op: UnaryOperator::Plus,
+            expr,
+        } => try_extract_u64_value(expr),
         _ => None,
     }
 }
@@ -3429,7 +3502,10 @@ fn parse_having_clause(expr: &Expr) -> Result<Vec<HavingCondition>, EngineError>
 }
 
 /// Recursively parse HAVING expression (handles AND/OR)
-fn parse_having_expr(expr: &Expr, conditions: &mut Vec<HavingCondition>) -> Result<(), EngineError> {
+fn parse_having_expr(
+    expr: &Expr,
+    conditions: &mut Vec<HavingCondition>,
+) -> Result<(), EngineError> {
     match expr {
         Expr::BinaryOp { left, op, right } => {
             match op {
@@ -3445,9 +3521,12 @@ fn parse_having_expr(expr: &Expr, conditions: &mut Vec<HavingCondition>) -> Resu
                     parse_having_expr(right, conditions)?;
                 }
                 // Comparison operators
-                BinaryOperator::Eq | BinaryOperator::NotEq |
-                BinaryOperator::Gt | BinaryOperator::GtEq |
-                BinaryOperator::Lt | BinaryOperator::LtEq => {
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq => {
                     // Left side should be an aggregate function
                     if let Expr::Function(func) = left.as_ref() {
                         if let Some(agg) = parse_aggregate_function(func)? {
@@ -3479,14 +3558,16 @@ fn parse_having_expr(expr: &Expr, conditions: &mut Vec<HavingCondition>) -> Resu
                 }
                 _ => {
                     return Err(EngineError::NotImplemented(format!(
-                        "unsupported operator in HAVING: {:?}", op
+                        "unsupported operator in HAVING: {:?}",
+                        op
                     )));
                 }
             }
         }
         _ => {
             return Err(EngineError::NotImplemented(format!(
-                "unsupported expression in HAVING: {}", expr
+                "unsupported expression in HAVING: {}",
+                expr
             )));
         }
     }
@@ -3496,12 +3577,13 @@ fn parse_having_expr(expr: &Expr, conditions: &mut Vec<HavingCondition>) -> Resu
 /// Extract a numeric value from an expression
 fn extract_numeric_value(expr: &Expr) -> Result<f64, EngineError> {
     match expr {
-        Expr::Value(Value::Number(n, _)) => {
-            n.parse::<f64>().map_err(|_| {
-                EngineError::InvalidArgument(format!("invalid number in HAVING: {}", n))
-            })
-        }
-        Expr::UnaryOp { op: sqlparser::ast::UnaryOperator::Minus, expr } => {
+        Expr::Value(Value::Number(n, _)) => n
+            .parse::<f64>()
+            .map_err(|_| EngineError::InvalidArgument(format!("invalid number in HAVING: {}", n))),
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Minus,
+            expr,
+        } => {
             let val = extract_numeric_value(expr)?;
             Ok(-val)
         }
@@ -3529,9 +3611,9 @@ fn parse_insert(
     };
 
     // Parse VALUES clause
-    let source = source.as_ref().ok_or_else(|| {
-        EngineError::InvalidArgument("INSERT requires VALUES clause".into())
-    })?;
+    let source = source
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidArgument("INSERT requires VALUES clause".into()))?;
 
     let values = match source.body.as_ref() {
         SetExpr::Values(values) => {
@@ -3624,9 +3706,7 @@ fn expr_to_sql_value(expr: &Expr) -> Result<SqlValue, EngineError> {
                 } else if let Ok(f) = n.parse::<f64>() {
                     Ok(SqlValue::Float(f))
                 } else {
-                    Err(EngineError::InvalidArgument(format!(
-                        "invalid number: {n}"
-                    )))
+                    Err(EngineError::InvalidArgument(format!("invalid number: {n}")))
                 }
             }
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
@@ -3722,9 +3802,9 @@ fn parse_delete(
     returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
     // Extract table name from the FROM clause
-    let from_table = from.first().ok_or_else(|| {
-        EngineError::InvalidArgument("DELETE requires FROM clause".into())
-    })?;
+    let from_table = from
+        .first()
+        .ok_or_else(|| EngineError::InvalidArgument("DELETE requires FROM clause".into()))?;
 
     let table_name = match &from_table.relation {
         TableFactor::Table { name, .. } => name.to_string(),
@@ -3872,7 +3952,11 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
             })
         }
 
-        Expr::Cast { expr: inner, data_type, .. } => {
+        Expr::Cast {
+            expr: inner,
+            data_type,
+            ..
+        } => {
             let inner_expr = parse_expr(inner)?;
             Ok(SelectExpr::Function(ScalarFunction::Cast {
                 expr: Box::new(inner_expr),
@@ -4257,12 +4341,8 @@ fn parse_window_function(
                 default,
             }
         }
-        "first_value" => {
-            WindowFunction::FirstValue(Box::new(get_arg(args, 0, "FIRST_VALUE")?))
-        }
-        "last_value" => {
-            WindowFunction::LastValue(Box::new(get_arg(args, 0, "LAST_VALUE")?))
-        }
+        "first_value" => WindowFunction::FirstValue(Box::new(get_arg(args, 0, "FIRST_VALUE")?)),
+        "last_value" => WindowFunction::LastValue(Box::new(get_arg(args, 0, "LAST_VALUE")?)),
         "nth_value" => {
             let expr = get_arg(args, 0, "NTH_VALUE")?;
             let n = get_int_arg(args, 1, "NTH_VALUE")?;
@@ -4425,9 +4505,7 @@ fn get_string_arg(args: &[SelectExpr], idx: usize, func_name: &str) -> Result<St
 }
 
 /// Parse SELECT items with full expression support
-pub fn parse_select_items_extended(
-    items: &[SelectItem],
-) -> Result<Vec<SelectColumn>, EngineError> {
+pub fn parse_select_items_extended(items: &[SelectItem]) -> Result<Vec<SelectColumn>, EngineError> {
     let mut columns = Vec::new();
 
     for item in items {
@@ -4873,7 +4951,8 @@ mod tests {
 
     #[test]
     fn test_parse_insert() {
-        let sql = "INSERT INTO mydb.events (tenant_id, duration_ms, status) VALUES (1, 500, 'completed')";
+        let sql =
+            "INSERT INTO mydb.events (tenant_id, duration_ms, status) VALUES (1, 500, 'completed')";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Insert(cmd) => {

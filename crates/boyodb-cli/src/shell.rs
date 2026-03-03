@@ -8,6 +8,7 @@ use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
 use base64::{engine::general_purpose, Engine as _};
 use comfy_table::{Cell, Table};
+use rustls::pki_types::ServerName;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -24,7 +25,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use rustls::pki_types::ServerName;
 
 /// Configuration loaded from ~/.boyodbrc
 #[derive(Debug, Default, Deserialize)]
@@ -89,7 +89,10 @@ impl ShellConfig {
                     if let Ok(config) = toml_parse(&contents) {
                         return config;
                     }
-                    eprintln!("Warning: Failed to parse {}, using defaults", path.display());
+                    eprintln!(
+                        "Warning: Failed to parse {}, using defaults",
+                        path.display()
+                    );
                 }
             }
         }
@@ -172,29 +175,113 @@ struct DisplayOptions<'a> {
 
 /// SQL keywords for tab completion
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN",
-    "ORDER", "BY", "ASC", "DESC", "LIMIT", "OFFSET", "GROUP", "HAVING",
-    "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "ON", "AS",
-    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "TRUNCATE",
-    "CREATE", "DROP", "ALTER", "TABLE", "DATABASE", "INDEX", "VIEW",
-    "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "NULL", "DEFAULT",
-    "COUNT", "SUM", "AVG", "MIN", "MAX", "DISTINCT",
-    "UNION", "INTERSECT", "EXCEPT", "ALL",
-    "CASE", "WHEN", "THEN", "ELSE", "END",
-    "CAST", "COALESCE", "NULLIF",
-    "TRUE", "FALSE", "IS",
-    "EXPLAIN", "ANALYZE", "DESCRIBE", "SHOW", "USE",
-    "GRANT", "REVOKE", "TO", "WITH", "OPTION",
-    "VACUUM", "DEDUPLICATE", "DEDUPLICATION",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "AND",
+    "OR",
+    "NOT",
+    "IN",
+    "LIKE",
+    "BETWEEN",
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "GROUP",
+    "HAVING",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "CROSS",
+    "ON",
+    "AS",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "TRUNCATE",
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "TABLE",
+    "DATABASE",
+    "INDEX",
+    "VIEW",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "NULL",
+    "DEFAULT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "DISTINCT",
+    "UNION",
+    "INTERSECT",
+    "EXCEPT",
+    "ALL",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "CAST",
+    "COALESCE",
+    "NULLIF",
+    "TRUE",
+    "FALSE",
+    "IS",
+    "EXPLAIN",
+    "ANALYZE",
+    "DESCRIBE",
+    "SHOW",
+    "USE",
+    "GRANT",
+    "REVOKE",
+    "TO",
+    "WITH",
+    "OPTION",
+    "VACUUM",
+    "DEDUPLICATE",
+    "DEDUPLICATION",
 ];
 
 /// Meta-commands for tab completion
 const META_COMMANDS: &[&str] = &[
-    "\\q", "\\quit", "\\h", "\\help", "\\?",
-    "\\l", "\\dt", "\\d", "\\du", "\\di", "\\dv",
-    "\\c", "\\x", "\\o", "\\i",
-    "\\timing", "\\format", "\\copy", "\\ps", "\\views",
-    "\\history", "\\pset", "\\pager",
+    "\\q",
+    "\\quit",
+    "\\h",
+    "\\help",
+    "\\?",
+    "\\l",
+    "\\dt",
+    "\\d",
+    "\\du",
+    "\\di",
+    "\\dv",
+    "\\c",
+    "\\x",
+    "\\o",
+    "\\i",
+    "\\timing",
+    "\\format",
+    "\\copy",
+    "\\ps",
+    "\\views",
+    "\\history",
+    "\\pset",
+    "\\pager",
 ];
 
 /// Tab completion helper for the shell
@@ -220,7 +307,8 @@ impl BoyodbHelper {
     }
 
     fn update_tables(&mut self, tables: Vec<(String, String)>) {
-        self.tables = tables.into_iter()
+        self.tables = tables
+            .into_iter()
             .map(|(db, tbl)| format!("{}.{}", db, tbl))
             .collect();
     }
@@ -231,7 +319,8 @@ impl BoyodbHelper {
         let line_to_cursor = &line[..pos];
 
         // Find the word being completed
-        let word_start = line_to_cursor.rfind(|c: char| c.is_whitespace() || c == ',' || c == '(')
+        let word_start = line_to_cursor
+            .rfind(|c: char| c.is_whitespace() || c == ',' || c == '(')
             .map(|i| i + 1)
             .unwrap_or(0);
         let word = &line_to_cursor[word_start..];
@@ -254,7 +343,12 @@ impl BoyodbHelper {
         for kw in SQL_KEYWORDS {
             if kw.starts_with(&word_upper) && !word.is_empty() {
                 // Match case with user input
-                let replacement = if word.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
+                let replacement = if word
+                    .chars()
+                    .next()
+                    .map(|c| c.is_lowercase())
+                    .unwrap_or(false)
+                {
                     kw.to_lowercase()
                 } else {
                     kw.to_string()
@@ -268,9 +362,12 @@ impl BoyodbHelper {
 
         // Table name completion (after FROM, JOIN, INTO, UPDATE, TABLE)
         let lower_line = line_to_cursor.to_lowercase();
-        if lower_line.contains("from ") || lower_line.contains("join ")
-            || lower_line.contains("into ") || lower_line.contains("update ")
-            || lower_line.contains("table ") || lower_line.contains("describe ")
+        if lower_line.contains("from ")
+            || lower_line.contains("join ")
+            || lower_line.contains("into ")
+            || lower_line.contains("update ")
+            || lower_line.contains("table ")
+            || lower_line.contains("describe ")
         {
             for table in &self.tables {
                 if table.to_lowercase().starts_with(&word.to_lowercase()) {
@@ -294,7 +391,8 @@ impl BoyodbHelper {
         }
 
         // Database name completion (after USE, DATABASE, \c)
-        if lower_line.contains("use ") || lower_line.ends_with("\\c ")
+        if lower_line.contains("use ")
+            || lower_line.ends_with("\\c ")
             || lower_line.contains("database ")
         {
             for db in &self.databases {
@@ -328,7 +426,8 @@ impl Completer for BoyodbHelper {
 
         // Find word start for replacement position
         let line_to_cursor = &line[..pos];
-        let word_start = line_to_cursor.rfind(|c: char| c.is_whitespace() || c == ',' || c == '(')
+        let word_start = line_to_cursor
+            .rfind(|c: char| c.is_whitespace() || c == ',' || c == '(')
             .map(|i| i + 1)
             .unwrap_or(0);
 
@@ -413,7 +512,9 @@ enum Operation {
         database: Option<String>,
     },
     #[serde(rename = "create_database")]
-    CreateDatabase { name: String },
+    CreateDatabase {
+        name: String,
+    },
     #[serde(rename = "create_table")]
     CreateTable {
         database: String,
@@ -593,10 +694,15 @@ struct ShellState {
 }
 
 impl ShellState {
-    fn new(host: String, token: Option<String>, database: Option<String>, tls_config: Option<TlsConfig>) -> Self {
-        let tls_connector = tls_config.as_ref().map(|config| {
-            build_tls_connector(config).expect("Failed to build TLS connector")
-        });
+    fn new(
+        host: String,
+        token: Option<String>,
+        database: Option<String>,
+        tls_config: Option<TlsConfig>,
+    ) -> Self {
+        let tls_connector = tls_config
+            .as_ref()
+            .map(|config| build_tls_connector(config).expect("Failed to build TLS connector"));
 
         // Load saved views from disk
         let client_views = load_client_views().unwrap_or_default();
@@ -626,7 +732,11 @@ impl ShellState {
     }
 
     fn prompt(&self) -> String {
-        let tls_indicator = if self.tls_config.is_some() { "[TLS]" } else { "" };
+        let tls_indicator = if self.tls_config.is_some() {
+            "[TLS]"
+        } else {
+            ""
+        };
         let user_indicator = match &self.current_user {
             Some(user) => format!("{}@", user),
             None => String::new(),
@@ -664,7 +774,7 @@ pub fn run_shell(
 
     // CLI auth takes precedence over config file
     let auto_user = if auth.is_some() {
-        None  // Don't use config user if CLI auth is provided
+        None // Don't use config user if CLI auth is provided
     } else {
         config.user
     };
@@ -767,8 +877,7 @@ async fn async_fetch_wal_stats(
         state.session_id = resp.session_id;
         state.current_user = Some(username);
     } else if let Some(username) = auto_user {
-        let password = rpassword::prompt_password("Password: ")
-            .unwrap_or_else(|_| String::new());
+        let password = rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
         if password.is_empty() {
             return Err(anyhow!("Password required for wal_stats"));
         }
@@ -824,7 +933,11 @@ async fn async_run_shell(
     }
 
     // Test connection
-    let tls_info = if state.tls_config.is_some() { " (TLS)" } else { "" };
+    let tls_info = if state.tls_config.is_some() {
+        " (TLS)"
+    } else {
+        ""
+    };
     if interactive {
         print!("Connecting to {}{}... ", host, tls_info);
     }
@@ -850,10 +963,14 @@ async fn async_run_shell(
 
     // CLI auth takes precedence (for non-interactive use)
     if let Some((username, password)) = cli_auth {
-        let resp = send_request(&state, Operation::Login {
-            username: username.clone(),
-            password,
-        }).await;
+        let resp = send_request(
+            &state,
+            Operation::Login {
+                username: username.clone(),
+                password,
+            },
+        )
+        .await;
 
         match resp {
             Ok(r) if r.status == "ok" => {
@@ -882,14 +999,17 @@ async fn async_run_shell(
         if interactive {
             println!("Auto-login as '{}' (from config)...", username);
         }
-        let password = rpassword::prompt_password("Password: ")
-            .unwrap_or_else(|_| String::new());
+        let password = rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
 
         if !password.is_empty() {
-            let resp = send_request(&state, Operation::Login {
-                username: username.clone(),
-                password,
-            }).await;
+            let resp = send_request(
+                &state,
+                Operation::Login {
+                    username: username.clone(),
+                    password,
+                },
+            )
+            .await;
 
             match resp {
                 Ok(r) if r.status == "ok" => {
@@ -901,7 +1021,10 @@ async fn async_run_shell(
                 }
                 Ok(r) => {
                     if interactive {
-                        eprintln!("Auto-login failed: {}\n", r.message.unwrap_or_else(|| "unknown error".into()));
+                        eprintln!(
+                            "Auto-login failed: {}\n",
+                            r.message.unwrap_or_else(|| "unknown error".into())
+                        );
                     }
                 }
                 Err(e) => {
@@ -928,13 +1051,13 @@ async fn async_run_shell(
     // Configure rustyline with proper history search support
     // Emacs mode (default) supports Ctrl+R for reverse history search
     let config = Config::builder()
-        .max_history_size(10000)            // Store up to 10k history entries
+        .max_history_size(10000) // Store up to 10k history entries
         .unwrap()
-        .history_ignore_dups(true)          // Don't store duplicate consecutive entries
+        .history_ignore_dups(true) // Don't store duplicate consecutive entries
         .unwrap()
-        .history_ignore_space(true)         // Don't store entries starting with space (returns Self, no unwrap)
-        .edit_mode(EditMode::Emacs)         // Emacs mode has Ctrl+R search built-in
-        .auto_add_history(false)            // We add history manually for better control
+        .history_ignore_space(true) // Don't store entries starting with space (returns Self, no unwrap)
+        .edit_mode(EditMode::Emacs) // Emacs mode has Ctrl+R search built-in
+        .auto_add_history(false) // We add history manually for better control
         .build();
 
     let mut rl: Editor<BoyodbHelper, DefaultHistory> = Editor::with_config(config)?;
@@ -954,7 +1077,8 @@ async fn async_run_shell(
     }
     if let Ok(resp) = send_request(&state, Operation::ListTables { database: None }).await {
         if let Some(tables) = resp.tables {
-            let table_list: Vec<(String, String)> = tables.iter()
+            let table_list: Vec<(String, String)> = tables
+                .iter()
                 .map(|t| (t.database.clone(), t.name.clone()))
                 .collect();
             if let Some(helper) = rl.helper_mut() {
@@ -1084,7 +1208,16 @@ fn is_immediate_command(input: &str) -> bool {
 
     matches!(
         first_word,
-        "help" | "quit" | "exit" | "status" | "login" | "logout" | "whoami" | "clear" | "use" | "history"
+        "help"
+            | "quit"
+            | "exit"
+            | "status"
+            | "login"
+            | "logout"
+            | "whoami"
+            | "clear"
+            | "use"
+            | "history"
     )
 }
 
@@ -1260,10 +1393,22 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                                 println!("{:<20} {:<15} {:<10}", "Name", "Type", "Nullable");
                                 println!("{}", "-".repeat(50));
                                 for field in fields {
-                                    let name = field.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                                    let dtype = field.get("data_type").map(|d| format!("{:?}", d)).unwrap_or_else(|| "?".to_string());
-                                    let nullable = field.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true);
-                                    println!("{:<20} {:<15} {:<10}", name, dtype, if nullable { "YES" } else { "NO" });
+                                    let name =
+                                        field.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                                    let dtype = field
+                                        .get("data_type")
+                                        .map(|d| format!("{:?}", d))
+                                        .unwrap_or_else(|| "?".to_string());
+                                    let nullable = field
+                                        .get("nullable")
+                                        .and_then(|n| n.as_bool())
+                                        .unwrap_or(true);
+                                    println!(
+                                        "{:<20} {:<15} {:<10}",
+                                        name,
+                                        dtype,
+                                        if nullable { "YES" } else { "NO" }
+                                    );
                                 }
                             }
                         }
@@ -1297,16 +1442,19 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             {
                 Ok(resp) => {
                     if let Ok(Some(ipc_bytes)) = response_ipc_bytes(&resp) {
-                            let opts = DisplayOptions {
-                                format: state.output_format,
-                                output_file: state.output_file.as_ref(),
-                                use_pager: state.use_pager,
-                            };
-                            let _ = display_arrow_results(&ipc_bytes, &resp, start.elapsed(), &opts);
+                        let opts = DisplayOptions {
+                            format: state.output_format,
+                            output_file: state.output_file.as_ref(),
+                            use_pager: state.use_pager,
+                        };
+                        let _ = display_arrow_results(&ipc_bytes, &resp, start.elapsed(), &opts);
                     } else if resp.status == "ok" {
                         println!("No users found (or SHOW USERS not supported)");
                     } else {
-                        eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown error".to_string()));
+                        eprintln!(
+                            "Error: {}",
+                            resp.message.unwrap_or_else(|| "unknown error".to_string())
+                        );
                     }
                 }
                 Err(e) => eprintln!("Error listing users: {}", e),
@@ -1384,22 +1532,36 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         let start = Instant::now();
                         match send_request(
                             state,
-                            build_query_operation(sql.clone(), state.timeout_millis, state.current_db.clone()),
+                            build_query_operation(
+                                sql.clone(),
+                                state.timeout_millis,
+                                state.current_db.clone(),
+                            ),
                         )
-                        .await {
+                        .await
+                        {
                             Ok(resp) => {
                                 if resp.status == "ok" {
                                     if let Ok(Some(ipc_bytes)) = response_ipc_bytes(&resp) {
-                                            let opts = DisplayOptions {
-                                                format: state.output_format,
-                                                output_file: state.output_file.as_ref(),
-                                                use_pager: state.use_pager,
-                                            };
-                                            let _ = display_arrow_results(&ipc_bytes, &resp, start.elapsed(), &opts);
+                                        let opts = DisplayOptions {
+                                            format: state.output_format,
+                                            output_file: state.output_file.as_ref(),
+                                            use_pager: state.use_pager,
+                                        };
+                                        let _ = display_arrow_results(
+                                            &ipc_bytes,
+                                            &resp,
+                                            start.elapsed(),
+                                            &opts,
+                                        );
                                     }
                                     success_count += 1;
                                 } else {
-                                    eprintln!("Error in '{}': {}", truncate_sql(&sql, 40), resp.message.unwrap_or_else(|| "unknown".to_string()));
+                                    eprintln!(
+                                        "Error in '{}': {}",
+                                        truncate_sql(&sql, 40),
+                                        resp.message.unwrap_or_else(|| "unknown".to_string())
+                                    );
                                     error_count += 1;
                                 }
                             }
@@ -1409,7 +1571,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                             }
                         }
                     }
-                    println!("\nExecuted {} statement(s), {} error(s)", success_count, error_count);
+                    println!(
+                        "\nExecuted {} statement(s), {} error(s)",
+                        success_count, error_count
+                    );
                 }
                 Err(e) => {
                     eprintln!("Cannot read file '{}': {}", file_path, e);
@@ -1494,8 +1659,7 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                 parts[2].trim_end_matches(';').to_string()
             } else {
                 // Prompt for password (hidden input) - interactive mode
-                rpassword::prompt_password("Password: ")
-                    .unwrap_or_else(|_| String::new())
+                rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new())
             };
 
             if password.is_empty() {
@@ -1503,17 +1667,24 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                 return Ok(false);
             }
 
-            let resp = send_request(state, Operation::Login {
-                username: username.clone(),
-                password,
-            }).await?;
+            let resp = send_request(
+                state,
+                Operation::Login {
+                    username: username.clone(),
+                    password,
+                },
+            )
+            .await?;
 
             if resp.status == "ok" {
                 state.session_id = resp.session_id;
                 state.current_user = Some(username.clone());
                 println!("Logged in as {}", username);
             } else {
-                eprintln!("Login failed: {}", resp.message.unwrap_or_else(|| "unknown error".into()));
+                eprintln!(
+                    "Login failed: {}",
+                    resp.message.unwrap_or_else(|| "unknown error".into())
+                );
             }
             return Ok(false);
         }
@@ -1527,9 +1698,15 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             if resp.status == "ok" {
                 let user = state.current_user.take();
                 state.session_id = None;
-                println!("Logged out{}", user.map(|u| format!(" (was {})", u)).unwrap_or_default());
+                println!(
+                    "Logged out{}",
+                    user.map(|u| format!(" (was {})", u)).unwrap_or_default()
+                );
             } else {
-                eprintln!("Logout failed: {}", resp.message.unwrap_or_else(|| "unknown error".into()));
+                eprintln!(
+                    "Logout failed: {}",
+                    resp.message.unwrap_or_else(|| "unknown error".into())
+                );
             }
             return Ok(false);
         }
@@ -1551,7 +1728,12 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             } else {
                 println!("Prepared statements:");
                 for (name, stmt) in &state.prepared_statements {
-                    println!("  {} ({} params): {}", name, stmt.param_count, truncate_sql(&stmt.sql, 60));
+                    println!(
+                        "  {} ({} params): {}",
+                        name,
+                        stmt.param_count,
+                        truncate_sql(&stmt.sql, 60)
+                    );
                 }
             }
             return Ok(false);
@@ -1589,7 +1771,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         println!("Output format: vertical (expanded)");
                     }
                     _ => {
-                        eprintln!("Unknown format '{}'. Available: table, csv, json, vertical", fmt);
+                        eprintln!(
+                            "Unknown format '{}'. Available: table, csv, json, vertical",
+                            fmt
+                        );
                     }
                 }
             } else {
@@ -1689,7 +1874,10 @@ async fn execute_sql(state: &ShellState, sql: &str) -> Result<()> {
     let elapsed = start.elapsed();
 
     if resp.status != "ok" {
-        eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown error".into()));
+        eprintln!(
+            "Error: {}",
+            resp.message.unwrap_or_else(|| "unknown error".into())
+        );
         return Ok(());
     }
 
@@ -1734,10 +1922,15 @@ async fn execute_sql(state: &ShellState, sql: &str) -> Result<()> {
                 table.set_header(vec!["Column", "Type", "Nullable"]);
                 for field in fields {
                     let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                    let dtype = field.get("type").and_then(|v| v.as_str())
+                    let dtype = field
+                        .get("type")
+                        .and_then(|v| v.as_str())
                         .or_else(|| field.get("data_type").and_then(|v| v.as_str()))
                         .unwrap_or("?");
-                    let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+                    let nullable = field
+                        .get("nullable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
                     table.add_row(vec![
                         name.to_string(),
                         dtype.to_string(),
@@ -1772,16 +1965,26 @@ async fn execute_sql(state: &ShellState, sql: &str) -> Result<()> {
 /// Execute EXPLAIN
 async fn execute_explain(state: &ShellState, sql: &str) -> Result<()> {
     // Strip "EXPLAIN " prefix
-    let query_sql = sql.strip_prefix("EXPLAIN ")
+    let query_sql = sql
+        .strip_prefix("EXPLAIN ")
         .or_else(|| sql.strip_prefix("explain "))
         .unwrap_or(sql);
 
     let start = Instant::now();
-    let resp = send_request(state, Operation::Explain { sql: query_sql.to_string() }).await?;
+    let resp = send_request(
+        state,
+        Operation::Explain {
+            sql: query_sql.to_string(),
+        },
+    )
+    .await?;
     let elapsed = start.elapsed();
 
     if resp.status != "ok" {
-        eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown error".into()));
+        eprintln!(
+            "Error: {}",
+            resp.message.unwrap_or_else(|| "unknown error".into())
+        );
         return Ok(());
     }
 
@@ -1806,14 +2009,17 @@ async fn execute_copy(state: &ShellState, input: &str) -> Result<()> {
     let input = input.trim();
 
     // Skip "\copy " prefix
-    let rest = input.strip_prefix("\\copy ")
+    let rest = input
+        .strip_prefix("\\copy ")
         .or_else(|| input.strip_prefix("\\COPY "))
         .ok_or_else(|| anyhow!("Invalid \\copy syntax"))?;
 
     // Parse: <table> FROM '<file>' [WITH (options)]
     let parts: Vec<&str> = rest.splitn(2, " FROM ").collect();
     if parts.len() != 2 {
-        return Err(anyhow!("\\copy syntax: \\copy <table> FROM '<file>' [WITH (options)]"));
+        return Err(anyhow!(
+            "\\copy syntax: \\copy <table> FROM '<file>' [WITH (options)]"
+        ));
     }
 
     let table_ref = parts[0].trim();
@@ -1829,8 +2035,9 @@ async fn execute_copy(state: &ShellState, input: &str) -> Result<()> {
         let tbl = parts.next().unwrap().to_string();
         (db, tbl)
     } else {
-        let db = state.current_db.clone()
-            .ok_or_else(|| anyhow!("No database selected. Use \\c <database> or specify as db.table"))?;
+        let db = state.current_db.clone().ok_or_else(|| {
+            anyhow!("No database selected. Use \\c <database> or specify as db.table")
+        })?;
         (db, table_ref.to_string())
     };
 
@@ -1887,7 +2094,10 @@ async fn execute_copy(state: &ShellState, input: &str) -> Result<()> {
     if resp.status == "ok" {
         println!(
             "COPY: {} bytes loaded into {}.{} (Time: {:.3}s)",
-            file_size, database, table, elapsed.as_secs_f64()
+            file_size,
+            database,
+            table,
+            elapsed.as_secs_f64()
         );
     } else {
         eprintln!(
@@ -1907,7 +2117,8 @@ fn extract_quoted_path(input: &str) -> Result<(String, Option<String>)> {
     fn extract_options(rest: &str) -> Option<String> {
         if rest.to_uppercase().starts_with("WITH") {
             rest.find('(').and_then(|paren_start| {
-                rest.rfind(')').map(|paren_end| rest[paren_start + 1..paren_end].to_string())
+                rest.rfind(')')
+                    .map(|paren_end| rest[paren_start + 1..paren_end].to_string())
             })
         } else {
             None
@@ -1995,7 +2206,8 @@ fn handle_create_view(state: &mut ShellState, input: &str) -> Result<()> {
 
     // Find " AS " separator
     let as_pos = rest.to_uppercase().find(" AS ");
-    let as_pos = as_pos.ok_or_else(|| anyhow!("CREATE VIEW syntax: CREATE VIEW <name> AS <select>"))?;
+    let as_pos =
+        as_pos.ok_or_else(|| anyhow!("CREATE VIEW syntax: CREATE VIEW <name> AS <select>"))?;
 
     let name = rest[..as_pos].trim().to_string();
     let sql = rest[as_pos + 4..].trim().to_string();
@@ -2100,10 +2312,7 @@ fn expand_views_in_sql(sql: &str, views: &std::collections::HashMap<String, Clie
 
         for pattern in patterns {
             if result.contains(&pattern) {
-                let replacement = pattern.replace(
-                    name,
-                    &format!("({}) AS {}", view.sql, name)
-                );
+                let replacement = pattern.replace(name, &format!("({}) AS {}", view.sql, name));
                 result = result.replace(&pattern, &replacement);
             }
         }
@@ -2120,7 +2329,8 @@ async fn handle_prepare(state: &mut ShellState, input: &str) -> Result<()> {
     let input = input.trim().trim_end_matches(';');
 
     // Skip "PREPARE "
-    let rest = input.strip_prefix("PREPARE ")
+    let rest = input
+        .strip_prefix("PREPARE ")
         .or_else(|| input.strip_prefix("prepare "))
         .ok_or_else(|| anyhow!("Invalid PREPARE syntax"))?;
 
@@ -2166,11 +2376,12 @@ async fn handle_prepare(state: &mut ShellState, input: &str) -> Result<()> {
     };
 
     state.prepared_statements.insert(name.clone(), stmt);
-    if let Some(id) = state.prepared_statements.get(&name).and_then(|s| s.server_id.as_ref()) {
-        println!(
-            "PREPARE: statement '{}' created (server id {})",
-            name, id
-        );
+    if let Some(id) = state
+        .prepared_statements
+        .get(&name)
+        .and_then(|s| s.server_id.as_ref())
+    {
+        println!("PREPARE: statement '{}' created (server id {})", name, id);
     } else {
         println!(
             "PREPARE: statement '{}' created with {} parameter(s)",
@@ -2212,7 +2423,8 @@ async fn execute_prepared(state: &ShellState, input: &str) -> Result<()> {
     let input = input.trim().trim_end_matches(';');
 
     // Skip "EXECUTE "
-    let rest = input.strip_prefix("EXECUTE ")
+    let rest = input
+        .strip_prefix("EXECUTE ")
         .or_else(|| input.strip_prefix("execute "))
         .ok_or_else(|| anyhow!("Invalid EXECUTE syntax"))?;
 
@@ -2229,14 +2441,18 @@ async fn execute_prepared(state: &ShellState, input: &str) -> Result<()> {
     };
 
     // Find the prepared statement
-    let stmt = state.prepared_statements.get(&name)
+    let stmt = state
+        .prepared_statements
+        .get(&name)
         .ok_or_else(|| anyhow!("Prepared statement '{}' not found", name))?;
 
     // Validate parameter count
     if params.len() != stmt.param_count {
         return Err(anyhow!(
             "Statement '{}' requires {} parameter(s), but {} provided",
-            name, stmt.param_count, params.len()
+            name,
+            stmt.param_count,
+            params.len()
         ));
     }
 
@@ -2276,7 +2492,10 @@ async fn execute_prepared(state: &ShellState, input: &str) -> Result<()> {
     let elapsed = start.elapsed();
 
     if resp.status != "ok" {
-        eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown error".into()));
+        eprintln!(
+            "Error: {}",
+            resp.message.unwrap_or_else(|| "unknown error".into())
+        );
         return Ok(());
     }
 
@@ -2306,7 +2525,7 @@ fn parse_execute_params(params_str: &str) -> Result<Vec<String>> {
         return Err(anyhow!("Parameters must be enclosed in parentheses"));
     }
 
-    let inner = &params_str[1..params_str.len()-1];
+    let inner = &params_str[1..params_str.len() - 1];
     if inner.trim().is_empty() {
         return Ok(vec![]);
     }
@@ -2364,7 +2583,8 @@ fn substitute_parameters(sql: &str, params: &[String]) -> String {
 fn handle_deallocate(state: &mut ShellState, input: &str) -> Result<()> {
     let input = input.trim().trim_end_matches(';');
 
-    let name = input.strip_prefix("DEALLOCATE ")
+    let name = input
+        .strip_prefix("DEALLOCATE ")
         .or_else(|| input.strip_prefix("deallocate "))
         .ok_or_else(|| anyhow!("Invalid DEALLOCATE syntax"))?
         .trim();
@@ -2393,11 +2613,15 @@ fn display_with_pager(output: &str, use_pager: bool) {
 
     if use_pager && lines.len() > terminal_height.saturating_sub(3) {
         // Try to use less, then more, then just print
-        use std::process::{Command, Stdio};
         use std::io::Write;
+        use std::process::{Command, Stdio};
 
         let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-        let pager_cmd = if pager.contains("less") { "less" } else { &pager };
+        let pager_cmd = if pager.contains("less") {
+            "less"
+        } else {
+            &pager
+        };
 
         match Command::new(pager_cmd)
             .arg("-R") // Enable color output in less
@@ -2412,10 +2636,7 @@ fn display_with_pager(output: &str, use_pager: bool) {
             }
             Err(_) => {
                 // Fallback: try 'more'
-                match Command::new("more")
-                    .stdin(Stdio::piped())
-                    .spawn()
-                {
+                match Command::new("more").stdin(Stdio::piped()).spawn() {
                     Ok(mut child) => {
                         if let Some(stdin) = child.stdin.as_mut() {
                             let _ = stdin.write_all(output.as_bytes());
@@ -2434,7 +2655,12 @@ fn display_with_pager(output: &str, use_pager: bool) {
     }
 }
 
-fn display_arrow_results(ipc_bytes: &[u8], resp: &Response, elapsed: Duration, opts: &DisplayOptions) -> Result<()> {
+fn display_arrow_results(
+    ipc_bytes: &[u8],
+    resp: &Response,
+    elapsed: Duration,
+    opts: &DisplayOptions,
+) -> Result<()> {
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)?;
 
@@ -2532,12 +2758,21 @@ fn display_arrow_results(ipc_bytes: &[u8], resp: &Response, elapsed: Duration, o
             let max_header_len = headers.iter().map(|h| h.len()).max().unwrap_or(0);
 
             for (row_num, row) in all_rows.iter().enumerate() {
-                writeln!(output, "-[ RECORD {} ]{}",
+                writeln!(
+                    output,
+                    "-[ RECORD {} ]{}",
                     row_num + 1,
-                    "-".repeat(50_usize.saturating_sub(13 + row_num.to_string().len())))?;
+                    "-".repeat(50_usize.saturating_sub(13 + row_num.to_string().len()))
+                )?;
                 for (i, val) in row.iter().enumerate() {
                     if let Some(header) = headers.get(i) {
-                        writeln!(output, "{:>width$} | {}", header, val, width = max_header_len)?;
+                        writeln!(
+                            output,
+                            "{:>width$} | {}",
+                            header,
+                            val,
+                            width = max_header_len
+                        )?;
                     }
                 }
             }
@@ -2562,7 +2797,6 @@ fn display_arrow_results(ipc_bytes: &[u8], resp: &Response, elapsed: Duration, o
         // Write to file
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
-            .write(true)
             .create(true)
             .append(true)
             .open(file_path)?;
@@ -2693,8 +2927,18 @@ fn format_decimal_value(value: i128, scale: i8) -> String {
         let divisor = 10_i128.pow(scale as u32);
         let integer_part = value / divisor;
         let fractional_part = (value % divisor).abs();
-        let sign = if value < 0 && integer_part == 0 { "-" } else { "" };
-        format!("{}{}.{:0>width$}", sign, integer_part, fractional_part, width = scale as usize)
+        let sign = if value < 0 && integer_part == 0 {
+            "-"
+        } else {
+            ""
+        };
+        format!(
+            "{}{}.{:0>width$}",
+            sign,
+            integer_part,
+            fractional_part,
+            width = scale as usize
+        )
     }
 }
 
@@ -2716,8 +2960,8 @@ fn format_date_value(days: i32) -> String {
 
 /// Build a TLS connector from configuration
 fn build_tls_connector(config: &TlsConfig) -> Result<TlsConnector> {
-    use rustls::ClientConfig;
     use rustls::pki_types::CertificateDer;
+    use rustls::ClientConfig;
 
     let root_store = if let Some(ca_path) = &config.ca_path {
         // Load custom CA certificate
@@ -2730,7 +2974,8 @@ fn build_tls_connector(config: &TlsConfig) -> Result<TlsConnector> {
 
         let mut root_store = rustls::RootCertStore::empty();
         for cert in certs {
-            root_store.add(cert)
+            root_store
+                .add(cert)
                 .map_err(|e| anyhow!("Failed to add CA certificate: {}", e))?;
         }
         root_store
@@ -2836,7 +3081,8 @@ async fn send_request(state: &ShellState, op: Operation) -> Result<Response> {
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow!("Connection failed after {} attempts", MAX_RETRY_ATTEMPTS)))
+    Err(last_error
+        .unwrap_or_else(|| anyhow!("Connection failed after {} attempts", MAX_RETRY_ATTEMPTS)))
 }
 
 /// Send a single request to the server (without retry)
@@ -2850,13 +3096,10 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
 
     // Connect with timeout (reduced from 10s to 5s for faster failure detection)
     let connect_timeout = Duration::from_secs(5);
-    let tcp_stream = tokio::time::timeout(
-        connect_timeout,
-        TcpStream::connect(&state.host)
-    )
-    .await
-    .map_err(|_| anyhow!("Connection timed out after {:?}", connect_timeout))?
-    .map_err(|e| anyhow!("Connection failed: {}", e))?;
+    let tcp_stream = tokio::time::timeout(connect_timeout, TcpStream::connect(&state.host))
+        .await
+        .map_err(|_| anyhow!("Connection timed out after {:?}", connect_timeout))?
+        .map_err(|e| anyhow!("Connection failed: {}", e))?;
 
     // Disable Nagle's algorithm for low-latency request/response
     tcp_stream.set_nodelay(true)?;
@@ -2868,7 +3111,9 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
         let server_name = ServerName::try_from(hostname.to_string())
             .map_err(|_| anyhow!("Invalid server name: {}", hostname))?;
 
-        let mut tls_stream = connector.connect(server_name, tcp_stream).await
+        let mut tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
             .map_err(|e| anyhow!("TLS handshake failed: {}", e))?;
 
         // Send length-prefixed frame
@@ -2878,8 +3123,13 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
         tls_stream.flush().await?;
 
         let resp_bytes = read_frame_bytes(&mut tls_stream).await?;
-        let mut resp: Response = serde_json::from_slice(&resp_bytes)
-            .map_err(|e| anyhow!("Invalid response: {} - body: {}", e, String::from_utf8_lossy(&resp_bytes)))?;
+        let mut resp: Response = serde_json::from_slice(&resp_bytes).map_err(|e| {
+            anyhow!(
+                "Invalid response: {} - body: {}",
+                e,
+                String::from_utf8_lossy(&resp_bytes)
+            )
+        })?;
         if resp.ipc_streaming.unwrap_or(false) {
             let payload = read_stream_bytes(&mut tls_stream).await?;
             resp.ipc_bytes = Some(payload);
@@ -2906,8 +3156,13 @@ async fn send_request_once(state: &ShellState, op: &Operation) -> Result<Respons
         stream.flush().await?;
 
         let resp_bytes = read_frame_bytes(&mut stream).await?;
-        let mut resp: Response = serde_json::from_slice(&resp_bytes)
-            .map_err(|e| anyhow!("Invalid response: {} - body: {}", e, String::from_utf8_lossy(&resp_bytes)))?;
+        let mut resp: Response = serde_json::from_slice(&resp_bytes).map_err(|e| {
+            anyhow!(
+                "Invalid response: {} - body: {}",
+                e,
+                String::from_utf8_lossy(&resp_bytes)
+            )
+        })?;
         if resp.ipc_streaming.unwrap_or(false) {
             let payload = read_stream_bytes(&mut stream).await?;
             resp.ipc_bytes = Some(payload);
@@ -3116,8 +3371,14 @@ mod tests {
     fn test_count_parameters() {
         assert_eq!(count_parameters("SELECT * FROM users"), 0);
         assert_eq!(count_parameters("SELECT * FROM users WHERE id = $1"), 1);
-        assert_eq!(count_parameters("SELECT * FROM users WHERE id = $1 AND name = $2"), 2);
-        assert_eq!(count_parameters("SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $3"), 3);
+        assert_eq!(
+            count_parameters("SELECT * FROM users WHERE id = $1 AND name = $2"),
+            2
+        );
+        assert_eq!(
+            count_parameters("SELECT * FROM t WHERE a = $1 AND b = $2 AND c = $3"),
+            3
+        );
         assert_eq!(count_parameters("SELECT $10 + $1"), 10); // Max parameter number
     }
 
@@ -3138,9 +3399,18 @@ mod tests {
         assert_eq!(
             substitute_parameters(
                 "SELECT $1, $10",
-                &["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(),
-                  "e".to_string(), "f".to_string(), "g".to_string(), "h".to_string(),
-                  "i".to_string(), "j".to_string()]
+                &[
+                    "a".to_string(),
+                    "b".to_string(),
+                    "c".to_string(),
+                    "d".to_string(),
+                    "e".to_string(),
+                    "f".to_string(),
+                    "g".to_string(),
+                    "h".to_string(),
+                    "i".to_string(),
+                    "j".to_string()
+                ]
             ),
             "SELECT a, j"
         );
@@ -3263,7 +3533,10 @@ mod tests {
     #[test]
     fn test_truncate_sql() {
         assert_eq!(truncate_sql("short", 10), "short");
-        assert_eq!(truncate_sql("this is a very long sql statement", 10), "this is a ...");
+        assert_eq!(
+            truncate_sql("this is a very long sql statement", 10),
+            "this is a ..."
+        );
         assert_eq!(truncate_sql("line1\nline2", 20), "line1 line2");
     }
 }

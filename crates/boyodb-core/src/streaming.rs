@@ -1,7 +1,7 @@
 // Streaming/Lazy Execution Module
 // Pipeline operators for memory-efficient query processing
 
-use arrow_array::{RecordBatch, ArrayRef, Array};
+use arrow_array::{Array, ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -63,7 +63,9 @@ impl std::fmt::Display for StreamError {
             StreamError::SchemaMismatch(s) => write!(f, "Schema mismatch: {}", s),
             StreamError::NotAcceptingInput => write!(f, "Operator not accepting input"),
             StreamError::Internal(s) => write!(f, "Internal error: {}", s),
-            StreamError::MemoryExceeded(bytes) => write!(f, "Memory limit exceeded: {} bytes", bytes),
+            StreamError::MemoryExceeded(bytes) => {
+                write!(f, "Memory limit exceeded: {} bytes", bytes)
+            }
         }
     }
 }
@@ -105,7 +107,9 @@ impl StreamOperator for StreamingFilter {
         while let Some(batch) = self.input_queue.pop_front() {
             match (self.predicate)(&batch) {
                 Ok(mask) => {
-                    if let Some(bool_arr) = mask.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+                    if let Some(bool_arr) =
+                        mask.as_any().downcast_ref::<arrow_array::BooleanArray>()
+                    {
                         match arrow_select::filter::filter_record_batch(&batch, bool_arr) {
                             Ok(filtered) if filtered.num_rows() > 0 => {
                                 return PollResult::Ready(filtered);
@@ -332,10 +336,10 @@ impl StreamOperator for StreamingLimit {
 // Streaming Hash Aggregate (Partial)
 // ============================================================================
 
-use std::collections::HashMap;
-use arrow_array::{Int64Array, Float64Array, UInt64Array};
-use arrow_array::builder::{Int64Builder, Float64Builder, UInt64Builder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int64Builder, StringBuilder, UInt64Builder};
+use arrow_array::{Float64Array, Int64Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
+use std::collections::HashMap;
 
 /// Accumulator for aggregation
 #[derive(Debug, Clone, Default)]
@@ -551,9 +555,10 @@ impl StreamOperator for StreamingHashAggregate {
         }
 
         // Find aggregation column
-        let agg_col_idx = self.agg_col.as_ref().and_then(|name| {
-            batch.schema().index_of(name).ok()
-        });
+        let agg_col_idx = self
+            .agg_col
+            .as_ref()
+            .and_then(|name| batch.schema().index_of(name).ok());
 
         for row in 0..batch.num_rows() {
             let key = self.extract_group_key(&batch, row);
@@ -804,11 +809,7 @@ mod tests {
         let id_array = Int64Array::from(ids);
         let name_array = StringArray::from(names);
 
-        RecordBatch::try_new(
-            schema,
-            vec![Arc::new(id_array), Arc::new(name_array)],
-        )
-        .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(id_array), Arc::new(name_array)]).unwrap()
     }
 
     #[test]
@@ -841,7 +842,11 @@ mod tests {
         match limit.poll_next() {
             PollResult::Ready(result) => {
                 assert_eq!(result.num_rows(), 2);
-                let id_col = result.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                let id_col = result
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
                 assert_eq!(id_col.value(0), 2); // Offset 1
                 assert_eq!(id_col.value(1), 3);
             }
@@ -851,21 +856,19 @@ mod tests {
 
     #[test]
     fn test_streaming_limit_across_batches() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
         let mut limit = StreamingLimit::new(schema.clone(), 3, 2);
 
         // Push multiple batches
-        let batch1 = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        ).unwrap();
+        let batch1 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
         let batch2 = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Int64Array::from(vec![3, 4, 5]))],
-        ).unwrap();
+        )
+        .unwrap();
 
         limit.push_input(batch1).unwrap();
         limit.push_input(batch2).unwrap();
@@ -898,7 +901,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
                 Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut agg = StreamingHashAggregate::new(
             &schema,
@@ -932,7 +936,8 @@ mod tests {
                 Arc::new(StringArray::from(vec!["a", "a", "a"])),
                 Arc::new(Int64Array::from(vec![1, 2, 3])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut agg = StreamingHashAggregate::new(
             &schema,
@@ -948,7 +953,11 @@ mod tests {
         match agg.poll_next() {
             PollResult::Ready(result) => {
                 assert_eq!(result.num_rows(), 1);
-                let sum_col = result.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+                let sum_col = result
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
                 assert_eq!(sum_col.value(0), 6.0); // 1 + 2 + 3
             }
             _ => panic!("Expected ready result"),
@@ -968,10 +977,14 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
                 Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut executor = PipelineExecutor::new();
-        executor.add_operator(Box::new(StreamingProject::new(&schema, &["id".to_string()])));
+        executor.add_operator(Box::new(StreamingProject::new(
+            &schema,
+            &["id".to_string()],
+        )));
         executor.add_operator(Box::new(StreamingLimit::new(
             Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
             3,
@@ -991,13 +1004,15 @@ mod tests {
             move || {
                 if counter < 3 {
                     counter += 1;
-                    let schema = Arc::new(Schema::new(vec![
-                        Field::new("id", DataType::Int64, false),
-                    ]));
-                    Some(RecordBatch::try_new(
-                        schema,
-                        vec![Arc::new(Int64Array::from(vec![counter]))],
-                    ).unwrap())
+                    let schema =
+                        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+                    Some(
+                        RecordBatch::try_new(
+                            schema,
+                            vec![Arc::new(Int64Array::from(vec![counter]))],
+                        )
+                        .unwrap(),
+                    )
                 } else {
                     None
                 }
@@ -1016,13 +1031,15 @@ mod tests {
             move || {
                 if counter < 5 {
                     counter += 1;
-                    let schema = Arc::new(Schema::new(vec![
-                        Field::new("id", DataType::Int64, false),
-                    ]));
-                    Some(RecordBatch::try_new(
-                        schema,
-                        vec![Arc::new(Int64Array::from(vec![counter]))],
-                    ).unwrap())
+                    let schema =
+                        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+                    Some(
+                        RecordBatch::try_new(
+                            schema,
+                            vec![Arc::new(Int64Array::from(vec![counter]))],
+                        )
+                        .unwrap(),
+                    )
                 } else {
                     None
                 }

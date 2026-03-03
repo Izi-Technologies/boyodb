@@ -129,10 +129,7 @@ pub enum GossipMessage {
         cluster_id: String,
     },
     /// Join request from new node.
-    Join {
-        node: NodeMeta,
-        cluster_id: String,
-    },
+    Join { node: NodeMeta, cluster_id: String },
     /// Acknowledge join.
     JoinAck {
         from: NodeId,
@@ -140,10 +137,7 @@ pub enum GossipMessage {
         leader_id: Option<NodeId>,
     },
     /// Graceful leave announcement.
-    Leave {
-        node_id: NodeId,
-        incarnation: u64,
-    },
+    Leave { node_id: NodeId, incarnation: u64 },
     /// Leader election messages.
     Election(ElectionMessage),
     /// Cluster metadata update.
@@ -159,18 +153,11 @@ pub enum GossipMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReplicationMessage {
     /// Write operation from leader to follower.
-    WriteRequest {
-        operation: WriteOperation,
-    },
+    WriteRequest { operation: WriteOperation },
     /// Acknowledgment from follower to leader.
-    WriteResponse {
-        ack: WriteAck,
-    },
+    WriteResponse { ack: WriteAck },
     /// Request current manifest version (for sync).
-    SyncRequest {
-        from: NodeId,
-        last_version: u64,
-    },
+    SyncRequest { from: NodeId, last_version: u64 },
     /// Response with bundle data for catch-up.
     SyncResponse {
         bundle_data: Vec<u8>,
@@ -202,10 +189,7 @@ pub enum ElectionMessage {
         manifest_version: u64,
     },
     /// Step down notification.
-    StepDown {
-        term: u64,
-        leader_id: NodeId,
-    },
+    StepDown { term: u64, leader_id: NodeId },
 }
 
 /// Write operation that must be replicated.

@@ -1,8 +1,8 @@
 // Advanced Analytics Module
 // Quantiles, GROUPING SETS, Array/JSON, ASOF JOIN, Probabilistic Sketches
 
-use std::collections::{HashMap, HashSet, BTreeMap};
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 // ============================================================================
 // Quantile/Percentile Functions
@@ -48,7 +48,8 @@ impl TDigest {
         }
 
         // Find insertion point
-        let idx = self.centroids
+        let idx = self
+            .centroids
             .binary_search_by(|c| c.mean.partial_cmp(&value).unwrap_or(Ordering::Equal))
             .unwrap_or_else(|i| i);
 
@@ -61,7 +62,11 @@ impl TDigest {
             } else {
                 let dist_left = (self.centroids[idx - 1].mean - value).abs();
                 let dist_right = (self.centroids[idx].mean - value).abs();
-                if dist_left < dist_right { idx - 1 } else { idx }
+                if dist_left < dist_right {
+                    idx - 1
+                } else {
+                    idx
+                }
             };
 
             let q = self.quantile_at_centroid(nearest);
@@ -79,7 +84,13 @@ impl TDigest {
         }
 
         // Insert new centroid
-        self.centroids.insert(idx, Centroid { mean: value, weight });
+        self.centroids.insert(
+            idx,
+            Centroid {
+                mean: value,
+                weight,
+            },
+        );
         self.total_weight += weight;
 
         // Compress if needed
@@ -165,7 +176,8 @@ impl TDigest {
         }
 
         // Sort by mean
-        self.centroids.sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(Ordering::Equal));
+        self.centroids
+            .sort_by(|a, b| a.mean.partial_cmp(&b.mean).unwrap_or(Ordering::Equal));
 
         let mut new_centroids = Vec::with_capacity(self.max_centroids);
         let mut current = self.centroids[0];
@@ -231,21 +243,24 @@ pub fn exact_quantiles(values: &mut [f64], quantiles: &[f64]) -> Vec<Option<f64>
     values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
     let n = values.len();
 
-    quantiles.iter().map(|&q| {
-        if q < 0.0 || q > 1.0 {
-            return None;
-        }
-        let pos = q * (n - 1) as f64;
-        let lower = pos.floor() as usize;
-        let upper = pos.ceil() as usize;
-        let fraction = pos - lower as f64;
+    quantiles
+        .iter()
+        .map(|&q| {
+            if q < 0.0 || q > 1.0 {
+                return None;
+            }
+            let pos = q * (n - 1) as f64;
+            let lower = pos.floor() as usize;
+            let upper = pos.ceil() as usize;
+            let fraction = pos - lower as f64;
 
-        if lower == upper || upper >= n {
-            Some(values[lower.min(n - 1)])
-        } else {
-            Some(values[lower] * (1.0 - fraction) + values[upper] * fraction)
-        }
-    }).collect()
+            if lower == upper || upper >= n {
+                Some(values[lower.min(n - 1)])
+            } else {
+                Some(values[lower] * (1.0 - fraction) + values[upper] * fraction)
+            }
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -265,11 +280,15 @@ impl GroupingSet {
     }
 
     pub fn all(n: usize) -> Self {
-        Self { columns: (0..n).collect() }
+        Self {
+            columns: (0..n).collect(),
+        }
     }
 
     pub fn empty() -> Self {
-        Self { columns: Vec::new() }
+        Self {
+            columns: Vec::new(),
+        }
     }
 }
 
@@ -422,8 +441,12 @@ impl ArrayValue {
     pub fn get(&self, index: usize) -> Option<JsonValue> {
         let idx = index.checked_sub(1)?; // Convert to 0-based
         match self {
-            ArrayValue::Int64Array(v) => v.get(idx).map(|&i| JsonValue::Number(JsonNumber::from_i64(i))),
-            ArrayValue::Float64Array(v) => v.get(idx).and_then(|&f| JsonNumber::from_f64(f).map(JsonValue::Number)),
+            ArrayValue::Int64Array(v) => v
+                .get(idx)
+                .map(|&i| JsonValue::Number(JsonNumber::from_i64(i))),
+            ArrayValue::Float64Array(v) => v
+                .get(idx)
+                .and_then(|&f| JsonNumber::from_f64(f).map(JsonValue::Number)),
             ArrayValue::StringArray(v) => v.get(idx).map(|s| JsonValue::String(s.clone())),
             ArrayValue::BoolArray(v) => v.get(idx).map(|&b| JsonValue::Bool(b)),
             ArrayValue::NestedArray(v) => v.get(idx).map(|a| array_to_json(a)),
@@ -458,20 +481,22 @@ impl ArrayValue {
 fn array_to_json(arr: &ArrayValue) -> JsonValue {
     match arr {
         ArrayValue::Int64Array(v) => JsonValue::Array(
-            v.iter().map(|&i| JsonValue::Number(JsonNumber::from_i64(i))).collect()
+            v.iter()
+                .map(|&i| JsonValue::Number(JsonNumber::from_i64(i)))
+                .collect(),
         ),
         ArrayValue::Float64Array(v) => JsonValue::Array(
-            v.iter().filter_map(|&f| JsonNumber::from_f64(f).map(JsonValue::Number)).collect()
+            v.iter()
+                .filter_map(|&f| JsonNumber::from_f64(f).map(JsonValue::Number))
+                .collect(),
         ),
-        ArrayValue::StringArray(v) => JsonValue::Array(
-            v.iter().map(|s| JsonValue::String(s.clone())).collect()
-        ),
-        ArrayValue::BoolArray(v) => JsonValue::Array(
-            v.iter().map(|&b| JsonValue::Bool(b)).collect()
-        ),
-        ArrayValue::NestedArray(v) => JsonValue::Array(
-            v.iter().map(array_to_json).collect()
-        ),
+        ArrayValue::StringArray(v) => {
+            JsonValue::Array(v.iter().map(|s| JsonValue::String(s.clone())).collect())
+        }
+        ArrayValue::BoolArray(v) => {
+            JsonValue::Array(v.iter().map(|&b| JsonValue::Bool(b)).collect())
+        }
+        ArrayValue::NestedArray(v) => JsonValue::Array(v.iter().map(array_to_json).collect()),
         ArrayValue::Null => JsonValue::Null,
     }
 }
@@ -559,7 +584,10 @@ impl JsonValue {
     }
 
     fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
-        while matches!(chars.peek(), Some(' ') | Some('\t') | Some('\n') | Some('\r')) {
+        while matches!(
+            chars.peek(),
+            Some(' ') | Some('\t') | Some('\n') | Some('\r')
+        ) {
             chars.next();
         }
     }
@@ -645,11 +673,13 @@ impl JsonValue {
         }
 
         if is_float {
-            num_str.parse::<f64>()
+            num_str
+                .parse::<f64>()
                 .map(|f| JsonValue::Number(JsonNumber::Float(f)))
                 .map_err(|_| JsonError::InvalidNumber)
         } else {
-            num_str.parse::<i64>()
+            num_str
+                .parse::<i64>()
                 .map(|i| JsonValue::Number(JsonNumber::Int(i)))
                 .map_err(|_| JsonError::InvalidNumber)
         }
@@ -759,7 +789,8 @@ impl JsonValue {
                 format!("[{}]", items.join(","))
             }
             JsonValue::Object(obj) => {
-                let items: Vec<String> = obj.iter()
+                let items: Vec<String> = obj
+                    .iter()
                     .map(|(k, v)| format!("\"{}\":{}", k, v.to_json_string()))
                     .collect();
                 format!("{{{}}}", items.join(","))
@@ -877,7 +908,14 @@ pub fn asof_join(
         groups
     } else {
         let mut groups = HashMap::new();
-        groups.insert(None, right_keys.iter().enumerate().map(|(i, &k)| (i, k)).collect());
+        groups.insert(
+            None,
+            right_keys
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (i, k))
+                .collect(),
+        );
         groups
     };
 
@@ -923,9 +961,8 @@ fn find_asof_match(
                     }
                 }
             }
-            best.filter(|(_, key)| {
-                tolerance.map_or(true, |t| target - key <= t)
-            }).map(|(idx, _)| idx)
+            best.filter(|(_, key)| tolerance.map_or(true, |t| target - key <= t))
+                .map(|(idx, _)| idx)
         }
         AsofDirection::Forward => {
             // Find smallest key >= target
@@ -937,9 +974,8 @@ fn find_asof_match(
                     }
                 }
             }
-            best.filter(|(_, key)| {
-                tolerance.map_or(true, |t| key - target <= t)
-            }).map(|(idx, _)| idx)
+            best.filter(|(_, key)| tolerance.map_or(true, |t| key - target <= t))
+                .map(|(idx, _)| idx)
         }
         AsofDirection::Nearest => {
             // Find closest key
@@ -952,9 +988,8 @@ fn find_asof_match(
                     best = Some((idx, key));
                 }
             }
-            best.filter(|(_, _)| {
-                tolerance.map_or(true, |t| best_diff <= t)
-            }).map(|(idx, _)| idx)
+            best.filter(|(_, _)| tolerance.map_or(true, |t| best_diff <= t))
+                .map(|(idx, _)| idx)
         }
     }
 }
@@ -1151,7 +1186,9 @@ impl HyperLogLog {
         let m = self.num_registers as f64;
 
         // Calculate harmonic mean
-        let sum: f64 = self.registers.iter()
+        let sum: f64 = self
+            .registers
+            .iter()
             .map(|&r| 2.0_f64.powi(-(r as i32)))
             .sum();
 
@@ -1224,10 +1261,18 @@ mod tests {
         }
 
         let p50 = td.percentile(50.0).unwrap();
-        assert!((p50 - 50.0).abs() < 5.0, "p50 should be around 50, got {}", p50);
+        assert!(
+            (p50 - 50.0).abs() < 5.0,
+            "p50 should be around 50, got {}",
+            p50
+        );
 
         let p99 = td.percentile(99.0).unwrap();
-        assert!((p99 - 99.0).abs() < 5.0, "p99 should be around 99, got {}", p99);
+        assert!(
+            (p99 - 99.0).abs() < 5.0,
+            "p99 should be around 99, got {}",
+            p99
+        );
     }
 
     #[test]
@@ -1315,8 +1360,14 @@ mod tests {
         let json = JsonValue::parse(r#"{"name": "test", "value": 42}"#).unwrap();
         match json {
             JsonValue::Object(obj) => {
-                assert_eq!(obj.get("name"), Some(&JsonValue::String("test".to_string())));
-                assert_eq!(obj.get("value"), Some(&JsonValue::Number(JsonNumber::Int(42))));
+                assert_eq!(
+                    obj.get("name"),
+                    Some(&JsonValue::String("test".to_string()))
+                );
+                assert_eq!(
+                    obj.get("value"),
+                    Some(&JsonValue::Number(JsonNumber::Int(42)))
+                );
             }
             _ => panic!("Expected object"),
         }
@@ -1412,7 +1463,7 @@ mod tests {
 
         assert_eq!(results[0].right_idx, Some(0)); // 10 -> 5 (diff=5, within tolerance)
         assert_eq!(results[1].right_idx, Some(1)); // 20 -> 15 (diff=5, within tolerance)
-        assert_eq!(results[2].right_idx, None);    // 100 -> None (diff=85, exceeds tolerance)
+        assert_eq!(results[2].right_idx, None); // 100 -> None (diff=85, exceeds tolerance)
     }
 
     #[test]
@@ -1454,8 +1505,11 @@ mod tests {
         let estimate = hll.estimate();
         // HLL with precision 14 has ~1.04/sqrt(2^14) = ~0.8% error
         // Allow wider margin for test stability
-        assert!(estimate > 8000 && estimate < 12000,
-            "Expected ~10000, got {}", estimate);
+        assert!(
+            estimate > 8000 && estimate < 12000,
+            "Expected ~10000, got {}",
+            estimate
+        );
     }
 
     #[test]
@@ -1474,8 +1528,11 @@ mod tests {
         let estimate = hll1.estimate();
 
         // Allow wider margin for merged estimates
-        assert!(estimate > 8000 && estimate < 12000,
-            "Expected ~10000, got {}", estimate);
+        assert!(
+            estimate > 8000 && estimate < 12000,
+            "Expected ~10000, got {}",
+            estimate
+        );
     }
 
     #[test]
@@ -1484,7 +1541,7 @@ mod tests {
         let quantiles = exact_quantiles(&mut values, &[0.25, 0.5, 0.75, 0.90, 0.99]);
 
         assert_eq!(quantiles[0], Some(25.75)); // p25
-        assert_eq!(quantiles[1], Some(50.5));  // p50
+        assert_eq!(quantiles[1], Some(50.5)); // p50
         assert_eq!(quantiles[2], Some(75.25)); // p75
     }
 }

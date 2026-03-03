@@ -25,3 +25,6 @@ dirs-next = "2"
 rpassword = "7"
 hex = "0.4"
 terminal_size = "0.4"
+
+[lints]
+workspace = true

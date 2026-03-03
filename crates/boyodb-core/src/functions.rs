@@ -3,10 +3,10 @@
 // Array, Map, JSON, Geo, URL, IP functions, Full-Text Search, and Sampling
 // providing an extensive function library for analytics.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Common Types
@@ -25,8 +25,8 @@ pub enum Value {
     Array(Vec<Value>),
     Map(BTreeMap<String, Value>),
     Tuple(Vec<Value>),
-    Date(i32),      // Days since epoch
-    DateTime(i64),  // Microseconds since epoch
+    Date(i32),     // Days since epoch
+    DateTime(i64), // Microseconds since epoch
     Ipv4(u32),
     Ipv6(u128),
     Uuid(u128),
@@ -69,7 +69,8 @@ impl Value {
                 format!("[{}]", items.join(", "))
             }
             Value::Map(m) => {
-                let items: Vec<String> = m.iter()
+                let items: Vec<String> = m
+                    .iter()
                     .map(|(k, v)| format!("'{}': {}", k, v.to_string_repr()))
                     .collect();
                 format!("{{{}}}", items.join(", "))
@@ -207,14 +208,18 @@ impl ArrayFunctions {
 
     /// Get element at index (1-based)
     pub fn element(arr: &Value, index: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
-        let idx = index.as_i64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Integer",
-            got: index.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
+        let idx = index
+            .as_i64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Integer",
+                got: index.type_name().to_string(),
+            })?;
 
         // 1-based indexing, negative from end
         let real_idx = if idx > 0 {
@@ -234,47 +239,59 @@ impl ArrayFunctions {
 
     /// Check if array contains element
     pub fn has(arr: &Value, elem: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
         Ok(Value::Bool(arr.contains(elem)))
     }
 
     /// Check if array contains all elements
     pub fn has_all(arr: &Value, elems: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
-        let elems = elems.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: elems.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
+        let elems = elems
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: elems.type_name().to_string(),
+            })?;
 
         Ok(Value::Bool(elems.iter().all(|e| arr.contains(e))))
     }
 
     /// Check if array contains any element
     pub fn has_any(arr: &Value, elems: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
-        let elems = elems.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: elems.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
+        let elems = elems
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: elems.type_name().to_string(),
+            })?;
 
         Ok(Value::Bool(elems.iter().any(|e| arr.contains(e))))
     }
 
     /// Find index of element (1-based, 0 if not found)
     pub fn index_of(arr: &Value, elem: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let idx = arr.iter().position(|e| e == elem);
         Ok(Value::UInt(idx.map(|i| i + 1).unwrap_or(0) as u64))
@@ -282,10 +299,12 @@ impl ArrayFunctions {
 
     /// Count occurrences of element
     pub fn count_equal(arr: &Value, elem: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let count = arr.iter().filter(|e| *e == elem).count();
         Ok(Value::UInt(count as u64))
@@ -295,10 +314,12 @@ impl ArrayFunctions {
     pub fn concat(arrays: &[Value]) -> FunctionResult {
         let mut result = Vec::new();
         for arr in arrays {
-            let a = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-                expected: "Array",
-                got: arr.type_name().to_string(),
-            })?;
+            let a = arr
+                .as_array()
+                .ok_or_else(|| FunctionError::InvalidArgumentType {
+                    expected: "Array",
+                    got: arr.type_name().to_string(),
+                })?;
             result.extend(a.iter().cloned());
         }
         Ok(Value::Array(result))
@@ -306,10 +327,12 @@ impl ArrayFunctions {
 
     /// Get unique elements
     pub fn distinct(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut seen = Vec::new();
         for elem in arr {
@@ -322,10 +345,12 @@ impl ArrayFunctions {
 
     /// Flatten nested arrays
     pub fn flatten(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut result = Vec::new();
         for elem in arr {
@@ -339,10 +364,12 @@ impl ArrayFunctions {
 
     /// Reverse array
     pub fn reverse(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut result = arr.clone();
         result.reverse();
@@ -351,37 +378,45 @@ impl ArrayFunctions {
 
     /// Sort array
     pub fn sort(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut result = arr.clone();
-        result.sort_by(|a, b| {
-            match (a, b) {
-                (Value::Int(x), Value::Int(y)) => x.cmp(y),
-                (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                (Value::String(x), Value::String(y)) => x.cmp(y),
-                _ => std::cmp::Ordering::Equal,
+        result.sort_by(|a, b| match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            (Value::Float(x), Value::Float(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
             }
+            (Value::String(x), Value::String(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
         });
         Ok(Value::Array(result))
     }
 
     /// Get slice of array
     pub fn slice(arr: &Value, offset: &Value, length: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
-        let offset = offset.as_i64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Integer",
-            got: offset.type_name().to_string(),
-        })?;
-        let length = length.as_i64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Integer",
-            got: length.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
+        let offset = offset
+            .as_i64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Integer",
+                got: offset.type_name().to_string(),
+            })?;
+        let length = length
+            .as_i64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Integer",
+                got: length.type_name().to_string(),
+            })?;
 
         let start = if offset > 0 {
             (offset - 1) as usize
@@ -398,10 +433,12 @@ impl ArrayFunctions {
 
     /// Sum of array elements
     pub fn array_sum(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut sum = 0.0;
         for elem in arr {
@@ -414,10 +451,12 @@ impl ArrayFunctions {
 
     /// Average of array elements
     pub fn array_avg(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         if arr.is_empty() {
             return Ok(Value::Null);
@@ -441,10 +480,12 @@ impl ArrayFunctions {
 
     /// Min of array elements
     pub fn array_min(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut min: Option<f64> = None;
         for elem in arr {
@@ -457,10 +498,12 @@ impl ArrayFunctions {
 
     /// Max of array elements
     pub fn array_max(arr: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
 
         let mut max: Option<f64> = None;
         for elem in arr {
@@ -473,14 +516,18 @@ impl ArrayFunctions {
 
     /// Join array elements into string
     pub fn array_join(arr: &Value, sep: &Value) -> FunctionResult {
-        let arr = arr.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: arr.type_name().to_string(),
-        })?;
-        let sep = sep.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: sep.type_name().to_string(),
-        })?;
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: arr.type_name().to_string(),
+            })?;
+        let sep = sep
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: sep.type_name().to_string(),
+            })?;
 
         let strings: Vec<String> = arr.iter().map(|v| v.to_string_repr()).collect();
         Ok(Value::String(strings.join(sep)))
@@ -488,14 +535,18 @@ impl ArrayFunctions {
 
     /// Intersection of two arrays
     pub fn array_intersect(a: &Value, b: &Value) -> FunctionResult {
-        let a = a.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: a.type_name().to_string(),
-        })?;
-        let b = b.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: b.type_name().to_string(),
-        })?;
+        let a = a
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: a.type_name().to_string(),
+            })?;
+        let b = b
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: b.type_name().to_string(),
+            })?;
 
         let result: Vec<Value> = a.iter().filter(|e| b.contains(e)).cloned().collect();
         Ok(Value::Array(result))
@@ -503,14 +554,18 @@ impl ArrayFunctions {
 
     /// Difference of two arrays (a - b)
     pub fn array_difference(a: &Value, b: &Value) -> FunctionResult {
-        let a = a.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: a.type_name().to_string(),
-        })?;
-        let b = b.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: b.type_name().to_string(),
-        })?;
+        let a = a
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: a.type_name().to_string(),
+            })?;
+        let b = b
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: b.type_name().to_string(),
+            })?;
 
         let result: Vec<Value> = a.iter().filter(|e| !b.contains(e)).cloned().collect();
         Ok(Value::Array(result))
@@ -526,24 +581,29 @@ pub struct MapFunctions;
 impl MapFunctions {
     /// Create a map from key-value pairs
     pub fn map(keys: &Value, values: &Value) -> FunctionResult {
-        let keys = keys.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: keys.type_name().to_string(),
-        })?;
-        let values = values.as_array().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Array",
-            got: values.type_name().to_string(),
-        })?;
+        let keys = keys
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: keys.type_name().to_string(),
+            })?;
+        let values = values
+            .as_array()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Array",
+                got: values.type_name().to_string(),
+            })?;
 
         if keys.len() != values.len() {
             return Err(FunctionError::InvalidArgument(
-                "Keys and values arrays must have same length".to_string()
+                "Keys and values arrays must have same length".to_string(),
             ));
         }
 
         let mut map = BTreeMap::new();
         for (k, v) in keys.iter().zip(values.iter()) {
-            let key = k.as_str()
+            let key = k
+                .as_str()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| k.to_string_repr());
             map.insert(key, v.clone());
@@ -554,86 +614,110 @@ impl MapFunctions {
 
     /// Get value by key
     pub fn map_get(map: &Value, key: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
-        let key = key.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: key.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
+        let key = key
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: key.type_name().to_string(),
+            })?;
 
         Ok(map.get(key).cloned().unwrap_or(Value::Null))
     }
 
     /// Get value by key with default
     pub fn map_get_or_default(map: &Value, key: &Value, default: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
-        let key = key.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: key.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
+        let key = key
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: key.type_name().to_string(),
+            })?;
 
         Ok(map.get(key).cloned().unwrap_or_else(|| default.clone()))
     }
 
     /// Check if map contains key
     pub fn map_contains(map: &Value, key: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
-        let key = key.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: key.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
+        let key = key
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: key.type_name().to_string(),
+            })?;
 
         Ok(Value::Bool(map.contains_key(key)))
     }
 
     /// Get all keys
     pub fn map_keys(map: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
 
-        Ok(Value::Array(map.keys().map(|k| Value::String(k.clone())).collect()))
+        Ok(Value::Array(
+            map.keys().map(|k| Value::String(k.clone())).collect(),
+        ))
     }
 
     /// Get all values
     pub fn map_values(map: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
 
         Ok(Value::Array(map.values().cloned().collect()))
     }
 
     /// Get map size
     pub fn map_size(map: &Value) -> FunctionResult {
-        let map = map.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: map.type_name().to_string(),
-        })?;
+        let map = map
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: map.type_name().to_string(),
+            })?;
 
         Ok(Value::UInt(map.len() as u64))
     }
 
     /// Merge two maps (second overrides first)
     pub fn map_update(base: &Value, updates: &Value) -> FunctionResult {
-        let base = base.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: base.type_name().to_string(),
-        })?;
-        let updates = updates.as_map().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Map",
-            got: updates.type_name().to_string(),
-        })?;
+        let base = base
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: base.type_name().to_string(),
+            })?;
+        let updates = updates
+            .as_map()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Map",
+                got: updates.type_name().to_string(),
+            })?;
 
         let mut result = base.clone();
         result.extend(updates.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -650,10 +734,12 @@ pub struct JsonFunctions;
 impl JsonFunctions {
     /// Parse JSON string into Value
     pub fn parse_json(json: &Value) -> FunctionResult {
-        let json_str = json.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: json.type_name().to_string(),
-        })?;
+        let json_str = json
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: json.type_name().to_string(),
+            })?;
 
         Self::parse_json_str(json_str)
     }
@@ -681,13 +767,13 @@ impl JsonFunctions {
 
         // String
         if s.starts_with('"') && s.ends_with('"') {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             return Ok(Value::String(Self::unescape_json_string(inner)));
         }
 
         // Array
         if s.starts_with('[') && s.ends_with(']') {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.trim().is_empty() {
                 return Ok(Value::Array(vec![]));
             }
@@ -701,21 +787,21 @@ impl JsonFunctions {
 
         // Object
         if s.starts_with('{') && s.ends_with('}') {
-            let inner = &s[1..s.len()-1];
+            let inner = &s[1..s.len() - 1];
             if inner.trim().is_empty() {
                 return Ok(Value::Map(BTreeMap::new()));
             }
             let pairs = Self::split_json_elements(inner)?;
             let mut map = BTreeMap::new();
             for pair in pairs {
-                let colon_pos = pair.find(':').ok_or_else(|| {
-                    FunctionError::ParseError("Invalid JSON object".to_string())
-                })?;
+                let colon_pos = pair
+                    .find(':')
+                    .ok_or_else(|| FunctionError::ParseError("Invalid JSON object".to_string()))?;
                 let key = pair[..colon_pos].trim();
-                let value = pair[colon_pos+1..].trim();
+                let value = pair[colon_pos + 1..].trim();
 
                 let key = if key.starts_with('"') && key.ends_with('"') {
-                    Self::unescape_json_string(&key[1..key.len()-1])
+                    Self::unescape_json_string(&key[1..key.len() - 1])
                 } else {
                     key.to_string()
                 };
@@ -820,8 +906,15 @@ impl JsonFunctions {
                 format!("[{}]", items.join(","))
             }
             Value::Map(m) => {
-                let items: Vec<String> = m.iter()
-                    .map(|(k, v)| format!("\"{}\":{}", Self::escape_json_string(k), Self::value_to_json(v)))
+                let items: Vec<String> = m
+                    .iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "\"{}\":{}",
+                            Self::escape_json_string(k),
+                            Self::value_to_json(v)
+                        )
+                    })
                     .collect();
                 format!("{{{}}}", items.join(","))
             }
@@ -831,10 +924,10 @@ impl JsonFunctions {
 
     fn escape_json_string(s: &str) -> String {
         s.replace('\\', "\\\\")
-         .replace('"', "\\\"")
-         .replace('\n', "\\n")
-         .replace('\r', "\\r")
-         .replace('\t', "\\t")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
     }
 
     /// Extract value at JSON path
@@ -842,16 +935,20 @@ impl JsonFunctions {
         let value = match json {
             Value::String(s) => Self::parse_json_str(s)?,
             Value::Map(_) | Value::Array(_) => json.clone(),
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "JSON String, Map, or Array",
-                got: json.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "JSON String, Map, or Array",
+                    got: json.type_name().to_string(),
+                })
+            }
         };
 
-        let path = path.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: path.type_name().to_string(),
-        })?;
+        let path = path
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: path.type_name().to_string(),
+            })?;
 
         Self::extract_path(&value, path)
     }
@@ -864,7 +961,7 @@ impl JsonFunctions {
             // Check for array index
             if let Some(bracket_pos) = part.find('[') {
                 let key = &part[..bracket_pos];
-                let idx_str = &part[bracket_pos+1..part.len()-1];
+                let idx_str = &part[bracket_pos + 1..part.len() - 1];
 
                 if !key.is_empty() {
                     current = match &current {
@@ -918,10 +1015,12 @@ impl JsonFunctions {
             _ => return Ok(Value::Bool(false)),
         };
 
-        let key = key.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: key.type_name().to_string(),
-        })?;
+        let key = key
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: key.type_name().to_string(),
+            })?;
 
         match value {
             Value::Map(m) => Ok(Value::Bool(m.contains_key(key))),
@@ -956,14 +1055,18 @@ impl GeoFunctions {
 
     /// Create a point
     pub fn point(lon: &Value, lat: &Value) -> FunctionResult {
-        let lon = lon.as_f64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Float",
-            got: lon.type_name().to_string(),
-        })?;
-        let lat = lat.as_f64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Float",
-            got: lat.type_name().to_string(),
-        })?;
+        let lon = lon
+            .as_f64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Float",
+                got: lon.type_name().to_string(),
+            })?;
+        let lat = lat
+            .as_f64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Float",
+                got: lat.type_name().to_string(),
+            })?;
 
         Ok(Value::Point(lon, lat))
     }
@@ -994,17 +1097,21 @@ impl GeoFunctions {
     pub fn great_circle_distance(p1: &Value, p2: &Value) -> FunctionResult {
         let (lon1, lat1) = match p1 {
             Value::Point(lon, lat) => (*lon, *lat),
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "Point",
-                got: p1.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "Point",
+                    got: p1.type_name().to_string(),
+                })
+            }
         };
         let (lon2, lat2) = match p2 {
             Value::Point(lon, lat) => (*lon, *lat),
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "Point",
-                got: p2.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "Point",
+                    got: p2.type_name().to_string(),
+                })
+            }
         };
 
         let distance = Self::haversine(lat1, lon1, lat2, lon2);
@@ -1020,8 +1127,8 @@ impl GeoFunctions {
         let dlat = lat2_rad - lat1_rad;
         let dlon = lon2_rad - lon1_rad;
 
-        let a = (dlat / 2.0).sin().powi(2) +
-                lat1_rad.cos() * lat2_rad.cos() * (dlon / 2.0).sin().powi(2);
+        let a = (dlat / 2.0).sin().powi(2)
+            + lat1_rad.cos() * lat2_rad.cos() * (dlon / 2.0).sin().powi(2);
         let c = 2.0 * a.sqrt().asin();
 
         Self::EARTH_RADIUS_M * c
@@ -1029,10 +1136,12 @@ impl GeoFunctions {
 
     /// Check if point is within radius (meters) of center
     pub fn point_in_circle(point: &Value, center: &Value, radius: &Value) -> FunctionResult {
-        let radius = radius.as_f64().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "Float",
-            got: radius.type_name().to_string(),
-        })?;
+        let radius = radius
+            .as_f64()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "Float",
+                got: radius.type_name().to_string(),
+            })?;
 
         let distance = Self::great_circle_distance(point, center)?;
         match distance {
@@ -1042,13 +1151,21 @@ impl GeoFunctions {
     }
 
     /// Check if point is within bounding box
-    pub fn point_in_bbox(point: &Value, min_lon: &Value, min_lat: &Value, max_lon: &Value, max_lat: &Value) -> FunctionResult {
+    pub fn point_in_bbox(
+        point: &Value,
+        min_lon: &Value,
+        min_lat: &Value,
+        max_lon: &Value,
+        max_lat: &Value,
+    ) -> FunctionResult {
         let (lon, lat) = match point {
             Value::Point(lon, lat) => (*lon, *lat),
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "Point",
-                got: point.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "Point",
+                    got: point.type_name().to_string(),
+                })
+            }
         };
 
         let min_lon = min_lon.as_f64().unwrap_or(f64::NEG_INFINITY);
@@ -1064,10 +1181,12 @@ impl GeoFunctions {
     pub fn geohash_encode(point: &Value, precision: &Value) -> FunctionResult {
         let (lon, lat) = match point {
             Value::Point(lon, lat) => (*lon, *lat),
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "Point",
-                got: point.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "Point",
+                    got: point.type_name().to_string(),
+                })
+            }
         };
 
         let precision = precision.as_i64().unwrap_or(12) as usize;
@@ -1121,10 +1240,12 @@ impl GeoFunctions {
 
     /// Decode geohash to bounding box
     pub fn geohash_decode(hash: &Value) -> FunctionResult {
-        let hash = hash.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: hash.type_name().to_string(),
-        })?;
+        let hash = hash
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: hash.type_name().to_string(),
+            })?;
 
         let (min_lat, min_lon, max_lat, max_lon) = Self::decode_geohash(hash)?;
         let center_lon = (min_lon + max_lon) / 2.0;
@@ -1141,8 +1262,9 @@ impl GeoFunctions {
         let mut is_lon = true;
 
         for c in hash.chars() {
-            let idx = BASE32.find(c.to_ascii_lowercase())
-                .ok_or_else(|| FunctionError::ParseError("Invalid geohash character".to_string()))?;
+            let idx = BASE32.find(c.to_ascii_lowercase()).ok_or_else(|| {
+                FunctionError::ParseError("Invalid geohash character".to_string())
+            })?;
 
             for bit in (0..5).rev() {
                 let val = (idx >> bit) & 1;
@@ -1178,10 +1300,12 @@ pub struct UrlFunctions;
 impl UrlFunctions {
     /// Extract domain from URL
     pub fn domain(url: &Value) -> FunctionResult {
-        let url = url.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: url.type_name().to_string(),
-        })?;
+        let url = url
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: url.type_name().to_string(),
+            })?;
 
         let domain = Self::extract_domain(url);
         Ok(Value::String(domain))
@@ -1234,10 +1358,12 @@ impl UrlFunctions {
 
     /// Extract protocol
     pub fn protocol(url: &Value) -> FunctionResult {
-        let url = url.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: url.type_name().to_string(),
-        })?;
+        let url = url
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: url.type_name().to_string(),
+            })?;
 
         let protocol = if url.starts_with("https://") {
             "https"
@@ -1254,10 +1380,12 @@ impl UrlFunctions {
 
     /// Extract path
     pub fn path(url: &Value) -> FunctionResult {
-        let url = url.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: url.type_name().to_string(),
-        })?;
+        let url = url
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: url.type_name().to_string(),
+            })?;
 
         let without_protocol = url
             .strip_prefix("https://")
@@ -1270,22 +1398,22 @@ impl UrlFunctions {
         let path_part = &without_protocol[path_start..];
 
         // Remove query and fragment
-        let path = path_part
-            .split(&['?', '#'][..])
-            .next()
-            .unwrap_or("/");
+        let path = path_part.split(&['?', '#'][..]).next().unwrap_or("/");
 
         Ok(Value::String(path.to_string()))
     }
 
     /// Extract query string
     pub fn query_string(url: &Value) -> FunctionResult {
-        let url = url.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: url.type_name().to_string(),
-        })?;
+        let url = url
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: url.type_name().to_string(),
+            })?;
 
-        let query = url.split('?')
+        let query = url
+            .split('?')
             .nth(1)
             .map(|q| q.split('#').next().unwrap_or(""))
             .unwrap_or("");
@@ -1300,10 +1428,12 @@ impl UrlFunctions {
             _ => return Ok(Value::String(String::new())),
         };
 
-        let param = param.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: param.type_name().to_string(),
-        })?;
+        let param = param
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: param.type_name().to_string(),
+            })?;
 
         for pair in query.split('&') {
             let mut parts = pair.splitn(2, '=');
@@ -1319,10 +1449,12 @@ impl UrlFunctions {
 
     /// Decode URL-encoded string
     pub fn decode_url_component(encoded: &Value) -> FunctionResult {
-        let s = encoded.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: encoded.type_name().to_string(),
-        })?;
+        let s = encoded
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: encoded.type_name().to_string(),
+            })?;
 
         Ok(Value::String(Self::url_decode(s)))
     }
@@ -1352,10 +1484,12 @@ impl UrlFunctions {
 
     /// Encode URL component
     pub fn encode_url_component(s: &Value) -> FunctionResult {
-        let s = s.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: s.type_name().to_string(),
-        })?;
+        let s = s
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: s.type_name().to_string(),
+            })?;
 
         Ok(Value::String(Self::url_encode(s)))
     }
@@ -1385,12 +1519,15 @@ pub struct IpFunctions;
 impl IpFunctions {
     /// Parse IPv4 address to integer
     pub fn ipv4_string_to_num(ip: &Value) -> FunctionResult {
-        let ip_str = ip.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: ip.type_name().to_string(),
-        })?;
+        let ip_str = ip
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: ip.type_name().to_string(),
+            })?;
 
-        let addr: Ipv4Addr = ip_str.parse()
+        let addr: Ipv4Addr = ip_str
+            .parse()
             .map_err(|_| FunctionError::ParseError(format!("Invalid IPv4: {}", ip_str)))?;
 
         Ok(Value::UInt(u32::from(addr) as u64))
@@ -1401,10 +1538,12 @@ impl IpFunctions {
         let num = match num {
             Value::UInt(n) => *n as u32,
             Value::Int(n) => *n as u32,
-            _ => return Err(FunctionError::InvalidArgumentType {
-                expected: "Integer",
-                got: num.type_name().to_string(),
-            }),
+            _ => {
+                return Err(FunctionError::InvalidArgumentType {
+                    expected: "Integer",
+                    got: num.type_name().to_string(),
+                })
+            }
         };
 
         let addr = Ipv4Addr::from(num);
@@ -1413,12 +1552,15 @@ impl IpFunctions {
 
     /// Parse IPv6 address to integer
     pub fn ipv6_string_to_num(ip: &Value) -> FunctionResult {
-        let ip_str = ip.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: ip.type_name().to_string(),
-        })?;
+        let ip_str = ip
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: ip.type_name().to_string(),
+            })?;
 
-        let addr: Ipv6Addr = ip_str.parse()
+        let addr: Ipv6Addr = ip_str
+            .parse()
             .map_err(|_| FunctionError::ParseError(format!("Invalid IPv6: {}", ip_str)))?;
 
         Ok(Value::Ipv6(u128::from(addr)))
@@ -1426,27 +1568,39 @@ impl IpFunctions {
 
     /// Check if IP is in CIDR range
     pub fn ipv4_cidr_to_range(cidr: &Value) -> FunctionResult {
-        let cidr_str = cidr.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: cidr.type_name().to_string(),
-        })?;
+        let cidr_str = cidr
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: cidr.type_name().to_string(),
+            })?;
 
         let parts: Vec<&str> = cidr_str.split('/').collect();
         if parts.len() != 2 {
-            return Err(FunctionError::ParseError("Invalid CIDR notation".to_string()));
+            return Err(FunctionError::ParseError(
+                "Invalid CIDR notation".to_string(),
+            ));
         }
 
-        let addr: Ipv4Addr = parts[0].parse()
+        let addr: Ipv4Addr = parts[0]
+            .parse()
             .map_err(|_| FunctionError::ParseError("Invalid IP address".to_string()))?;
-        let prefix: u8 = parts[1].parse()
+        let prefix: u8 = parts[1]
+            .parse()
             .map_err(|_| FunctionError::ParseError("Invalid prefix length".to_string()))?;
 
         if prefix > 32 {
-            return Err(FunctionError::OutOfRange("Prefix must be <= 32".to_string()));
+            return Err(FunctionError::OutOfRange(
+                "Prefix must be <= 32".to_string(),
+            ));
         }
 
         let ip_num = u32::from(addr);
-        let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            !0u32 << (32 - prefix)
+        };
         let start = ip_num & mask;
         let end = start | !mask;
 
@@ -1476,12 +1630,15 @@ impl IpFunctions {
 
     /// Check if IP is private (RFC 1918)
     pub fn is_ipv4_private(ip: &Value) -> FunctionResult {
-        let ip_str = ip.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: ip.type_name().to_string(),
-        })?;
+        let ip_str = ip
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: ip.type_name().to_string(),
+            })?;
 
-        let addr: Ipv4Addr = ip_str.parse()
+        let addr: Ipv4Addr = ip_str
+            .parse()
             .map_err(|_| FunctionError::ParseError(format!("Invalid IPv4: {}", ip_str)))?;
 
         let is_private = addr.is_private() || addr.is_loopback() || addr.is_link_local();
@@ -1490,10 +1647,12 @@ impl IpFunctions {
 
     /// Get IP version
     pub fn ip_version(ip: &Value) -> FunctionResult {
-        let ip_str = ip.as_str().ok_or_else(|| FunctionError::InvalidArgumentType {
-            expected: "String",
-            got: ip.type_name().to_string(),
-        })?;
+        let ip_str = ip
+            .as_str()
+            .ok_or_else(|| FunctionError::InvalidArgumentType {
+                expected: "String",
+                got: ip.type_name().to_string(),
+            })?;
 
         if ip_str.parse::<Ipv4Addr>().is_ok() {
             Ok(Value::Int(4))
@@ -1532,7 +1691,11 @@ pub struct SimpleTokenizer {
 
 impl SimpleTokenizer {
     pub fn new(lowercase: bool, min_length: usize, max_length: usize) -> Self {
-        Self { lowercase, min_length, max_length }
+        Self {
+            lowercase,
+            min_length,
+            max_length,
+        }
     }
 }
 
@@ -1580,7 +1743,11 @@ pub struct NgramTokenizer {
 
 impl NgramTokenizer {
     pub fn new(min_gram: usize, max_gram: usize, lowercase: bool) -> Self {
-        Self { min_gram, max_gram, lowercase }
+        Self {
+            min_gram,
+            max_gram,
+            lowercase,
+        }
     }
 }
 
@@ -1598,7 +1765,7 @@ impl Tokenizer for NgramTokenizer {
 
         for n in self.min_gram..=self.max_gram {
             for i in 0..=chars.len().saturating_sub(n) {
-                let term: String = chars[i..i+n].iter().collect();
+                let term: String = chars[i..i + n].iter().collect();
                 tokens.push(Token {
                     term,
                     position,
@@ -1654,7 +1821,8 @@ impl InvertedIndex {
         // Group tokens by term
         let mut term_positions: HashMap<String, Vec<u32>> = HashMap::new();
         for token in &tokens {
-            term_positions.entry(token.term.clone())
+            term_positions
+                .entry(token.term.clone())
                 .or_default()
                 .push(token.position);
         }
@@ -1763,14 +1931,20 @@ impl InvertedIndex {
         results
     }
 
-    fn check_phrase_in_doc(&self, index: &HashMap<String, Vec<Posting>>, doc_id: u64, tokens: &[Token]) -> bool {
+    fn check_phrase_in_doc(
+        &self,
+        index: &HashMap<String, Vec<Posting>>,
+        doc_id: u64,
+        tokens: &[Token],
+    ) -> bool {
         if tokens.is_empty() {
             return false;
         }
 
         // Get positions for first term
         let first_term = &tokens[0].term;
-        let first_positions: Vec<u32> = index.get(first_term)
+        let first_positions: Vec<u32> = index
+            .get(first_term)
             .and_then(|postings| postings.iter().find(|p| p.doc_id == doc_id))
             .map(|p| p.positions.clone())
             .unwrap_or_default();
@@ -1780,7 +1954,8 @@ impl InvertedIndex {
             for (i, token) in tokens.iter().enumerate().skip(1) {
                 let expected_pos = start_pos + i as u32;
 
-                let has_position = index.get(&token.term)
+                let has_position = index
+                    .get(&token.term)
                     .and_then(|postings| postings.iter().find(|p| p.doc_id == doc_id))
                     .map(|p| p.positions.contains(&expected_pos))
                     .unwrap_or(false);
@@ -1865,9 +2040,7 @@ impl Sampler {
                 let hash = self.hash_row(row_num);
                 (hash as f64 / u64::MAX as f64) < *ratio
             }
-            SamplingMethod::Block { n, offset } => {
-                (row_num + offset) % n == 0
-            }
+            SamplingMethod::Block { n, offset } => (row_num + offset) % n == 0,
             SamplingMethod::Reservoir(_) => {
                 // Reservoir sampling handles this differently
                 true
@@ -1920,8 +2093,8 @@ impl Sampler {
     }
 
     fn hash_value(&self, value: &Value) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
         self.seed.hash(&mut hasher);
@@ -1937,7 +2110,11 @@ impl Sampler {
             SamplingMethod::Block { n, .. } => 1.0 / *n as f64,
             SamplingMethod::Reservoir(k) => {
                 let count = *self.reservoir_count.read();
-                if count == 0 { 1.0 } else { *k as f64 / count as f64 }
+                if count == 0 {
+                    1.0
+                } else {
+                    *k as f64 / count as f64
+                }
             }
         }
     }
@@ -1962,7 +2139,10 @@ mod tests {
     #[test]
     fn test_array_basic() {
         let arr = ArrayFunctions::array(&[Value::Int(1), Value::Int(2), Value::Int(3)]).unwrap();
-        assert_eq!(arr, Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        assert_eq!(
+            arr,
+            Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
 
         let len = ArrayFunctions::length(&arr).unwrap();
         assert_eq!(len, Value::UInt(3));
@@ -1975,22 +2155,46 @@ mod tests {
     fn test_array_element() {
         let arr = Value::Array(vec![Value::Int(10), Value::Int(20), Value::Int(30)]);
 
-        assert_eq!(ArrayFunctions::element(&arr, &Value::Int(1)).unwrap(), Value::Int(10));
-        assert_eq!(ArrayFunctions::element(&arr, &Value::Int(2)).unwrap(), Value::Int(20));
-        assert_eq!(ArrayFunctions::element(&arr, &Value::Int(-1)).unwrap(), Value::Int(30));
-        assert_eq!(ArrayFunctions::element(&arr, &Value::Int(0)).unwrap(), Value::Null);
+        assert_eq!(
+            ArrayFunctions::element(&arr, &Value::Int(1)).unwrap(),
+            Value::Int(10)
+        );
+        assert_eq!(
+            ArrayFunctions::element(&arr, &Value::Int(2)).unwrap(),
+            Value::Int(20)
+        );
+        assert_eq!(
+            ArrayFunctions::element(&arr, &Value::Int(-1)).unwrap(),
+            Value::Int(30)
+        );
+        assert_eq!(
+            ArrayFunctions::element(&arr, &Value::Int(0)).unwrap(),
+            Value::Null
+        );
     }
 
     #[test]
     fn test_array_has() {
         let arr = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
 
-        assert_eq!(ArrayFunctions::has(&arr, &Value::Int(2)).unwrap(), Value::Bool(true));
-        assert_eq!(ArrayFunctions::has(&arr, &Value::Int(5)).unwrap(), Value::Bool(false));
+        assert_eq!(
+            ArrayFunctions::has(&arr, &Value::Int(2)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            ArrayFunctions::has(&arr, &Value::Int(5)).unwrap(),
+            Value::Bool(false)
+        );
 
         let search = Value::Array(vec![Value::Int(1), Value::Int(5)]);
-        assert_eq!(ArrayFunctions::has_any(&arr, &search).unwrap(), Value::Bool(true));
-        assert_eq!(ArrayFunctions::has_all(&arr, &search).unwrap(), Value::Bool(false));
+        assert_eq!(
+            ArrayFunctions::has_any(&arr, &search).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            ArrayFunctions::has_all(&arr, &search).unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[test]
@@ -2008,7 +2212,12 @@ mod tests {
 
     #[test]
     fn test_array_math() {
-        let arr = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4)]);
+        let arr = Value::Array(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+            Value::Int(4),
+        ]);
 
         assert_eq!(ArrayFunctions::array_sum(&arr).unwrap(), Value::Float(10.0));
         assert_eq!(ArrayFunctions::array_avg(&arr).unwrap(), Value::Float(2.5));
@@ -2020,13 +2229,22 @@ mod tests {
 
     #[test]
     fn test_map_basic() {
-        let keys = Value::Array(vec![Value::String("a".to_string()), Value::String("b".to_string())]);
+        let keys = Value::Array(vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+        ]);
         let values = Value::Array(vec![Value::Int(1), Value::Int(2)]);
 
         let map = MapFunctions::map(&keys, &values).unwrap();
 
-        assert_eq!(MapFunctions::map_get(&map, &Value::String("a".to_string())).unwrap(), Value::Int(1));
-        assert_eq!(MapFunctions::map_contains(&map, &Value::String("a".to_string())).unwrap(), Value::Bool(true));
+        assert_eq!(
+            MapFunctions::map_get(&map, &Value::String("a".to_string())).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            MapFunctions::map_contains(&map, &Value::String("a".to_string())).unwrap(),
+            Value::Bool(true)
+        );
         assert_eq!(MapFunctions::map_size(&map).unwrap(), Value::UInt(2));
     }
 
@@ -2039,7 +2257,8 @@ mod tests {
 
         assert!(matches!(parsed, Value::Map(_)));
 
-        let name = JsonFunctions::json_extract(&parsed, &Value::String("name".to_string())).unwrap();
+        let name =
+            JsonFunctions::json_extract(&parsed, &Value::String("name".to_string())).unwrap();
         assert_eq!(name, Value::String("Alice".to_string()));
     }
 
@@ -2053,12 +2272,16 @@ mod tests {
 
     #[test]
     fn test_json_extract_path() {
-        let json = Value::String(r#"{"user": {"name": "Bob", "scores": [10, 20, 30]}}"#.to_string());
+        let json =
+            Value::String(r#"{"user": {"name": "Bob", "scores": [10, 20, 30]}}"#.to_string());
 
-        let name = JsonFunctions::json_extract(&json, &Value::String("user.name".to_string())).unwrap();
+        let name =
+            JsonFunctions::json_extract(&json, &Value::String("user.name".to_string())).unwrap();
         assert_eq!(name, Value::String("Bob".to_string()));
 
-        let score = JsonFunctions::json_extract(&json, &Value::String("user.scores[1]".to_string())).unwrap();
+        let score =
+            JsonFunctions::json_extract(&json, &Value::String("user.scores[1]".to_string()))
+                .unwrap();
         assert_eq!(score, Value::Int(20));
     }
 
@@ -2081,8 +2304,14 @@ mod tests {
         let point = GeoFunctions::point(&Value::Float(-122.4194), &Value::Float(37.7749)).unwrap();
         assert!(matches!(point, Value::Point(_, _)));
 
-        assert_eq!(GeoFunctions::geo_lon(&point).unwrap(), Value::Float(-122.4194));
-        assert_eq!(GeoFunctions::geo_lat(&point).unwrap(), Value::Float(37.7749));
+        assert_eq!(
+            GeoFunctions::geo_lon(&point).unwrap(),
+            Value::Float(-122.4194)
+        );
+        assert_eq!(
+            GeoFunctions::geo_lat(&point).unwrap(),
+            Value::Float(37.7749)
+        );
     }
 
     #[test]
@@ -2120,13 +2349,29 @@ mod tests {
 
     #[test]
     fn test_url_parsing() {
-        let url = Value::String("https://www.example.com/path/to/page?query=test#anchor".to_string());
+        let url =
+            Value::String("https://www.example.com/path/to/page?query=test#anchor".to_string());
 
-        assert_eq!(UrlFunctions::domain(&url).unwrap(), Value::String("www.example.com".to_string()));
-        assert_eq!(UrlFunctions::domain_without_www(&url).unwrap(), Value::String("example.com".to_string()));
-        assert_eq!(UrlFunctions::protocol(&url).unwrap(), Value::String("https".to_string()));
-        assert_eq!(UrlFunctions::path(&url).unwrap(), Value::String("/path/to/page".to_string()));
-        assert_eq!(UrlFunctions::query_string(&url).unwrap(), Value::String("query=test".to_string()));
+        assert_eq!(
+            UrlFunctions::domain(&url).unwrap(),
+            Value::String("www.example.com".to_string())
+        );
+        assert_eq!(
+            UrlFunctions::domain_without_www(&url).unwrap(),
+            Value::String("example.com".to_string())
+        );
+        assert_eq!(
+            UrlFunctions::protocol(&url).unwrap(),
+            Value::String("https".to_string())
+        );
+        assert_eq!(
+            UrlFunctions::path(&url).unwrap(),
+            Value::String("/path/to/page".to_string())
+        );
+        assert_eq!(
+            UrlFunctions::query_string(&url).unwrap(),
+            Value::String("query=test".to_string())
+        );
     }
 
     #[test]
@@ -2138,7 +2383,8 @@ mod tests {
             Value::String("bar".to_string())
         );
         assert_eq!(
-            UrlFunctions::extract_url_parameter(&url, &Value::String("missing".to_string())).unwrap(),
+            UrlFunctions::extract_url_parameter(&url, &Value::String("missing".to_string()))
+                .unwrap(),
             Value::String(String::new())
         );
     }
@@ -2275,8 +2521,14 @@ mod tests {
 
     #[test]
     fn test_deterministic_sampling() {
-        let sampler1 = Sampler::new(SamplingMethod::Deterministic { ratio: 0.3, seed: 42 });
-        let sampler2 = Sampler::new(SamplingMethod::Deterministic { ratio: 0.3, seed: 42 });
+        let sampler1 = Sampler::new(SamplingMethod::Deterministic {
+            ratio: 0.3,
+            seed: 42,
+        });
+        let sampler2 = Sampler::new(SamplingMethod::Deterministic {
+            ratio: 0.3,
+            seed: 42,
+        });
 
         // Same seed should give same results
         for i in 0..100 {

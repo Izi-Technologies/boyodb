@@ -7,9 +7,9 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
+use std::env;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -57,7 +57,8 @@ fn send_request_streaming(
     stream.flush()?;
 
     let header_bytes = read_frame_bytes(stream)?;
-    let header: Value = serde_json::from_slice(&header_bytes).unwrap_or(json!({"error": "parse error"}));
+    let header: Value =
+        serde_json::from_slice(&header_bytes).unwrap_or(json!({"error": "parse error"}));
 
     let mut payload = Vec::new();
     if header.get("ipc_streaming").and_then(|v| v.as_bool()) == Some(true) {
@@ -127,40 +128,40 @@ mod server_tests {
             let config = boyodb_core::EngineConfig::new(data_path, 1);
             let db = boyodb_core::Db::open(config).unwrap();
 
-        // Health check
-        assert!(db.health_check().is_ok());
+            // Health check
+            assert!(db.health_check().is_ok());
 
-        // Create database
-        assert!(db.create_database("test_db").is_ok());
+            // Create database
+            assert!(db.create_database("test_db").is_ok());
 
-        // List databases
-        let dbs = db.list_databases().unwrap();
-        assert!(dbs.contains(&"test_db".to_string()));
+            // List databases
+            let dbs = db.list_databases().unwrap();
+            assert!(dbs.contains(&"test_db".to_string()));
 
-        // Create table
-        assert!(db.create_table("test_db", "events", None).is_ok());
+            // Create table
+            assert!(db.create_table("test_db", "events", None).is_ok());
 
-        // List tables
-        let tables = db.list_tables(Some("test_db")).unwrap();
-        assert!(tables.iter().any(|t| t.name == "events"));
+            // List tables
+            let tables = db.list_tables(Some("test_db")).unwrap();
+            assert!(tables.iter().any(|t| t.name == "events"));
 
-        // Ingest data
-        let ipc_data = create_test_ipc();
-        let batch = boyodb_core::IngestBatch {
-            payload_ipc: ipc_data,
-            watermark_micros: 1000000,
-            shard_override: None,
-            database: Some("test_db".to_string()),
-            table: Some("events".to_string()),
-        };
-        assert!(db.ingest_ipc(batch).is_ok());
+            // Ingest data
+            let ipc_data = create_test_ipc();
+            let batch = boyodb_core::IngestBatch {
+                payload_ipc: ipc_data,
+                watermark_micros: 1000000,
+                shard_override: None,
+                database: Some("test_db".to_string()),
+                table: Some("events".to_string()),
+            };
+            assert!(db.ingest_ipc(batch).is_ok());
 
-        // Query data
-        let request = boyodb_core::QueryRequest {
-            sql: "SELECT * FROM test_db.events".to_string(),
-            timeout_millis: 5000,
-            collect_stats: false,
-        };
+            // Query data
+            let request = boyodb_core::QueryRequest {
+                sql: "SELECT * FROM test_db.events".to_string(),
+                timeout_millis: 5000,
+                collect_stats: false,
+            };
             let result = db.query(request).unwrap();
             assert!(!result.records_ipc.is_empty());
         });
@@ -177,38 +178,38 @@ mod server_tests {
             let config = boyodb_core::EngineConfig::new(data_path, 1);
             let db = boyodb_core::Db::open(config).unwrap();
 
-        db.create_database("agg_test").unwrap();
-        db.create_table("agg_test", "data", None).unwrap();
+            db.create_database("agg_test").unwrap();
+            db.create_table("agg_test", "data", None).unwrap();
 
-        // Ingest test data
-        let ipc_data = create_test_ipc();
-        let batch = boyodb_core::IngestBatch {
-            payload_ipc: ipc_data,
-            watermark_micros: 2000000,
-            shard_override: None,
-            database: Some("agg_test".to_string()),
-            table: Some("data".to_string()),
-        };
-        db.ingest_ipc(batch).unwrap();
+            // Ingest test data
+            let ipc_data = create_test_ipc();
+            let batch = boyodb_core::IngestBatch {
+                payload_ipc: ipc_data,
+                watermark_micros: 2000000,
+                shard_override: None,
+                database: Some("agg_test".to_string()),
+                table: Some("data".to_string()),
+            };
+            db.ingest_ipc(batch).unwrap();
 
-        // COUNT query
-        let result = db
-            .query(boyodb_core::QueryRequest {
-                sql: "SELECT COUNT(*) FROM agg_test.data".to_string(),
-                timeout_millis: 5000,
-            collect_stats: false,
-        })
-            .unwrap();
-        assert!(!result.records_ipc.is_empty());
+            // COUNT query
+            let result = db
+                .query(boyodb_core::QueryRequest {
+                    sql: "SELECT COUNT(*) FROM agg_test.data".to_string(),
+                    timeout_millis: 5000,
+                    collect_stats: false,
+                })
+                .unwrap();
+            assert!(!result.records_ipc.is_empty());
 
-        // GROUP BY query
-        let result = db
-            .query(boyodb_core::QueryRequest {
-                sql: "SELECT tenant_id, COUNT(*) FROM agg_test.data GROUP BY tenant_id"
-                    .to_string(),
-                timeout_millis: 5000,
-            collect_stats: false,
-            })
+            // GROUP BY query
+            let result = db
+                .query(boyodb_core::QueryRequest {
+                    sql: "SELECT tenant_id, COUNT(*) FROM agg_test.data GROUP BY tenant_id"
+                        .to_string(),
+                    timeout_millis: 5000,
+                    collect_stats: false,
+                })
                 .unwrap();
             assert!(!result.records_ipc.is_empty());
         });
@@ -227,7 +228,8 @@ mod server_tests {
         let auth = boyodb_core::AuthManager::new(&auth_path).unwrap();
 
         // Create user
-        auth.create_user("testuser", "TestPass123!", "root").unwrap();
+        auth.create_user("testuser", "TestPass123!", "root")
+            .unwrap();
 
         // Authenticate
         let session = auth
@@ -239,7 +241,8 @@ mod server_tests {
         assert!(auth.validate_session(&session).is_ok());
 
         // Create role
-        auth.create_role("testrole", Some("Test role"), "root").unwrap();
+        auth.create_role("testrole", Some("Test role"), "root")
+            .unwrap();
 
         // Grant role to user
         auth.grant_role("testuser", "testrole", "root").unwrap();
@@ -341,8 +344,7 @@ mod server_tests {
     #[test]
     #[ignore]
     fn test_tcp_server_health() {
-        let mut stream =
-            TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
+        let mut stream = TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -358,8 +360,7 @@ mod server_tests {
     #[test]
     #[ignore]
     fn test_tcp_wal_stats() {
-        let mut stream =
-            TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
+        let mut stream = TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -367,10 +368,10 @@ mod server_tests {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        let username = env::var("BOYODB_TEST_USER")
-            .expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
-        let password = env::var("BOYODB_TEST_PASS")
-            .expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
+        let username =
+            env::var("BOYODB_TEST_USER").expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
+        let password =
+            env::var("BOYODB_TEST_PASS").expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
 
         let login_response = send_request(
             &mut stream,
@@ -404,8 +405,7 @@ mod server_tests {
     #[test]
     #[ignore]
     fn test_tcp_query() {
-        let mut stream =
-            TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
+        let mut stream = TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -413,10 +413,10 @@ mod server_tests {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        let username = env::var("BOYODB_TEST_USER")
-            .expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
-        let password = env::var("BOYODB_TEST_PASS")
-            .expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
+        let username =
+            env::var("BOYODB_TEST_USER").expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
+        let password =
+            env::var("BOYODB_TEST_PASS").expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
 
         // Login to obtain session for authenticated operations
         let login_response = send_request(
@@ -497,8 +497,7 @@ mod server_tests {
     #[test]
     #[ignore]
     fn test_tcp_query_streaming() {
-        let mut stream =
-            TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
+        let mut stream = TcpStream::connect("127.0.0.1:8765").expect("Failed to connect to server");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -506,10 +505,10 @@ mod server_tests {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        let username = env::var("BOYODB_TEST_USER")
-            .expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
-        let password = env::var("BOYODB_TEST_PASS")
-            .expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
+        let username =
+            env::var("BOYODB_TEST_USER").expect("set BOYODB_TEST_USER for auth-enabled TCP tests");
+        let password =
+            env::var("BOYODB_TEST_PASS").expect("set BOYODB_TEST_PASS for auth-enabled TCP tests");
 
         let login_response = send_request(
             &mut stream,

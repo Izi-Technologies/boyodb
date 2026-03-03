@@ -218,8 +218,7 @@ pub fn deserialize_bloom_or_empty(data: &[u8], expected_items: usize) -> Bloom<u
 }
 
 fn fallback_capacity(expected_items: usize) -> usize {
-    expected_items
-        .clamp(BLOOM_FALLBACK_MIN_ITEMS, BLOOM_FALLBACK_MAX_ITEMS)
+    expected_items.clamp(BLOOM_FALLBACK_MIN_ITEMS, BLOOM_FALLBACK_MAX_ITEMS)
 }
 
 #[cfg(test)]

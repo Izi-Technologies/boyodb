@@ -7,21 +7,21 @@
 //! - Multiple merge strategies (concatenate, merge-sort, final aggregate)
 //! - Execution stats aggregation
 
+use crate::engine::{Db, EngineError, PlanKind, QueryExecutionStats, QueryResponse};
 use crate::planner_distributed::{
-    LocalPlan, GlobalPlan, MergeStrategy, FinalAggKind, PartialAggSpec, OrderBySpec,
+    FinalAggKind, GlobalPlan, LocalPlan, MergeStrategy, OrderBySpec, PartialAggSpec,
 };
-use crate::engine::{PlanKind, Db, EngineError, QueryResponse, QueryExecutionStats};
 
-use std::net::SocketAddr;
-use std::io::{Read, Write, Cursor};
-use std::time::{Duration, Instant};
-use serde::{Deserialize, Serialize};
-use base64::{Engine as _, engine::general_purpose};
+use arrow_array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
-use arrow_array::{RecordBatch, ArrayRef, Float64Array, Int64Array, Array};
 use arrow_schema::SchemaRef;
+use base64::{engine::general_purpose, Engine as _};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::io::{Cursor, Read, Write};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // Configuration
@@ -110,7 +110,7 @@ enum RequestEnum {
         plan_json: serde_json::Value,
         timeout_millis: u32,
         accept_compression: Option<String>,
-    }
+    },
 }
 
 #[derive(Deserialize)]
@@ -149,7 +149,12 @@ impl DistributedExecutor {
     }
 
     /// Execute a distributed query with the given local and global plans
-    pub fn execute(&self, db: &Db, global: GlobalPlan, local: LocalPlan) -> Result<QueryResponse, EngineError> {
+    pub fn execute(
+        &self,
+        db: &Db,
+        global: GlobalPlan,
+        local: LocalPlan,
+    ) -> Result<QueryResponse, EngineError> {
         // 1. Resolve target nodes
         let nodes = self.resolve_nodes(db, &local)?;
 
@@ -163,9 +168,10 @@ impl DistributedExecutor {
         }
 
         // 2. Scatter to all nodes in parallel with retry
-        let node_results: Vec<NodeResult> = nodes.par_iter().map(|addr| {
-            self.send_subquery_with_retry(*addr, &local)
-        }).collect();
+        let node_results: Vec<NodeResult> = nodes
+            .par_iter()
+            .map(|addr| self.send_subquery_with_retry(*addr, &local))
+            .collect();
 
         // 3. Process results based on fault tolerance config
         let execution_result = self.process_node_results(node_results, &global)?;
@@ -174,7 +180,12 @@ impl DistributedExecutor {
     }
 
     /// Execute and return detailed results including per-node info
-    pub fn execute_detailed(&self, db: &Db, global: GlobalPlan, local: LocalPlan) -> Result<DistributedExecutionResult, EngineError> {
+    pub fn execute_detailed(
+        &self,
+        db: &Db,
+        global: GlobalPlan,
+        local: LocalPlan,
+    ) -> Result<DistributedExecutionResult, EngineError> {
         let nodes = self.resolve_nodes(db, &local)?;
 
         if nodes.is_empty() {
@@ -191,9 +202,10 @@ impl DistributedExecutor {
             });
         }
 
-        let node_results: Vec<NodeResult> = nodes.par_iter().map(|addr| {
-            self.send_subquery_with_retry(*addr, &local)
-        }).collect();
+        let node_results: Vec<NodeResult> = nodes
+            .par_iter()
+            .map(|addr| self.send_subquery_with_retry(*addr, &local))
+            .collect();
 
         self.process_node_results(node_results, &global)
     }
@@ -203,15 +215,17 @@ impl DistributedExecutor {
     // ========================================================================
 
     fn resolve_nodes(&self, db: &Db, plan: &LocalPlan) -> Result<Vec<SocketAddr>, EngineError> {
-        let cm_lock = db.cluster_manager.read()
+        let cm_lock = db
+            .cluster_manager
+            .read()
             .map_err(|_| EngineError::Internal("ClusterManager lock poisoned".into()))?;
         let cm_weak = cm_lock.as_ref().ok_or_else(|| {
             EngineError::Internal("ClusterManager not initialized in distributed mode".into())
         })?;
 
-        let cm = cm_weak.upgrade().ok_or_else(|| {
-            EngineError::Internal("ClusterManager dropped".into())
-        })?;
+        let cm = cm_weak
+            .upgrade()
+            .ok_or_else(|| EngineError::Internal("ClusterManager dropped".into()))?;
 
         // Determine shards from filter
         let shard_ids = self.prune_shards(db, plan);
@@ -231,22 +245,29 @@ impl DistributedExecutor {
         let members: Vec<SocketAddr> = {
             let gossip = cm.gossip.read();
             if broadcast || target_nodes.is_empty() {
-                gossip.membership.members.values()
+                gossip
+                    .membership
+                    .members
+                    .values()
                     .filter(|m| m.state == crate::cluster::NodeState::Alive)
                     .map(|m| m.rpc_addr)
                     .collect()
             } else {
                 // Try targeted lookup first
-                let targeted: Vec<SocketAddr> = target_nodes.iter().filter_map(|nid| {
-                    gossip.membership.members.get(nid)
-                }).filter(|m| m.state == crate::cluster::NodeState::Alive)
-                  .map(|m| m.rpc_addr)
-                  .collect();
+                let targeted: Vec<SocketAddr> = target_nodes
+                    .iter()
+                    .filter_map(|nid| gossip.membership.members.get(nid))
+                    .filter(|m| m.state == crate::cluster::NodeState::Alive)
+                    .map(|m| m.rpc_addr)
+                    .collect();
 
                 // Fall back to broadcast if targeted lookup returns no nodes
                 // This handles cases where node IDs don't match membership keys
                 if targeted.is_empty() {
-                    gossip.membership.members.values()
+                    gossip
+                        .membership
+                        .members
+                        .values()
                         .filter(|m| m.state == crate::cluster::NodeState::Alive)
                         .map(|m| m.rpc_addr)
                         .collect()
@@ -286,7 +307,7 @@ impl DistributedExecutor {
                     empty_shards
                 }
             }
-            _ => empty_shards
+            _ => empty_shards,
         }
     }
 
@@ -326,14 +347,21 @@ impl DistributedExecutor {
         }
     }
 
-    fn send_subquery(&self, addr: SocketAddr, plan: &LocalPlan) -> Result<QueryResponse, EngineError> {
+    fn send_subquery(
+        &self,
+        addr: SocketAddr,
+        plan: &LocalPlan,
+    ) -> Result<QueryResponse, EngineError> {
         // Connect with timeout
         let mut stream = std::net::TcpStream::connect_timeout(
             &addr,
-            Duration::from_millis(self.config.connect_timeout_ms)
-        ).map_err(|e| EngineError::Io(format!("connect to {}: {}", addr, e)))?;
+            Duration::from_millis(self.config.connect_timeout_ms),
+        )
+        .map_err(|e| EngineError::Io(format!("connect to {}: {}", addr, e)))?;
 
-        stream.set_read_timeout(Some(Duration::from_millis(self.config.read_timeout_ms))).ok();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(self.config.read_timeout_ms)))
+            .ok();
         stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
         // Prepare request
@@ -351,19 +379,23 @@ impl DistributedExecutor {
             .map_err(|e| EngineError::Internal(format!("serialize req: {}", e)))?;
 
         let len = req_bytes.len() as u32;
-        stream.write_all(&len.to_be_bytes())
+        stream
+            .write_all(&len.to_be_bytes())
             .map_err(|e| EngineError::Io(format!("write len: {}", e)))?;
-        stream.write_all(&req_bytes)
+        stream
+            .write_all(&req_bytes)
             .map_err(|e| EngineError::Io(format!("write payload: {}", e)))?;
 
         // Read response
         let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf)
+        stream
+            .read_exact(&mut len_buf)
             .map_err(|e| EngineError::Io(format!("read len: {}", e)))?;
         let resp_len = u32::from_be_bytes(len_buf) as usize;
 
         let mut resp_buf = vec![0u8; resp_len];
-        stream.read_exact(&mut resp_buf)
+        stream
+            .read_exact(&mut resp_buf)
             .map_err(|e| EngineError::Io(format!("read payload: {}", e)))?;
 
         // Deserialize
@@ -371,12 +403,15 @@ impl DistributedExecutor {
             .map_err(|e| EngineError::Internal(format!("deserialize resp: {}", e)))?;
 
         if raw.status != "ok" {
-            return Err(EngineError::Remote(raw.error.unwrap_or_else(|| "unknown remote error".into())));
+            return Err(EngineError::Remote(
+                raw.error.unwrap_or_else(|| "unknown remote error".into()),
+            ));
         }
 
         // Decode IPC
         let records_ipc = if let Some(b64) = raw.ipc_base64 {
-            general_purpose::STANDARD.decode(b64)
+            general_purpose::STANDARD
+                .decode(b64)
                 .map_err(|e| EngineError::Internal(format!("base64 decode: {}", e)))?
         } else {
             vec![]
@@ -433,9 +468,7 @@ impl DistributedExecutor {
         // Combine successes with tolerated "not found" results
         successes.extend(not_found_nodes);
 
-        let failed_nodes: Vec<SocketAddr> = hard_failures.iter()
-            .map(|r| r.node_addr)
-            .collect();
+        let failed_nodes: Vec<SocketAddr> = hard_failures.iter().map(|r| r.node_addr).collect();
 
         // Check fault tolerance for hard failures only
         if !self.config.allow_partial_results && !hard_failures.is_empty() {
@@ -447,16 +480,15 @@ impl DistributedExecutor {
         if successes.len() < self.config.min_nodes_for_partial {
             return Err(EngineError::Internal(format!(
                 "Insufficient nodes: {} succeeded, {} required",
-                successes.len(), self.config.min_nodes_for_partial
+                successes.len(),
+                self.config.min_nodes_for_partial
             )));
         }
 
         // Merge successful results
         let merged = self.merge_results(global, &successes)?;
 
-        let all_results: Vec<NodeResult> = successes.into_iter()
-            .chain(hard_failures)
-            .collect();
+        let all_results: Vec<NodeResult> = successes.into_iter().chain(hard_failures).collect();
 
         Ok(DistributedExecutionResult {
             response: merged,
@@ -496,15 +528,16 @@ impl DistributedExecutor {
 
         // Apply merge strategy
         let merged_ipc = match &global.merge_strategy {
-            MergeStrategy::Concatenate => {
-                self.merge_concatenate(&all_ipc)?
-            }
-            MergeStrategy::MergeSort { order_by, limit, offset } => {
-                self.merge_sorted(&all_ipc, order_by, *limit, *offset)?
-            }
-            MergeStrategy::FinalAggregate { partial_aggs, group_by: _ } => {
-                self.merge_final_aggregate(&all_ipc, partial_aggs, global)?
-            }
+            MergeStrategy::Concatenate => self.merge_concatenate(&all_ipc)?,
+            MergeStrategy::MergeSort {
+                order_by,
+                limit,
+                offset,
+            } => self.merge_sorted(&all_ipc, order_by, *limit, *offset)?,
+            MergeStrategy::FinalAggregate {
+                partial_aggs,
+                group_by: _,
+            } => self.merge_final_aggregate(&all_ipc, partial_aggs, global)?,
             MergeStrategy::SetOperation { op: _ } => {
                 // For now, just concatenate - deduplication handled separately
                 self.merge_concatenate(&all_ipc)?
@@ -549,7 +582,8 @@ impl DistributedExecutor {
             }
 
             for batch in reader {
-                let b = batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
+                let b =
+                    batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
                 all_batches.push(b);
             }
         }
@@ -565,10 +599,12 @@ impl DistributedExecutor {
             let mut writer = StreamWriter::try_new(&mut merged_ipc, &schema)
                 .map_err(|e| EngineError::Internal(format!("ipc writer: {}", e)))?;
             for batch in all_batches {
-                writer.write(&batch)
+                writer
+                    .write(&batch)
                     .map_err(|e| EngineError::Internal(format!("ipc write: {}", e)))?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("ipc finish: {}", e)))?;
         }
 
@@ -609,7 +645,8 @@ impl DistributedExecutor {
             }
 
             for batch in reader {
-                let b = batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
+                let b =
+                    batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
                 all_batches.push(b);
             }
         }
@@ -627,26 +664,34 @@ impl DistributedExecutor {
             .map_err(|e| EngineError::Internal(format!("concat batches: {}", e)))?;
 
         // Sort
-        let sort_columns: Vec<_> = order_by.iter().map(|o| {
-            arrow::compute::SortColumn {
-                values: concatenated.column_by_name(&o.column)
+        let sort_columns: Vec<_> = order_by
+            .iter()
+            .map(|o| arrow::compute::SortColumn {
+                values: concatenated
+                    .column_by_name(&o.column)
                     .cloned()
                     .unwrap_or_else(|| concatenated.column(0).clone()),
                 options: Some(arrow::compute::SortOptions {
                     descending: o.descending,
                     nulls_first: o.nulls_first,
                 }),
-            }
-        }).collect();
+            })
+            .collect();
 
-        let indices = arrow::compute::lexsort_to_indices(&sort_columns, limit.map(|l| l + offset.unwrap_or(0)))
-            .map_err(|e| EngineError::Internal(format!("lexsort: {}", e)))?;
+        let indices = arrow::compute::lexsort_to_indices(
+            &sort_columns,
+            limit.map(|l| l + offset.unwrap_or(0)),
+        )
+        .map_err(|e| EngineError::Internal(format!("lexsort: {}", e)))?;
 
         // Take sorted rows
-        let sorted_columns: Vec<ArrayRef> = concatenated.columns().iter().map(|col| {
-            arrow::compute::take(col.as_ref(), &indices, None)
-                .unwrap_or_else(|_| col.clone())
-        }).collect();
+        let sorted_columns: Vec<ArrayRef> = concatenated
+            .columns()
+            .iter()
+            .map(|col| {
+                arrow::compute::take(col.as_ref(), &indices, None).unwrap_or_else(|_| col.clone())
+            })
+            .collect();
 
         let sorted_batch = RecordBatch::try_new(schema.clone(), sorted_columns)
             .map_err(|e| EngineError::Internal(format!("create sorted batch: {}", e)))?;
@@ -655,7 +700,8 @@ impl DistributedExecutor {
         let offset_val = offset.unwrap_or(0);
         let final_batch = if offset_val > 0 || limit.is_some() {
             let start = offset_val.min(sorted_batch.num_rows());
-            let len = limit.map(|l| l.min(sorted_batch.num_rows() - start))
+            let len = limit
+                .map(|l| l.min(sorted_batch.num_rows() - start))
                 .unwrap_or(sorted_batch.num_rows() - start);
             sorted_batch.slice(start, len)
         } else {
@@ -667,9 +713,11 @@ impl DistributedExecutor {
         {
             let mut writer = StreamWriter::try_new(&mut merged_ipc, &schema)
                 .map_err(|e| EngineError::Internal(format!("ipc writer: {}", e)))?;
-            writer.write(&final_batch)
+            writer
+                .write(&final_batch)
                 .map_err(|e| EngineError::Internal(format!("ipc write: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("ipc finish: {}", e)))?;
         }
 
@@ -706,7 +754,11 @@ impl DistributedExecutor {
                 continue;
             }
 
-            let start_in_batch = if rows_seen < offset { offset - rows_seen } else { 0 };
+            let start_in_batch = if rows_seen < offset {
+                offset - rows_seen
+            } else {
+                0
+            };
             let available = batch_rows - start_in_batch;
             let to_take = available.min(max_rows - rows_taken);
 
@@ -732,10 +784,12 @@ impl DistributedExecutor {
             let mut writer = StreamWriter::try_new(&mut result_ipc, &schema)
                 .map_err(|e| EngineError::Internal(format!("ipc writer: {}", e)))?;
             for batch in all_batches {
-                writer.write(&batch)
+                writer
+                    .write(&batch)
                     .map_err(|e| EngineError::Internal(format!("ipc write: {}", e)))?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("ipc finish: {}", e)))?;
         }
 
@@ -749,7 +803,12 @@ impl DistributedExecutor {
         global: &GlobalPlan,
     ) -> Result<Vec<u8>, EngineError> {
         // For aggregations, use the engine's Aggregator
-        if let PlanKind::Simple { agg: Some(agg_plan), filter, .. } = &global.kind {
+        if let PlanKind::Simple {
+            agg: Some(agg_plan),
+            filter,
+            ..
+        } = &global.kind
+        {
             let mut aggregator = crate::engine::Aggregator::new(agg_plan.clone())?;
 
             for chunk in ipc_chunks {
@@ -782,7 +841,8 @@ impl DistributedExecutor {
                 .map_err(|e| EngineError::Internal(format!("ipc reader: {}", e)))?;
 
             for batch in reader {
-                let b = batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
+                let b =
+                    batch.map_err(|e| EngineError::Internal(format!("ipc read batch: {}", e)))?;
                 all_batches.push(b);
             }
         }
@@ -799,7 +859,11 @@ impl DistributedExecutor {
 
         for spec in partial_aggs {
             let final_value = self.compute_single_final_agg(&all_batches, spec)?;
-            result_fields.push(arrow_schema::Field::new(&spec.output_column, final_value.data_type().clone(), true));
+            result_fields.push(arrow_schema::Field::new(
+                &spec.output_column,
+                final_value.data_type().clone(),
+                true,
+            ));
             result_columns.push(final_value);
         }
 
@@ -817,9 +881,11 @@ impl DistributedExecutor {
         {
             let mut writer = StreamWriter::try_new(&mut result_ipc, &result_schema)
                 .map_err(|e| EngineError::Internal(format!("ipc writer: {}", e)))?;
-            writer.write(&result_batch)
+            writer
+                .write(&result_batch)
                 .map_err(|e| EngineError::Internal(format!("ipc write: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("ipc finish: {}", e)))?;
         }
 
@@ -867,7 +933,11 @@ impl DistributedExecutor {
                     }
                 }
 
-                let avg = if total_count > 0 { total_sum / total_count as f64 } else { 0.0 };
+                let avg = if total_count > 0 {
+                    total_sum / total_count as f64
+                } else {
+                    0.0
+                };
                 Ok(std::sync::Arc::new(Float64Array::from(vec![avg])))
             }
             FinalAggKind::SumOfSums | FinalAggKind::CountOfCounts => {
@@ -905,7 +975,9 @@ impl DistributedExecutor {
                     }
                 }
 
-                Ok(std::sync::Arc::new(Int64Array::from(vec![max_val.unwrap_or(0)])))
+                Ok(std::sync::Arc::new(Int64Array::from(vec![
+                    max_val.unwrap_or(0)
+                ])))
             }
             FinalAggKind::MinOfMins => {
                 let col = &spec.source_columns[0];
@@ -924,7 +996,9 @@ impl DistributedExecutor {
                     }
                 }
 
-                Ok(std::sync::Arc::new(Int64Array::from(vec![min_val.unwrap_or(0)])))
+                Ok(std::sync::Arc::new(Int64Array::from(vec![
+                    min_val.unwrap_or(0)
+                ])))
             }
             _ => {
                 // For STDDEV, VARIANCE, HLL - return 0 as placeholder
@@ -951,9 +1025,13 @@ fn merge_execution_stats(merged: &mut QueryExecutionStats, node_stats: &QueryExe
     merged.rows_returned += node_stats.rows_returned;
 
     // Max for timing (wall clock of slowest node)
-    merged.execution_time_micros = merged.execution_time_micros.max(node_stats.execution_time_micros);
+    merged.execution_time_micros = merged
+        .execution_time_micros
+        .max(node_stats.execution_time_micros);
     merged.scan_time_micros = merged.scan_time_micros.max(node_stats.scan_time_micros);
-    merged.aggregation_time_micros = merged.aggregation_time_micros.max(node_stats.aggregation_time_micros);
+    merged.aggregation_time_micros = merged
+        .aggregation_time_micros
+        .max(node_stats.aggregation_time_micros);
     merged.sort_time_micros = merged.sort_time_micros.max(node_stats.sort_time_micros);
     merged.parse_time_micros = merged.parse_time_micros.max(node_stats.parse_time_micros);
     merged.plan_time_micros = merged.plan_time_micros.max(node_stats.plan_time_micros);
@@ -963,9 +1041,7 @@ fn merge_execution_stats(merged: &mut QueryExecutionStats, node_stats: &QueryExe
 
     // Sum memory usage
     if let Some(peak) = node_stats.peak_memory_bytes {
-        merged.peak_memory_bytes = Some(
-            merged.peak_memory_bytes.unwrap_or(0) + peak
-        );
+        merged.peak_memory_bytes = Some(merged.peak_memory_bytes.unwrap_or(0) + peak);
     }
 }
 

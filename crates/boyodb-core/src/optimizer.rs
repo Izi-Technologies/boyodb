@@ -213,10 +213,7 @@ pub enum LogicalPlan {
         offset: usize,
     },
     /// Union
-    Union {
-        inputs: Vec<LogicalPlan>,
-        all: bool,
-    },
+    Union { inputs: Vec<LogicalPlan>, all: bool },
     /// Subquery
     Subquery {
         input: Box<LogicalPlan>,
@@ -227,8 +224,14 @@ pub enum LogicalPlan {
 #[derive(Debug, Clone)]
 pub enum ProjectExpr {
     Column(String),
-    Alias { expr: Box<ProjectExpr>, alias: String },
-    Function { name: String, args: Vec<ProjectExpr> },
+    Alias {
+        expr: Box<ProjectExpr>,
+        alias: String,
+    },
+    Function {
+        name: String,
+        args: Vec<ProjectExpr>,
+    },
     Literal(StatValue),
 }
 
@@ -315,10 +318,7 @@ pub enum Predicate {
         negated: bool,
     },
     /// IS NULL
-    IsNull {
-        column: String,
-        negated: bool,
-    },
+    IsNull { column: String, negated: bool },
     /// AND combination
     And(Vec<Predicate>),
     /// OR combination
@@ -368,7 +368,8 @@ impl Predicate {
     pub fn simplify(self) -> Predicate {
         match self {
             Predicate::And(mut preds) => {
-                preds = preds.into_iter()
+                preds = preds
+                    .into_iter()
                     .map(|p| p.simplify())
                     .filter(|p| !matches!(p, Predicate::True))
                     .collect();
@@ -382,7 +383,8 @@ impl Predicate {
                 }
             }
             Predicate::Or(mut preds) => {
-                preds = preds.into_iter()
+                preds = preds
+                    .into_iter()
                     .map(|p| p.simplify())
                     .filter(|p| !matches!(p, Predicate::False))
                     .collect();
@@ -395,14 +397,12 @@ impl Predicate {
                     _ => Predicate::Or(preds),
                 }
             }
-            Predicate::Not(p) => {
-                match p.simplify() {
-                    Predicate::True => Predicate::False,
-                    Predicate::False => Predicate::True,
-                    Predicate::Not(inner) => *inner,
-                    other => Predicate::Not(Box::new(other)),
-                }
-            }
+            Predicate::Not(p) => match p.simplify() {
+                Predicate::True => Predicate::False,
+                Predicate::False => Predicate::True,
+                Predicate::Not(inner) => *inner,
+                other => Predicate::Not(Box::new(other)),
+            },
             other => other,
         }
     }
@@ -502,13 +502,9 @@ pub enum PhysicalPlan {
         partitioning: Partitioning,
     },
     /// Gather parallel streams
-    Gather {
-        inputs: Vec<PhysicalPlan>,
-    },
+    Gather { inputs: Vec<PhysicalPlan> },
     /// Union all
-    UnionAll {
-        inputs: Vec<PhysicalPlan>,
-    },
+    UnionAll { inputs: Vec<PhysicalPlan> },
 }
 
 #[derive(Debug, Clone)]
@@ -524,9 +520,15 @@ pub enum Partitioning {
     /// Round-robin distribution
     RoundRobin(usize),
     /// Hash partitioning on columns
-    Hash { columns: Vec<String>, num_partitions: usize },
+    Hash {
+        columns: Vec<String>,
+        num_partitions: usize,
+    },
     /// Range partitioning
-    Range { column: String, boundaries: Vec<StatValue> },
+    Range {
+        column: String,
+        boundaries: Vec<StatValue>,
+    },
     /// Single partition (no parallelism)
     Single,
 }
@@ -549,15 +551,19 @@ impl Default for SelectivityEstimator {
     fn default() -> Self {
         Self {
             default_selectivity: 0.25,
-            eq_selectivity: 0.01,     // 1% match for equality
-            range_selectivity: 0.33,   // 33% for range predicates
+            eq_selectivity: 0.01,    // 1% match for equality
+            range_selectivity: 0.33, // 33% for range predicates
         }
     }
 }
 
 impl SelectivityEstimator {
     /// Estimate selectivity of a predicate given column statistics
-    pub fn estimate(&self, predicate: &Predicate, stats: &HashMap<String, ColumnStatistics>) -> f64 {
+    pub fn estimate(
+        &self,
+        predicate: &Predicate,
+        stats: &HashMap<String, ColumnStatistics>,
+    ) -> f64 {
         match predicate {
             Predicate::Comparison { column, op, value } => {
                 if let Some(col_stats) = stats.get(column) {
@@ -569,22 +575,39 @@ impl SelectivityEstimator {
                     }
                 }
             }
-            Predicate::In { column, values, negated } => {
+            Predicate::In {
+                column,
+                values,
+                negated,
+            } => {
                 let base = if let Some(col_stats) = stats.get(column) {
                     let distinct = col_stats.distinct_count.max(1) as f64;
                     (values.len() as f64 / distinct).min(1.0)
                 } else {
                     (values.len() as f64 * self.eq_selectivity).min(1.0)
                 };
-                if *negated { 1.0 - base } else { base }
+                if *negated {
+                    1.0 - base
+                } else {
+                    base
+                }
             }
-            Predicate::Between { column, low, high, negated } => {
+            Predicate::Between {
+                column,
+                low,
+                high,
+                negated,
+            } => {
                 let base = if let Some(col_stats) = stats.get(column) {
                     self.estimate_range(col_stats, low, high)
                 } else {
                     self.range_selectivity
                 };
-                if *negated { 1.0 - base } else { base }
+                if *negated {
+                    1.0 - base
+                } else {
+                    base
+                }
             }
             Predicate::IsNull { column, negated } => {
                 let base = if let Some(col_stats) = stats.get(column) {
@@ -597,25 +620,29 @@ impl SelectivityEstimator {
                 } else {
                     0.01
                 };
-                if *negated { 1.0 - base } else { base }
+                if *negated {
+                    1.0 - base
+                } else {
+                    base
+                }
             }
             Predicate::Like { negated, .. } => {
                 // LIKE selectivity depends on pattern, use default
                 let base = self.default_selectivity;
-                if *negated { 1.0 - base } else { base }
+                if *negated {
+                    1.0 - base
+                } else {
+                    base
+                }
             }
             Predicate::And(preds) => {
                 // Assume independence (may overestimate selectivity)
-                preds.iter()
-                    .map(|p| self.estimate(p, stats))
-                    .product()
+                preds.iter().map(|p| self.estimate(p, stats)).product()
             }
             Predicate::Or(preds) => {
                 // P(A or B) = P(A) + P(B) - P(A and B)
                 // Simplified: assume independence
-                let individual: Vec<f64> = preds.iter()
-                    .map(|p| self.estimate(p, stats))
-                    .collect();
+                let individual: Vec<f64> = preds.iter().map(|p| self.estimate(p, stats)).collect();
                 1.0 - individual.iter().map(|s| 1.0 - s).product::<f64>()
             }
             Predicate::Not(p) => 1.0 - self.estimate(p, stats),
@@ -625,15 +652,18 @@ impl SelectivityEstimator {
         }
     }
 
-    fn estimate_comparison(&self, stats: &ColumnStatistics, op: CompareOp, value: &StatValue) -> f64 {
+    fn estimate_comparison(
+        &self,
+        stats: &ColumnStatistics,
+        op: CompareOp,
+        value: &StatValue,
+    ) -> f64 {
         match op {
             CompareOp::Eq => {
                 // Uniform distribution assumption
                 1.0 / stats.distinct_count.max(1) as f64
             }
-            CompareOp::Ne => {
-                1.0 - (1.0 / stats.distinct_count.max(1) as f64)
-            }
+            CompareOp::Ne => 1.0 - (1.0 / stats.distinct_count.max(1) as f64),
             CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
                 // Use histogram if available
                 if let Some(ref histogram) = stats.histogram {
@@ -648,7 +678,12 @@ impl SelectivityEstimator {
         }
     }
 
-    fn estimate_from_histogram(&self, histogram: &Histogram, op: CompareOp, value: &StatValue) -> f64 {
+    fn estimate_from_histogram(
+        &self,
+        histogram: &Histogram,
+        op: CompareOp,
+        value: &StatValue,
+    ) -> f64 {
         let total_count: u64 = histogram.buckets.iter().map(|b| b.count).sum();
         if total_count == 0 {
             return self.range_selectivity;
@@ -671,7 +706,13 @@ impl SelectivityEstimator {
         matching_count as f64 / total_count as f64
     }
 
-    fn estimate_linear(&self, min: &StatValue, max: &StatValue, op: CompareOp, value: &StatValue) -> f64 {
+    fn estimate_linear(
+        &self,
+        min: &StatValue,
+        max: &StatValue,
+        op: CompareOp,
+        value: &StatValue,
+    ) -> f64 {
         let (min_f, max_f, val_f) = match (min.as_f64(), max.as_f64(), value.as_f64()) {
             (Some(mn), Some(mx), Some(v)) => (mn, mx, v),
             _ => return self.range_selectivity,
@@ -695,10 +736,11 @@ impl SelectivityEstimator {
 
     fn estimate_range(&self, stats: &ColumnStatistics, low: &StatValue, high: &StatValue) -> f64 {
         if let (Some(min), Some(max)) = (&stats.min_value, &stats.max_value) {
-            let (min_f, max_f, low_f, high_f) = match (min.as_f64(), max.as_f64(), low.as_f64(), high.as_f64()) {
-                (Some(mn), Some(mx), Some(lo), Some(hi)) => (mn, mx, lo, hi),
-                _ => return self.range_selectivity,
-            };
+            let (min_f, max_f, low_f, high_f) =
+                match (min.as_f64(), max.as_f64(), low.as_f64(), high.as_f64()) {
+                    (Some(mn), Some(mx), Some(lo), Some(hi)) => (mn, mx, lo, hi),
+                    _ => return self.range_selectivity,
+                };
 
             if max_f <= min_f {
                 return self.range_selectivity;
@@ -757,7 +799,10 @@ impl CostBasedOptimizer {
 
     /// Add index information
     pub fn add_index(&mut self, table: &str, index: IndexInfo) {
-        self.indexes.entry(table.to_string()).or_default().push(index);
+        self.indexes
+            .entry(table.to_string())
+            .or_default()
+            .push(index);
     }
 
     /// Optimize a logical plan into a physical plan
@@ -775,7 +820,12 @@ impl CostBasedOptimizer {
         match plan {
             LogicalPlan::Filter { input, predicate } => {
                 match *input {
-                    LogicalPlan::Scan { table, database, columns, filter } => {
+                    LogicalPlan::Scan {
+                        table,
+                        database,
+                        columns,
+                        filter,
+                    } => {
                         // Merge predicate into scan filter
                         let merged = match filter {
                             Some(existing) => Predicate::And(vec![existing, predicate]),
@@ -788,7 +838,12 @@ impl CostBasedOptimizer {
                             filter: Some(merged.simplify()),
                         }
                     }
-                    LogicalPlan::Join { left, right, join_type, condition } => {
+                    LogicalPlan::Join {
+                        left,
+                        right,
+                        join_type,
+                        condition,
+                    } => {
                         // Try to push predicate to appropriate side
                         let (left_cols, right_cols) = self.get_join_columns(&left, &right);
                         let (left_pred, right_pred, remaining) =
@@ -828,67 +883,75 @@ impl CostBasedOptimizer {
                             join
                         }
                     }
-                    other => {
-                        LogicalPlan::Filter {
-                            input: Box::new(self.push_down_predicates(other)),
-                            predicate,
-                        }
-                    }
+                    other => LogicalPlan::Filter {
+                        input: Box::new(self.push_down_predicates(other)),
+                        predicate,
+                    },
                 }
             }
-            LogicalPlan::Join { left, right, join_type, condition } => {
-                LogicalPlan::Join {
-                    left: Box::new(self.push_down_predicates(*left)),
-                    right: Box::new(self.push_down_predicates(*right)),
-                    join_type,
-                    condition,
-                }
-            }
-            LogicalPlan::Project { input, columns } => {
-                LogicalPlan::Project {
-                    input: Box::new(self.push_down_predicates(*input)),
-                    columns,
-                }
-            }
-            LogicalPlan::Aggregate { input, group_by, aggregates } => {
-                LogicalPlan::Aggregate {
-                    input: Box::new(self.push_down_predicates(*input)),
-                    group_by,
-                    aggregates,
-                }
-            }
-            LogicalPlan::Sort { input, order_by } => {
-                LogicalPlan::Sort {
-                    input: Box::new(self.push_down_predicates(*input)),
-                    order_by,
-                }
-            }
-            LogicalPlan::Limit { input, limit, offset } => {
-                LogicalPlan::Limit {
-                    input: Box::new(self.push_down_predicates(*input)),
-                    limit,
-                    offset,
-                }
-            }
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                condition,
+            } => LogicalPlan::Join {
+                left: Box::new(self.push_down_predicates(*left)),
+                right: Box::new(self.push_down_predicates(*right)),
+                join_type,
+                condition,
+            },
+            LogicalPlan::Project { input, columns } => LogicalPlan::Project {
+                input: Box::new(self.push_down_predicates(*input)),
+                columns,
+            },
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => LogicalPlan::Aggregate {
+                input: Box::new(self.push_down_predicates(*input)),
+                group_by,
+                aggregates,
+            },
+            LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+                input: Box::new(self.push_down_predicates(*input)),
+                order_by,
+            },
+            LogicalPlan::Limit {
+                input,
+                limit,
+                offset,
+            } => LogicalPlan::Limit {
+                input: Box::new(self.push_down_predicates(*input)),
+                limit,
+                offset,
+            },
             other => other,
         }
     }
 
-    fn get_join_columns(&self, left: &LogicalPlan, right: &LogicalPlan) -> (Vec<String>, Vec<String>) {
+    fn get_join_columns(
+        &self,
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+    ) -> (Vec<String>, Vec<String>) {
         fn get_output_columns(plan: &LogicalPlan) -> Vec<String> {
             match plan {
                 LogicalPlan::Scan { columns, .. } => columns.clone(),
-                LogicalPlan::Project { columns, .. } => {
-                    columns.iter().filter_map(|c| {
-                        match c {
-                            ProjectExpr::Column(name) => Some(name.clone()),
-                            ProjectExpr::Alias { alias, .. } => Some(alias.clone()),
-                            _ => None,
-                        }
-                    }).collect()
-                }
+                LogicalPlan::Project { columns, .. } => columns
+                    .iter()
+                    .filter_map(|c| match c {
+                        ProjectExpr::Column(name) => Some(name.clone()),
+                        ProjectExpr::Alias { alias, .. } => Some(alias.clone()),
+                        _ => None,
+                    })
+                    .collect(),
                 LogicalPlan::Filter { input, .. } => get_output_columns(input),
-                LogicalPlan::Aggregate { group_by, aggregates, .. } => {
+                LogicalPlan::Aggregate {
+                    group_by,
+                    aggregates,
+                    ..
+                } => {
                     let mut cols = group_by.clone();
                     for agg in aggregates {
                         if let Some(ref alias) = agg.alias {
@@ -960,7 +1023,12 @@ impl CostBasedOptimizer {
     /// Optimize join order for multi-table joins
     fn optimize_joins(&self, plan: LogicalPlan) -> LogicalPlan {
         match plan {
-            LogicalPlan::Join { left, right, join_type, condition } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                condition,
+            } => {
                 // For two-table joins, decide order based on estimated sizes
                 let left_cost = self.estimate_plan_cost(&left);
                 let right_cost = self.estimate_plan_cost(&right);
@@ -983,38 +1051,36 @@ impl CostBasedOptimizer {
                     }
                 }
             }
-            LogicalPlan::Filter { input, predicate } => {
-                LogicalPlan::Filter {
-                    input: Box::new(self.optimize_joins(*input)),
-                    predicate,
-                }
-            }
-            LogicalPlan::Project { input, columns } => {
-                LogicalPlan::Project {
-                    input: Box::new(self.optimize_joins(*input)),
-                    columns,
-                }
-            }
-            LogicalPlan::Aggregate { input, group_by, aggregates } => {
-                LogicalPlan::Aggregate {
-                    input: Box::new(self.optimize_joins(*input)),
-                    group_by,
-                    aggregates,
-                }
-            }
-            LogicalPlan::Sort { input, order_by } => {
-                LogicalPlan::Sort {
-                    input: Box::new(self.optimize_joins(*input)),
-                    order_by,
-                }
-            }
-            LogicalPlan::Limit { input, limit, offset } => {
-                LogicalPlan::Limit {
-                    input: Box::new(self.optimize_joins(*input)),
-                    limit,
-                    offset,
-                }
-            }
+            LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+                input: Box::new(self.optimize_joins(*input)),
+                predicate,
+            },
+            LogicalPlan::Project { input, columns } => LogicalPlan::Project {
+                input: Box::new(self.optimize_joins(*input)),
+                columns,
+            },
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => LogicalPlan::Aggregate {
+                input: Box::new(self.optimize_joins(*input)),
+                group_by,
+                aggregates,
+            },
+            LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
+                input: Box::new(self.optimize_joins(*input)),
+                order_by,
+            },
+            LogicalPlan::Limit {
+                input,
+                limit,
+                offset,
+            } => LogicalPlan::Limit {
+                input: Box::new(self.optimize_joins(*input)),
+                limit,
+                offset,
+            },
             other => other,
         }
     }
@@ -1036,11 +1102,18 @@ impl CostBasedOptimizer {
                     CompareOp::Ge => CompareOp::Le,
                     other => other,
                 };
-                Predicate::ColumnCompare { left: right, op: swapped_op, right: left }
+                Predicate::ColumnCompare {
+                    left: right,
+                    op: swapped_op,
+                    right: left,
+                }
             }
-            Predicate::And(preds) => {
-                Predicate::And(preds.into_iter().map(|p| self.swap_predicate_columns(p)).collect())
-            }
+            Predicate::And(preds) => Predicate::And(
+                preds
+                    .into_iter()
+                    .map(|p| self.swap_predicate_columns(p))
+                    .collect(),
+            ),
             other => other,
         }
     }
@@ -1048,12 +1121,18 @@ impl CostBasedOptimizer {
     /// Estimate cost of a logical plan
     fn estimate_plan_cost(&self, plan: &LogicalPlan) -> QueryCost {
         match plan {
-            LogicalPlan::Scan { table, filter, columns, .. } => {
+            LogicalPlan::Scan {
+                table,
+                filter,
+                columns,
+                ..
+            } => {
                 let stats = self.table_stats.get(table);
                 let base_rows = stats.map(|s| s.row_count).unwrap_or(1000) as f64;
                 let base_bytes = stats.map(|s| s.size_bytes).unwrap_or(10000) as f64;
 
-                let selectivity = filter.as_ref()
+                let selectivity = filter
+                    .as_ref()
                     .map(|f| {
                         let col_stats = stats.map(|s| &s.columns).cloned().unwrap_or_default();
                         self.selectivity.estimate(f, &col_stats)
@@ -1061,8 +1140,11 @@ impl CostBasedOptimizer {
                     .unwrap_or(1.0);
 
                 let output_rows = base_rows * selectivity;
-                let col_fraction = if columns.is_empty() { 1.0 } else {
-                    stats.map(|s| columns.len() as f64 / s.columns.len().max(1) as f64)
+                let col_fraction = if columns.is_empty() {
+                    1.0
+                } else {
+                    stats
+                        .map(|s| columns.len() as f64 / s.columns.len().max(1) as f64)
                         .unwrap_or(1.0)
                 };
 
@@ -1081,7 +1163,8 @@ impl CostBasedOptimizer {
                 let selectivity = self.selectivity.estimate(predicate, &col_stats);
 
                 QueryCost {
-                    cpu_cost: input_cost.cpu_cost + input_cost.output_rows * self.cost_params.cpu_operator_cost,
+                    cpu_cost: input_cost.cpu_cost
+                        + input_cost.output_rows * self.cost_params.cpu_operator_cost,
                     io_cost: input_cost.io_cost,
                     memory_cost: input_cost.memory_cost,
                     network_cost: input_cost.network_cost,
@@ -1110,7 +1193,9 @@ impl CostBasedOptimizer {
                     output_bytes: output_rows * 200.0, // Combined row size
                 }
             }
-            LogicalPlan::Aggregate { input, group_by, .. } => {
+            LogicalPlan::Aggregate {
+                input, group_by, ..
+            } => {
                 let input_cost = self.estimate_plan_cost(input);
 
                 // Estimate number of groups
@@ -1122,7 +1207,8 @@ impl CostBasedOptimizer {
                 };
 
                 QueryCost {
-                    cpu_cost: input_cost.cpu_cost + input_cost.output_rows * self.cost_params.cpu_operator_cost,
+                    cpu_cost: input_cost.cpu_cost
+                        + input_cost.output_rows * self.cost_params.cpu_operator_cost,
                     io_cost: input_cost.io_cost,
                     memory_cost: num_groups * 100.0, // Hash table for groups
                     network_cost: input_cost.network_cost,
@@ -1132,7 +1218,8 @@ impl CostBasedOptimizer {
             }
             LogicalPlan::Sort { input, .. } => {
                 let input_cost = self.estimate_plan_cost(input);
-                let sort_cost = input_cost.output_rows * (input_cost.output_rows.log2().max(1.0))
+                let sort_cost = input_cost.output_rows
+                    * (input_cost.output_rows.log2().max(1.0))
                     * self.cost_params.cpu_operator_cost;
 
                 QueryCost {
@@ -1154,28 +1241,29 @@ impl CostBasedOptimizer {
                     memory_cost: 0.0, // Streaming
                     network_cost: input_cost.network_cost,
                     output_rows,
-                    output_bytes: output_rows * (input_cost.output_bytes / input_cost.output_rows.max(1.0)),
+                    output_bytes: output_rows
+                        * (input_cost.output_bytes / input_cost.output_rows.max(1.0)),
                 }
             }
             LogicalPlan::Project { input, .. } => {
                 let input_cost = self.estimate_plan_cost(input);
                 QueryCost {
-                    cpu_cost: input_cost.cpu_cost + input_cost.output_rows * self.cost_params.cpu_operator_cost,
+                    cpu_cost: input_cost.cpu_cost
+                        + input_cost.output_rows * self.cost_params.cpu_operator_cost,
                     ..input_cost
                 }
             }
-            LogicalPlan::Union { inputs, .. } => {
-                inputs.iter()
-                    .map(|p| self.estimate_plan_cost(p))
-                    .fold(QueryCost::default(), |acc, c| QueryCost {
-                        cpu_cost: acc.cpu_cost + c.cpu_cost,
-                        io_cost: acc.io_cost + c.io_cost,
-                        memory_cost: acc.memory_cost.max(c.memory_cost),
-                        network_cost: acc.network_cost + c.network_cost,
-                        output_rows: acc.output_rows + c.output_rows,
-                        output_bytes: acc.output_bytes + c.output_bytes,
-                    })
-            }
+            LogicalPlan::Union { inputs, .. } => inputs
+                .iter()
+                .map(|p| self.estimate_plan_cost(p))
+                .fold(QueryCost::default(), |acc, c| QueryCost {
+                    cpu_cost: acc.cpu_cost + c.cpu_cost,
+                    io_cost: acc.io_cost + c.io_cost,
+                    memory_cost: acc.memory_cost.max(c.memory_cost),
+                    network_cost: acc.network_cost + c.network_cost,
+                    output_rows: acc.output_rows + c.output_rows,
+                    output_bytes: acc.output_bytes + c.output_bytes,
+                }),
             LogicalPlan::Subquery { input, .. } => self.estimate_plan_cost(input),
         }
     }
@@ -1183,7 +1271,12 @@ impl CostBasedOptimizer {
     /// Convert logical plan to physical plan
     fn to_physical(&self, plan: LogicalPlan) -> PhysicalPlan {
         match plan {
-            LogicalPlan::Scan { table, database, columns, filter } => {
+            LogicalPlan::Scan {
+                table,
+                database,
+                columns,
+                filter,
+            } => {
                 // Decide between seq scan and index scan
                 let use_index = self.should_use_index(&table, &filter);
                 let parallel = self.should_parallelize(&table, &filter);
@@ -1207,19 +1300,19 @@ impl CostBasedOptimizer {
                     }
                 }
             }
-            LogicalPlan::Filter { input, predicate } => {
-                PhysicalPlan::Filter {
-                    input: Box::new(self.to_physical(*input)),
-                    predicate,
-                }
-            }
-            LogicalPlan::Project { input, columns } => {
-                PhysicalPlan::Project {
-                    input: Box::new(self.to_physical(*input)),
-                    columns,
-                }
-            }
-            LogicalPlan::Aggregate { input, group_by, aggregates } => {
+            LogicalPlan::Filter { input, predicate } => PhysicalPlan::Filter {
+                input: Box::new(self.to_physical(*input)),
+                predicate,
+            },
+            LogicalPlan::Project { input, columns } => PhysicalPlan::Project {
+                input: Box::new(self.to_physical(*input)),
+                columns,
+            },
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
                 let input_physical = self.to_physical(*input);
 
                 // Use sorted aggregate if input is already sorted by group keys
@@ -1239,7 +1332,12 @@ impl CostBasedOptimizer {
                     }
                 }
             }
-            LogicalPlan::Join { left, right, join_type, condition } => {
+            LogicalPlan::Join {
+                left,
+                right,
+                join_type,
+                condition,
+            } => {
                 let left_physical = self.to_physical(*left);
                 let right_physical = self.to_physical(*right);
 
@@ -1281,18 +1379,25 @@ impl CostBasedOptimizer {
                     }
                 }
             }
-            LogicalPlan::Sort { input, order_by } => {
-                PhysicalPlan::Sort {
-                    input: Box::new(self.to_physical(*input)),
-                    order_by,
-                    limit: None,
-                }
-            }
-            LogicalPlan::Limit { input, limit, offset } => {
+            LogicalPlan::Sort { input, order_by } => PhysicalPlan::Sort {
+                input: Box::new(self.to_physical(*input)),
+                order_by,
+                limit: None,
+            },
+            LogicalPlan::Limit {
+                input,
+                limit,
+                offset,
+            } => {
                 let input_physical = self.to_physical(*input);
 
                 // Check if we can use TopN optimization
-                if let PhysicalPlan::Sort { input: sort_input, order_by, .. } = input_physical {
+                if let PhysicalPlan::Sort {
+                    input: sort_input,
+                    order_by,
+                    ..
+                } = input_physical
+                {
                     if offset == 0 {
                         return PhysicalPlan::TopN {
                             input: sort_input,
@@ -1318,28 +1423,33 @@ impl CostBasedOptimizer {
                 }
             }
             LogicalPlan::Union { inputs, all } => {
-                let physical_inputs: Vec<_> = inputs.into_iter()
-                    .map(|p| self.to_physical(p))
-                    .collect();
+                let physical_inputs: Vec<_> =
+                    inputs.into_iter().map(|p| self.to_physical(p)).collect();
 
                 if all {
-                    PhysicalPlan::UnionAll { inputs: physical_inputs }
+                    PhysicalPlan::UnionAll {
+                        inputs: physical_inputs,
+                    }
                 } else {
                     // UNION requires deduplication
                     PhysicalPlan::HashAggregate {
-                        input: Box::new(PhysicalPlan::UnionAll { inputs: physical_inputs }),
+                        input: Box::new(PhysicalPlan::UnionAll {
+                            inputs: physical_inputs,
+                        }),
                         group_by: vec![], // All columns
                         aggregates: vec![],
                     }
                 }
             }
-            LogicalPlan::Subquery { input, .. } => {
-                self.to_physical(*input)
-            }
+            LogicalPlan::Subquery { input, .. } => self.to_physical(*input),
         }
     }
 
-    fn should_use_index(&self, table: &str, filter: &Option<Predicate>) -> Option<(String, IndexRange)> {
+    fn should_use_index(
+        &self,
+        table: &str,
+        filter: &Option<Predicate>,
+    ) -> Option<(String, IndexRange)> {
         let filter = filter.as_ref()?;
         let indexes = self.indexes.get(table)?;
 
@@ -1351,56 +1461,61 @@ impl CostBasedOptimizer {
         None
     }
 
-    fn predicate_to_index_range(&self, pred: &Predicate, index_cols: &[String]) -> Option<IndexRange> {
+    fn predicate_to_index_range(
+        &self,
+        pred: &Predicate,
+        index_cols: &[String],
+    ) -> Option<IndexRange> {
         if index_cols.is_empty() {
             return None;
         }
         let first_col = &index_cols[0];
 
         match pred {
-            Predicate::Comparison { column, op, value } if column == first_col => {
-                Some(match op {
-                    CompareOp::Eq => IndexRange {
-                        start: Some(value.clone()),
-                        start_inclusive: true,
-                        end: Some(value.clone()),
-                        end_inclusive: true,
-                    },
-                    CompareOp::Lt => IndexRange {
-                        start: None,
-                        start_inclusive: true,
-                        end: Some(value.clone()),
-                        end_inclusive: false,
-                    },
-                    CompareOp::Le => IndexRange {
-                        start: None,
-                        start_inclusive: true,
-                        end: Some(value.clone()),
-                        end_inclusive: true,
-                    },
-                    CompareOp::Gt => IndexRange {
-                        start: Some(value.clone()),
-                        start_inclusive: false,
-                        end: None,
-                        end_inclusive: true,
-                    },
-                    CompareOp::Ge => IndexRange {
-                        start: Some(value.clone()),
-                        start_inclusive: true,
-                        end: None,
-                        end_inclusive: true,
-                    },
-                    CompareOp::Ne => return None,
-                })
-            }
-            Predicate::Between { column, low, high, negated: false } if column == first_col => {
-                Some(IndexRange {
-                    start: Some(low.clone()),
+            Predicate::Comparison { column, op, value } if column == first_col => Some(match op {
+                CompareOp::Eq => IndexRange {
+                    start: Some(value.clone()),
                     start_inclusive: true,
-                    end: Some(high.clone()),
+                    end: Some(value.clone()),
                     end_inclusive: true,
-                })
-            }
+                },
+                CompareOp::Lt => IndexRange {
+                    start: None,
+                    start_inclusive: true,
+                    end: Some(value.clone()),
+                    end_inclusive: false,
+                },
+                CompareOp::Le => IndexRange {
+                    start: None,
+                    start_inclusive: true,
+                    end: Some(value.clone()),
+                    end_inclusive: true,
+                },
+                CompareOp::Gt => IndexRange {
+                    start: Some(value.clone()),
+                    start_inclusive: false,
+                    end: None,
+                    end_inclusive: true,
+                },
+                CompareOp::Ge => IndexRange {
+                    start: Some(value.clone()),
+                    start_inclusive: true,
+                    end: None,
+                    end_inclusive: true,
+                },
+                CompareOp::Ne => return None,
+            }),
+            Predicate::Between {
+                column,
+                low,
+                high,
+                negated: false,
+            } if column == first_col => Some(IndexRange {
+                start: Some(low.clone()),
+                start_inclusive: true,
+                end: Some(high.clone()),
+                end_inclusive: true,
+            }),
             Predicate::And(preds) => {
                 // Try to combine multiple predicates on index column
                 let mut start = None;
@@ -1422,7 +1537,12 @@ impl CostBasedOptimizer {
                 }
 
                 if start.is_some() || end.is_some() {
-                    Some(IndexRange { start, start_inclusive, end, end_inclusive })
+                    Some(IndexRange {
+                        start,
+                        start_inclusive,
+                        end,
+                        end_inclusive,
+                    })
                 } else {
                     None
                 }
@@ -1444,7 +1564,10 @@ impl CostBasedOptimizer {
         false
     }
 
-    fn extract_equi_join_keys(&self, condition: &JoinCondition) -> Option<(Vec<String>, Vec<String>)> {
+    fn extract_equi_join_keys(
+        &self,
+        condition: &JoinCondition,
+    ) -> Option<(Vec<String>, Vec<String>)> {
         match condition {
             JoinCondition::On(pred) => self.extract_equi_keys_from_predicate(pred),
             JoinCondition::Using(cols) => Some((cols.clone(), cols.clone())),
@@ -1453,11 +1576,16 @@ impl CostBasedOptimizer {
         }
     }
 
-    fn extract_equi_keys_from_predicate(&self, pred: &Predicate) -> Option<(Vec<String>, Vec<String>)> {
+    fn extract_equi_keys_from_predicate(
+        &self,
+        pred: &Predicate,
+    ) -> Option<(Vec<String>, Vec<String>)> {
         match pred {
-            Predicate::ColumnCompare { left, op: CompareOp::Eq, right } => {
-                Some((vec![left.clone()], vec![right.clone()]))
-            }
+            Predicate::ColumnCompare {
+                left,
+                op: CompareOp::Eq,
+                right,
+            } => Some((vec![left.clone()], vec![right.clone()])),
             Predicate::And(preds) => {
                 let mut left_keys = vec![];
                 let mut right_keys = vec![];
@@ -1479,7 +1607,11 @@ impl CostBasedOptimizer {
 
     fn estimate_physical_cost(&self, plan: &PhysicalPlan) -> QueryCost {
         match plan {
-            PhysicalPlan::SeqScan { table, parallel_degree, .. } => {
+            PhysicalPlan::SeqScan {
+                table,
+                parallel_degree,
+                ..
+            } => {
                 let stats = self.table_stats.get(table);
                 let rows = stats.map(|s| s.row_count).unwrap_or(1000) as f64;
                 let bytes = stats.map(|s| s.size_bytes).unwrap_or(10000) as f64;
@@ -1510,7 +1642,8 @@ impl CostBasedOptimizer {
             PhysicalPlan::Filter { input, .. } => {
                 let input_cost = self.estimate_physical_cost(input);
                 QueryCost {
-                    cpu_cost: input_cost.cpu_cost + input_cost.output_rows * self.cost_params.cpu_operator_cost,
+                    cpu_cost: input_cost.cpu_cost
+                        + input_cost.output_rows * self.cost_params.cpu_operator_cost,
                     output_rows: input_cost.output_rows * 0.5, // Assume 50% selectivity
                     ..input_cost
                 }
@@ -1520,7 +1653,8 @@ impl CostBasedOptimizer {
                 let probe_cost = self.estimate_physical_cost(probe);
 
                 QueryCost {
-                    cpu_cost: build_cost.cpu_cost + probe_cost.cpu_cost
+                    cpu_cost: build_cost.cpu_cost
+                        + probe_cost.cpu_cost
                         + build_cost.output_rows * 2.0 * self.cost_params.cpu_tuple_cost
                         + probe_cost.output_rows * self.cost_params.cpu_tuple_cost,
                     io_cost: build_cost.io_cost + probe_cost.io_cost,
@@ -1570,9 +1704,19 @@ impl ParallelPlanner {
     }
 
     /// Add parallelism to a physical plan
-    pub fn parallelize(&self, plan: PhysicalPlan, stats: &HashMap<String, TableStats>) -> PhysicalPlan {
+    pub fn parallelize(
+        &self,
+        plan: PhysicalPlan,
+        stats: &HashMap<String, TableStats>,
+    ) -> PhysicalPlan {
         match plan {
-            PhysicalPlan::SeqScan { table, database, columns, filter, parallel_degree: _ } => {
+            PhysicalPlan::SeqScan {
+                table,
+                database,
+                columns,
+                filter,
+                parallel_degree: _,
+            } => {
                 let degree = self.compute_parallelism(&table, stats);
                 if degree > 1 {
                     PhysicalPlan::SeqScan {
@@ -1592,7 +1736,11 @@ impl ParallelPlanner {
                     }
                 }
             }
-            PhysicalPlan::HashAggregate { input, group_by, aggregates } => {
+            PhysicalPlan::HashAggregate {
+                input,
+                group_by,
+                aggregates,
+            } => {
                 let parallel_input = self.parallelize(*input, stats);
 
                 // For aggregation, we might need a two-phase approach
@@ -1617,7 +1765,14 @@ impl ParallelPlanner {
                     }
                 }
             }
-            PhysicalPlan::HashJoin { build, probe, join_type, build_keys, probe_keys, .. } => {
+            PhysicalPlan::HashJoin {
+                build,
+                probe,
+                join_type,
+                build_keys,
+                probe_keys,
+                ..
+            } => {
                 let parallel_build = self.parallelize(*build, stats);
                 let parallel_probe = self.parallelize(*probe, stats);
 
@@ -1630,19 +1785,19 @@ impl ParallelPlanner {
                     parallel_build: true,
                 }
             }
-            PhysicalPlan::Filter { input, predicate } => {
-                PhysicalPlan::Filter {
-                    input: Box::new(self.parallelize(*input, stats)),
-                    predicate,
-                }
-            }
-            PhysicalPlan::Project { input, columns } => {
-                PhysicalPlan::Project {
-                    input: Box::new(self.parallelize(*input, stats)),
-                    columns,
-                }
-            }
-            PhysicalPlan::Sort { input, order_by, limit } => {
+            PhysicalPlan::Filter { input, predicate } => PhysicalPlan::Filter {
+                input: Box::new(self.parallelize(*input, stats)),
+                predicate,
+            },
+            PhysicalPlan::Project { input, columns } => PhysicalPlan::Project {
+                input: Box::new(self.parallelize(*input, stats)),
+                columns,
+            },
+            PhysicalPlan::Sort {
+                input,
+                order_by,
+                limit,
+            } => {
                 // Sort requires gathering all data
                 PhysicalPlan::Sort {
                     input: Box::new(self.parallelize(*input, stats)),
@@ -1667,7 +1822,9 @@ impl ParallelPlanner {
 
     fn should_two_phase_aggregate(&self, plan: &PhysicalPlan) -> bool {
         match plan {
-            PhysicalPlan::SeqScan { parallel_degree, .. } => *parallel_degree > 1,
+            PhysicalPlan::SeqScan {
+                parallel_degree, ..
+            } => *parallel_degree > 1,
             PhysicalPlan::Filter { input, .. } => self.should_two_phase_aggregate(input),
             PhysicalPlan::Project { input, .. } => self.should_two_phase_aggregate(input),
             _ => false,
@@ -1717,14 +1874,17 @@ mod tests {
     fn test_selectivity_estimation() {
         let estimator = SelectivityEstimator::default();
         let mut stats = HashMap::new();
-        stats.insert("id".to_string(), ColumnStatistics {
-            distinct_count: 1000,
-            null_count: 0,
-            min_value: Some(StatValue::Int64(1)),
-            max_value: Some(StatValue::Int64(1000)),
-            avg_length: None,
-            histogram: None,
-        });
+        stats.insert(
+            "id".to_string(),
+            ColumnStatistics {
+                distinct_count: 1000,
+                null_count: 0,
+                min_value: Some(StatValue::Int64(1)),
+                max_value: Some(StatValue::Int64(1000)),
+                avg_length: None,
+                histogram: None,
+            },
+        );
 
         // Equality on high cardinality column
         let eq_pred = Predicate::Comparison {
@@ -1795,16 +1955,22 @@ mod tests {
         let mut optimizer = CostBasedOptimizer::new(4);
 
         // Add stats - small table and large table
-        optimizer.update_stats("small", TableStats {
-            row_count: 100,
-            size_bytes: 10000,
-            ..Default::default()
-        });
-        optimizer.update_stats("large", TableStats {
-            row_count: 1000000,
-            size_bytes: 100000000,
-            ..Default::default()
-        });
+        optimizer.update_stats(
+            "small",
+            TableStats {
+                row_count: 100,
+                size_bytes: 10000,
+                ..Default::default()
+            },
+        );
+        optimizer.update_stats(
+            "large",
+            TableStats {
+                row_count: 1000000,
+                size_bytes: 100000000,
+                ..Default::default()
+            },
+        );
 
         let plan = LogicalPlan::Join {
             left: Box::new(LogicalPlan::Scan {
@@ -1831,14 +1997,12 @@ mod tests {
 
         // Should swap to build on smaller table
         match optimized {
-            LogicalPlan::Join { left, .. } => {
-                match *left {
-                    LogicalPlan::Scan { table, .. } => {
-                        assert_eq!(table, "small");
-                    }
-                    _ => panic!("Expected scan"),
+            LogicalPlan::Join { left, .. } => match *left {
+                LogicalPlan::Scan { table, .. } => {
+                    assert_eq!(table, "small");
                 }
-            }
+                _ => panic!("Expected scan"),
+            },
             _ => panic!("Expected join"),
         }
     }
@@ -1846,11 +2010,14 @@ mod tests {
     #[test]
     fn test_physical_plan_generation() {
         let mut optimizer = CostBasedOptimizer::new(4);
-        optimizer.update_stats("users", TableStats {
-            row_count: 100000,
-            size_bytes: 10000000,
-            ..Default::default()
-        });
+        optimizer.update_stats(
+            "users",
+            TableStats {
+                row_count: 100000,
+                size_bytes: 10000000,
+                ..Default::default()
+            },
+        );
 
         let logical = LogicalPlan::Limit {
             input: Box::new(LogicalPlan::Sort {
@@ -1880,11 +2047,14 @@ mod tests {
     fn test_parallel_planner() {
         let planner = ParallelPlanner::new(8);
         let mut stats = HashMap::new();
-        stats.insert("large_table".to_string(), TableStats {
-            row_count: 1000000,
-            size_bytes: 100 * 1024 * 1024,
-            ..Default::default()
-        });
+        stats.insert(
+            "large_table".to_string(),
+            TableStats {
+                row_count: 1000000,
+                size_bytes: 100 * 1024 * 1024,
+                ..Default::default()
+            },
+        );
 
         let plan = PhysicalPlan::SeqScan {
             table: "large_table".to_string(),
@@ -1897,7 +2067,9 @@ mod tests {
         let parallel_plan = planner.parallelize(plan, &stats);
 
         match parallel_plan {
-            PhysicalPlan::SeqScan { parallel_degree, .. } => {
+            PhysicalPlan::SeqScan {
+                parallel_degree, ..
+            } => {
                 assert!(parallel_degree > 1);
             }
             _ => panic!("Expected seq scan"),

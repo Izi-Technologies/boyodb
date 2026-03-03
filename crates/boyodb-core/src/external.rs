@@ -6,8 +6,8 @@
 //! - Dictionary tables for efficient dimension lookups
 //! - External tables for querying external data sources
 
-use std::collections::{HashMap, BTreeMap};
-use std::io::{Read, Write, Cursor};
+use std::collections::{BTreeMap, HashMap};
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,12 +37,14 @@ impl ObjectPath {
         // Parse s3://bucket/key or gs://bucket/key or az://container/blob
         let uri = uri.trim();
 
-        let (scheme, rest) = uri.split_once("://")
+        let (scheme, rest) = uri
+            .split_once("://")
             .ok_or_else(|| StorageError::InvalidPath(uri.to_string()))?;
 
         match scheme {
             "s3" | "gs" | "az" | "file" => {
-                let (bucket, key) = rest.split_once('/')
+                let (bucket, key) = rest
+                    .split_once('/')
                     .ok_or_else(|| StorageError::InvalidPath(uri.to_string()))?;
                 Ok(Self::new(bucket, key))
             }
@@ -194,7 +196,11 @@ pub trait ObjectStore: Send + Sync {
     fn head(&self, path: &ObjectPath) -> Result<ObjectMeta, StorageError>;
 
     /// List objects with prefix
-    fn list(&self, path: &ObjectPath, continuation_token: Option<&str>) -> Result<ListResult, StorageError>;
+    fn list(
+        &self,
+        path: &ObjectPath,
+        continuation_token: Option<&str>,
+    ) -> Result<ListResult, StorageError>;
 
     /// Copy object
     fn copy(&self, src: &ObjectPath, dst: &ObjectPath) -> Result<(), StorageError>;
@@ -203,10 +209,21 @@ pub trait ObjectStore: Send + Sync {
     fn create_multipart(&self, path: &ObjectPath) -> Result<String, StorageError>;
 
     /// Upload a part
-    fn upload_part(&self, path: &ObjectPath, upload_id: &str, part_number: u32, data: &[u8]) -> Result<String, StorageError>;
+    fn upload_part(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        part_number: u32,
+        data: &[u8],
+    ) -> Result<String, StorageError>;
 
     /// Complete multipart upload
-    fn complete_multipart(&self, path: &ObjectPath, upload_id: &str, parts: &[UploadPart]) -> Result<(), StorageError>;
+    fn complete_multipart(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        parts: &[UploadPart],
+    ) -> Result<(), StorageError>;
 
     /// Abort multipart upload
     fn abort_multipart(&self, path: &ObjectPath, upload_id: &str) -> Result<(), StorageError>;
@@ -240,7 +257,9 @@ impl Default for InMemoryObjectStore {
 impl ObjectStore for InMemoryObjectStore {
     fn get(&self, path: &ObjectPath) -> Result<Vec<u8>, StorageError> {
         let key = Self::key(path);
-        self.objects.read().unwrap()
+        self.objects
+            .read()
+            .unwrap()
             .get(&key)
             .map(|(data, _)| data.clone())
             .ok_or_else(|| StorageError::NotFound(path.clone()))
@@ -269,7 +288,10 @@ impl ObjectStore for InMemoryObjectStore {
             content_type: None,
             metadata: HashMap::new(),
         };
-        self.objects.write().unwrap().insert(key, (data.to_vec(), meta));
+        self.objects
+            .write()
+            .unwrap()
+            .insert(key, (data.to_vec(), meta));
         Ok(())
     }
 
@@ -286,17 +308,24 @@ impl ObjectStore for InMemoryObjectStore {
 
     fn head(&self, path: &ObjectPath) -> Result<ObjectMeta, StorageError> {
         let key = Self::key(path);
-        self.objects.read().unwrap()
+        self.objects
+            .read()
+            .unwrap()
             .get(&key)
             .map(|(_, meta)| meta.clone())
             .ok_or_else(|| StorageError::NotFound(path.clone()))
     }
 
-    fn list(&self, path: &ObjectPath, _continuation_token: Option<&str>) -> Result<ListResult, StorageError> {
+    fn list(
+        &self,
+        path: &ObjectPath,
+        _continuation_token: Option<&str>,
+    ) -> Result<ListResult, StorageError> {
         let prefix = Self::key(path);
         let objects = self.objects.read().unwrap();
 
-        let matching: Vec<_> = objects.iter()
+        let matching: Vec<_> = objects
+            .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, (_, meta))| meta.clone())
             .collect();
@@ -314,8 +343,13 @@ impl ObjectStore for InMemoryObjectStore {
     }
 
     fn create_multipart(&self, path: &ObjectPath) -> Result<String, StorageError> {
-        let upload_id = format!("upload_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let upload_id = format!(
+            "upload_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
 
         let upload = MultipartUpload {
             upload_id: upload_id.clone(),
@@ -328,23 +362,43 @@ impl ObjectStore for InMemoryObjectStore {
                 .as_secs(),
         };
 
-        self.multipart_uploads.write().unwrap().insert(upload_id.clone(), upload);
+        self.multipart_uploads
+            .write()
+            .unwrap()
+            .insert(upload_id.clone(), upload);
         Ok(upload_id)
     }
 
-    fn upload_part(&self, path: &ObjectPath, upload_id: &str, part_number: u32, data: &[u8]) -> Result<String, StorageError> {
+    fn upload_part(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        part_number: u32,
+        data: &[u8],
+    ) -> Result<String, StorageError> {
         let etag = format!("{:x}", md5_hash(data));
 
         // Store part data temporarily
-        let part_key = format!("{}/_multipart/{}/{}", Self::key(path), upload_id, part_number);
-        self.objects.write().unwrap().insert(part_key, (data.to_vec(), ObjectMeta {
-            path: path.clone(),
-            size: data.len() as u64,
-            last_modified: 0,
-            etag: Some(etag.clone()),
-            content_type: None,
-            metadata: HashMap::new(),
-        }));
+        let part_key = format!(
+            "{}/_multipart/{}/{}",
+            Self::key(path),
+            upload_id,
+            part_number
+        );
+        self.objects.write().unwrap().insert(
+            part_key,
+            (
+                data.to_vec(),
+                ObjectMeta {
+                    path: path.clone(),
+                    size: data.len() as u64,
+                    last_modified: 0,
+                    etag: Some(etag.clone()),
+                    content_type: None,
+                    metadata: HashMap::new(),
+                },
+            ),
+        );
 
         // Track part in upload
         let mut uploads = self.multipart_uploads.write().unwrap();
@@ -359,12 +413,22 @@ impl ObjectStore for InMemoryObjectStore {
         Ok(etag)
     }
 
-    fn complete_multipart(&self, path: &ObjectPath, upload_id: &str, parts: &[UploadPart]) -> Result<(), StorageError> {
+    fn complete_multipart(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        parts: &[UploadPart],
+    ) -> Result<(), StorageError> {
         // Combine all parts
         let mut combined = Vec::new();
 
         for part in parts {
-            let part_key = format!("{}/_multipart/{}/{}", Self::key(path), upload_id, part.part_number);
+            let part_key = format!(
+                "{}/_multipart/{}/{}",
+                Self::key(path),
+                upload_id,
+                part.part_number
+            );
             if let Some((data, _)) = self.objects.read().unwrap().get(&part_key) {
                 combined.extend_from_slice(data);
             }
@@ -375,7 +439,12 @@ impl ObjectStore for InMemoryObjectStore {
 
         // Clean up parts
         for part in parts {
-            let part_key = format!("{}/_multipart/{}/{}", Self::key(path), upload_id, part.part_number);
+            let part_key = format!(
+                "{}/_multipart/{}/{}",
+                Self::key(path),
+                upload_id,
+                part.part_number
+            );
             self.objects.write().unwrap().remove(&part_key);
         }
 
@@ -388,7 +457,12 @@ impl ObjectStore for InMemoryObjectStore {
         let uploads = self.multipart_uploads.read().unwrap();
         if let Some(upload) = uploads.get(upload_id) {
             for part in &upload.parts {
-                let part_key = format!("{}/_multipart/{}/{}", Self::key(path), upload_id, part.part_number);
+                let part_key = format!(
+                    "{}/_multipart/{}/{}",
+                    Self::key(path),
+                    upload_id,
+                    part.part_number
+                );
                 self.objects.write().unwrap().remove(&part_key);
             }
         }
@@ -477,7 +551,8 @@ impl CachedObjectStore {
 
         if total_size > self.max_cache_size {
             // Simple LRU: remove oldest entries until under limit
-            let mut entries: Vec<_> = cache.iter()
+            let mut entries: Vec<_> = cache
+                .iter()
                 .map(|(k, v)| (k.clone(), v.cached_at))
                 .collect();
             entries.sort_by_key(|(_, t)| *t);
@@ -516,11 +591,14 @@ impl ObjectStore for CachedObjectStore {
         self.evict_if_needed();
         {
             let mut cache = self.cache.write().unwrap();
-            cache.insert(key, CacheEntry {
-                size: data.len(),
-                data: data.clone(),
-                cached_at: Instant::now(),
-            });
+            cache.insert(
+                key,
+                CacheEntry {
+                    size: data.len(),
+                    data: data.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
         }
 
         Ok(data)
@@ -552,7 +630,11 @@ impl ObjectStore for CachedObjectStore {
         self.inner.head(path)
     }
 
-    fn list(&self, path: &ObjectPath, continuation_token: Option<&str>) -> Result<ListResult, StorageError> {
+    fn list(
+        &self,
+        path: &ObjectPath,
+        continuation_token: Option<&str>,
+    ) -> Result<ListResult, StorageError> {
         self.inner.list(path, continuation_token)
     }
 
@@ -564,11 +646,22 @@ impl ObjectStore for CachedObjectStore {
         self.inner.create_multipart(path)
     }
 
-    fn upload_part(&self, path: &ObjectPath, upload_id: &str, part_number: u32, data: &[u8]) -> Result<String, StorageError> {
+    fn upload_part(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        part_number: u32,
+        data: &[u8],
+    ) -> Result<String, StorageError> {
         self.inner.upload_part(path, upload_id, part_number, data)
     }
 
-    fn complete_multipart(&self, path: &ObjectPath, upload_id: &str, parts: &[UploadPart]) -> Result<(), StorageError> {
+    fn complete_multipart(
+        &self,
+        path: &ObjectPath,
+        upload_id: &str,
+        parts: &[UploadPart],
+    ) -> Result<(), StorageError> {
         let key = Self::cache_key(path);
         self.cache.write().unwrap().remove(&key);
         self.inner.complete_multipart(path, upload_id, parts)
@@ -640,10 +733,18 @@ pub enum ParquetPhysicalType {
 pub enum ParquetLogicalType {
     String,
     Uuid,
-    Timestamp { unit: TimeUnit, is_adjusted_to_utc: bool },
+    Timestamp {
+        unit: TimeUnit,
+        is_adjusted_to_utc: bool,
+    },
     Date,
-    Time { unit: TimeUnit },
-    Decimal { precision: u32, scale: u32 },
+    Time {
+        unit: TimeUnit,
+    },
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
     List,
     Map,
     Json,
@@ -728,23 +829,44 @@ impl Default for ParquetReadOptions {
 #[derive(Debug, Clone)]
 pub enum ParquetPredicate {
     /// Column equals value
-    Eq { column: String, value: PredicateValue },
+    Eq {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column not equals value
-    Ne { column: String, value: PredicateValue },
+    Ne {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column less than value
-    Lt { column: String, value: PredicateValue },
+    Lt {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column less than or equal value
-    Le { column: String, value: PredicateValue },
+    Le {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column greater than value
-    Gt { column: String, value: PredicateValue },
+    Gt {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column greater than or equal value
-    Ge { column: String, value: PredicateValue },
+    Ge {
+        column: String,
+        value: PredicateValue,
+    },
     /// Column is null
     IsNull { column: String },
     /// Column is not null
     IsNotNull { column: String },
     /// Column in list of values
-    In { column: String, values: Vec<PredicateValue> },
+    In {
+        column: String,
+        values: Vec<PredicateValue>,
+    },
     /// Logical AND
     And(Box<ParquetPredicate>, Box<ParquetPredicate>),
     /// Logical OR
@@ -822,7 +944,9 @@ impl ParquetManager {
         // In real implementation, would read footer from Parquet file
         // For now, return simulated metadata
 
-        let meta = self.store.head(path)
+        let meta = self
+            .store
+            .head(path)
             .map_err(|e| ParquetError::StorageError(e.to_string()))?;
 
         Ok(ParquetMetadata {
@@ -897,16 +1021,23 @@ impl ParquetManager {
                 false
             }
             ParquetPredicate::And(left, right) => {
-                self.can_skip_row_group(left, row_group) || self.can_skip_row_group(right, row_group)
+                self.can_skip_row_group(left, row_group)
+                    || self.can_skip_row_group(right, row_group)
             }
             ParquetPredicate::Or(left, right) => {
-                self.can_skip_row_group(left, row_group) && self.can_skip_row_group(right, row_group)
+                self.can_skip_row_group(left, row_group)
+                    && self.can_skip_row_group(right, row_group)
             }
             _ => false,
         }
     }
 
-    fn value_outside_range(&self, value: &PredicateValue, min: &Option<Vec<u8>>, max: &Option<Vec<u8>>) -> bool {
+    fn value_outside_range(
+        &self,
+        value: &PredicateValue,
+        min: &Option<Vec<u8>>,
+        max: &Option<Vec<u8>>,
+    ) -> bool {
         if let (Some(min), Some(max)) = (min, max) {
             let cmp_min = self.compare_value_bytes(value, min);
             let cmp_max = self.compare_value_bytes(value, max);
@@ -926,16 +1057,20 @@ impl ParquetManager {
                     0
                 }
             }
-            PredicateValue::String(s) => {
-                s.as_bytes().cmp(bytes) as i32
-            }
+            PredicateValue::String(s) => s.as_bytes().cmp(bytes) as i32,
             _ => 0,
         }
     }
 
     /// Simulate reading data from Parquet (returns row count)
-    pub fn read_data(&self, path: &ObjectPath, options: &ParquetReadOptions) -> Result<Vec<ParquetRow>, ParquetError> {
-        let _data = self.store.get(path)
+    pub fn read_data(
+        &self,
+        path: &ObjectPath,
+        options: &ParquetReadOptions,
+    ) -> Result<Vec<ParquetRow>, ParquetError> {
+        let _data = self
+            .store
+            .get(path)
             .map_err(|e| ParquetError::StorageError(e.to_string()))?;
 
         // In real implementation, would decode Parquet format
@@ -944,7 +1079,10 @@ impl ParquetManager {
         for i in 0..10 {
             let mut values = HashMap::new();
             values.insert("id".to_string(), ParquetValue::Int64(i));
-            values.insert("name".to_string(), ParquetValue::String(format!("row_{}", i)));
+            values.insert(
+                "name".to_string(),
+                ParquetValue::String(format!("row_{}", i)),
+            );
             rows.push(ParquetRow { values });
         }
 
@@ -984,7 +1122,8 @@ impl ParquetManager {
         // Write footer magic
         data.extend_from_slice(b"PAR1");
 
-        self.store.put(path, &data)
+        self.store
+            .put(path, &data)
             .map_err(|e| ParquetError::StorageError(e.to_string()))?;
 
         Ok(ParquetWriteResult {
@@ -1096,25 +1235,13 @@ pub enum DictionaryValue {
 #[derive(Debug, Clone)]
 pub enum DictionarySource {
     /// Load from a table
-    Table {
-        database: String,
-        table: String,
-    },
+    Table { database: String, table: String },
     /// Load from a file (CSV, Parquet, etc.)
-    File {
-        path: String,
-        format: String,
-    },
+    File { path: String, format: String },
     /// Load from HTTP endpoint
-    Http {
-        url: String,
-        format: String,
-    },
+    Http { url: String, format: String },
     /// Load from object storage
-    ObjectStorage {
-        path: ObjectPath,
-        format: String,
-    },
+    ObjectStorage { path: ObjectPath, format: String },
 }
 
 /// Dictionary statistics
@@ -1177,7 +1304,11 @@ impl DictionaryTable {
     }
 
     /// Lookup with default
-    pub fn lookup_or_default(&mut self, key: &DictionaryKey, default: Vec<DictionaryValue>) -> Vec<DictionaryValue> {
+    pub fn lookup_or_default(
+        &mut self,
+        key: &DictionaryKey,
+        default: Vec<DictionaryValue>,
+    ) -> Vec<DictionaryValue> {
         self.lookup(key).cloned().unwrap_or(default)
     }
 
@@ -1239,8 +1370,7 @@ impl DictionaryTable {
 
     /// Refresh from source
     pub fn refresh(&mut self) -> Result<usize, DictionaryError> {
-        let source = self.source.as_ref()
-            .ok_or(DictionaryError::NoSource)?;
+        let source = self.source.as_ref().ok_or(DictionaryError::NoSource)?;
 
         // In real implementation, would load from source
         // For now, just update timestamp
@@ -1267,7 +1397,9 @@ impl DictionaryManager {
 
     /// Register a dictionary
     pub fn register(&self, dict: DictionaryTable) {
-        self.dictionaries.write().unwrap()
+        self.dictionaries
+            .write()
+            .unwrap()
             .insert(dict.name.clone(), dict);
     }
 
@@ -1543,10 +1675,16 @@ impl ExternalTableManager {
     }
 
     /// Drop an external table
-    pub fn drop_table(&self, database: &str, name: &str) -> Result<ExternalTable, ExternalTableError> {
+    pub fn drop_table(
+        &self,
+        database: &str,
+        name: &str,
+    ) -> Result<ExternalTable, ExternalTableError> {
         let key = format!("{}.{}", database, name);
 
-        self.tables.write().unwrap()
+        self.tables
+            .write()
+            .unwrap()
             .remove(&key)
             .ok_or_else(|| ExternalTableError::NotFound(key))
     }
@@ -1560,7 +1698,9 @@ impl ExternalTableManager {
     /// List external tables in a database
     pub fn list_tables(&self, database: &str) -> Vec<ExternalTable> {
         let prefix = format!("{}.", database);
-        self.tables.read().unwrap()
+        self.tables
+            .read()
+            .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, v)| v.clone())
@@ -1568,7 +1708,11 @@ impl ExternalTableManager {
     }
 
     /// Infer schema from external source
-    pub fn infer_schema(&self, location: &ExternalLocation, format: &ExternalFormat) -> Result<ExternalSchema, ExternalTableError> {
+    pub fn infer_schema(
+        &self,
+        location: &ExternalLocation,
+        format: &ExternalFormat,
+    ) -> Result<ExternalSchema, ExternalTableError> {
         // In real implementation, would read sample data to infer schema
         // For now, return a placeholder schema
 
@@ -1597,7 +1741,8 @@ impl ExternalTableManager {
             .map_err(|e| ExternalTableError::InvalidLocation(e.to_string()))?;
 
         if let Some(ref store) = self.store {
-            let result = store.list(&path, None)
+            let result = store
+                .list(&path, None)
                 .map_err(|e| ExternalTableError::StorageError(e.to_string()))?;
 
             Ok(result.objects.iter().map(|o| o.path.to_uri("s3")).collect())
@@ -1616,7 +1761,8 @@ impl ExternalTableManager {
         predicates: Vec<ExternalPredicate>,
         limit: Option<u64>,
     ) -> Result<ExternalTableScan, ExternalTableError> {
-        let table = self.get_table(database, name)
+        let table = self
+            .get_table(database, name)
             .ok_or_else(|| ExternalTableError::NotFound(format!("{}.{}", database, name)))?;
 
         let files = self.list_files(&table)?;
@@ -1631,7 +1777,10 @@ impl ExternalTableManager {
     }
 
     /// Execute scan (simplified - returns row count)
-    pub fn execute_scan(&self, scan: &ExternalTableScan) -> Result<Vec<HashMap<String, String>>, ExternalTableError> {
+    pub fn execute_scan(
+        &self,
+        scan: &ExternalTableScan,
+    ) -> Result<Vec<HashMap<String, String>>, ExternalTableError> {
         // In real implementation, would read files and apply predicates
         // For now, return simulated results
 
@@ -1674,7 +1823,9 @@ impl std::fmt::Display for ExternalTableError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExternalTableError::NotFound(t) => write!(f, "External table not found: {}", t),
-            ExternalTableError::AlreadyExists(t) => write!(f, "External table already exists: {}", t),
+            ExternalTableError::AlreadyExists(t) => {
+                write!(f, "External table already exists: {}", t)
+            }
             ExternalTableError::InvalidLocation(e) => write!(f, "Invalid location: {}", e),
             ExternalTableError::StorageError(e) => write!(f, "Storage error: {}", e),
             ExternalTableError::FormatError(e) => write!(f, "Format error: {}", e),
@@ -1779,11 +1930,19 @@ mod tests {
     fn test_in_memory_store_list() {
         let store = InMemoryObjectStore::new();
 
-        store.put(&ObjectPath::new("bucket", "prefix/a.txt"), b"a").unwrap();
-        store.put(&ObjectPath::new("bucket", "prefix/b.txt"), b"b").unwrap();
-        store.put(&ObjectPath::new("bucket", "other/c.txt"), b"c").unwrap();
+        store
+            .put(&ObjectPath::new("bucket", "prefix/a.txt"), b"a")
+            .unwrap();
+        store
+            .put(&ObjectPath::new("bucket", "prefix/b.txt"), b"b")
+            .unwrap();
+        store
+            .put(&ObjectPath::new("bucket", "other/c.txt"), b"c")
+            .unwrap();
 
-        let result = store.list(&ObjectPath::new("bucket", "prefix/"), None).unwrap();
+        let result = store
+            .list(&ObjectPath::new("bucket", "prefix/"), None)
+            .unwrap();
         assert_eq!(result.objects.len(), 2);
     }
 
@@ -1798,8 +1957,16 @@ mod tests {
         let etag2 = store.upload_part(&path, &upload_id, 2, b"part2").unwrap();
 
         let parts = vec![
-            UploadPart { part_number: 1, etag: etag1, size: 5 },
-            UploadPart { part_number: 2, etag: etag2, size: 5 },
+            UploadPart {
+                part_number: 1,
+                etag: etag1,
+                size: 5,
+            },
+            UploadPart {
+                part_number: 2,
+                etag: etag2,
+                size: 5,
+            },
         ];
 
         store.complete_multipart(&path, &upload_id, &parts).unwrap();
@@ -1840,31 +2007,31 @@ mod tests {
 
         let path = ObjectPath::new("bucket", "test.parquet");
         let schema = ParquetSchema {
-            columns: vec![
-                ParquetColumn {
-                    name: "id".to_string(),
-                    physical_type: ParquetPhysicalType::Int64,
-                    logical_type: None,
-                    nullable: false,
-                    compression: None,
-                },
-            ],
+            columns: vec![ParquetColumn {
+                name: "id".to_string(),
+                physical_type: ParquetPhysicalType::Int64,
+                logical_type: None,
+                nullable: false,
+                compression: None,
+            }],
         };
 
-        let rows = vec![
-            ParquetRow {
-                values: {
-                    let mut m = HashMap::new();
-                    m.insert("id".to_string(), ParquetValue::Int64(1));
-                    m
-                },
+        let rows = vec![ParquetRow {
+            values: {
+                let mut m = HashMap::new();
+                m.insert("id".to_string(), ParquetValue::Int64(1));
+                m
             },
-        ];
+        }];
 
-        let result = manager.write_data(&path, &schema, &rows, &ParquetWriteOptions::default()).unwrap();
+        let result = manager
+            .write_data(&path, &schema, &rows, &ParquetWriteOptions::default())
+            .unwrap();
         assert_eq!(result.rows_written, 1);
 
-        let read_rows = manager.read_data(&path, &ParquetReadOptions::default()).unwrap();
+        let read_rows = manager
+            .read_data(&path, &ParquetReadOptions::default())
+            .unwrap();
         assert!(!read_rows.is_empty());
     }
 
@@ -1915,8 +2082,14 @@ mod tests {
     fn test_dictionary_stats() {
         let mut dict = DictionaryTable::new("test", "id", vec!["value".to_string()]);
 
-        dict.insert(DictionaryKey::Int64(1), vec![DictionaryValue::String("one".to_string())]);
-        dict.insert(DictionaryKey::Int64(2), vec![DictionaryValue::String("two".to_string())]);
+        dict.insert(
+            DictionaryKey::Int64(1),
+            vec![DictionaryValue::String("one".to_string())],
+        );
+        dict.insert(
+            DictionaryKey::Int64(2),
+            vec![DictionaryValue::String("two".to_string())],
+        );
 
         // Lookup existing key
         dict.lookup(&DictionaryKey::Int64(1));
@@ -2003,7 +2176,10 @@ mod tests {
                 name: format!("table_{}", i),
                 database: "test_db".to_string(),
                 table_type: ExternalTableType::ObjectStorage,
-                schema: ExternalSchema { columns: vec![], partition_columns: vec![] },
+                schema: ExternalSchema {
+                    columns: vec![],
+                    partition_columns: vec![],
+                },
                 location: ExternalLocation {
                     uri: format!("s3://bucket/table_{}/", i),
                     credential: None,
@@ -2028,7 +2204,10 @@ mod tests {
             name: "to_drop".to_string(),
             database: "db".to_string(),
             table_type: ExternalTableType::ObjectStorage,
-            schema: ExternalSchema { columns: vec![], partition_columns: vec![] },
+            schema: ExternalSchema {
+                columns: vec![],
+                partition_columns: vec![],
+            },
             location: ExternalLocation {
                 uri: "s3://bucket/".to_string(),
                 credential: None,
@@ -2052,21 +2231,21 @@ mod tests {
         let manager = ExternalTableManager::new().with_store(store.clone());
 
         // Create a file in the store
-        store.put(&ObjectPath::new("bucket", "data/file.parquet"), b"data").unwrap();
+        store
+            .put(&ObjectPath::new("bucket", "data/file.parquet"), b"data")
+            .unwrap();
 
         let table = ExternalTable {
             name: "scan_test".to_string(),
             database: "db".to_string(),
             table_type: ExternalTableType::ObjectStorage,
             schema: ExternalSchema {
-                columns: vec![
-                    ExternalColumn {
-                        name: "col1".to_string(),
-                        data_type: ExternalDataType::String,
-                        nullable: true,
-                        comment: None,
-                    },
-                ],
+                columns: vec![ExternalColumn {
+                    name: "col1".to_string(),
+                    data_type: ExternalDataType::String,
+                    nullable: true,
+                    comment: None,
+                }],
                 partition_columns: vec![],
             },
             location: ExternalLocation {
@@ -2081,13 +2260,9 @@ mod tests {
 
         manager.create_table(table).unwrap();
 
-        let scan = manager.create_scan(
-            "db",
-            "scan_test",
-            vec!["col1".to_string()],
-            vec![],
-            Some(5),
-        ).unwrap();
+        let scan = manager
+            .create_scan("db", "scan_test", vec!["col1".to_string()], vec![], Some(5))
+            .unwrap();
 
         assert_eq!(scan.columns, vec!["col1"]);
         assert_eq!(scan.limit, Some(5));
@@ -2130,8 +2305,14 @@ mod tests {
     #[test]
     fn test_external_predicate() {
         let pred = ExternalPredicate::And(vec![
-            ExternalPredicate::Gt { column: "id".to_string(), value: "0".to_string() },
-            ExternalPredicate::Lt { column: "id".to_string(), value: "100".to_string() },
+            ExternalPredicate::Gt {
+                column: "id".to_string(),
+                value: "0".to_string(),
+            },
+            ExternalPredicate::Lt {
+                column: "id".to_string(),
+                value: "100".to_string(),
+            },
         ]);
 
         match pred {
@@ -2158,7 +2339,9 @@ mod tests {
             properties: HashMap::new(),
         };
 
-        let schema = manager.infer_schema(&location, &ExternalFormat::default()).unwrap();
+        let schema = manager
+            .infer_schema(&location, &ExternalFormat::default())
+            .unwrap();
         assert!(!schema.columns.is_empty());
     }
 }

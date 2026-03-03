@@ -3,12 +3,12 @@
 // Memory pools, I/O scheduling, workload isolation, and resource quotas
 // for multi-tenant and production environments.
 
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Memory Pools
@@ -108,12 +108,11 @@ impl MemoryPool {
                 });
             }
 
-            if self.used_bytes.compare_exchange(
-                current,
-                current + bytes,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .used_bytes
+                .compare_exchange(current, current + bytes, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 // Update peak
                 let new_used = current + bytes;
                 loop {
@@ -121,12 +120,11 @@ impl MemoryPool {
                     if new_used <= peak {
                         break;
                     }
-                    if self.peak_bytes.compare_exchange(
-                        peak,
-                        new_used,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ).is_ok() {
+                    if self
+                        .peak_bytes
+                        .compare_exchange(peak, new_used, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
                         break;
                     }
                 }
@@ -262,7 +260,9 @@ impl MemoryManager {
     /// Create a new memory pool
     pub fn create_pool(&self, name: &str, size: u64) -> Arc<MemoryPool> {
         let pool = Arc::new(MemoryPool::new(name, size));
-        self.pools.write().insert(name.to_string(), Arc::clone(&pool));
+        self.pools
+            .write()
+            .insert(name.to_string(), Arc::clone(&pool));
         pool
     }
 
@@ -278,10 +278,7 @@ impl MemoryManager {
 
     /// Get all pool stats
     pub fn all_stats(&self) -> Vec<MemoryPoolStats> {
-        self.pools.read()
-            .values()
-            .map(|p| p.stats())
-            .collect()
+        self.pools.read().values().map(|p| p.stats()).collect()
     }
 
     /// Get global memory usage
@@ -397,7 +394,8 @@ impl IoScheduler {
             deadline: None,
         };
 
-        self.queues.write()
+        self.queues
+            .write()
             .get_mut(&priority)
             .unwrap()
             .push_back(request);
@@ -424,7 +422,8 @@ impl IoScheduler {
             deadline: Some(Instant::now() + deadline),
         };
 
-        self.queues.write()
+        self.queues
+            .write()
             .get_mut(&priority)
             .unwrap()
             .push_back(request);
@@ -454,9 +453,9 @@ impl IoScheduler {
         ] {
             if let Some(queue) = queues.get_mut(&priority) {
                 // Check for expired deadlines first
-                let expired_idx = queue.iter().position(|r| {
-                    r.deadline.map(|d| d < Instant::now()).unwrap_or(false)
-                });
+                let expired_idx = queue
+                    .iter()
+                    .position(|r| r.deadline.map(|d| d < Instant::now()).unwrap_or(false));
 
                 if let Some(idx) = expired_idx {
                     if let Some(request) = queue.remove(idx) {
@@ -482,10 +481,12 @@ impl IoScheduler {
 
         match request.io_type {
             IoType::Read => {
-                self.bytes_read.fetch_add(request.size_bytes, Ordering::SeqCst);
+                self.bytes_read
+                    .fetch_add(request.size_bytes, Ordering::SeqCst);
             }
             IoType::Write => {
-                self.bytes_written.fetch_add(request.size_bytes, Ordering::SeqCst);
+                self.bytes_written
+                    .fetch_add(request.size_bytes, Ordering::SeqCst);
             }
             _ => {}
         }
@@ -502,7 +503,8 @@ impl IoScheduler {
 
     /// Get queue depths
     pub fn queue_depths(&self) -> HashMap<IoPriority, usize> {
-        self.queues.read()
+        self.queues
+            .read()
             .iter()
             .map(|(p, q)| (*p, q.len()))
             .collect()
@@ -567,12 +569,16 @@ impl RateLimiter {
                 return false;
             }
 
-            if self.tokens.compare_exchange(
-                current,
-                current - tokens,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .tokens
+                .compare_exchange(
+                    current,
+                    current - tokens,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -725,7 +731,8 @@ impl WorkloadGroupState {
     /// Release a query slot
     pub fn release(&self, duration_ms: u64) {
         self.current_queries.fetch_sub(1, Ordering::SeqCst);
-        self.total_query_time_ms.fetch_add(duration_ms, Ordering::SeqCst);
+        self.total_query_time_ms
+            .fetch_add(duration_ms, Ordering::SeqCst);
 
         // Admit queued query if any
         let queued = self.queued_queries.load(Ordering::SeqCst);
@@ -800,9 +807,7 @@ pub struct WorkloadManager {
 impl WorkloadManager {
     pub fn new() -> Self {
         let mut groups = HashMap::new();
-        let default = Arc::new(WorkloadGroupState::new(
-            WorkloadGroup::new("default")
-        ));
+        let default = Arc::new(WorkloadGroupState::new(WorkloadGroup::new("default")));
         groups.insert("default".to_string(), default);
 
         Self {
@@ -836,22 +841,25 @@ impl WorkloadManager {
 
     /// Map user to group
     pub fn map_user(&self, user: &str, group: &str) {
-        self.user_mappings.write().insert(user.to_string(), group.to_string());
+        self.user_mappings
+            .write()
+            .insert(user.to_string(), group.to_string());
     }
 
     /// Get group for user
     pub fn get_group_for_user(&self, user: &str) -> Arc<WorkloadGroupState> {
-        let group_name = self.user_mappings.read()
+        let group_name = self
+            .user_mappings
+            .read()
             .get(user)
             .cloned()
             .unwrap_or_else(|| self.default_group.clone());
 
-        self.groups.read()
+        self.groups
+            .read()
             .get(&group_name)
             .cloned()
-            .unwrap_or_else(|| {
-                self.groups.read().get(&self.default_group).unwrap().clone()
-            })
+            .unwrap_or_else(|| self.groups.read().get(&self.default_group).unwrap().clone())
     }
 
     /// Admit query for user
@@ -862,10 +870,7 @@ impl WorkloadManager {
 
     /// Get all group stats
     pub fn all_stats(&self) -> Vec<WorkloadGroupStats> {
-        self.groups.read()
-            .values()
-            .map(|g| g.stats())
-            .collect()
+        self.groups.read().values().map(|g| g.stats()).collect()
     }
 }
 
@@ -965,7 +970,10 @@ impl ResourceTracker {
         if let Some(limit) = self.quota.max_memory_bytes {
             if new_value > limit {
                 self.memory_used.fetch_sub(bytes, Ordering::SeqCst);
-                return Err(QuotaError::MemoryExceeded { used: new_value, limit });
+                return Err(QuotaError::MemoryExceeded {
+                    used: new_value,
+                    limit,
+                });
             }
         }
         Ok(())
@@ -981,7 +989,10 @@ impl ResourceTracker {
         let new_value = self.rows_read.fetch_add(rows, Ordering::SeqCst) + rows;
         if let Some(limit) = self.quota.max_read_rows {
             if new_value > limit {
-                return Err(QuotaError::RowsExceeded { read: new_value, limit });
+                return Err(QuotaError::RowsExceeded {
+                    read: new_value,
+                    limit,
+                });
             }
         }
         Ok(())
@@ -992,7 +1003,10 @@ impl ResourceTracker {
         let new_value = self.bytes_read.fetch_add(bytes, Ordering::SeqCst) + bytes;
         if let Some(limit) = self.quota.max_read_bytes {
             if new_value > limit {
-                return Err(QuotaError::BytesExceeded { read: new_value, limit });
+                return Err(QuotaError::BytesExceeded {
+                    read: new_value,
+                    limit,
+                });
             }
         }
         Ok(())
@@ -1021,7 +1035,11 @@ impl ResourceTracker {
             } else {
                 let count = self.query_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count > limit {
-                    return Err(QuotaError::RateLimitExceeded { count, limit, interval });
+                    return Err(QuotaError::RateLimitExceeded {
+                        count,
+                        limit,
+                        interval,
+                    });
                 }
             }
         }
@@ -1089,12 +1107,11 @@ impl QueryThrottler {
                 return false;
             }
 
-            if self.current.compare_exchange(
-                current,
-                current + 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .current
+                .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 self.total_admitted.fetch_add(1, Ordering::SeqCst);
                 return true;
             }
@@ -1314,8 +1331,15 @@ pub enum MemoryError {
 impl std::fmt::Display for MemoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PoolExhausted { requested, available } => {
-                write!(f, "Pool exhausted: requested {} bytes, available {}", requested, available)
+            Self::PoolExhausted {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "Pool exhausted: requested {} bytes, available {}",
+                    requested, available
+                )
             }
             Self::ParentPoolExhausted => write!(f, "Parent pool exhausted"),
             Self::InsufficientMemory => write!(f, "Insufficient memory"),
@@ -1354,11 +1378,27 @@ impl std::error::Error for WorkloadError {}
 /// Quota errors
 #[derive(Debug, Clone)]
 pub enum QuotaError {
-    MemoryExceeded { used: u64, limit: u64 },
-    RowsExceeded { read: u64, limit: u64 },
-    BytesExceeded { read: u64, limit: u64 },
-    ExecutionTimeExceeded { elapsed: Duration, limit: Duration },
-    RateLimitExceeded { count: u64, limit: u64, interval: Duration },
+    MemoryExceeded {
+        used: u64,
+        limit: u64,
+    },
+    RowsExceeded {
+        read: u64,
+        limit: u64,
+    },
+    BytesExceeded {
+        read: u64,
+        limit: u64,
+    },
+    ExecutionTimeExceeded {
+        elapsed: Duration,
+        limit: Duration,
+    },
+    RateLimitExceeded {
+        count: u64,
+        limit: u64,
+        interval: Duration,
+    },
 }
 
 impl std::fmt::Display for QuotaError {
@@ -1376,8 +1416,16 @@ impl std::fmt::Display for QuotaError {
             Self::ExecutionTimeExceeded { elapsed, limit } => {
                 write!(f, "Execution time exceeded: {:?} / {:?}", elapsed, limit)
             }
-            Self::RateLimitExceeded { count, limit, interval } => {
-                write!(f, "Rate limit exceeded: {} / {} per {:?}", count, limit, interval)
+            Self::RateLimitExceeded {
+                count,
+                limit,
+                interval,
+            } => {
+                write!(
+                    f,
+                    "Rate limit exceeded: {} / {} per {:?}",
+                    count, limit, interval
+                )
             }
         }
     }
@@ -1555,8 +1603,7 @@ mod tests {
     fn test_workload_manager() {
         let manager = WorkloadManager::new();
 
-        let group = WorkloadGroup::new("batch")
-            .with_priority(WorkloadPriority::Low);
+        let group = WorkloadGroup::new("batch").with_priority(WorkloadPriority::Low);
         manager.create_group(group).unwrap();
 
         manager.map_user("etl_user", "batch");

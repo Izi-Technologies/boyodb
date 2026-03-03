@@ -17,8 +17,8 @@
 //! ```
 
 use arrow_array::{
-    Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array,
     builder::{Float64Builder, Int64Builder, StringBuilder, UInt64Builder},
+    Array, ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use rustc_hash::FxHashMap;
@@ -46,7 +46,9 @@ pub struct ProjectionDef {
     pub enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Time bucketing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +134,13 @@ impl GroupState {
             AggType::Sum => self.sum,
             AggType::Min => self.min.unwrap_or(0.0),
             AggType::Max => self.max.unwrap_or(0.0),
-            AggType::Avg => if self.count > 0 { self.sum / self.count as f64 } else { 0.0 },
+            AggType::Avg => {
+                if self.count > 0 {
+                    self.sum / self.count as f64
+                } else {
+                    0.0
+                }
+            }
         }
     }
 }
@@ -247,7 +255,11 @@ pub fn build_projection(
         .map(|col| {
             // Try to infer type from first batch
             if let Ok(idx) = batches[0].schema().index_of(col) {
-                Field::new(col, batches[0].schema().field(idx).data_type().clone(), true)
+                Field::new(
+                    col,
+                    batches[0].schema().field(idx).data_type().clone(),
+                    true,
+                )
             } else {
                 Field::new(col, DataType::Utf8, true)
             }
@@ -266,21 +278,25 @@ pub fn build_projection(
 
     // Build output arrays
     let num_groups = groups.len();
-    let mut group_builders: Vec<Box<dyn ArrayBuilder>> = def
-        .group_by
-        .iter()
-        .map(|col| {
-            if let Ok(idx) = batches[0].schema().index_of(col) {
-                match batches[0].schema().field(idx).data_type() {
-                    DataType::Int64 => Box::new(Int64Builder::with_capacity(num_groups)) as Box<dyn ArrayBuilder>,
-                    DataType::UInt64 => Box::new(UInt64Builder::with_capacity(num_groups)) as Box<dyn ArrayBuilder>,
-                    _ => Box::new(StringBuilder::with_capacity(num_groups, num_groups * 32)) as Box<dyn ArrayBuilder>,
+    let mut group_builders: Vec<Box<dyn ArrayBuilder>> =
+        def.group_by
+            .iter()
+            .map(|col| {
+                if let Ok(idx) = batches[0].schema().index_of(col) {
+                    match batches[0].schema().field(idx).data_type() {
+                        DataType::Int64 => Box::new(Int64Builder::with_capacity(num_groups))
+                            as Box<dyn ArrayBuilder>,
+                        DataType::UInt64 => Box::new(UInt64Builder::with_capacity(num_groups))
+                            as Box<dyn ArrayBuilder>,
+                        _ => Box::new(StringBuilder::with_capacity(num_groups, num_groups * 32))
+                            as Box<dyn ArrayBuilder>,
+                    }
+                } else {
+                    Box::new(StringBuilder::with_capacity(num_groups, num_groups * 32))
+                        as Box<dyn ArrayBuilder>
                 }
-            } else {
-                Box::new(StringBuilder::with_capacity(num_groups, num_groups * 32)) as Box<dyn ArrayBuilder>
-            }
-        })
-        .collect();
+            })
+            .collect();
 
     let mut agg_builders: Vec<(AggType, Box<dyn ArrayBuilder>)> = def
         .aggregations
@@ -300,22 +316,34 @@ pub fn build_projection(
         for (i, value) in key.values.iter().enumerate() {
             match value {
                 GroupKeyValue::Int64(v) => {
-                    if let Some(builder) = group_builders[i].as_any_mut().downcast_mut::<Int64Builder>() {
+                    if let Some(builder) = group_builders[i]
+                        .as_any_mut()
+                        .downcast_mut::<Int64Builder>()
+                    {
                         builder.append_value(*v);
                     }
                 }
                 GroupKeyValue::UInt64(v) => {
-                    if let Some(builder) = group_builders[i].as_any_mut().downcast_mut::<UInt64Builder>() {
+                    if let Some(builder) = group_builders[i]
+                        .as_any_mut()
+                        .downcast_mut::<UInt64Builder>()
+                    {
                         builder.append_value(*v);
                     }
                 }
                 GroupKeyValue::String(v) => {
-                    if let Some(builder) = group_builders[i].as_any_mut().downcast_mut::<StringBuilder>() {
+                    if let Some(builder) = group_builders[i]
+                        .as_any_mut()
+                        .downcast_mut::<StringBuilder>()
+                    {
                         builder.append_value(v);
                     }
                 }
                 GroupKeyValue::Null => {
-                    if let Some(builder) = group_builders[i].as_any_mut().downcast_mut::<StringBuilder>() {
+                    if let Some(builder) = group_builders[i]
+                        .as_any_mut()
+                        .downcast_mut::<StringBuilder>()
+                    {
                         builder.append_null();
                     }
                 }
@@ -361,19 +389,27 @@ trait ArrayBuilder: Send + Sync {
 }
 
 impl ArrayBuilder for Int64Builder {
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 impl ArrayBuilder for UInt64Builder {
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 impl ArrayBuilder for Float64Builder {
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 impl ArrayBuilder for StringBuilder {
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 fn finish_builder(builder: &mut Box<dyn ArrayBuilder>) -> Result<ArrayRef, EngineError> {
@@ -394,9 +430,21 @@ fn finish_builder(builder: &mut Box<dyn ArrayBuilder>) -> Result<ArrayRef, Engin
 
 fn extract_numeric_value(arr: &dyn Array, row: usize) -> f64 {
     match arr.data_type() {
-        DataType::Int64 => arr.as_any().downcast_ref::<Int64Array>().unwrap().value(row) as f64,
-        DataType::UInt64 => arr.as_any().downcast_ref::<UInt64Array>().unwrap().value(row) as f64,
-        DataType::Float64 => arr.as_any().downcast_ref::<Float64Array>().unwrap().value(row),
+        DataType::Int64 => arr
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(row) as f64,
+        DataType::UInt64 => arr
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(row) as f64,
+        DataType::Float64 => arr
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(row),
         _ => 0.0,
     }
 }
@@ -465,7 +513,9 @@ mod tests {
             schema,
             vec![
                 Arc::new(UInt64Array::from(vec![1, 1, 1, 2, 2, 2])),
-                Arc::new(StringArray::from(vec!["click", "view", "click", "click", "view", "click"])),
+                Arc::new(StringArray::from(vec![
+                    "click", "view", "click", "click", "view", "click",
+                ])),
                 Arc::new(Float64Array::from(vec![10.0, 5.0, 15.0, 20.0, 8.0, 25.0])),
             ],
         )

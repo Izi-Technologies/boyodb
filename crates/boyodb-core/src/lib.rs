@@ -6,59 +6,59 @@ pub mod ffi;
 pub mod replication;
 pub mod replication_worker;
 pub use replication::{BundlePayload, BundleSegment};
-pub mod sql;
-pub mod types;
-pub mod planner_distributed;
-pub mod executor_distributed;
-pub mod storage;
-pub mod tiering;
-pub mod vectorized;
-pub mod delta_encoding;
-pub mod mergetree;
-pub mod gorilla;
-pub mod projections;
-pub mod flight;
-pub mod vector;
-pub mod optimizer;
-pub mod streaming;
 pub mod analytics;
-pub mod realtime;
-pub mod operations;
-pub mod external;
-pub mod security;
 pub mod compression;
-pub mod mutations;
-pub mod observability;
-pub mod functions;
+pub mod data_formats;
+pub mod delta_encoding;
 pub mod distributed;
 pub mod execution;
-pub mod data_formats;
-pub mod high_availability;
-pub mod resource_governance;
-pub mod tooling;
-pub mod wal;
+pub mod executor_distributed;
+pub mod external;
+pub mod flight;
+pub mod functions;
+pub mod gorilla;
 pub mod gpu;
+pub mod high_availability;
+pub mod mergetree;
+pub mod mutations;
+pub mod observability;
+pub mod operations;
+pub mod optimizer;
+pub mod planner_distributed;
+pub mod projections;
+pub mod realtime;
+pub mod resource_governance;
+pub mod security;
+pub mod sql;
+pub mod storage;
+pub mod streaming;
+pub mod tiering;
+pub mod tooling;
+pub mod types;
+pub mod vector;
+pub mod vectorized;
+pub mod wal;
 
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
 };
 pub use engine::{
-    apply_computed_columns, apply_window_functions, ComputedValue, CteContext, Db, EngineConfig,
-    EvalContext, evaluate_expr, execute_query_with_ctes, ExplainPlan, HealthStatus, IngestBatch,
-    merge_cte_results, Metrics, QueryExecutionStats, QueryRequest, QueryResponse, TableDescription,
-    validate_identifier, VacuumResult,
+    apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
+    merge_cte_results, validate_identifier, ComputedValue, CteContext, Db, EngineConfig,
+    EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
+    QueryRequest, QueryResponse, TableDescription, VacuumResult,
 };
 pub use replication::{
     BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,
 };
 pub use sql::{
-    parse_sql, parse_expr, parse_select_items_extended, parse_ctes,
-    AuthCommand, CteDefinition, DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand,
-    GrantTargetType, GroupBy, GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinType,
-    LiteralValue, OrderByClause, ParsedQuery, QueryFilter as SqlQueryFilter, ScalarFunction,
-    SelectColumn, SelectExpr, SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame,
-    WindowFrameBound, WindowFrameUnit, WindowFunction, WindowSpec,
+    parse_ctes, parse_expr, parse_select_items_extended, parse_sql, AuthCommand, CteDefinition,
+    DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand, GrantTargetType, GroupBy,
+    GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinType, LiteralValue, OrderByClause,
+    ParsedQuery, QueryFilter as SqlQueryFilter, ScalarFunction, SelectColumn, SelectExpr,
+    SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame, WindowFrameBound,
+    WindowFrameUnit, WindowFunction, WindowSpec,
 };
 pub use types::{BoyodbStatus, OwnedBuffer};
 
@@ -71,12 +71,12 @@ pub use cluster::{
 
 // Real-time & Streaming re-exports (Phase 4)
 pub use realtime::{
-    CdcCapture, CdcCheckpoint, CdcError, CdcEvent, CdcEventType, CdcSourceConfig,
-    CdcSourceType, ConsumerOffsets, DeltaOp, DeltaValue, ExactlyOnceIngestor,
-    IngestionError, IngestionState, IngestionTransaction, IngestRecord, KafkaConsumer,
-    MaterializedColumn, MaterializedView, MaterializedViewDef, OffsetReset, PulsarConsumer,
-    RefreshMode, RowDelta, SecurityProtocol, StreamConsumer, StreamError, StreamMessage,
-    StreamPipeline, StreamProducer, StreamSourceConfig, StreamStage,
+    CdcCapture, CdcCheckpoint, CdcError, CdcEvent, CdcEventType, CdcSourceConfig, CdcSourceType,
+    ConsumerOffsets, DeltaOp, DeltaValue, ExactlyOnceIngestor, IngestRecord, IngestionError,
+    IngestionState, IngestionTransaction, KafkaConsumer, MaterializedColumn, MaterializedView,
+    MaterializedViewDef, OffsetReset, PulsarConsumer, RefreshMode, RowDelta, SecurityProtocol,
+    StreamConsumer, StreamError, StreamMessage, StreamPipeline, StreamProducer, StreamSourceConfig,
+    StreamStage,
 };
 
 // Operations & Production re-exports (Phase 5)
@@ -113,31 +113,31 @@ pub use security::{
 // Advanced Compression re-exports (Phase 8)
 pub use compression::{
     BitPackEncoder, Codec, CodecType, CompressionError, CompressionManager, CompressionStats,
-    DeltaEncoder, DictionaryEncoded, DictionaryEncoder, DoubleDeltaEncoder, Lz4Codec,
-    RleEncoder, ZstdCodec,
+    DeltaEncoder, DictionaryEncoded, DictionaryEncoder, DoubleDeltaEncoder, Lz4Codec, RleEncoder,
+    ZstdCodec,
 };
 
 // Mutations & Specialized Engines re-exports (Phase 9)
 pub use mutations::{
     AggState, ColumnUpdate, DeleteMask, DeleteStats, LightweightDeleteManager, MergeRow,
-    MergeTreeConfig, MergeTreeEngine, MergeTreeMerger, MergeTreeSettings, Mutation,
-    MutationError, MutationExpr, MutationManager, MutationPart, MutationPredicate,
-    MutationProgress, MutationState, MutationType, MutationValue,
+    MergeTreeConfig, MergeTreeEngine, MergeTreeMerger, MergeTreeSettings, Mutation, MutationError,
+    MutationExpr, MutationManager, MutationPart, MutationPredicate, MutationProgress,
+    MutationState, MutationType, MutationValue,
 };
 
 // Observability re-exports (Phase 10)
 pub use observability::{
-    AsyncMetric, CachedResult, ErrorEntry, HistogramBucket, MetricDefinition,
-    ObservabilityManager, PartEventType, PartLogEntry, ProcessEntry, PrometheusExporter,
-    PrometheusHistogram, PrometheusMetric, PrometheusMetricType, QueryCache, QueryCacheConfig,
-    QueryCacheStats, QueryKind, QueryLogEntry, QueryType, SystemTable, SystemTablesManager,
+    AsyncMetric, CachedResult, ErrorEntry, HistogramBucket, MetricDefinition, ObservabilityManager,
+    PartEventType, PartLogEntry, ProcessEntry, PrometheusExporter, PrometheusHistogram,
+    PrometheusMetric, PrometheusMetricType, QueryCache, QueryCacheConfig, QueryCacheStats,
+    QueryKind, QueryLogEntry, QueryType, SystemTable, SystemTablesManager,
 };
 
 // Advanced Functions re-exports (Phase 11)
 pub use functions::{
     ArrayFunctions, FunctionError, FunctionResult, GeoFunctions, InvertedIndex, IpFunctions,
-    JsonFunctions, MapFunctions, NgramTokenizer, Posting, Sampler, SamplingMethod,
-    SimpleTokenizer, Token, Tokenizer, UrlFunctions, Value as FunctionValue,
+    JsonFunctions, MapFunctions, NgramTokenizer, Posting, Sampler, SamplingMethod, SimpleTokenizer,
+    Token, Tokenizer, UrlFunctions, Value as FunctionValue,
 };
 
 // Distributed DDL & Global Indexes re-exports (Phase 12)
@@ -160,8 +160,8 @@ pub use execution::{
 // Data Formats re-exports (Phase 14)
 pub use data_formats::{
     AddFile, ColumnChunkMeta, ColumnStatsMeta, CommitInfo, DataFileInfo, DataFileStats,
-    DataFormatError, DataLakeField, DataLakeOperation, DataLakeSchema, DataLakeTable,
-    DataLakeType, IsolationLevel, MergeAction, MergeActionType, NativeOrcReader, NativeOrcWriter,
+    DataFormatError, DataLakeField, DataLakeOperation, DataLakeSchema, DataLakeTable, DataLakeType,
+    IsolationLevel, MergeAction, MergeActionType, NativeOrcReader, NativeOrcWriter,
     NativeParquetReader, NativeParquetWriter, OptimizeResult, OrcColumnData, OrcColumnMeta,
     OrcColumnStats, OrcCompression, OrcField, OrcFileMeta, OrcPredicate, OrcReadOpts, OrcRowBatch,
     OrcSchema, OrcStripeMeta, OrcType, OrcValue, OrcWriteOpts, ParquetColumnData,
@@ -176,17 +176,16 @@ pub use data_formats::{
 
 // High Availability re-exports (Phase 15)
 pub use high_availability::{
-    AppendEntriesRequest, AppendEntriesResponse, ClusterHaStatus,
-    ElectionState as HaElectionState, FailoverEvent, FailoverEventType, FailoverManager,
-    HaConfig, HaError, HaManager, HealthCheckResult, HealthMonitor, LeaderElection,
-    LoadBalanceStrategy, LogEntry, LogEntryType, PendingWrite, QuorumWriter, ReadPreference,
-    ReplicaInfo, ReplicaRole, ReplicaSelector, ReplicaState, VoteRequest, VoteResponse,
-    WriteAck, WriteConsistency,
+    AppendEntriesRequest, AppendEntriesResponse, ClusterHaStatus, ElectionState as HaElectionState,
+    FailoverEvent, FailoverEventType, FailoverManager, HaConfig, HaError, HaManager,
+    HealthCheckResult, HealthMonitor, LeaderElection, LoadBalanceStrategy, LogEntry, LogEntryType,
+    PendingWrite, QuorumWriter, ReadPreference, ReplicaInfo, ReplicaRole, ReplicaSelector,
+    ReplicaState, VoteRequest, VoteResponse, WriteAck, WriteConsistency,
 };
 
 // Resource Governance re-exports (Phase 16)
 pub use resource_governance::{
-    IoRequest, IoScheduler, IoStats, IoType, IoPriority, MemoryAllocation, MemoryError,
+    IoPriority, IoRequest, IoScheduler, IoStats, IoType, MemoryAllocation, MemoryError,
     MemoryManager, MemoryPool, MemoryPoolStats, QueryAdmission, QueryContext, QueryThrottler,
     QuotaError, RateLimiter, ResourceError, ResourceGovernor, ResourceGovernorConfig,
     ResourceGovernorStats, ResourceQuotaDef, ResourceTracker, ResourceUsageInfo, ThrottlerStats,
@@ -197,11 +196,11 @@ pub use resource_governance::{
 // Tooling re-exports (Phase 17)
 pub use tooling::{
     BackupConfig as ToolingBackupConfig, BenchmarkConfig, BenchmarkResult, CliCommand,
-    ColumnDef as ToolingColumnDef, ColumnTransform, ColumnType, CommandParser,
-    CompressionType, ConversionComplexity, CsvOptions, DataExporter, DataFormat, DataImporter,
-    ErrorHandling, ExportConfig, ExportResult, FormatConverter, FormatOptions, ImportConfig,
-    ImportError, ImportResult, InferenceSettings, JsonOptions, LocalEngine, LocalTable,
-    MigrateDirection, Migration, MigrationManager, ParquetCompression as ToolingParquetCompression,
+    ColumnDef as ToolingColumnDef, ColumnTransform, ColumnType, CommandParser, CompressionType,
+    ConversionComplexity, CsvOptions, DataExporter, DataFormat, DataImporter, ErrorHandling,
+    ExportConfig, ExportResult, FormatConverter, FormatOptions, ImportConfig, ImportError,
+    ImportResult, InferenceSettings, JsonOptions, LocalEngine, LocalTable, MigrateDirection,
+    Migration, MigrationManager, ParquetCompression as ToolingParquetCompression,
     ParquetOptions as ToolingParquetOptions, QueryResult as ToolingQueryResult,
     RestoreConfig as ToolingRestoreConfig, SchemaInferrer, TableSchema as ToolingTableSchema,
     ToolingError, ToolingResult, TypeCoercion,

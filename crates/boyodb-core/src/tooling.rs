@@ -7,11 +7,11 @@
 //! - Schema inspection and migration tools
 //! - Bulk data operations
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -119,18 +119,28 @@ impl DataFormat {
 
     /// Check if format is text-based
     pub fn is_text(&self) -> bool {
-        matches!(self,
-            DataFormat::Csv | DataFormat::Tsv | DataFormat::JsonLines |
-            DataFormat::JsonArray | DataFormat::SqlInsert | DataFormat::Pretty |
-            DataFormat::Vertical | DataFormat::Raw
+        matches!(
+            self,
+            DataFormat::Csv
+                | DataFormat::Tsv
+                | DataFormat::JsonLines
+                | DataFormat::JsonArray
+                | DataFormat::SqlInsert
+                | DataFormat::Pretty
+                | DataFormat::Vertical
+                | DataFormat::Raw
         )
     }
 
     /// Check if format supports streaming
     pub fn supports_streaming(&self) -> bool {
-        matches!(self,
-            DataFormat::Csv | DataFormat::Tsv | DataFormat::JsonLines |
-            DataFormat::Native | DataFormat::Raw
+        matches!(
+            self,
+            DataFormat::Csv
+                | DataFormat::Tsv
+                | DataFormat::JsonLines
+                | DataFormat::Native
+                | DataFormat::Raw
         )
     }
 }
@@ -750,7 +760,10 @@ impl SchemaInferrer {
 
         // Try integer
         if let Ok(_) = trimmed.parse::<i64>() {
-            let abs = trimmed.trim_start_matches('-').parse::<u64>().unwrap_or(u64::MAX);
+            let abs = trimmed
+                .trim_start_matches('-')
+                .parse::<u64>()
+                .unwrap_or(u64::MAX);
             if abs <= i8::MAX as u64 {
                 return ColumnType::Int8;
             } else if abs <= i16::MAX as u64 {
@@ -768,7 +781,10 @@ impl SchemaInferrer {
         }
 
         // Try date (YYYY-MM-DD)
-        if trimmed.len() == 10 && trimmed.chars().nth(4) == Some('-') && trimmed.chars().nth(7) == Some('-') {
+        if trimmed.len() == 10
+            && trimmed.chars().nth(4) == Some('-')
+            && trimmed.chars().nth(7) == Some('-')
+        {
             return ColumnType::Date;
         }
 
@@ -822,7 +838,10 @@ impl SchemaInferrer {
             TypeCoercion::Strict => {
                 // All types must match
                 let first = &types[0];
-                if types.iter().all(|t| std::mem::discriminant(t) == std::mem::discriminant(first)) {
+                if types
+                    .iter()
+                    .all(|t| std::mem::discriminant(t) == std::mem::discriminant(first))
+                {
                     first.clone()
                 } else {
                     ColumnType::String
@@ -831,9 +850,18 @@ impl SchemaInferrer {
             TypeCoercion::Loose => {
                 // Use widest numeric type
                 let has_string = types.iter().any(|t| matches!(t, ColumnType::String));
-                let has_float = types.iter().any(|t| matches!(t, ColumnType::Float32 | ColumnType::Float64));
-                let has_int = types.iter().any(|t| matches!(t,
-                    ColumnType::Int8 | ColumnType::Int16 | ColumnType::Int32 | ColumnType::Int64));
+                let has_float = types
+                    .iter()
+                    .any(|t| matches!(t, ColumnType::Float32 | ColumnType::Float64));
+                let has_int = types.iter().any(|t| {
+                    matches!(
+                        t,
+                        ColumnType::Int8
+                            | ColumnType::Int16
+                            | ColumnType::Int32
+                            | ColumnType::Int64
+                    )
+                });
 
                 if has_string {
                     ColumnType::String
@@ -871,15 +899,21 @@ impl DataImporter {
     /// Validate configuration
     pub fn validate(&self) -> ToolingResult<()> {
         if self.config.source.as_os_str().is_empty() {
-            return Err(ToolingError::Validation("Source path is required".to_string()));
+            return Err(ToolingError::Validation(
+                "Source path is required".to_string(),
+            ));
         }
 
         if self.config.table.is_empty() {
-            return Err(ToolingError::Validation("Table name is required".to_string()));
+            return Err(ToolingError::Validation(
+                "Table name is required".to_string(),
+            ));
         }
 
         if self.config.batch_size == 0 {
-            return Err(ToolingError::Validation("Batch size must be > 0".to_string()));
+            return Err(ToolingError::Validation(
+                "Batch size must be > 0".to_string(),
+            ));
         }
 
         Ok(())
@@ -978,7 +1012,9 @@ impl DataExporter {
         }
 
         if self.config.target.as_os_str().is_empty() {
-            return Err(ToolingError::Validation("Target path is required".to_string()));
+            return Err(ToolingError::Validation(
+                "Target path is required".to_string(),
+            ));
         }
 
         Ok(())
@@ -990,9 +1026,13 @@ impl DataExporter {
             .iter()
             .map(|v| {
                 if v.contains(options.delimiter) || v.contains(options.quote) || v.contains('\n') {
-                    format!("{}{}{}",
+                    format!(
+                        "{}{}{}",
                         options.quote,
-                        v.replace(options.quote, &format!("{}{}", options.quote, options.quote)),
+                        v.replace(
+                            options.quote,
+                            &format!("{}{}", options.quote, options.quote)
+                        ),
                         options.quote
                     )
                 } else {
@@ -1041,7 +1081,12 @@ impl DataExporter {
             return "null".to_string();
         }
         // String with escaping
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"))
+        format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        )
     }
 
     /// Get current result
@@ -1089,12 +1134,10 @@ impl FormatConverter {
             (DataFormat::Csv, DataFormat::Tsv) | (DataFormat::Tsv, DataFormat::Csv) => {
                 ConversionComplexity::Trivial
             }
-            (DataFormat::JsonLines, DataFormat::JsonArray) |
-            (DataFormat::JsonArray, DataFormat::JsonLines) => {
-                ConversionComplexity::Simple
-            }
-            (DataFormat::Csv | DataFormat::Tsv, DataFormat::Parquet | DataFormat::Orc) |
-            (DataFormat::Parquet | DataFormat::Orc, DataFormat::Csv | DataFormat::Tsv) => {
+            (DataFormat::JsonLines, DataFormat::JsonArray)
+            | (DataFormat::JsonArray, DataFormat::JsonLines) => ConversionComplexity::Simple,
+            (DataFormat::Csv | DataFormat::Tsv, DataFormat::Parquet | DataFormat::Orc)
+            | (DataFormat::Parquet | DataFormat::Orc, DataFormat::Csv | DataFormat::Tsv) => {
                 ConversionComplexity::Complex
             }
             _ => ConversionComplexity::Moderate,
@@ -1189,7 +1232,12 @@ impl LocalEngine {
     }
 
     /// Register a file as a table
-    pub fn register_file(&self, name: &str, path: impl AsRef<Path>, format: DataFormat) -> ToolingResult<()> {
+    pub fn register_file(
+        &self,
+        name: &str,
+        path: impl AsRef<Path>,
+        format: DataFormat,
+    ) -> ToolingResult<()> {
         let table = LocalTable {
             name: name.to_string(),
             path: path.as_ref().to_path_buf(),
@@ -1283,7 +1331,9 @@ impl QueryResult {
         let mut output = String::new();
 
         // Header
-        let header: Vec<String> = self.columns.iter()
+        let header: Vec<String> = self
+            .columns
+            .iter()
             .zip(&widths)
             .map(|(c, w)| format!("{:width$}", c, width = *w))
             .collect();
@@ -1297,7 +1347,8 @@ impl QueryResult {
 
         // Rows
         for row in &self.rows {
-            let formatted: Vec<String> = row.iter()
+            let formatted: Vec<String> = row
+                .iter()
                 .zip(&widths)
                 .map(|(v, w)| format!("{:width$}", v, width = *w))
                 .collect();
@@ -1570,7 +1621,8 @@ impl BenchmarkResult {
         if !sorted.is_empty() {
             self.median_ms = sorted[sorted.len() / 2];
             self.p95_ms = sorted[(sorted.len() as f64 * 0.95) as usize];
-            self.p99_ms = sorted[(sorted.len() as f64 * 0.99).min(sorted.len() as f64 - 1.0) as usize];
+            self.p99_ms =
+                sorted[(sorted.len() as f64 * 0.99).min(sorted.len() as f64 - 1.0) as usize];
         }
     }
 
@@ -1615,7 +1667,11 @@ pub enum CliCommand {
     /// Export data
     Export(ExportConfig),
     /// Convert format
-    Convert { source: PathBuf, target: PathBuf, format: DataFormat },
+    Convert {
+        source: PathBuf,
+        target: PathBuf,
+        format: DataFormat,
+    },
     /// Describe table
     Describe { table: String },
     /// List tables
@@ -1629,7 +1685,10 @@ pub enum CliCommand {
     /// Restore database
     Restore(RestoreConfig),
     /// Run migrations
-    Migrate { direction: MigrateDirection, target: Option<u64> },
+    Migrate {
+        direction: MigrateDirection,
+        target: Option<u64>,
+    },
     /// Help
     Help { topic: Option<String> },
     /// Exit
@@ -1657,13 +1716,18 @@ impl CommandParser {
 
         // Check for keywords
         let upper = trimmed.to_uppercase();
-        if upper.starts_with("SELECT") || upper.starts_with("WITH") ||
-           upper.starts_with("INSERT") || upper.starts_with("UPDATE") ||
-           upper.starts_with("DELETE") || upper.starts_with("CREATE") ||
-           upper.starts_with("DROP") || upper.starts_with("ALTER") {
+        if upper.starts_with("SELECT")
+            || upper.starts_with("WITH")
+            || upper.starts_with("INSERT")
+            || upper.starts_with("UPDATE")
+            || upper.starts_with("DELETE")
+            || upper.starts_with("CREATE")
+            || upper.starts_with("DROP")
+            || upper.starts_with("ALTER")
+        {
             return Ok(CliCommand::Query {
                 sql: trimmed.to_string(),
-                format: DataFormat::Pretty
+                format: DataFormat::Pretty,
             });
         }
 
@@ -1703,23 +1767,30 @@ impl CommandParser {
             "\\d" | "\\dt" => Ok(CliCommand::ListTables),
             "\\d+" => {
                 if parts.len() > 1 {
-                    Ok(CliCommand::Describe { table: parts[1].to_string() })
+                    Ok(CliCommand::Describe {
+                        table: parts[1].to_string(),
+                    })
                 } else {
                     Ok(CliCommand::ListTables)
                 }
             }
             "\\s" => {
                 if parts.len() > 1 {
-                    Ok(CliCommand::ShowSchema { table: parts[1].to_string() })
+                    Ok(CliCommand::ShowSchema {
+                        table: parts[1].to_string(),
+                    })
                 } else {
                     Err(ToolingError::Parse("\\s requires table name".to_string()))
                 }
             }
             "\\q" | "\\quit" | "\\exit" => Ok(CliCommand::Exit),
             "\\?" | "\\h" | "\\help" => Ok(CliCommand::Help {
-                topic: parts.get(1).map(|s| s.to_string())
+                topic: parts.get(1).map(|s| s.to_string()),
             }),
-            _ => Err(ToolingError::Parse(format!("Unknown meta-command: {}", parts[0]))),
+            _ => Err(ToolingError::Parse(format!(
+                "Unknown meta-command: {}",
+                parts[0]
+            ))),
         }
     }
 }
@@ -1742,7 +1813,10 @@ mod tests {
     #[test]
     fn test_data_format_from_extension() {
         assert_eq!(DataFormat::from_extension("csv"), Some(DataFormat::Csv));
-        assert_eq!(DataFormat::from_extension("parquet"), Some(DataFormat::Parquet));
+        assert_eq!(
+            DataFormat::from_extension("parquet"),
+            Some(DataFormat::Parquet)
+        );
         assert_eq!(DataFormat::from_extension("pq"), Some(DataFormat::Parquet));
         assert_eq!(DataFormat::from_extension("unknown"), None);
     }
@@ -1836,9 +1910,7 @@ mod tests {
     fn test_query_result_vertical() {
         let result = QueryResult {
             columns: vec!["id".to_string(), "name".to_string()],
-            rows: vec![
-                vec!["1".to_string(), "Alice".to_string()],
-            ],
+            rows: vec![vec!["1".to_string(), "Alice".to_string()]],
             affected_rows: 0,
             execution_time_ms: 10,
         };
@@ -1853,7 +1925,9 @@ mod tests {
     fn test_local_engine() {
         let engine = LocalEngine::new("/tmp");
 
-        engine.register_file("test", "/tmp/test.csv", DataFormat::Csv).unwrap();
+        engine
+            .register_file("test", "/tmp/test.csv", DataFormat::Csv)
+            .unwrap();
 
         let tables = engine.list_tables();
         assert_eq!(tables.len(), 1);
@@ -1966,7 +2040,10 @@ mod tests {
         result.duration_ms = 10_000;
 
         assert_eq!(result.rows_per_second(), 100_000.0);
-        assert_eq!(result.mb_per_second(), 100_000_000.0 / (1024.0 * 1024.0) / 10.0);
+        assert_eq!(
+            result.mb_per_second(),
+            100_000_000.0 / (1024.0 * 1024.0) / 10.0
+        );
     }
 
     #[test]

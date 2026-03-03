@@ -1,52 +1,51 @@
 use crate::replication::{
     compute_bundle_plan_hash, BundlePayload, BundlePlan, BundlePlanner, BundleRequest,
-    BundleSegment, ColumnStats, IndexMeta, IndexState, Manifest, ManifestEntry, PrimitiveValue,
-    SegmentTier, TableMeta,
+    BundleSegment, IndexMeta, IndexState, Manifest, ManifestEntry, SegmentTier, TableMeta,
 };
-use crate::wal::Wal;
-use crate::sql::SqlValue;
 use crate::sql::SelectExpr;
+use crate::sql::SqlValue;
+use crate::wal::Wal;
+use arrow::compute::kernels::aggregate;
+use arrow::compute::kernels::boolean::and;
+use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
+use arrow::compute::{filter as arrow_filter, like, nlike};
 use arrow_array::builder::{
-    BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder,
-    TimestampMicrosecondBuilder, UInt64Builder,
+    BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, UInt64Builder,
 };
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, Scalar, StringArray,
-    TimestampMicrosecondArray, UInt64Array, Int8Array, Int16Array, Int32Array,
-    UInt8Array, UInt16Array, UInt32Array, Float32Array, Float64Array,
-    cast::AsArray,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    Int8Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt8Array,
 };
-use arrow::compute::kernels::aggregate;
-use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
-use arrow::compute::kernels::boolean::{and, or, not};
-use arrow::compute::{filter as arrow_filter, like, nlike};
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use bloomfilter::Bloom;
 use crc32fast::Hasher as Crc32Hasher;
+use hyperloglogplus::HyperLogLog;
 use lru::LruCache;
+use lz4_flex::{
+    compress_prepend_size as lz4_compress, decompress_size_prepended as lz4_decompress,
+};
 use parking_lot::Mutex as ParkingMutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use snap::{read::FrameDecoder as SnappyDecoder, write::FrameEncoder as SnappyEncoder};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Cursor, Write, ErrorKind};
+use std::hash::{Hash, Hasher};
+use std::io::{BufWriter, Cursor, ErrorKind, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tempfile::TempDir;
 #[cfg(test)]
 use tempfile::tempdir;
+use tempfile::TempDir;
 use thiserror::Error;
 use zstd::stream::{decode_all as zstd_decode_all, encode_all as zstd_encode_all};
-use lz4_flex::{compress_prepend_size as lz4_compress, decompress_size_prepended as lz4_decompress};
-use snap::{read::FrameDecoder as SnappyDecoder, write::FrameEncoder as SnappyEncoder};
-use hyperloglogplus::{HyperLogLog, HyperLogLogPlus};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -83,7 +82,9 @@ const MAX_IDENTIFIER_LEN: usize = 128;
 /// - Must not be a reserved keyword
 pub fn validate_identifier(name: &str, kind: &str) -> Result<(), EngineError> {
     if name.is_empty() {
-        return Err(EngineError::InvalidArgument(format!("{kind} name cannot be empty")));
+        return Err(EngineError::InvalidArgument(format!(
+            "{kind} name cannot be empty"
+        )));
     }
     if name.len() > MAX_IDENTIFIER_LEN {
         return Err(EngineError::InvalidArgument(format!(
@@ -237,12 +238,12 @@ impl EngineConfig {
             s3_endpoint: None,
             s3_access_key: None,
             s3_secret_key: None,
-            auto_compact_interval_secs: 60,             // Check every minute
-            max_concurrent_compactions: 2,              // Limit to 2 concurrent compactions
-            compaction_cooldown_secs: 30,               // 30s cooldown per table
-            tier_warm_after_millis: 3_600_000,          // 1h
-            tier_cold_after_millis: 86_400_000,         // 24h
-            tier_hot_compression: Some("lz4".to_string()),   // LZ4 for hot tier (fast)
+            auto_compact_interval_secs: 60,     // Check every minute
+            max_concurrent_compactions: 2,      // Limit to 2 concurrent compactions
+            compaction_cooldown_secs: 30,       // 30s cooldown per table
+            tier_warm_after_millis: 3_600_000,  // 1h
+            tier_cold_after_millis: 86_400_000, // 24h
+            tier_hot_compression: Some("lz4".to_string()), // LZ4 for hot tier (fast)
             tier_warm_compression: Some("zstd".to_string()), // ZSTD for warm tier (balanced)
             tier_cold_compression: Some("zstd".to_string()), // ZSTD for cold tier (best ratio)
             maintenance_interval_millis: 0,
@@ -256,11 +257,11 @@ impl EngineConfig {
             cache_cold_segments: false,
             memtable_max_bytes: 0,
             memtable_max_entries: 0,
-            query_cache_size: 10_000,  // 10K queries
+            query_cache_size: 10_000,             // 10K queries
             query_cache_bytes: 256 * 1024 * 1024, // 256MB default query cache
-            query_cache_ttl_secs: 300, // 5 minutes
-            plan_cache_size: 10_000,   // 10K plans
-            plan_cache_ttl_secs: 300,  // 5 minutes
+            query_cache_ttl_secs: 300,            // 5 minutes
+            plan_cache_size: 10_000,              // 10K plans
+            plan_cache_ttl_secs: 300,             // 5 minutes
             index_granularity_rows: 0,
             join_max_bytes: 200 * 1024 * 1024,
             join_partition_bytes: 64 * 1024 * 1024,
@@ -583,13 +584,12 @@ fn normalize_sql_for_cache(sql: &str) -> String {
 fn normalize_keyword(word: &str) -> String {
     let upper = word.to_uppercase();
     match upper.as_str() {
-        "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "NOT" | "IN" | "IS" | "NULL"
-        | "ORDER" | "BY" | "ASC" | "DESC" | "LIMIT" | "OFFSET" | "JOIN" | "LEFT"
-        | "RIGHT" | "INNER" | "OUTER" | "ON" | "AS" | "GROUP" | "HAVING" | "UNION"
-        | "ALL" | "DISTINCT" | "LIKE" | "BETWEEN" | "CASE" | "WHEN" | "THEN"
-        | "ELSE" | "END" | "INSERT" | "INTO" | "VALUES" | "UPDATE" | "SET"
-        | "DELETE" | "CREATE" | "TABLE" | "INDEX" | "DROP" | "ALTER" | "WITH"
-        | "SUM" | "COUNT" | "AVG" | "MIN" | "MAX" | "TRUE" | "FALSE" => upper,
+        "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "NOT" | "IN" | "IS" | "NULL" | "ORDER"
+        | "BY" | "ASC" | "DESC" | "LIMIT" | "OFFSET" | "JOIN" | "LEFT" | "RIGHT" | "INNER"
+        | "OUTER" | "ON" | "AS" | "GROUP" | "HAVING" | "UNION" | "ALL" | "DISTINCT" | "LIKE"
+        | "BETWEEN" | "CASE" | "WHEN" | "THEN" | "ELSE" | "END" | "INSERT" | "INTO" | "VALUES"
+        | "UPDATE" | "SET" | "DELETE" | "CREATE" | "TABLE" | "INDEX" | "DROP" | "ALTER"
+        | "WITH" | "SUM" | "COUNT" | "AVG" | "MIN" | "MAX" | "TRUE" | "FALSE" => upper,
         _ => word.to_string(), // Keep identifiers as-is
     }
 }
@@ -769,7 +769,14 @@ impl QueryCache {
         None
     }
 
-    fn insert(&mut self, sql: &str, response: QueryResponse, manifest_version: u64, database: &str, table: &str) {
+    fn insert(
+        &mut self,
+        sql: &str,
+        response: QueryResponse,
+        manifest_version: u64,
+        database: &str,
+        table: &str,
+    ) {
         if self.max_bytes == 0 {
             return;
         }
@@ -802,7 +809,9 @@ impl QueryCache {
 
     /// Invalidate only entries for a specific table (granular invalidation)
     fn invalidate_table(&mut self, database: &str, table: &str) {
-        let keys_to_remove: Vec<(u64, u64)> = self.lru.iter()
+        let keys_to_remove: Vec<(u64, u64)> = self
+            .lru
+            .iter()
             .filter(|(_, entry)| entry.database == database && entry.table == table)
             .map(|(key, entry)| (*key, entry.bytes))
             .collect();
@@ -871,9 +880,10 @@ impl PartitionWriter {
 
     fn write(&mut self, batch: &RecordBatch) -> Result<(), EngineError> {
         if self.writer.is_none() {
-            let file = self.file.take().ok_or_else(|| {
-                EngineError::Internal("partition writer file missing".into())
-            })?;
+            let file = self
+                .file
+                .take()
+                .ok_or_else(|| EngineError::Internal("partition writer file missing".into()))?;
             let writer = StreamWriter::try_new(BufWriter::new(file), batch.schema().as_ref())
                 .map_err(|e| EngineError::Internal(format!("IPC writer error: {e}")))?;
             self.writer = Some(writer);
@@ -928,26 +938,35 @@ impl ManifestIndex {
         if entries.len() < 1000 {
             let mut index = ManifestIndex::new();
             for (i, entry) in entries.iter().enumerate() {
-                let db = if entry.database.is_empty() { "default" } else { &entry.database };
-                let table = if entry.table.is_empty() { "default" } else { &entry.table };
+                let db = if entry.database.is_empty() {
+                    "default"
+                } else {
+                    &entry.database
+                };
+                let table = if entry.table.is_empty() {
+                    "default"
+                } else {
+                    &entry.table
+                };
                 let table_key = (db.to_string(), table.to_string());
 
-                index.by_table
-                    .entry(table_key.clone())
-                    .or_default()
-                    .push(i);
+                index.by_table.entry(table_key.clone()).or_default().push(i);
                 index.segment_ids.insert(entry.segment_id.clone());
 
                 // Build time partition index
                 if let Some(event_time) = entry.event_time_min {
                     let time_bucket = event_time / TIME_PARTITION_MICROS;
-                    index.by_time_partition
+                    index
+                        .by_time_partition
                         .entry((db.to_string(), table.to_string(), time_bucket))
                         .or_default()
                         .push(i);
 
                     // Update table time range
-                    let range = index.table_time_ranges.entry(table_key).or_insert((u64::MAX, 0));
+                    let range = index
+                        .table_time_ranges
+                        .entry(table_key)
+                        .or_insert((u64::MAX, 0));
                     range.0 = range.0.min(event_time);
                     if let Some(max_time) = entry.event_time_max {
                         range.1 = range.1.max(max_time);
@@ -961,10 +980,8 @@ impl ManifestIndex {
         use std::collections::HashMap;
 
         // Build segment_ids set in parallel
-        let segment_ids: std::collections::HashSet<String> = entries
-            .par_iter()
-            .map(|e| e.segment_id.clone())
-            .collect();
+        let segment_ids: std::collections::HashSet<String> =
+            entries.par_iter().map(|e| e.segment_id.clone()).collect();
 
         // Build table index in parallel chunks, then merge
         let chunk_size = (entries.len() / rayon::current_num_threads()).max(1000);
@@ -985,8 +1002,16 @@ impl ManifestIndex {
                 let mut time_ranges: HashMap<(String, String), (u64, u64)> = HashMap::new();
 
                 for (i, entry) in chunk.iter().enumerate() {
-                    let db = if entry.database.is_empty() { "default" } else { &entry.database };
-                    let table = if entry.table.is_empty() { "default" } else { &entry.table };
+                    let db = if entry.database.is_empty() {
+                        "default"
+                    } else {
+                        &entry.database
+                    };
+                    let table = if entry.table.is_empty() {
+                        "default"
+                    } else {
+                        &entry.table
+                    };
                     let idx = base_idx + i;
                     let table_key = (db.to_string(), table.to_string());
 
@@ -994,7 +1019,8 @@ impl ManifestIndex {
 
                     if let Some(event_time) = entry.event_time_min {
                         let time_bucket = event_time / TIME_PARTITION_MICROS;
-                        by_time.entry((db.to_string(), table.to_string(), time_bucket))
+                        by_time
+                            .entry((db.to_string(), table.to_string(), time_bucket))
                             .or_default()
                             .push(idx);
 
@@ -1006,7 +1032,11 @@ impl ManifestIndex {
                     }
                 }
 
-                PartialIndex { by_table, by_time, time_ranges }
+                PartialIndex {
+                    by_table,
+                    by_time,
+                    time_ranges,
+                }
             })
             .collect();
 
@@ -1047,8 +1077,16 @@ impl ManifestIndex {
 
     /// Add a new entry to the index
     fn add_entry(&mut self, index: usize, entry: &ManifestEntry) {
-        let db = if entry.database.is_empty() { "default" } else { &entry.database };
-        let table = if entry.table.is_empty() { "default" } else { &entry.table };
+        let db = if entry.database.is_empty() {
+            "default"
+        } else {
+            &entry.database
+        };
+        let table = if entry.table.is_empty() {
+            "default"
+        } else {
+            &entry.table
+        };
         let table_key = (db.to_string(), table.to_string());
 
         self.by_table
@@ -1066,7 +1104,10 @@ impl ManifestIndex {
                 .push(index);
 
             // Update table time range
-            let range = self.table_time_ranges.entry(table_key).or_insert((u64::MAX, 0));
+            let range = self
+                .table_time_ranges
+                .entry(table_key)
+                .or_insert((u64::MAX, 0));
             range.0 = range.0.min(event_time);
             if let Some(max_time) = entry.event_time_max {
                 range.1 = range.1.max(max_time);
@@ -1082,7 +1123,8 @@ impl ManifestIndex {
 
     /// Get indices of entries for a table (O(1) lookup, then iterate)
     fn get_table_entries(&self, database: &str, table: &str) -> Option<&Vec<usize>> {
-        self.by_table.get(&(database.to_string(), table.to_string()))
+        self.by_table
+            .get(&(database.to_string(), table.to_string()))
     }
 }
 
@@ -1378,13 +1420,18 @@ impl ShardedMemtables {
         (hasher.finish() as usize) % MEMTABLE_SHARDS
     }
 
-    fn lock_shard(&self, key: &MemtableKey) -> parking_lot::MutexGuard<'_, HashMap<MemtableKey, Memtable>> {
+    fn lock_shard(
+        &self,
+        key: &MemtableKey,
+    ) -> parking_lot::MutexGuard<'_, HashMap<MemtableKey, Memtable>> {
         let idx = self.get_shard_index(key);
         self.shards[idx].lock()
     }
 
     /// Iterate over all shards (for flush operations)
-    fn iter_all_shards(&self) -> impl Iterator<Item = parking_lot::MutexGuard<'_, HashMap<MemtableKey, Memtable>>> {
+    fn iter_all_shards(
+        &self,
+    ) -> impl Iterator<Item = parking_lot::MutexGuard<'_, HashMap<MemtableKey, Memtable>>> {
         self.shards.iter().map(|s| s.lock())
     }
 
@@ -1443,11 +1490,7 @@ impl Drop for Db {
         }
 
         // Persist manifest if it has changed since last persistence
-        let current_version = self
-            .manifest
-            .read()
-            .map(|m| m.version)
-            .unwrap_or(0);
+        let current_version = self.manifest.read().map(|m| m.version).unwrap_or(0);
         let last_persisted = self.last_persisted_version.load(Ordering::Acquire);
         if current_version > last_persisted {
             if let Ok(manifest) = self.manifest.read() {
@@ -1722,11 +1765,16 @@ impl Db {
     /// Open a database for testing (no tokio runtime required)
     #[cfg(test)]
     pub fn open_for_test(cfg: EngineConfig) -> Result<Self, EngineError> {
-        let storage = std::sync::Arc::new(crate::storage::TieredStorage::new_local_only(cfg.segments_dir.clone()));
+        let storage = std::sync::Arc::new(crate::storage::TieredStorage::new_local_only(
+            cfg.segments_dir.clone(),
+        ));
         Self::open_with_storage(cfg, storage)
     }
 
-    pub fn open_with_storage(cfg: EngineConfig, storage: std::sync::Arc<crate::storage::TieredStorage>) -> Result<Self, EngineError> {
+    pub fn open_with_storage(
+        cfg: EngineConfig,
+        storage: std::sync::Arc<crate::storage::TieredStorage>,
+    ) -> Result<Self, EngineError> {
         fs::create_dir_all(&cfg.data_dir)
             .map_err(|e| EngineError::Internal(format!("failed to create data dir: {e}")))?;
         fs::create_dir_all(&cfg.wal_dir)
@@ -1808,7 +1856,9 @@ impl Db {
             schema_cache: ParkingMutex::new(LruCache::new(
                 NonZeroUsize::new(cfg.schema_cache_entries.max(1)).unwrap(),
             )),
-            recent_bundle_hashes: ParkingMutex::new(LruCache::new(NonZeroUsize::new(1024).unwrap())),
+            recent_bundle_hashes: ParkingMutex::new(LruCache::new(
+                NonZeroUsize::new(1024).unwrap(),
+            )),
             memtables: ShardedMemtables::new(),
             memtable_index: ParkingMutex::new(HashMap::new()),
             metrics: Metrics::default(),
@@ -1887,7 +1937,10 @@ impl Db {
         let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
 
         // Apply on-ingest deduplication if configured
-        let deduped_payload = if let Some(ref dedup_config) = existing_table.as_ref().and_then(|t| t.deduplication.clone()) {
+        let deduped_payload = if let Some(ref dedup_config) = existing_table
+            .as_ref()
+            .and_then(|t| t.deduplication.clone())
+        {
             use crate::sql::DeduplicationMode;
             match dedup_config.mode {
                 DeduplicationMode::OnIngest | DeduplicationMode::Both => {
@@ -1900,8 +1953,9 @@ impl Db {
                         let merged = if batches.len() == 1 {
                             batches.into_iter().next().unwrap()
                         } else {
-                            arrow_select::concat::concat_batches(&schema, &batches)
-                                .map_err(|e| EngineError::Internal(format!("concat batches for dedup: {e}")))?
+                            arrow_select::concat::concat_batches(&schema, &batches).map_err(
+                                |e| EngineError::Internal(format!("concat batches for dedup: {e}")),
+                            )?
                         };
                         let deduped = self.deduplicate_batch(
                             &merged,
@@ -1942,8 +1996,9 @@ impl Db {
                 .and_then(|t| t.compression.clone())
                 .or_else(|| self.cfg.tier_hot_compression.clone()),
         )?;
-        let encodings =
-            column_encodings_from_schema_json(existing_table.as_ref().and_then(|t| t.schema_json.as_ref()))?;
+        let encodings = column_encodings_from_schema_json(
+            existing_table.as_ref().and_then(|t| t.schema_json.as_ref()),
+        )?;
         let encoded_payload = apply_column_encodings(&sorted_payload, &encodings)?;
         let stored_payload = compress_payload(&encoded_payload, table_compression.as_deref())?;
         let existing_schema = existing_table
@@ -1955,11 +2010,11 @@ impl Db {
         // Choose shard deterministically to avoid hot locks; prefer caller-provided shard override (e.g., tenant hash).
         // Choose shard deterministically using ShardMap
         let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
-        
+
         let global_shard_id = if let Some(hint) = batch.shard_override {
             // Hint provided (e.g. from upstream router or client explicit shard)
-            // Existing logic was mix64(hint) % len. We should respect explicit override if it looks like a shard ID? 
-            // Or assume hint is a partition key? 
+            // Existing logic was mix64(hint) % len. We should respect explicit override if it looks like a shard ID?
+            // Or assume hint is a partition key?
             // Let's assume hint is a partition key (like tenant_id) to be consistent with get_shard_id.
             self.shard_map.read().unwrap().get_shard_id(hint)
         } else if let Some(tid) = stats.tenant_id_min {
@@ -2035,8 +2090,14 @@ impl Db {
                     if let Some(existing_schema) = existing_schema.as_ref() {
                         // Compare schemas by comparing field count and names instead of hash
                         // This is more robust against serialization order differences
-                        let schemas_compatible = schemas_are_compatible(&existing_schema.json, validated.schema_spec.as_deref().unwrap_or("[]"));
-                        if !schemas_compatible && existing_schema.hash != 0 && validated.schema_hash != 0 {
+                        let schemas_compatible = schemas_are_compatible(
+                            &existing_schema.json,
+                            validated.schema_spec.as_deref().unwrap_or("[]"),
+                        );
+                        if !schemas_compatible
+                            && existing_schema.hash != 0
+                            && validated.schema_hash != 0
+                        {
                             // Only fail if both hashes are non-zero and schemas don't match
                             if existing_schema.hash != validated.schema_hash {
                                 return Err(EngineError::InvalidArgument(
@@ -2044,9 +2105,7 @@ impl Db {
                                 ));
                             }
                         }
-                        if tbl.schema_json.as_deref()
-                            != Some(existing_schema.json.as_str())
-                        {
+                        if tbl.schema_json.as_deref() != Some(existing_schema.json.as_str()) {
                             tbl.schema_json = Some(existing_schema.json.clone());
                         }
                     } else {
@@ -2234,10 +2293,9 @@ impl Db {
                 let entry_index = manifest.entries.len();
                 manifest.entries.push(entry.clone());
                 {
-                    let mut index = self
-                        .manifest_index
-                        .write()
-                        .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                    let mut index = self.manifest_index.write().map_err(|_| {
+                        EngineError::Internal("manifest index lock poisoned".into())
+                    })?;
                     index.add_entry(entry_index, entry);
                 }
                 added += 1;
@@ -2296,7 +2354,8 @@ impl Db {
 
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
-        self.last_persisted_version.store(manifest.version, Ordering::Release);
+        self.last_persisted_version
+            .store(manifest.version, Ordering::Release);
         Ok(())
     }
 
@@ -2370,12 +2429,12 @@ impl Db {
         // Try distributed execution if clustered
         if self.cluster_manager.read().map_or(false, |g| g.is_some()) {
             if let Some((local, global)) = crate::planner_distributed::distribute_plan(&plan.kind) {
-                 use crate::executor_distributed::DistributedExecutor;
-                 let executor = DistributedExecutor::new();
-                 // TODO: Handle fallback or specific errors? For now propagate.
-                 // If executor returns valid result, return it.
-                 // If it returns error, we might want to fallback? But usually distributed failure is fatal.
-                 return executor.execute(self, global, local);
+                use crate::executor_distributed::DistributedExecutor;
+                let executor = DistributedExecutor::new();
+                // TODO: Handle fallback or specific errors? For now propagate.
+                // If executor returns valid result, return it.
+                // If it returns error, we might want to fallback? But usually distributed failure is fatal.
+                return executor.execute(self, global, local);
             }
         }
 
@@ -2384,9 +2443,7 @@ impl Db {
             PlanKind::SetOperation => {
                 self.execute_set_operation(&request, deadline, manifest_version)
             }
-            PlanKind::Subquery => {
-                self.execute_subquery_query(&request, deadline, manifest_version)
-            }
+            PlanKind::Subquery => self.execute_subquery_query(&request, deadline, manifest_version),
             PlanKind::Cte => self.execute_cte_query(&request, deadline, manifest_version),
             PlanKind::Transaction(_) => {
                 // Return empty response for transaction control stubs
@@ -2468,13 +2525,7 @@ impl Db {
             }
             PlanKind::Transaction(_) => {
                 // Return empty result for transactions (auto-commit behavior)
-                (
-                    None,
-                    None,
-                    None,
-                    None,
-                    QueryFilter::default(),
-                )
+                (None, None, None, None, QueryFilter::default())
             }
             PlanKind::Simple {
                 agg,
@@ -2505,17 +2556,29 @@ impl Db {
         let expected_schema: Option<Vec<TableFieldSpec>> = manifest
             .tables
             .iter()
-            .find(|t| t.database == db.as_deref().unwrap_or("default") && t.name == table.as_deref().unwrap_or("unknown"))
+            .find(|t| {
+                t.database == db.as_deref().unwrap_or("default")
+                    && t.name == table.as_deref().unwrap_or("unknown")
+            })
             .and_then(|t| {
                 t.schema_json
                     .as_ref()
                     .and_then(|s| serde_json::from_str::<Vec<TableFieldSpec>>(s).ok())
             });
-        let schema_map = self.table_schema_map(db.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown")).unwrap_or_default();
+        let schema_map = self
+            .table_schema_map(
+                db.as_deref().unwrap_or("default"),
+                table.as_deref().unwrap_or("unknown"),
+            )
+            .unwrap_or_default();
         let index_list: Vec<IndexMeta> = manifest
             .indexes
             .iter()
-            .filter(|idx| idx.database == db.as_deref().unwrap_or("default") && idx.table == table.as_deref().unwrap_or("unknown") && idx.state == IndexState::Ready)
+            .filter(|idx| {
+                idx.database == db.as_deref().unwrap_or("default")
+                    && idx.table == table.as_deref().unwrap_or("unknown")
+                    && idx.state == IndexState::Ready
+            })
             .cloned()
             .collect();
 
@@ -2524,10 +2587,16 @@ impl Db {
             .read()
             .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
 
-        let table_indices = manifest_index
-            .get_table_entries(db.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown"));
+        let table_indices = manifest_index.get_table_entries(
+            db.as_deref().unwrap_or("default"),
+            table.as_deref().unwrap_or("unknown"),
+        );
         if table_indices.is_none() {
-            return Err(EngineError::NotFound(format!("no segments for {}.{}", db.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown"))));
+            return Err(EngineError::NotFound(format!(
+                "no segments for {}.{}",
+                db.as_deref().unwrap_or("default"),
+                table.as_deref().unwrap_or("unknown")
+            )));
         }
         let table_indices = table_indices.unwrap();
         let total_segments = table_indices.len();
@@ -2592,7 +2661,8 @@ impl Db {
                 }
             }
 
-            if false { // Optimization stubbed out
+            if false {
+                // Optimization stubbed out
                 continue;
             }
             if !index_list.is_empty() && !schema_map.is_empty() {
@@ -2644,29 +2714,22 @@ impl Db {
             segment_filter.limit = None;
             segment_filter.offset = None;
 
-            let batches = filter_ipc_batches(
-                read_ipc_batches(&payload)?,
-                &segment_filter,
-            )?;
+            let batches = filter_ipc_batches(read_ipc_batches(&payload)?, &segment_filter)?;
 
             if batches.is_empty() {
                 data_skipped_bytes += original_size;
                 continue;
             }
 
-            let sliced = apply_offset_limit_to_batches(
-                batches,
-                &mut remaining_offset,
-                &mut remaining_limit,
-            );
+            let sliced =
+                apply_offset_limit_to_batches(batches, &mut remaining_offset, &mut remaining_limit);
             if sliced.is_empty() {
                 continue;
             }
 
             stream_writer = Some(
-                StreamWriter::try_new(&mut *writer, sliced[0].schema().as_ref()).map_err(|e| {
-                    EngineError::Internal(format!("ipc writer init failed: {e}"))
-                })?,
+                StreamWriter::try_new(&mut *writer, sliced[0].schema().as_ref())
+                    .map_err(|e| EngineError::Internal(format!("ipc writer init failed: {e}")))?,
             );
 
             if let Some(w) = stream_writer.as_mut() {
@@ -2697,10 +2760,7 @@ impl Db {
                 segment_filter.limit = None;
                 segment_filter.offset = None;
 
-                let batches = filter_ipc_batches(
-                    read_ipc_batches(&payload)?,
-                    &segment_filter,
-                )?;
+                let batches = filter_ipc_batches(read_ipc_batches(&payload)?, &segment_filter)?;
 
                 if batches.is_empty() {
                     data_skipped_bytes += original_size;
@@ -2721,9 +2781,8 @@ impl Db {
                         if batch.num_rows() == 0 {
                             continue;
                         }
-                        w.write(batch).map_err(|e| {
-                            EngineError::Internal(format!("ipc write failed: {e}"))
-                        })?;
+                        w.write(batch)
+                            .map_err(|e| EngineError::Internal(format!("ipc write failed: {e}")))?;
                         if remaining_limit == 0 {
                             break;
                         }
@@ -2771,13 +2830,31 @@ impl Db {
         let manifest_version = self.get_manifest_version()?;
         let query_start = std::time::Instant::now();
         // TODO: Support timeout in distributed request
-        let deadline = None; 
-        
+        let deadline = None;
+
         match plan {
-             PlanKind::Simple { agg, db, table, projection, filter, computed_columns } => {
-                 self.execute_simple_plan(agg, db, table, projection, filter, computed_columns, deadline, manifest_version, false, query_start)
-             }
-             _ => Err(EngineError::NotImplemented("Distributed execution supports Simple plans only".into()))
+            PlanKind::Simple {
+                agg,
+                db,
+                table,
+                projection,
+                filter,
+                computed_columns,
+            } => self.execute_simple_plan(
+                agg,
+                db,
+                table,
+                projection,
+                filter,
+                computed_columns,
+                deadline,
+                manifest_version,
+                false,
+                query_start,
+            ),
+            _ => Err(EngineError::NotImplemented(
+                "Distributed execution supports Simple plans only".into(),
+            )),
         }
     }
 
@@ -2802,23 +2879,22 @@ impl Db {
         // Handle scalar queries (no table source)
         if database.is_none() && table.is_none() {
             if let Some(exprs) = projection {
-
                 let mut columns: Vec<ArrayRef> = Vec::new();
                 let mut fields: Vec<Field> = Vec::new();
 
                 for (i, expr_str) in exprs.iter().enumerate() {
                     let col_name = format!("col_{}", i);
                     if let Ok(val) = expr_str.parse::<i64>() {
-                         columns.push(Arc::new(Int64Array::from(vec![val])));
-                         fields.push(Field::new(col_name, DataType::Int64, false));
+                        columns.push(Arc::new(Int64Array::from(vec![val])));
+                        fields.push(Field::new(col_name, DataType::Int64, false));
                     } else if let Ok(val) = expr_str.parse::<f64>() {
-                         columns.push(Arc::new(arrow_array::Float64Array::from(vec![val])));
-                         fields.push(Field::new(col_name, DataType::Float64, false));
+                        columns.push(Arc::new(arrow_array::Float64Array::from(vec![val])));
+                        fields.push(Field::new(col_name, DataType::Float64, false));
                     } else {
-                         // Treat as string (strip quotes if present)
-                         let val = expr_str.trim().trim_matches('\'').trim_matches('"');
-                         columns.push(Arc::new(StringArray::from(vec![val])));
-                         fields.push(Field::new(col_name, DataType::Utf8, false));
+                        // Treat as string (strip quotes if present)
+                        let val = expr_str.trim().trim_matches('\'').trim_matches('"');
+                        columns.push(Arc::new(StringArray::from(vec![val])));
+                        fields.push(Field::new(col_name, DataType::Utf8, false));
                     }
                 }
 
@@ -2831,9 +2907,11 @@ impl Db {
                 {
                     let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buffer, &schema)
                         .map_err(|e| EngineError::Internal(format!("ipc init error: {e}")))?;
-                    writer.write(&batch)
+                    writer
+                        .write(&batch)
                         .map_err(|e| EngineError::Internal(format!("ipc write error: {e}")))?;
-                    writer.finish()
+                    writer
+                        .finish()
                         .map_err(|e| EngineError::Internal(format!("ipc finish error: {e}")))?;
                 }
 
@@ -2843,82 +2921,108 @@ impl Db {
                     segments_scanned: 0,
                     execution_stats: Some(QueryExecutionStats {
                         execution_time_micros: query_start.elapsed().as_micros() as u64,
-                         ..Default::default()
+                        ..Default::default()
                     }),
                 });
             } else if !computed_columns.is_empty() {
-                 let mut schema_fields = Vec::new();
-                 let mut columns: Vec<ArrayRef> = Vec::new();
+                let mut schema_fields = Vec::new();
+                let mut columns: Vec<ArrayRef> = Vec::new();
 
-                 for (i, col) in computed_columns.iter().enumerate() {
-                     let name = col.alias.clone().unwrap_or_else(|| format!("col_{}", i + 1));
-                     match &col.expr {
-                         crate::sql::SelectExpr::Literal(val) => {
-                              match val {
-                                  crate::sql::LiteralValue::Integer(n) => {
-                                      schema_fields.push(Field::new(name, DataType::Int64, false));
-                                      columns.push(std::sync::Arc::new(Int64Array::from(vec![*n])));
-                                  }
-                                  crate::sql::LiteralValue::String(s) => {
-                                      schema_fields.push(Field::new(name, DataType::Utf8, false));
-                                      columns.push(std::sync::Arc::new(StringArray::from(vec![s.clone()])));
-                                  }
-                                  _ => return Err(EngineError::NotImplemented(format!("unsupported literal type: {:?}", val))),
-                              }
-                         }
-                         _ => return Err(EngineError::NotImplemented("only literals supported in scalar SELECT".into())),
-                     }
-                 }
-                 let schema = std::sync::Arc::new(Schema::new(schema_fields));
-                 let batch = RecordBatch::try_new(schema.clone(), columns).map_err(|e| EngineError::Internal(e.to_string()))?;
-                 
-                 let mut buffer = Vec::new();
-                 {
-                     let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buffer, &schema)
-                         .map_err(|e| EngineError::Internal(format!("ipc init error: {e}")))?;
-                     writer.write(&batch)
-                         .map_err(|e| EngineError::Internal(format!("ipc write error: {e}")))?;
-                     writer.finish()
-                         .map_err(|e| EngineError::Internal(format!("ipc finish error: {e}")))?;
-                 }
-                  return Ok(QueryResponse {
-                     records_ipc: buffer,
-                     data_skipped_bytes: 0,
-                     segments_scanned: 0,
-                     execution_stats: Some(QueryExecutionStats {
-                         execution_time_micros: query_start.elapsed().as_micros() as u64,
-                          ..Default::default()
-                     }),
-                 });
+                for (i, col) in computed_columns.iter().enumerate() {
+                    let name = col
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| format!("col_{}", i + 1));
+                    match &col.expr {
+                        crate::sql::SelectExpr::Literal(val) => match val {
+                            crate::sql::LiteralValue::Integer(n) => {
+                                schema_fields.push(Field::new(name, DataType::Int64, false));
+                                columns.push(std::sync::Arc::new(Int64Array::from(vec![*n])));
+                            }
+                            crate::sql::LiteralValue::String(s) => {
+                                schema_fields.push(Field::new(name, DataType::Utf8, false));
+                                columns
+                                    .push(std::sync::Arc::new(StringArray::from(vec![s.clone()])));
+                            }
+                            _ => {
+                                return Err(EngineError::NotImplemented(format!(
+                                    "unsupported literal type: {:?}",
+                                    val
+                                )))
+                            }
+                        },
+                        _ => {
+                            return Err(EngineError::NotImplemented(
+                                "only literals supported in scalar SELECT".into(),
+                            ))
+                        }
+                    }
+                }
+                let schema = std::sync::Arc::new(Schema::new(schema_fields));
+                let batch = RecordBatch::try_new(schema.clone(), columns)
+                    .map_err(|e| EngineError::Internal(e.to_string()))?;
+
+                let mut buffer = Vec::new();
+                {
+                    let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buffer, &schema)
+                        .map_err(|e| EngineError::Internal(format!("ipc init error: {e}")))?;
+                    writer
+                        .write(&batch)
+                        .map_err(|e| EngineError::Internal(format!("ipc write error: {e}")))?;
+                    writer
+                        .finish()
+                        .map_err(|e| EngineError::Internal(format!("ipc finish error: {e}")))?;
+                }
+                return Ok(QueryResponse {
+                    records_ipc: buffer,
+                    data_skipped_bytes: 0,
+                    segments_scanned: 0,
+                    execution_stats: Some(QueryExecutionStats {
+                        execution_time_micros: query_start.elapsed().as_micros() as u64,
+                        ..Default::default()
+                    }),
+                });
             } else {
-                 // Empty SELECT or Transaction stub (BEGIN/COMMIT)
-                 // Return empty result
-                 return Ok(QueryResponse {
-                     records_ipc: Vec::new(), // Empty IPC for non-data queries
-                     data_skipped_bytes: 0,
-                     segments_scanned: 0,
-                     execution_stats: Some(QueryExecutionStats {
-                         execution_time_micros: query_start.elapsed().as_micros() as u64,
-                          ..Default::default()
-                     }),
-                 });
+                // Empty SELECT or Transaction stub (BEGIN/COMMIT)
+                // Return empty result
+                return Ok(QueryResponse {
+                    records_ipc: Vec::new(), // Empty IPC for non-data queries
+                    data_skipped_bytes: 0,
+                    segments_scanned: 0,
+                    execution_stats: Some(QueryExecutionStats {
+                        execution_time_micros: query_start.elapsed().as_micros() as u64,
+                        ..Default::default()
+                    }),
+                });
             }
         }
 
         let expected_schema: Option<Vec<TableFieldSpec>> = manifest
             .tables
             .iter()
-            .find(|t| t.database == database.as_deref().unwrap_or("default") && t.name == table.as_deref().unwrap_or("unknown"))
+            .find(|t| {
+                t.database == database.as_deref().unwrap_or("default")
+                    && t.name == table.as_deref().unwrap_or("unknown")
+            })
             .and_then(|t| {
                 t.schema_json
                     .as_ref()
                     .and_then(|s| serde_json::from_str::<Vec<TableFieldSpec>>(s).ok())
             });
-        let schema_map = self.table_schema_map(database.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown")).unwrap_or_default();
+        let schema_map = self
+            .table_schema_map(
+                database.as_deref().unwrap_or("default"),
+                table.as_deref().unwrap_or("unknown"),
+            )
+            .unwrap_or_default();
         let index_list: Vec<IndexMeta> = manifest
             .indexes
             .iter()
-            .filter(|idx| idx.database == database.as_deref().unwrap_or("default") && idx.table == table.as_deref().unwrap_or("unknown") && idx.state == IndexState::Ready)
+            .filter(|idx| {
+                idx.database == database.as_deref().unwrap_or("default")
+                    && idx.table == table.as_deref().unwrap_or("unknown")
+                    && idx.state == IndexState::Ready
+            })
             .cloned()
             .collect();
 
@@ -2929,8 +3033,17 @@ impl Db {
             .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
 
         let table_indices = manifest_index
-            .get_table_entries(database.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown"))
-            .ok_or_else(|| EngineError::NotFound(format!("no segments for {}.{}", database.as_deref().unwrap_or("default"), table.as_deref().unwrap_or("unknown"))))?;
+            .get_table_entries(
+                database.as_deref().unwrap_or("default"),
+                table.as_deref().unwrap_or("unknown"),
+            )
+            .ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "no segments for {}.{}",
+                    database.as_deref().unwrap_or("default"),
+                    table.as_deref().unwrap_or("unknown")
+                ))
+            })?;
 
         // Track total segments for stats
         let total_segments = table_indices.len();
@@ -3021,7 +3134,10 @@ impl Db {
             )));
         }
 
-        let estimated_capacity = filter.limit.unwrap_or(matching.len().saturating_mul(64)).min(64 * 1024);
+        let estimated_capacity = filter
+            .limit
+            .unwrap_or(matching.len().saturating_mul(64))
+            .min(64 * 1024);
         let mut records = Vec::with_capacity(estimated_capacity);
         let mut data_skipped_bytes: u64 = 0;
 
@@ -3055,13 +3171,14 @@ impl Db {
                 let has_enough_segments = segment_count >= 4;
                 let has_large_data = estimated_bytes > 32 * 1024 * 1024;
                 let has_many_segments = segment_count > 16;
-                let worth_parallelizing = has_large_data || has_many_segments || avg_segment_size > 8 * 1024 * 1024;
+                let worth_parallelizing =
+                    has_large_data || has_many_segments || avg_segment_size > 8 * 1024 * 1024;
 
                 has_enough_segments && worth_parallelizing && !offset_pushdown
             };
 
             if use_parallel {
-                 let filter_ref = &filter;
+                let filter_ref = &filter;
                 let projection_ref = projection.as_deref();
                 let expected_schema_ref = expected_schema
                     .as_ref()
@@ -3081,10 +3198,7 @@ impl Db {
                             Ok(p) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let filtered = match filter_ipc(
-                            &payload,
-                            filter_ref,
-                        ) {
+                        let filtered = match filter_ipc(&payload, filter_ref) {
                             Ok(f) => f,
                             Err(e) => return Some(Err(e)),
                         };
@@ -3092,7 +3206,11 @@ impl Db {
                             let estimated_rows = (filtered.len() / 100).max(1);
                             collected_rows_ref.fetch_add(estimated_rows as u64, Ordering::Relaxed);
                         }
-                        let skipped = if filtered.is_empty() { payload.len() as u64 } else { 0 };
+                        let skipped = if filtered.is_empty() {
+                            payload.len() as u64
+                        } else {
+                            0
+                        };
                         Some(Ok((filtered, skipped)))
                     })
                     .collect();
@@ -3106,9 +3224,17 @@ impl Db {
             } else {
                 let limit = filter.limit.unwrap_or(usize::MAX);
                 let mut estimated_rows: usize = 0;
-                let mut remaining_offset = if offset_pushdown { filter.offset.unwrap_or(0) } else { 0 };
-                let mut remaining_limit = if offset_pushdown { filter.limit.unwrap_or(usize::MAX) } else { usize::MAX };
-                
+                let mut remaining_offset = if offset_pushdown {
+                    filter.offset.unwrap_or(0)
+                } else {
+                    0
+                };
+                let mut remaining_limit = if offset_pushdown {
+                    filter.limit.unwrap_or(usize::MAX)
+                } else {
+                    usize::MAX
+                };
+
                 for entry in &matching {
                     if estimated_rows >= limit || remaining_limit == 0 {
                         break;
@@ -3120,13 +3246,11 @@ impl Db {
                         let mut segment_filter = filter.clone();
                         segment_filter.limit = None;
                         segment_filter.offset = None;
-                        let batches = filter_ipc_batches(
-                            read_ipc_batches(&payload)?,
-                            &segment_filter,
-                        )?;
+                        let batches =
+                            filter_ipc_batches(read_ipc_batches(&payload)?, &segment_filter)?;
                         if batches.is_empty() {
-                             data_skipped_bytes += original_size;
-                             continue;
+                            data_skipped_bytes += original_size;
+                            continue;
                         }
                         let sliced = apply_offset_limit_to_batches(
                             batches,
@@ -3140,10 +3264,7 @@ impl Db {
                         estimated_rows += sliced.iter().map(|b| b.num_rows()).sum::<usize>();
                         records.extend_from_slice(&ipc);
                     } else {
-                        let filtered = filter_ipc(
-                            &payload,
-                            &filter,
-                        )?;
+                        let filtered = filter_ipc(&payload, &filter)?;
                         if filtered.is_empty() {
                             data_skipped_bytes += original_size;
                         } else {
@@ -3162,10 +3283,14 @@ impl Db {
                 if !records.is_empty() {
                     // Convert expected_schema to Arrow Schema for handling missing columns
                     let arrow_schema = expected_schema.as_ref().map(|fields| {
-                        let arrow_fields: Vec<Field> = fields.iter().map(|f| {
-                            let dt = arrow_type_from_str(&f.data_type).unwrap_or(DataType::Utf8);
-                            Field::new(&f.name, dt, f.nullable)
-                        }).collect();
+                        let arrow_fields: Vec<Field> = fields
+                            .iter()
+                            .map(|f| {
+                                let dt =
+                                    arrow_type_from_str(&f.data_type).unwrap_or(DataType::Utf8);
+                                Field::new(&f.name, dt, f.nullable)
+                            })
+                            .collect();
                         Schema::new(arrow_fields)
                     });
                     records = apply_projection_with_schema(&records, cols, arrow_schema.as_ref())?;
@@ -3180,7 +3305,7 @@ impl Db {
                 }
             }
         } else if let Some(agg_plan) = agg.clone() {
-             let mut agg_state = Aggregator::new(agg_plan)?;
+            let mut agg_state = Aggregator::new(agg_plan)?;
             let default_filter = QueryFilter::default();
             let agg_projection = aggregation_projection(agg.as_ref().expect("agg present"), &[]);
             if matching.len() >= self.cfg.parallel_scan_threshold {
@@ -3188,27 +3313,21 @@ impl Db {
                 let expected_schema_ref = expected_schema
                     .as_ref()
                     .map(|v: &Vec<TableFieldSpec>| Arc::new(v.clone()));
-                 let payloads: Vec<Result<Arc<Vec<u8>>, EngineError>> = matching
+                let payloads: Vec<Result<Arc<Vec<u8>>, EngineError>> = matching
                     .par_iter()
                     .map(|entry| this.load_segment_cached(entry))
                     .collect();
-                 for payload_result in payloads {
+                for payload_result in payloads {
                     check_timeout()?;
                     let payload = payload_result?;
-                    let filtered = filter_ipc(
-                        &payload,
-                        &filter,
-                    )?;
+                    let filtered = filter_ipc(&payload, &filter)?;
                     agg_state.consume_ipc(&filtered, &default_filter)?;
                 }
             } else {
-                 for entry in &matching {
+                for entry in &matching {
                     check_timeout()?;
                     let payload = self.load_segment_cached(entry)?;
-                    let filtered = filter_ipc(
-                        &payload,
-                        &filter,
-                    )?;
+                    let filtered = filter_ipc(&payload, &filter)?;
                     agg_state.consume_ipc(&filtered, &default_filter)?;
                 }
             }
@@ -3254,10 +3373,8 @@ impl Db {
         }
 
         if let Some(mem_entry) = self.memtable_index.lock().get(&entry.segment_id) {
-            let payload = decompress_payload(
-                mem_entry.payload.clone(),
-                entry.compression.as_deref(),
-            )?;
+            let payload =
+                decompress_payload(mem_entry.payload.clone(), entry.compression.as_deref())?;
             return Ok(Arc::new(payload));
         }
 
@@ -3366,11 +3483,17 @@ impl Db {
         let mut segments_scanned = 0usize;
 
         // Load data from the left (main) table
-        let left_entries = self.table_entries(parsed.database.as_deref().unwrap_or("default"), parsed.table.as_deref().unwrap_or("dual"))?;
+        let left_entries = self.table_entries(
+            parsed.database.as_deref().unwrap_or("default"),
+            parsed.table.as_deref().unwrap_or("dual"),
+        )?;
         segments_scanned += left_entries.len();
 
         // Decode left table to RecordBatches
-        let mut current_batches = self.load_table_batches(parsed.database.as_deref().unwrap_or("default"), parsed.table.as_deref().unwrap_or("dual"))?;
+        let mut current_batches = self.load_table_batches(
+            parsed.database.as_deref().unwrap_or("default"),
+            parsed.table.as_deref().unwrap_or("dual"),
+        )?;
         let mut current_spilled: Option<(Vec<PathBuf>, Arc<Schema>)> = None;
         let mut spill_dirs: Vec<TempDir> = Vec::new();
         check_timeout()?;
@@ -3407,8 +3530,8 @@ impl Db {
                 }
 
                 let max_side_bytes = left_bytes.max(right_size);
-                let mut partitions = (max_side_bytes + join_partition_bytes - 1)
-                    / join_partition_bytes;
+                let mut partitions =
+                    (max_side_bytes + join_partition_bytes - 1) / join_partition_bytes;
                 partitions = partitions.max(1).min(join_max_partitions as u64);
                 let partitions = (partitions as usize).next_power_of_two();
 
@@ -3417,10 +3540,9 @@ impl Db {
 
                 let mut left_needed: Option<Vec<String>> = None;
                 let mut right_needed: Option<Vec<String>> = None;
-                if let (Some(left_schema), Some(right_schema)) = (
-                    current_batches.get(0).map(|b| b.schema()),
-                    right_schema,
-                ) {
+                if let (Some(left_schema), Some(right_schema)) =
+                    (current_batches.get(0).map(|b| b.schema()), right_schema)
+                {
                     let remaining_left_keys = parsed.joins[join_idx..]
                         .iter()
                         .map(|j| j.on_condition.left_column.clone())
@@ -3439,17 +3561,23 @@ impl Db {
                         extend_needed_with_filter(needed, &left_filter, Some(left_schema.as_ref()));
                     }
                     if let Some(ref mut needed) = right_needed {
-                        extend_needed_with_filter(needed, &right_filter, Some(right_schema.as_ref()));
+                        extend_needed_with_filter(
+                            needed,
+                            &right_filter,
+                            Some(right_schema.as_ref()),
+                        );
                     }
                     if let Some(ref needed) = left_needed {
                         if current_spilled.is_none() {
-                            current_batches = Self::project_batches_by_name(&current_batches, needed)?;
+                            current_batches =
+                                Self::project_batches_by_name(&current_batches, needed)?;
                         }
                     }
                 }
 
                 if !filter_is_empty(&left_filter) && current_spilled.is_none() {
-                    current_batches = filter_batches_with_query_filter(current_batches, &left_filter)?;
+                    current_batches =
+                        filter_batches_with_query_filter(current_batches, &left_filter)?;
                 }
 
                 let left_paths = if let Some((paths, _schema)) = current_spilled.take() {
@@ -3533,14 +3661,12 @@ impl Db {
                                 )?
                             }
                         }
-                        JoinType::FullOuter => {
-                            Self::full_outer_join_batches(
-                                &left_batches,
-                                &right_batches,
-                                &join.on_condition.left_column,
-                                &join.on_condition.right_column,
-                            )?
-                        }
+                        JoinType::FullOuter => Self::full_outer_join_batches(
+                            &left_batches,
+                            &right_batches,
+                            &join.on_condition.left_column,
+                            &join.on_condition.right_column,
+                        )?,
                         JoinType::Cross => None,
                     };
 
@@ -3554,8 +3680,9 @@ impl Db {
                 if join_idx + 1 < parsed.joins.len() && !current_batches.is_empty() {
                     let joined_bytes = Self::estimate_batches_bytes(&current_batches);
                     if joined_bytes > max_join_bytes as u64 {
-                        let tmp = TempDir::new()
-                            .map_err(|e| EngineError::Io(format!("create join spill dir failed: {e}")))?;
+                        let tmp = TempDir::new().map_err(|e| {
+                            EngineError::Io(format!("create join spill dir failed: {e}"))
+                        })?;
                         let path = tmp.path().join("spill.ipc");
                         Self::write_batches_to_ipc_file(&current_batches, &path)?;
                         let schema = current_batches[0].schema();
@@ -3593,12 +3720,20 @@ impl Db {
                 )?;
                 if let Some(needed) = left_needed {
                     let mut needed = needed;
-                    extend_needed_with_filter(&mut needed, &left_filter, Some(left_schema.as_ref()));
+                    extend_needed_with_filter(
+                        &mut needed,
+                        &left_filter,
+                        Some(left_schema.as_ref()),
+                    );
                     current_batches = Self::project_batches_by_name(&current_batches, &needed)?;
                 }
                 if let Some(needed) = right_needed {
                     let mut needed = needed;
-                    extend_needed_with_filter(&mut needed, &right_filter, Some(right_schema.as_ref()));
+                    extend_needed_with_filter(
+                        &mut needed,
+                        &right_filter,
+                        Some(right_schema.as_ref()),
+                    );
                     right_batches = Self::project_batches_by_name(&right_batches, &needed)?;
                 }
             }
@@ -3618,9 +3753,7 @@ impl Db {
 
             // Perform the join based on type
             let joined_batch = match join.join_type {
-                JoinType::Cross => {
-                    self.cross_join_batches(&current_batches, &right_batches)?
-                }
+                JoinType::Cross => self.cross_join_batches(&current_batches, &right_batches)?,
                 JoinType::Inner => {
                     if current_batches.is_empty() || right_batches.is_empty() {
                         None
@@ -3658,14 +3791,12 @@ impl Db {
                         )?
                     }
                 }
-                JoinType::FullOuter => {
-                    Self::full_outer_join_batches(
-                        &current_batches,
-                        &right_batches,
-                        &join.on_condition.left_column,
-                        &join.on_condition.right_column,
-                    )?
-                }
+                JoinType::FullOuter => Self::full_outer_join_batches(
+                    &current_batches,
+                    &right_batches,
+                    &join.on_condition.left_column,
+                    &join.on_condition.right_column,
+                )?,
             };
             check_timeout()?;
 
@@ -3677,8 +3808,9 @@ impl Db {
             if join_idx + 1 < parsed.joins.len() && !current_batches.is_empty() {
                 let joined_bytes = Self::estimate_batches_bytes(&current_batches);
                 if joined_bytes > max_join_bytes as u64 {
-                    let tmp = TempDir::new()
-                        .map_err(|e| EngineError::Io(format!("create join spill dir failed: {e}")))?;
+                    let tmp = TempDir::new().map_err(|e| {
+                        EngineError::Io(format!("create join spill dir failed: {e}"))
+                    })?;
                     let path = tmp.path().join("spill.ipc");
                     Self::write_batches_to_ipc_file(&current_batches, &path)?;
                     let schema = current_batches[0].schema();
@@ -3694,8 +3826,7 @@ impl Db {
         }
 
         if !filter_is_empty(&remaining_filter) {
-            current_batches =
-                filter_batches_with_query_filter(current_batches, &remaining_filter)?;
+            current_batches = filter_batches_with_query_filter(current_batches, &remaining_filter)?;
         }
 
         // Encode result to IPC
@@ -3709,9 +3840,7 @@ impl Db {
                         .fields()
                         .iter()
                         .position(|f| f.name() == col)
-                        .ok_or_else(|| {
-                            EngineError::NotFound(format!("column not found: {col}"))
-                        })?;
+                        .ok_or_else(|| EngineError::NotFound(format!("column not found: {col}")))?;
                     indices.push(idx);
                 }
                 batch = batch
@@ -3868,7 +3997,9 @@ impl Db {
 
         for (batch_idx, batch) in right_batches.iter().enumerate() {
             let col_idx = batch.schema().index_of(right_col).map_err(|_| {
-                EngineError::InvalidArgument(format!("column '{right_col}' not found in right table"))
+                EngineError::InvalidArgument(format!(
+                    "column '{right_col}' not found in right table"
+                ))
             })?;
 
             let col = batch.column(col_idx);
@@ -3893,7 +4024,11 @@ impl Db {
                 field.name().to_string()
             };
             // Right side columns are nullable in LEFT JOIN
-            fields.push(arrow_schema::Field::new(name, field.data_type().clone(), true));
+            fields.push(arrow_schema::Field::new(
+                name,
+                field.data_type().clone(),
+                true,
+            ));
         }
 
         let result_schema = Arc::new(arrow_schema::Schema::new(fields));
@@ -3941,11 +4076,7 @@ impl Db {
 
         // Right side columns (with NULLs for non-matches)
         for col_idx in 0..right_schema.fields().len() {
-            let array = Self::take_from_batches_nullable(
-                right_batches,
-                col_idx,
-                &right_indices,
-            )?;
+            let array = Self::take_from_batches_nullable(right_batches, col_idx, &right_indices)?;
             result_arrays.push(array);
         }
 
@@ -4049,7 +4180,11 @@ impl Db {
             } else {
                 field.name().to_string()
             };
-            fields.push(arrow_schema::Field::new(name, field.data_type().clone(), field.is_nullable()));
+            fields.push(arrow_schema::Field::new(
+                name,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ));
         }
 
         let result_schema = Arc::new(arrow_schema::Schema::new(fields));
@@ -4061,7 +4196,9 @@ impl Db {
 
         for (right_batch_idx, right_batch) in right_batches.iter().enumerate() {
             let col_idx = right_batch.schema().index_of(right_col).map_err(|_| {
-                EngineError::InvalidArgument(format!("column '{right_col}' not found in right table"))
+                EngineError::InvalidArgument(format!(
+                    "column '{right_col}' not found in right table"
+                ))
             })?;
 
             let col = right_batch.column(col_idx);
@@ -4168,7 +4305,9 @@ impl Db {
 
         for (batch_idx, batch) in right_batches.iter().enumerate() {
             let col_idx = batch.schema().index_of(right_col).map_err(|_| {
-                EngineError::InvalidArgument(format!("column '{right_col}' not found in right table"))
+                EngineError::InvalidArgument(format!(
+                    "column '{right_col}' not found in right table"
+                ))
             })?;
 
             let col = batch.column(col_idx);
@@ -4186,7 +4325,11 @@ impl Db {
             Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
 
         for field in left_schema.fields() {
-            fields.push(arrow_schema::Field::new(field.name(), field.data_type().clone(), true));
+            fields.push(arrow_schema::Field::new(
+                field.name(),
+                field.data_type().clone(),
+                true,
+            ));
         }
 
         for field in right_schema.fields() {
@@ -4195,15 +4338,21 @@ impl Db {
             } else {
                 field.name().to_string()
             };
-            fields.push(arrow_schema::Field::new(name, field.data_type().clone(), true));
+            fields.push(arrow_schema::Field::new(
+                name,
+                field.data_type().clone(),
+                true,
+            ));
         }
 
         let result_schema = Arc::new(arrow_schema::Schema::new(fields));
 
         // Probe with left side
         let left_row_count: usize = left_batches.iter().map(|b| b.num_rows()).sum();
-        let mut left_indices: Vec<Option<(u32, u32)>> = Vec::with_capacity(left_row_count + right_row_count);
-        let mut right_indices: Vec<Option<(u32, u32)>> = Vec::with_capacity(left_row_count + right_row_count);
+        let mut left_indices: Vec<Option<(u32, u32)>> =
+            Vec::with_capacity(left_row_count + right_row_count);
+        let mut right_indices: Vec<Option<(u32, u32)>> =
+            Vec::with_capacity(left_row_count + right_row_count);
 
         for (left_batch_idx, left_batch) in left_batches.iter().enumerate() {
             let col_idx = left_batch.schema().index_of(left_col).map_err(|_| {
@@ -4608,11 +4757,7 @@ impl Db {
         // Parse the SQL to get query with subquery filters
         let parsed = match parse_sql(&request.sql)? {
             SqlStatement::Query(q) => q,
-            _ => {
-                return Err(EngineError::InvalidArgument(
-                    "expected SELECT query".into(),
-                ))
-            }
+            _ => return Err(EngineError::InvalidArgument("expected SELECT query".into())),
         };
 
         // Collect values from IN subqueries
@@ -4621,8 +4766,8 @@ impl Db {
             let subquery_request = QueryRequest {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
-            collect_stats: false,
-        };
+                collect_stats: false,
+            };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
 
@@ -4654,8 +4799,8 @@ impl Db {
             let subquery_request = QueryRequest {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
-            collect_stats: false,
-        };
+                collect_stats: false,
+            };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
 
@@ -4684,8 +4829,8 @@ impl Db {
             let subquery_request = QueryRequest {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
-            collect_stats: false,
-        };
+                collect_stats: false,
+            };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
 
@@ -4716,9 +4861,9 @@ impl Db {
         // Now execute the main query without subquery filters, then apply filters in memory
         // Build a simplified query without the subquery parts
         let main_sql = format!(
-                    "SELECT * FROM {}.{}",
-                    parsed.database.as_deref().unwrap_or("default"),
-                    parsed.table.as_deref().unwrap_or("dual")
+            "SELECT * FROM {}.{}",
+            parsed.database.as_deref().unwrap_or("default"),
+            parsed.table.as_deref().unwrap_or("dual")
         );
         let main_request = QueryRequest {
             sql: main_sql,
@@ -4788,11 +4933,7 @@ impl Db {
         // Parse the SQL to extract CTEs
         let parsed = match parse_sql(&request.sql)? {
             SqlStatement::Query(q) => q,
-            _ => {
-                return Err(EngineError::InvalidArgument(
-                    "expected SELECT query".into(),
-                ))
-            }
+            _ => return Err(EngineError::InvalidArgument("expected SELECT query".into())),
         };
 
         // If no CTEs, execute normally
@@ -4800,8 +4941,8 @@ impl Db {
             return self.query(QueryRequest {
                 sql: request.sql.clone(),
                 timeout_millis: request.timeout_millis,
-            collect_stats: false,
-        });
+                collect_stats: false,
+            });
         }
 
         // Execute query with CTEs
@@ -4810,7 +4951,7 @@ impl Db {
 
     /// Extract a column value as string for subquery comparison
     fn extract_column_value_as_string(col: &ArrayRef, row_idx: usize) -> String {
-        use arrow_array::{Int32Array, Int64Array, Float32Array, Float64Array};
+        use arrow_array::{Float32Array, Float64Array, Int32Array, Int64Array};
 
         if col.is_null(row_idx) {
             return "NULL".to_string();
@@ -4876,7 +5017,8 @@ impl Db {
                     };
 
                     if let Some(&col_idx) = col_indices.get(&column.to_lowercase()) {
-                        let val = Self::extract_column_value_as_string(batch.column(col_idx), row_idx);
+                        let val =
+                            Self::extract_column_value_as_string(batch.column(col_idx), row_idx);
                         let in_set = values.contains(&val);
                         if negated {
                             if in_set {
@@ -4897,7 +5039,8 @@ impl Db {
                 // Check scalar comparison filters
                 for (column, (op, expected_value)) in scalar_values {
                     if let Some(&col_idx) = col_indices.get(&column.to_lowercase()) {
-                        let actual_value = Self::extract_column_value_as_string(batch.column(col_idx), row_idx);
+                        let actual_value =
+                            Self::extract_column_value_as_string(batch.column(col_idx), row_idx);
                         let cmp_result = Self::compare_string_values(&actual_value, expected_value);
                         let op_passes = match op.as_str() {
                             "=" => cmp_result == std::cmp::Ordering::Equal,
@@ -4928,7 +5071,8 @@ impl Db {
         // Build result batch from matching indices
         let mut result_arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
         for col_idx in 0..schema.fields().len() {
-            let arrays: Vec<&dyn Array> = batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
+            let arrays: Vec<&dyn Array> =
+                batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
 
             // Build indices for arrow take operation
             let mut take_indices: Vec<u32> = Vec::with_capacity(all_indices.len());
@@ -4964,7 +5108,9 @@ impl Db {
     fn compare_string_values(a: &str, b: &str) -> std::cmp::Ordering {
         // Try numeric comparison first
         if let (Ok(a_num), Ok(b_num)) = (a.parse::<f64>(), b.parse::<f64>()) {
-            return a_num.partial_cmp(&b_num).unwrap_or(std::cmp::Ordering::Equal);
+            return a_num
+                .partial_cmp(&b_num)
+                .unwrap_or(std::cmp::Ordering::Equal);
         }
         // Fall back to string comparison
         a.cmp(b)
@@ -4985,7 +5131,8 @@ impl Db {
             right_batches[0].schema()
         };
 
-        let all_batches: Vec<&RecordBatch> = left_batches.iter().chain(right_batches.iter()).collect();
+        let all_batches: Vec<&RecordBatch> =
+            left_batches.iter().chain(right_batches.iter()).collect();
 
         if all_batches.is_empty() {
             return Ok(None);
@@ -5276,7 +5423,11 @@ impl Db {
         }
 
         for entry in entries {
-            let mut batches = self.load_segment_batches_cached(entry)?.iter().cloned().collect();
+            let mut batches = self
+                .load_segment_batches_cached(entry)?
+                .iter()
+                .cloned()
+                .collect();
             if let Some(filter) = filter {
                 batches = filter_batches_with_query_filter(batches, filter)?;
             }
@@ -5309,7 +5460,9 @@ impl Db {
                     }
                     let idx_array = UInt32Array::from_iter_values(indices.iter().copied());
                     let subset = arrow_select::take::take_record_batch(&batch, &idx_array)
-                        .map_err(|e| EngineError::Internal(format!("partition take failed: {e}")))?;
+                        .map_err(|e| {
+                            EngineError::Internal(format!("partition take failed: {e}"))
+                        })?;
                     outputs[bucket].write(&subset)?;
                 }
             }
@@ -5400,10 +5553,7 @@ impl Db {
         Ok(batches)
     }
 
-    fn write_batches_to_ipc_file(
-        batches: &[RecordBatch],
-        path: &Path,
-    ) -> Result<(), EngineError> {
+    fn write_batches_to_ipc_file(batches: &[RecordBatch], path: &Path) -> Result<(), EngineError> {
         if batches.is_empty() {
             let _ = File::create(path)
                 .map_err(|e| EngineError::Io(format!("create join spill file failed: {e}")))?;
@@ -5492,7 +5642,9 @@ impl Db {
                         }
                         let idx_array = UInt32Array::from_iter_values(indices.iter().copied());
                         let subset = arrow_select::take::take_record_batch(&batch, &idx_array)
-                            .map_err(|e| EngineError::Internal(format!("partition take failed: {e}")))?;
+                            .map_err(|e| {
+                                EngineError::Internal(format!("partition take failed: {e}"))
+                            })?;
                         outputs[bucket].write(&subset)?;
                     }
                 }
@@ -5622,7 +5774,8 @@ impl Db {
         while let Some(batch) = reader
             .next()
             .transpose()
-            .map_err(|e| EngineError::Internal(format!("IPC decode error: {e}")))? {
+            .map_err(|e| EngineError::Internal(format!("IPC decode error: {e}")))?
+        {
             batches.push(decode_record_batch_encodings(&batch)?);
         }
         Ok(batches)
@@ -5694,14 +5847,11 @@ impl Db {
             FxHashMap::with_capacity_and_hasher(right_row_count, Default::default());
 
         for (batch_idx, batch) in right_batches.iter().enumerate() {
-            let col_idx = batch
-                .schema()
-                .index_of(right_col)
-                .map_err(|_| {
-                    EngineError::InvalidArgument(format!(
-                        "column '{right_col}' not found in right table"
-                    ))
-                })?;
+            let col_idx = batch.schema().index_of(right_col).map_err(|_| {
+                EngineError::InvalidArgument(format!(
+                    "column '{right_col}' not found in right table"
+                ))
+            })?;
 
             let col = batch.column(col_idx);
             for row_idx in 0..batch.num_rows() {
@@ -5720,14 +5870,9 @@ impl Db {
 
         // Probe with left side
         for (left_batch_idx, left_batch) in left_batches.iter().enumerate() {
-            let col_idx = left_batch
-                .schema()
-                .index_of(left_col)
-                .map_err(|_| {
-                    EngineError::InvalidArgument(format!(
-                        "column '{left_col}' not found in left table"
-                    ))
-                })?;
+            let col_idx = left_batch.schema().index_of(left_col).map_err(|_| {
+                EngineError::InvalidArgument(format!("column '{left_col}' not found in left table"))
+            })?;
 
             let col = left_batch.column(col_idx);
             for row_idx in 0..left_batch.num_rows() {
@@ -5881,8 +6026,8 @@ impl Db {
 
         // Concatenate all taken arrays
         let array_refs: Vec<&dyn Array> = taken_arrays.iter().map(|a| a.as_ref()).collect();
-        let concatenated = concat(&array_refs)
-            .map_err(|e| EngineError::Internal(format!("concat error: {e}")))?;
+        let concatenated =
+            concat(&array_refs).map_err(|e| EngineError::Internal(format!("concat error: {e}")))?;
 
         // Reorder to match original output order
         let mut reorder_indices: Vec<u32> = vec![0; indices.len()];
@@ -6031,14 +6176,8 @@ impl Db {
     }
 
     fn apply_tiering_rules(&self) -> Result<(), EngineError> {
-        let warm_after_micros = self
-            .cfg
-            .tier_warm_after_millis
-            .saturating_mul(1_000);
-        let cold_after_micros = self
-            .cfg
-            .tier_cold_after_millis
-            .saturating_mul(1_000);
+        let warm_after_micros = self.cfg.tier_warm_after_millis.saturating_mul(1_000);
+        let cold_after_micros = self.cfg.tier_cold_after_millis.saturating_mul(1_000);
         let warm_compression = normalize_compression(self.cfg.tier_warm_compression.clone())?;
         let cold_compression = normalize_compression(self.cfg.tier_cold_compression.clone())?;
 
@@ -6056,7 +6195,9 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             for entry in manifest.entries.iter_mut() {
-                let Some(age) = segment_age_micros(entry, now) else { continue };
+                let Some(age) = segment_age_micros(entry, now) else {
+                    continue;
+                };
                 let target_tier = if cold_after_micros > 0 && age >= cold_after_micros {
                     SegmentTier::Cold
                 } else if warm_after_micros > 0 && age >= warm_after_micros {
@@ -6115,7 +6256,11 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             for (segment_id, size_bytes, checksum, compression) in &updates {
-                if let Some(entry) = manifest.entries.iter_mut().find(|e| e.segment_id == *segment_id) {
+                if let Some(entry) = manifest
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.segment_id == *segment_id)
+                {
                     entry.size_bytes = *size_bytes;
                     entry.checksum = *checksum;
                     entry.compression = compression.clone();
@@ -6161,7 +6306,9 @@ impl Db {
         // Avoid unbounded loops: compact up to a fixed number of batches per invocation.
         for _ in 0..16 {
             let candidate = self.pick_compaction_candidate(target_bytes, min_segments, None)?;
-            let Some((entries, table_meta)) = candidate else { break };
+            let Some((entries, table_meta)) = candidate else {
+                break;
+            };
             self.compact_entries(entries, table_meta)?;
         }
         Ok(())
@@ -6239,7 +6386,11 @@ impl Db {
             return Ok(None);
         }
 
-        let db_name = if database.is_empty() { "default" } else { database };
+        let db_name = if database.is_empty() {
+            "default"
+        } else {
+            database
+        };
         let table_name = if table.is_empty() { "default" } else { table };
         let candidate = self.pick_compaction_candidate(
             self.cfg.compaction_target_bytes,
@@ -6309,8 +6460,9 @@ impl Db {
                 .and_then(|t| t.compression.clone())
                 .or_else(|| entries.first().and_then(|e| e.compression.clone())),
         )?;
-        let encodings =
-            column_encodings_from_schema_json(table_meta.as_ref().and_then(|t| t.schema_json.as_ref()))?;
+        let encodings = column_encodings_from_schema_json(
+            table_meta.as_ref().and_then(|t| t.schema_json.as_ref()),
+        )?;
         let encoded_payload = apply_column_encodings(&sorted_ipc, &encodings)?;
         let stored_payload = compress_payload(&encoded_payload, compression.as_deref())?;
 
@@ -6351,7 +6503,9 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             let drop_set: HashSet<String> = entries.iter().map(|e| e.segment_id.clone()).collect();
-            manifest.entries.retain(|e| !drop_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
             manifest.bump_version();
             new_entry.version_added = manifest.version;
             manifest.entries.push(new_entry.clone());
@@ -6456,7 +6610,11 @@ impl Db {
             persist_segment_ipc(&self.storage, &seg.entry.segment_id, &seg.data)?;
         }
 
-        let entries: Vec<ManifestEntry> = payload.segments.iter().map(|seg| seg.entry.clone()).collect();
+        let entries: Vec<ManifestEntry> = payload
+            .segments
+            .iter()
+            .map(|seg| seg.entry.clone())
+            .collect();
         let _added = self.append_manifest_entries(entries)?;
 
         let mut manifest = self
@@ -6585,10 +6743,8 @@ impl Db {
             )));
         }
         if let Some(expected_schema_hash) = seg.entry.schema_hash {
-            let actual_schema_hash = compute_schema_hash_from_payload(
-                &seg.data,
-                seg.entry.compression.as_deref(),
-            )?;
+            let actual_schema_hash =
+                compute_schema_hash_from_payload(&seg.data, seg.entry.compression.as_deref())?;
             if actual_schema_hash != expected_schema_hash {
                 return Err(EngineError::InvalidArgument(format!(
                     "bundle segment {} schema hash mismatch",
@@ -6787,7 +6943,12 @@ impl Db {
     }
 
     /// Drop a view from the database
-    pub fn drop_view(&self, database: &str, name: &str, if_exists: bool) -> Result<(), EngineError> {
+    pub fn drop_view(
+        &self,
+        database: &str,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), EngineError> {
         if database.trim().is_empty() || name.trim().is_empty() {
             return Err(EngineError::InvalidArgument(
                 "database and view name required".into(),
@@ -6816,7 +6977,10 @@ impl Db {
     }
 
     /// List all views in a database
-    pub fn list_views(&self, database: Option<&str>) -> Result<Vec<(String, String, String)>, EngineError> {
+    pub fn list_views(
+        &self,
+        database: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>, EngineError> {
         let manifest = self
             .manifest
             .read()
@@ -6968,9 +7132,7 @@ impl Db {
                 .find(|v| v.database == database && v.name == name)
                 .map(|v| v.query_sql.clone())
                 .ok_or_else(|| {
-                    EngineError::NotFound(format!(
-                        "materialized view not found: {database}.{name}"
-                    ))
+                    EngineError::NotFound(format!("materialized view not found: {database}.{name}"))
                 })?
         };
 
@@ -7134,11 +7296,7 @@ impl Db {
             .join(index_name)
     }
 
-    fn index_segment_path(
-        &self,
-        index: &IndexMeta,
-        segment_id: &str,
-    ) -> PathBuf {
+    fn index_segment_path(&self, index: &IndexMeta, segment_id: &str) -> PathBuf {
         self.index_dir(&index.database, &index.table, &index.name)
             .join(format!("{segment_id}.idx"))
     }
@@ -7160,10 +7318,7 @@ impl Db {
             .ok_or_else(|| EngineError::NotFound("table schema not found".into()))?;
         let fields: Vec<TableFieldSpec> = serde_json::from_str(&schema_json)
             .map_err(|e| EngineError::InvalidArgument(format!("invalid schema json: {e}")))?;
-        Ok(fields
-            .into_iter()
-            .map(|f| (f.name, f.data_type))
-            .collect())
+        Ok(fields.into_iter().map(|f| (f.name, f.data_type)).collect())
     }
 
     fn hash_index_value(data_type: &str, value: &IndexValue) -> Option<u64> {
@@ -7216,12 +7371,7 @@ impl Db {
         Some(hasher.finish())
     }
 
-    fn index_filter_hashes(
-        &self,
-        filter: &QueryFilter,
-        column: &str,
-        data_type: &str,
-    ) -> Vec<u64> {
+    fn index_filter_hashes(&self, filter: &QueryFilter, column: &str, data_type: &str) -> Vec<u64> {
         let mut values: Vec<IndexValue> = Vec::new();
         if column == "tenant_id" {
             if let Some(v) = filter.tenant_id_eq {
@@ -7280,7 +7430,10 @@ impl Db {
                         parse_uuid_string(v).map(|b| IndexValue::Bytes(b.to_vec()))
                     }));
                 } else if is_binary {
-                    values.extend(vs.iter().map(|v| IndexValue::Bytes(decode_binary_literal(v))));
+                    values.extend(
+                        vs.iter()
+                            .map(|v| IndexValue::Bytes(decode_binary_literal(v))),
+                    );
                 } else {
                     values.extend(vs.iter().cloned().map(IndexValue::Str));
                 }
@@ -7294,8 +7447,8 @@ impl Db {
     }
 
     fn load_hash_index(path: &Path) -> Result<Vec<u64>, EngineError> {
-        let bytes = fs::read(path)
-            .map_err(|e| EngineError::Io(format!("read hash index failed: {e}")))?;
+        let bytes =
+            fs::read(path).map_err(|e| EngineError::Io(format!("read hash index failed: {e}")))?;
         if bytes.len() < 8 {
             return Ok(Vec::new());
         }
@@ -7349,9 +7502,7 @@ impl Db {
                 }
                 crate::sql::IndexType::Hash => {
                     let values = Self::load_hash_index(&path)?;
-                    hashes
-                        .iter()
-                        .any(|h| values.binary_search(h).is_ok())
+                    hashes.iter().any(|h| values.binary_search(h).is_ok())
                 }
                 _ => true,
             };
@@ -7499,7 +7650,8 @@ impl Db {
                     Ok(storage) => Db::open_with_storage(cfg, std::sync::Arc::new(storage)),
                     Err(_) => {
                         // Fall back to local-only storage (no tokio runtime needed)
-                        let storage = crate::storage::TieredStorage::new_local_only(cfg.segments_dir.clone());
+                        let storage =
+                            crate::storage::TieredStorage::new_local_only(cfg.segments_dir.clone());
                         Db::open_with_storage(cfg, std::sync::Arc::new(storage))
                     }
                 }
@@ -7561,7 +7713,9 @@ impl Db {
                 .collect::<Vec<_>>();
             (entry, indexes)
         };
-        let Some(entry) = entry else { return; };
+        let Some(entry) = entry else {
+            return;
+        };
         if indexes.is_empty() {
             return;
         }
@@ -7572,7 +7726,8 @@ impl Db {
                 match storage_result {
                     Ok(storage) => Db::open_with_storage(cfg, std::sync::Arc::new(storage)),
                     Err(_) => {
-                        let storage = crate::storage::TieredStorage::new_local_only(cfg.segments_dir.clone());
+                        let storage =
+                            crate::storage::TieredStorage::new_local_only(cfg.segments_dir.clone());
                         Db::open_with_storage(cfg, std::sync::Arc::new(storage))
                     }
                 }
@@ -7615,58 +7770,57 @@ impl Db {
             .unwrap_or_default()
             .as_micros() as u64;
 
-        let index_meta = {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
-
-            // Verify table exists
-            let table_exists = manifest
-                .tables
-                .iter()
-                .any(|t| t.database == database && t.name == table);
-            if !table_exists {
-                return Err(EngineError::NotFound(format!(
-                    "table not found: {database}.{table}"
-                )));
-            }
-
-            if manifest
-                .indexes
-                .iter()
-                .any(|idx| idx.database == database && idx.table == table && idx.name == index_name)
+        let index_meta =
             {
-                if if_not_exists {
-                    tracing::info!(
-                        "Index {} already exists on {}.{}",
-                        index_name,
-                        database,
-                        table
-                    );
-                    return Ok(());
-                }
-                return Err(EngineError::InvalidArgument(format!(
-                    "index already exists: {database}.{table}.{index_name}"
-                )));
-            }
+                let mut manifest = self
+                    .manifest
+                    .write()
+                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
 
-            let index_meta = IndexMeta {
-                name: index_name.to_string(),
-                database: database.to_string(),
-                table: table.to_string(),
-                columns: columns.to_vec(),
-                index_type,
-                state: IndexState::Building,
-                created_micros: now,
-                last_built_micros: None,
+                // Verify table exists
+                let table_exists = manifest
+                    .tables
+                    .iter()
+                    .any(|t| t.database == database && t.name == table);
+                if !table_exists {
+                    return Err(EngineError::NotFound(format!(
+                        "table not found: {database}.{table}"
+                    )));
+                }
+
+                if manifest.indexes.iter().any(|idx| {
+                    idx.database == database && idx.table == table && idx.name == index_name
+                }) {
+                    if if_not_exists {
+                        tracing::info!(
+                            "Index {} already exists on {}.{}",
+                            index_name,
+                            database,
+                            table
+                        );
+                        return Ok(());
+                    }
+                    return Err(EngineError::InvalidArgument(format!(
+                        "index already exists: {database}.{table}.{index_name}"
+                    )));
+                }
+
+                let index_meta = IndexMeta {
+                    name: index_name.to_string(),
+                    database: database.to_string(),
+                    table: table.to_string(),
+                    columns: columns.to_vec(),
+                    index_type,
+                    state: IndexState::Building,
+                    created_micros: now,
+                    last_built_micros: None,
+                };
+                manifest.indexes.push(index_meta.clone());
+                manifest.bump_version();
+                persist_manifest(&self.cfg.manifest_path, &manifest)?;
+                snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+                index_meta
             };
-            manifest.indexes.push(index_meta.clone());
-            manifest.bump_version();
-            persist_manifest(&self.cfg.manifest_path, &manifest)?;
-            snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
-            index_meta
-        };
 
         self.spawn_background_index_build(index_meta);
         Ok(())
@@ -7717,7 +7871,8 @@ impl Db {
         &self,
         database: Option<&str>,
         table: Option<&str>,
-    ) -> Result<Vec<(String, String, String, Vec<String>, crate::sql::IndexType)>, EngineError> {
+    ) -> Result<Vec<(String, String, String, Vec<String>, crate::sql::IndexType)>, EngineError>
+    {
         let manifest = self
             .manifest
             .read()
@@ -7765,11 +7920,16 @@ impl Db {
             .entries
             .iter()
             .filter(|e| e.database == database && e.table == table)
-            .fold((0, 0), |(count, bytes), e| (count + 1, bytes + e.size_bytes));
+            .fold((0, 0), |(count, bytes), e| {
+                (count + 1, bytes + e.size_bytes)
+            });
 
         tracing::info!(
             "ANALYZE {}.{}: {} segments, {} bytes total",
-            database, table, segment_count, total_bytes
+            database,
+            table,
+            segment_count,
+            total_bytes
         );
 
         // Note: Full implementation would:
@@ -7782,7 +7942,12 @@ impl Db {
     /// Vacuum a table to reclaim storage
     /// - Regular VACUUM: rewrites fragmented segments (< 50% of target size)
     /// - VACUUM FULL: merges all segments into optimal-sized chunks
-    pub fn vacuum(&self, database: &str, table: &str, full: bool) -> Result<VacuumResult, EngineError> {
+    pub fn vacuum(
+        &self,
+        database: &str,
+        table: &str,
+        full: bool,
+    ) -> Result<VacuumResult, EngineError> {
         let table_meta = {
             let manifest = self
                 .manifest
@@ -7836,7 +8001,10 @@ impl Db {
         if full {
             tracing::info!(
                 "VACUUM FULL {}.{}: merging {} segments ({} bytes)",
-                database, table, original_count, original_bytes
+                database,
+                table,
+                original_count,
+                original_bytes
             );
 
             // VACUUM FULL: merge ALL segments into optimal chunks
@@ -7861,9 +8029,13 @@ impl Db {
                     .manifest
                     .write()
                     .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
-                let drop_set: std::collections::HashSet<String> =
-                    segments_to_vacuum.iter().map(|e| e.segment_id.clone()).collect();
-                manifest.entries.retain(|e| !drop_set.contains(&e.segment_id));
+                let drop_set: std::collections::HashSet<String> = segments_to_vacuum
+                    .iter()
+                    .map(|e| e.segment_id.clone())
+                    .collect();
+                manifest
+                    .entries
+                    .retain(|e| !drop_set.contains(&e.segment_id));
                 manifest.bump_version();
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
             }
@@ -7892,7 +8064,9 @@ impl Db {
             })?;
 
             let new_bytes: u64 = {
-                let manifest = self.manifest.read()
+                let manifest = self
+                    .manifest
+                    .read()
                     .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
                 manifest
                     .entries
@@ -7903,7 +8077,9 @@ impl Db {
             };
 
             let new_count = {
-                let manifest = self.manifest.read()
+                let manifest = self
+                    .manifest
+                    .read()
                     .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
                 manifest
                     .entries
@@ -7920,7 +8096,10 @@ impl Db {
 
             tracing::info!(
                 "VACUUM FULL complete: {} -> {} segments, {} -> {} bytes",
-                original_count, new_count, original_bytes, new_bytes
+                original_count,
+                new_count,
+                original_bytes,
+                new_bytes
             );
 
             Ok(VacuumResult {
@@ -7937,7 +8116,11 @@ impl Db {
                 .collect();
 
             if fragmented.is_empty() {
-                tracing::info!("VACUUM {}.{}: no fragmented segments found", database, table);
+                tracing::info!(
+                    "VACUUM {}.{}: no fragmented segments found",
+                    database,
+                    table
+                );
                 return Ok(VacuumResult {
                     segments_processed: original_count,
                     segments_removed: 0,
@@ -7948,7 +8131,9 @@ impl Db {
 
             tracing::info!(
                 "VACUUM {}.{}: rewriting {} fragmented segments",
-                database, table, fragmented.len()
+                database,
+                table,
+                fragmented.len()
             );
 
             // Group fragmented segments and compact them
@@ -7961,7 +8146,9 @@ impl Db {
             }
 
             let new_bytes: u64 = {
-                let manifest = self.manifest.read()
+                let manifest = self
+                    .manifest
+                    .read()
                     .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
                 manifest
                     .entries
@@ -7980,7 +8167,8 @@ impl Db {
             Ok(VacuumResult {
                 segments_processed: original_count,
                 segments_removed: fragmented_count,
-                bytes_reclaimed: fragmented_bytes.saturating_sub(new_bytes.saturating_sub(original_bytes - fragmented_bytes)),
+                bytes_reclaimed: fragmented_bytes
+                    .saturating_sub(new_bytes.saturating_sub(original_bytes - fragmented_bytes)),
                 new_segments: 1,
             })
         }
@@ -8071,7 +8259,10 @@ impl Db {
         }
 
         // Check if we can start more compactions
-        if !self.compaction_state.can_start_compaction(self.cfg.max_concurrent_compactions) {
+        if !self
+            .compaction_state
+            .can_start_compaction(self.cfg.max_concurrent_compactions)
+        {
             tracing::debug!(
                 "Skipping background compaction: {} active (max {})",
                 self.compaction_state.active_count(),
@@ -8088,11 +8279,15 @@ impl Db {
         let mut compacted = 0;
         for candidate in candidates {
             // Check again before each compaction
-            if !self.compaction_state.can_start_compaction(self.cfg.max_concurrent_compactions) {
+            if !self
+                .compaction_state
+                .can_start_compaction(self.cfg.max_concurrent_compactions)
+            {
                 break;
             }
 
-            self.compaction_state.start_compaction(&candidate.database, &candidate.table);
+            self.compaction_state
+                .start_compaction(&candidate.database, &candidate.table);
 
             match self.vacuum(&candidate.database, &candidate.table, false) {
                 Ok(result) => {
@@ -8178,7 +8373,11 @@ impl Db {
         if let Some(cfg) = config {
             tracing::info!(
                 "Deduplication enabled on {}.{}: keys={:?}, version={:?}, mode={:?}",
-                database, table, cfg.key_columns, cfg.version_column, cfg.mode
+                database,
+                table,
+                cfg.key_columns,
+                cfg.version_column,
+                cfg.mode
             );
         } else {
             tracing::info!("Deduplication disabled on {}.{}", database, table);
@@ -8228,61 +8427,85 @@ impl Db {
         match &constraint {
             TableConstraint::PrimaryKey { name, .. } => {
                 // Only one primary key allowed
-                if tbl.constraints.iter().any(|c| matches!(c, TableConstraint::PrimaryKey { .. })) {
+                if tbl
+                    .constraints
+                    .iter()
+                    .any(|c| matches!(c, TableConstraint::PrimaryKey { .. }))
+                {
                     return Err(EngineError::InvalidArgument(
-                        "table already has a primary key".into()
+                        "table already has a primary key".into(),
                     ));
                 }
                 // Check for name conflict
                 if let Some(n) = name {
-                    if tbl.constraints.iter().any(|c| {
-                        match c {
-                            TableConstraint::PrimaryKey { name: Some(existing), .. } |
-                            TableConstraint::Unique { name: Some(existing), .. } |
-                            TableConstraint::Check { name: Some(existing), .. } => existing == n,
-                            _ => false,
+                    if tbl.constraints.iter().any(|c| match c {
+                        TableConstraint::PrimaryKey {
+                            name: Some(existing),
+                            ..
                         }
+                        | TableConstraint::Unique {
+                            name: Some(existing),
+                            ..
+                        }
+                        | TableConstraint::Check {
+                            name: Some(existing),
+                            ..
+                        } => existing == n,
+                        _ => false,
                     }) {
-                        return Err(EngineError::InvalidArgument(
-                            format!("constraint '{}' already exists", n)
-                        ));
+                        return Err(EngineError::InvalidArgument(format!(
+                            "constraint '{}' already exists",
+                            n
+                        )));
                     }
                 }
             }
             TableConstraint::Unique { name, .. } | TableConstraint::Check { name, .. } => {
                 if let Some(n) = name {
-                    if tbl.constraints.iter().any(|c| {
-                        match c {
-                            TableConstraint::PrimaryKey { name: Some(existing), .. } |
-                            TableConstraint::Unique { name: Some(existing), .. } |
-                            TableConstraint::Check { name: Some(existing), .. } => existing == n,
-                            _ => false,
+                    if tbl.constraints.iter().any(|c| match c {
+                        TableConstraint::PrimaryKey {
+                            name: Some(existing),
+                            ..
                         }
+                        | TableConstraint::Unique {
+                            name: Some(existing),
+                            ..
+                        }
+                        | TableConstraint::Check {
+                            name: Some(existing),
+                            ..
+                        } => existing == n,
+                        _ => false,
                     }) {
-                        return Err(EngineError::InvalidArgument(
-                            format!("constraint '{}' already exists", n)
-                        ));
+                        return Err(EngineError::InvalidArgument(format!(
+                            "constraint '{}' already exists",
+                            n
+                        )));
                     }
                 }
             }
             TableConstraint::NotNull { column } => {
                 // Check for duplicate NOT NULL
-                if tbl.constraints.iter().any(|c| {
-                    matches!(c, TableConstraint::NotNull { column: col } if col == column)
-                }) {
-                    return Err(EngineError::InvalidArgument(
-                        format!("NOT NULL constraint already exists for column '{}'", column)
-                    ));
+                if tbl
+                    .constraints
+                    .iter()
+                    .any(|c| matches!(c, TableConstraint::NotNull { column: col } if col == column))
+                {
+                    return Err(EngineError::InvalidArgument(format!(
+                        "NOT NULL constraint already exists for column '{}'",
+                        column
+                    )));
                 }
             }
             TableConstraint::Default { column, .. } => {
                 // Check for duplicate DEFAULT
-                if tbl.constraints.iter().any(|c| {
-                    matches!(c, TableConstraint::Default { column: col, .. } if col == column)
-                }) {
-                    return Err(EngineError::InvalidArgument(
-                        format!("DEFAULT constraint already exists for column '{}'", column)
-                    ));
+                if tbl.constraints.iter().any(
+                    |c| matches!(c, TableConstraint::Default { column: col, .. } if col == column),
+                ) {
+                    return Err(EngineError::InvalidArgument(format!(
+                        "DEFAULT constraint already exists for column '{}'",
+                        column
+                    )));
                 }
             }
         }
@@ -8292,7 +8515,12 @@ impl Db {
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
 
-        tracing::info!("Added constraint to {}.{}: {:?}", database, table, constraint);
+        tracing::info!(
+            "Added constraint to {}.{}: {:?}",
+            database,
+            table,
+            constraint
+        );
         Ok(())
     }
 
@@ -8317,26 +8545,30 @@ impl Db {
             .ok_or_else(|| EngineError::NotFound("table not found".into()))?;
 
         let original_len = tbl.constraints.len();
-        tbl.constraints.retain(|c| {
-            match c {
-                TableConstraint::PrimaryKey { name: Some(n), .. } |
-                TableConstraint::Unique { name: Some(n), .. } |
-                TableConstraint::Check { name: Some(n), .. } => n != constraint_name,
-                _ => true,
-            }
+        tbl.constraints.retain(|c| match c {
+            TableConstraint::PrimaryKey { name: Some(n), .. }
+            | TableConstraint::Unique { name: Some(n), .. }
+            | TableConstraint::Check { name: Some(n), .. } => n != constraint_name,
+            _ => true,
         });
 
         if tbl.constraints.len() == original_len {
-            return Err(EngineError::NotFound(
-                format!("constraint '{}' not found", constraint_name)
-            ));
+            return Err(EngineError::NotFound(format!(
+                "constraint '{}' not found",
+                constraint_name
+            )));
         }
 
         manifest.bump_version();
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
 
-        tracing::info!("Dropped constraint '{}' from {}.{}", constraint_name, database, table);
+        tracing::info!(
+            "Dropped constraint '{}' from {}.{}",
+            constraint_name,
+            database,
+            table
+        );
         Ok(())
     }
 
@@ -8387,11 +8619,18 @@ impl Db {
 
         // Check if database exists
         if !manifest.databases.iter().any(|db| db.name == database) {
-            return Err(EngineError::NotFound(format!("database '{}' not found", database)));
+            return Err(EngineError::NotFound(format!(
+                "database '{}' not found",
+                database
+            )));
         }
 
         // Check if sequence already exists
-        if manifest.sequences.iter().any(|s| s.database == database && s.name == name) {
+        if manifest
+            .sequences
+            .iter()
+            .any(|s| s.database == database && s.name == name)
+        {
             if if_not_exists {
                 return Ok(());
             }
@@ -8583,7 +8822,10 @@ impl Db {
     }
 
     /// Get all sequences in a database (for SHOW SEQUENCES)
-    pub fn list_sequences(&self, database: &str) -> Result<Vec<crate::replication::SequenceMeta>, EngineError> {
+    pub fn list_sequences(
+        &self,
+        database: &str,
+    ) -> Result<Vec<crate::replication::SequenceMeta>, EngineError> {
         let manifest = self
             .manifest
             .read()
@@ -8599,7 +8841,10 @@ impl Db {
 
     /// Handle information_schema queries (virtual system tables)
     /// Returns Some(QueryResponse) if the query is an information_schema query, None otherwise
-    fn handle_information_schema_query(&self, sql: &str) -> Result<Option<QueryResponse>, EngineError> {
+    fn handle_information_schema_query(
+        &self,
+        sql: &str,
+    ) -> Result<Option<QueryResponse>, EngineError> {
         let sql_lower = sql.to_lowercase();
 
         // Check if this is an information_schema query
@@ -8608,15 +8853,25 @@ impl Db {
         }
 
         // Parse to find which table is being queried
-        if sql_lower.contains("information_schema.schemata") || sql_lower.contains("information_schema.\"schemata\"") {
+        if sql_lower.contains("information_schema.schemata")
+            || sql_lower.contains("information_schema.\"schemata\"")
+        {
             return Ok(Some(self.query_information_schema_schemata()?));
-        } else if sql_lower.contains("information_schema.tables") || sql_lower.contains("information_schema.\"tables\"") {
+        } else if sql_lower.contains("information_schema.tables")
+            || sql_lower.contains("information_schema.\"tables\"")
+        {
             return Ok(Some(self.query_information_schema_tables()?));
-        } else if sql_lower.contains("information_schema.columns") || sql_lower.contains("information_schema.\"columns\"") {
+        } else if sql_lower.contains("information_schema.columns")
+            || sql_lower.contains("information_schema.\"columns\"")
+        {
             return Ok(Some(self.query_information_schema_columns()?));
-        } else if sql_lower.contains("information_schema.table_constraints") || sql_lower.contains("information_schema.\"table_constraints\"") {
+        } else if sql_lower.contains("information_schema.table_constraints")
+            || sql_lower.contains("information_schema.\"table_constraints\"")
+        {
             return Ok(Some(self.query_information_schema_table_constraints()?));
-        } else if sql_lower.contains("information_schema.key_column_usage") || sql_lower.contains("information_schema.\"key_column_usage\"") {
+        } else if sql_lower.contains("information_schema.key_column_usage")
+            || sql_lower.contains("information_schema.\"key_column_usage\"")
+        {
             return Ok(Some(self.query_information_schema_key_column_usage()?));
         }
 
@@ -8668,11 +8923,15 @@ impl Db {
 
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer =
+                StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).map_err(|e| {
+                    EngineError::Internal(format!("failed to create IPC writer: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
         Ok(QueryResponse {
@@ -8732,11 +8991,15 @@ impl Db {
 
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer =
+                StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).map_err(|e| {
+                    EngineError::Internal(format!("failed to create IPC writer: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
         Ok(QueryResponse {
@@ -8781,15 +9044,21 @@ impl Db {
 
                         ordinal_position.append_value((idx + 1) as i64);
 
-                        if let Some(dtype) = field.get("type").and_then(|v| v.as_str())
-                            .or_else(|| field.get("data_type").and_then(|v| v.as_str())) {
+                        if let Some(dtype) = field
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| field.get("data_type").and_then(|v| v.as_str()))
+                        {
                             data_type.append_value(dtype);
                         } else {
                             data_type.append_value("unknown");
                         }
 
                         // Check if nullable field exists
-                        let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let nullable = field
+                            .get("nullable")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
                         is_nullable.append_value(if nullable { "YES" } else { "NO" });
                     }
                 }
@@ -8822,11 +9091,15 @@ impl Db {
 
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer =
+                StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).map_err(|e| {
+                    EngineError::Internal(format!("failed to create IPC writer: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
         Ok(QueryResponse {
@@ -8839,8 +9112,8 @@ impl Db {
 
     /// Query information_schema.table_constraints
     fn query_information_schema_table_constraints(&self) -> Result<QueryResponse, EngineError> {
-        use arrow_array::builder::StringBuilder;
         use crate::sql::TableConstraint;
+        use arrow_array::builder::StringBuilder;
 
         let manifest = self
             .manifest
@@ -8910,11 +9183,15 @@ impl Db {
 
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer =
+                StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).map_err(|e| {
+                    EngineError::Internal(format!("failed to create IPC writer: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
         Ok(QueryResponse {
@@ -8927,8 +9204,8 @@ impl Db {
 
     /// Query information_schema.key_column_usage
     fn query_information_schema_key_column_usage(&self) -> Result<QueryResponse, EngineError> {
-        use arrow_array::builder::{Int64Builder, StringBuilder};
         use crate::sql::TableConstraint;
+        use arrow_array::builder::{Int64Builder, StringBuilder};
 
         let manifest = self
             .manifest
@@ -8993,11 +9270,15 @@ impl Db {
 
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer =
+                StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).map_err(|e| {
+                    EngineError::Internal(format!("failed to create IPC writer: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
         Ok(QueryResponse {
@@ -9083,7 +9364,7 @@ impl Db {
         }
 
         let indices = arrow_array::UInt32Array::from(
-            keep_indices.iter().map(|&i| i as u32).collect::<Vec<_>>()
+            keep_indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
         );
         let columns: Vec<arrow_array::ArrayRef> = batch
             .columns()
@@ -9111,9 +9392,8 @@ impl Db {
                 .cloned()
         };
 
-        let table_meta = table_meta.ok_or_else(|| {
-            EngineError::NotFound(format!("table not found: {database}.{table}"))
-        })?;
+        let table_meta = table_meta
+            .ok_or_else(|| EngineError::NotFound(format!("table not found: {database}.{table}")))?;
 
         let dedup_config = table_meta.deduplication.ok_or_else(|| {
             EngineError::InvalidArgument(format!(
@@ -9168,13 +9448,21 @@ impl Db {
         let rows_removed = total_rows_before - deduped.num_rows();
 
         if rows_removed == 0 {
-            tracing::info!("Deduplication on {}.{}: no duplicates found", database, table);
+            tracing::info!(
+                "Deduplication on {}.{}: no duplicates found",
+                database,
+                table
+            );
             return Ok(0);
         }
 
         tracing::info!(
             "Deduplication on {}.{}: {} duplicates removed ({} -> {} rows)",
-            database, table, rows_removed, total_rows_before, deduped.num_rows()
+            database,
+            table,
+            rows_removed,
+            total_rows_before,
+            deduped.num_rows()
         );
 
         // Remove old segments
@@ -9184,7 +9472,9 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             let drop_set: HashSet<String> = segments.iter().map(|e| e.segment_id.clone()).collect();
-            manifest.entries.retain(|e| !drop_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
         }
@@ -9577,7 +9867,10 @@ impl Db {
     /// to prevent SQL injection and path traversal attacks.
     fn validate_identifier(&self, name: &str, kind: &str) -> Result<(), EngineError> {
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument(format!("{} name cannot be empty", kind)));
+            return Err(EngineError::InvalidArgument(format!(
+                "{} name cannot be empty",
+                kind
+            )));
         }
 
         if name.len() > 128 {
@@ -9588,7 +9881,10 @@ impl Db {
         }
 
         // Check for invalid characters that could enable injection or path traversal
-        let invalid_chars = ['\'', '"', '\\', '/', '\0', ';', '-', '*', '?', '`', '$', '!', '|', '&', '<', '>', '\n', '\r', '\t'];
+        let invalid_chars = [
+            '\'', '"', '\\', '/', '\0', ';', '-', '*', '?', '`', '$', '!', '|', '&', '<', '>',
+            '\n', '\r', '\t',
+        ];
         for c in invalid_chars {
             if name.contains(c) {
                 let char_display = match c {
@@ -9637,14 +9933,19 @@ impl Db {
 
     /// Validate and resolve a COPY file path for security.
     /// Paths must be within the data directory's 'copy' subdirectory to prevent path traversal attacks.
-    fn validate_copy_path(&self, path: &str, for_write: bool) -> Result<std::path::PathBuf, EngineError> {
-        use std::path::{Path, PathBuf};
+    fn validate_copy_path(
+        &self,
+        path: &str,
+        for_write: bool,
+    ) -> Result<std::path::PathBuf, EngineError> {
+        use std::path::Path;
 
         // Create the allowed copy directory (data_dir/copy)
         let copy_dir = self.cfg.data_dir.join("copy");
         if !copy_dir.exists() {
-            std::fs::create_dir_all(&copy_dir)
-                .map_err(|e| EngineError::Internal(format!("failed to create copy directory: {}", e)))?;
+            std::fs::create_dir_all(&copy_dir).map_err(|e| {
+                EngineError::Internal(format!("failed to create copy directory: {}", e))
+            })?;
         }
 
         // Parse the requested path
@@ -9663,25 +9964,28 @@ impl Db {
         let canonical = if for_write {
             let parent = resolved.parent().unwrap_or(Path::new("."));
             if !parent.exists() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| EngineError::Internal(format!("failed to create directory: {}", e)))?;
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    EngineError::Internal(format!("failed to create directory: {}", e))
+                })?;
             }
-            let canonical_parent = parent.canonicalize()
+            let canonical_parent = parent
+                .canonicalize()
                 .map_err(|e| EngineError::InvalidArgument(format!("invalid path: {}", e)))?;
             canonical_parent.join(resolved.file_name().unwrap_or_default())
         } else {
-            resolved.canonicalize()
-                .map_err(|e| EngineError::InvalidArgument(format!("file not found or invalid path: {}", e)))?
+            resolved.canonicalize().map_err(|e| {
+                EngineError::InvalidArgument(format!("file not found or invalid path: {}", e))
+            })?
         };
 
         // Security check: ensure the canonical path is under copy_dir
-        let canonical_copy_dir = copy_dir.canonicalize()
-            .unwrap_or_else(|_| copy_dir.clone());
+        let canonical_copy_dir = copy_dir.canonicalize().unwrap_or_else(|_| copy_dir.clone());
 
         if !canonical.starts_with(&canonical_copy_dir) {
             return Err(EngineError::InvalidArgument(format!(
                 "COPY path '{}' is outside the allowed directory. Files must be in '{}'",
-                path, copy_dir.display()
+                path,
+                copy_dir.display()
             )));
         }
 
@@ -9689,7 +9993,7 @@ impl Db {
         let path_str = path.to_lowercase();
         if path_str.contains("..") || path_str.contains('\0') {
             return Err(EngineError::InvalidArgument(
-                "COPY path contains invalid characters".into()
+                "COPY path contains invalid characters".into(),
             ));
         }
 
@@ -9716,7 +10020,7 @@ impl Db {
             CopySource::File(path) => self.validate_copy_path(path, false)?,
             CopySource::Stdin => {
                 return Err(EngineError::InvalidArgument(
-                    "COPY FROM STDIN is not supported in batch mode".into()
+                    "COPY FROM STDIN is not supported in batch mode".into(),
                 ));
             }
             CopySource::Program(cmd) => {
@@ -9728,16 +10032,19 @@ impl Db {
         };
 
         // Read the file
-        let file_content = std::fs::read(&file_path)
-            .map_err(|e| EngineError::Internal(format!("failed to read file '{}': {}", file_path.display(), e)))?;
+        let file_content = std::fs::read(&file_path).map_err(|e| {
+            EngineError::Internal(format!(
+                "failed to read file '{}': {}",
+                file_path.display(),
+                e
+            ))
+        })?;
 
         match format {
             CopyFormat::Csv | CopyFormat::Text => {
                 self.copy_from_csv(database, table, &file_content, format, options)
             }
-            CopyFormat::Json => {
-                self.copy_from_json(database, table, &file_content, options)
-            }
+            CopyFormat::Json => self.copy_from_json(database, table, &file_content, options),
             CopyFormat::Arrow => {
                 // Direct Arrow IPC ingest
                 let watermark = std::time::SystemTime::now()
@@ -9775,18 +10082,23 @@ impl Db {
 
         // Get table schema
         let table_desc = self.describe_table(database, table)?;
-        let schema_json = table_desc.schema_json.ok_or_else(|| {
-            EngineError::InvalidArgument("table has no schema".into())
-        })?;
+        let schema_json = table_desc
+            .schema_json
+            .ok_or_else(|| EngineError::InvalidArgument("table has no schema".into()))?;
 
         // Parse schema JSON
         let schema_fields: Vec<serde_json::Value> = serde_json::from_str(&schema_json)
             .map_err(|e| EngineError::Internal(format!("invalid schema JSON: {}", e)))?;
 
         // Determine delimiter
-        let delimiter = options.delimiter.unwrap_or(
-            if matches!(format, crate::sql::CopyFormat::Text) { '\t' } else { ',' }
-        );
+        let delimiter =
+            options
+                .delimiter
+                .unwrap_or(if matches!(format, crate::sql::CopyFormat::Text) {
+                    '\t'
+                } else {
+                    ','
+                });
 
         // Parse content
         let content_str = std::str::from_utf8(content)
@@ -9807,10 +10119,14 @@ impl Db {
 
         for field in &schema_fields {
             let name = field["name"].as_str().unwrap_or("unknown");
-            let type_str = field["type"].as_str()
+            let type_str = field["type"]
+                .as_str()
                 .or_else(|| field["data_type"].as_str())
                 .unwrap_or("string");
-            let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+            let nullable = field
+                .get("nullable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
 
             let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
                 "int64" | "bigint" => (DataType::Int64, Box::new(Int64Builder::new())),
@@ -9832,9 +10148,10 @@ impl Db {
             for (i, field) in schema_fields.iter().enumerate() {
                 let value = values.get(i).copied().unwrap_or("");
                 let is_null = value == null_str || value.is_empty();
-                let type_str = field["type"].as_str()
-                .or_else(|| field["data_type"].as_str())
-                .unwrap_or("string");
+                let type_str = field["type"]
+                    .as_str()
+                    .or_else(|| field["data_type"].as_str())
+                    .unwrap_or("string");
 
                 match type_str {
                     "int64" | "bigint" => {
@@ -9874,7 +10191,10 @@ impl Db {
                         if is_null {
                             builder.append_null();
                         } else {
-                            let b = matches!(value.to_lowercase().as_str(), "true" | "t" | "1" | "yes" | "y");
+                            let b = matches!(
+                                value.to_lowercase().as_str(),
+                                "true" | "t" | "1" | "yes" | "y"
+                            );
                             builder.append_value(b);
                         }
                     }
@@ -9893,7 +10213,8 @@ impl Db {
         // Build arrays and create batch
         let mut arrays: Vec<ArrayRef> = Vec::new();
         for (i, field) in schema_fields.iter().enumerate() {
-            let type_str = field["type"].as_str()
+            let type_str = field["type"]
+                .as_str()
                 .or_else(|| field["data_type"].as_str())
                 .unwrap_or("string");
             let array: ArrayRef = match type_str {
@@ -9903,18 +10224,30 @@ impl Db {
                 "int32" | "int" | "integer" => {
                     Arc::new(builders[i].downcast_mut::<Int32Builder>().unwrap().finish())
                 }
-                "float64" | "double" => {
-                    Arc::new(builders[i].downcast_mut::<Float64Builder>().unwrap().finish())
-                }
-                "float32" | "float" => {
-                    Arc::new(builders[i].downcast_mut::<Float32Builder>().unwrap().finish())
-                }
-                "boolean" | "bool" => {
-                    Arc::new(builders[i].downcast_mut::<BooleanBuilder>().unwrap().finish())
-                }
-                _ => {
-                    Arc::new(builders[i].downcast_mut::<StringBuilder>().unwrap().finish())
-                }
+                "float64" | "double" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<Float64Builder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                "float32" | "float" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<Float32Builder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                "boolean" | "bool" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<BooleanBuilder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                _ => Arc::new(
+                    builders[i]
+                        .downcast_mut::<StringBuilder>()
+                        .unwrap()
+                        .finish(),
+                ),
             };
             arrays.push(array);
         }
@@ -9926,11 +10259,14 @@ impl Db {
         // Convert to IPC and ingest
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref()).map_err(|e| {
+                EngineError::Internal(format!("failed to create IPC writer: {}", e))
+            })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
 
@@ -9963,9 +10299,9 @@ impl Db {
 
         // Get table schema
         let table_desc = self.describe_table(database, table)?;
-        let schema_json = table_desc.schema_json.ok_or_else(|| {
-            EngineError::InvalidArgument("table has no schema".into())
-        })?;
+        let schema_json = table_desc
+            .schema_json
+            .ok_or_else(|| EngineError::InvalidArgument("table has no schema".into()))?;
 
         let schema_fields: Vec<serde_json::Value> = serde_json::from_str(&schema_json)
             .map_err(|e| EngineError::Internal(format!("invalid schema JSON: {}", e)))?;
@@ -9973,7 +10309,10 @@ impl Db {
         let content_str = std::str::from_utf8(content)
             .map_err(|e| EngineError::InvalidArgument(format!("invalid UTF-8: {}", e)))?;
 
-        let lines: Vec<&str> = content_str.lines().filter(|l| !l.trim().is_empty()).collect();
+        let lines: Vec<&str> = content_str
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
         if lines.is_empty() {
             return Ok(0);
         }
@@ -9984,10 +10323,14 @@ impl Db {
 
         for field in &schema_fields {
             let name = field["name"].as_str().unwrap_or("unknown");
-            let type_str = field["type"].as_str()
+            let type_str = field["type"]
+                .as_str()
                 .or_else(|| field["data_type"].as_str())
                 .unwrap_or("string");
-            let nullable = field.get("nullable").and_then(|v| v.as_bool()).unwrap_or(true);
+            let nullable = field
+                .get("nullable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
 
             let (arrow_type, builder): (DataType, Box<dyn std::any::Any>) = match type_str {
                 "int64" | "bigint" => (DataType::Int64, Box::new(Int64Builder::new())),
@@ -10009,9 +10352,10 @@ impl Db {
 
             for (i, field) in schema_fields.iter().enumerate() {
                 let name = field["name"].as_str().unwrap_or("unknown");
-                let type_str = field["type"].as_str()
-                .or_else(|| field["data_type"].as_str())
-                .unwrap_or("string");
+                let type_str = field["type"]
+                    .as_str()
+                    .or_else(|| field["data_type"].as_str())
+                    .unwrap_or("string");
                 let value = &json[name];
 
                 match type_str {
@@ -10072,7 +10416,8 @@ impl Db {
         // Build arrays and create batch
         let mut arrays: Vec<ArrayRef> = Vec::new();
         for (i, field) in schema_fields.iter().enumerate() {
-            let type_str = field["type"].as_str()
+            let type_str = field["type"]
+                .as_str()
                 .or_else(|| field["data_type"].as_str())
                 .unwrap_or("string");
             let array: ArrayRef = match type_str {
@@ -10082,18 +10427,30 @@ impl Db {
                 "int32" | "int" | "integer" => {
                     Arc::new(builders[i].downcast_mut::<Int32Builder>().unwrap().finish())
                 }
-                "float64" | "double" => {
-                    Arc::new(builders[i].downcast_mut::<Float64Builder>().unwrap().finish())
-                }
-                "float32" | "float" => {
-                    Arc::new(builders[i].downcast_mut::<Float32Builder>().unwrap().finish())
-                }
-                "boolean" | "bool" => {
-                    Arc::new(builders[i].downcast_mut::<BooleanBuilder>().unwrap().finish())
-                }
-                _ => {
-                    Arc::new(builders[i].downcast_mut::<StringBuilder>().unwrap().finish())
-                }
+                "float64" | "double" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<Float64Builder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                "float32" | "float" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<Float32Builder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                "boolean" | "bool" => Arc::new(
+                    builders[i]
+                        .downcast_mut::<BooleanBuilder>()
+                        .unwrap()
+                        .finish(),
+                ),
+                _ => Arc::new(
+                    builders[i]
+                        .downcast_mut::<StringBuilder>()
+                        .unwrap()
+                        .finish(),
+                ),
             };
             arrays.push(array);
         }
@@ -10105,11 +10462,14 @@ impl Db {
         // Convert to IPC and ingest
         let mut ipc = Vec::new();
         {
-            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref())
-                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {}", e)))?;
-            writer.write(&batch)
+            let mut writer = StreamWriter::try_new(&mut ipc, schema.as_ref()).map_err(|e| {
+                EngineError::Internal(format!("failed to create IPC writer: {}", e))
+            })?;
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish writer: {}", e)))?;
         }
 
@@ -10175,22 +10535,29 @@ impl Db {
 
         match format {
             CopyFormat::Csv | CopyFormat::Text => {
-                let delimiter = options.delimiter.unwrap_or(
-                    if matches!(format, CopyFormat::Text) { '\t' } else { ',' }
-                );
+                let delimiter =
+                    options
+                        .delimiter
+                        .unwrap_or(if matches!(format, CopyFormat::Text) {
+                            '\t'
+                        } else {
+                            ','
+                        });
                 let null_str = options.null_string.as_deref().unwrap_or("");
 
                 // Write header if requested
                 if options.header {
-                    let header: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                    let header: Vec<&str> =
+                        schema.fields().iter().map(|f| f.name().as_str()).collect();
                     output.push_str(&header.join(&delimiter.to_string()));
                     output.push('\n');
                 }
 
                 // Write data rows
                 while let Some(batch_result) = reader.next() {
-                    let batch = batch_result
-                        .map_err(|e| EngineError::Internal(format!("failed to read batch: {}", e)))?;
+                    let batch = batch_result.map_err(|e| {
+                        EngineError::Internal(format!("failed to read batch: {}", e))
+                    })?;
 
                     for row in 0..batch.num_rows() {
                         let values: Vec<String> = batch
@@ -10212,8 +10579,9 @@ impl Db {
             }
             CopyFormat::Json => {
                 while let Some(batch_result) = reader.next() {
-                    let batch = batch_result
-                        .map_err(|e| EngineError::Internal(format!("failed to read batch: {}", e)))?;
+                    let batch = batch_result.map_err(|e| {
+                        EngineError::Internal(format!("failed to read batch: {}", e))
+                    })?;
 
                     for row in 0..batch.num_rows() {
                         let mut obj = serde_json::Map::new();
@@ -10386,9 +10754,7 @@ impl Db {
         nullable: bool,
     ) -> Result<(), EngineError> {
         if column.trim().is_empty() {
-            return Err(EngineError::InvalidArgument(
-                "column name required".into(),
-            ));
+            return Err(EngineError::InvalidArgument("column name required".into()));
         }
         if !nullable {
             return Err(EngineError::InvalidArgument(
@@ -10480,9 +10846,7 @@ impl Db {
         column: &str,
     ) -> Result<(), EngineError> {
         if column.trim().is_empty() {
-            return Err(EngineError::InvalidArgument(
-                "column name required".into(),
-            ));
+            return Err(EngineError::InvalidArgument("column name required".into()));
         }
 
         let table_meta = {
@@ -10514,9 +10878,10 @@ impl Db {
         )
         .map_err(|e| EngineError::InvalidArgument(format!("invalid schema json: {e}")))?;
 
-        let pos = fields.iter().position(|f| f.name == column).ok_or_else(|| {
-            EngineError::NotFound(format!("column '{}' not found", column))
-        })?;
+        let pos = fields
+            .iter()
+            .position(|f| f.name == column)
+            .ok_or_else(|| EngineError::NotFound(format!("column '{}' not found", column)))?;
         fields.remove(pos);
         if fields.is_empty() {
             return Err(EngineError::InvalidArgument(
@@ -10562,28 +10927,26 @@ impl Db {
         let db_name = database.to_string();
         let tbl_name = table.to_string();
         let schema_json = schema_json.to_string();
-        std::thread::spawn(move || {
-            match Db::open(cfg) {
-                Ok(db) => {
-                    if let Err(e) =
-                        db.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json)
-                    {
-                        tracing::warn!(
-                            database = %db_name,
-                            table = %tbl_name,
-                            error = %e,
-                            "background schema rewrite failed"
-                        );
-                    }
-                }
-                Err(e) => {
+        std::thread::spawn(move || match Db::open(cfg) {
+            Ok(db) => {
+                if let Err(e) =
+                    db.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json)
+                {
                     tracing::warn!(
                         database = %db_name,
                         table = %tbl_name,
                         error = %e,
-                        "failed to start background schema rewrite"
+                        "background schema rewrite failed"
                     );
                 }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    database = %db_name,
+                    table = %tbl_name,
+                    error = %e,
+                    "failed to start background schema rewrite"
+                );
             }
         });
     }
@@ -10619,14 +10982,14 @@ impl Db {
         table: &str,
         schema_json: &str,
     ) -> Result<(), EngineError> {
-        let expected_spec: Vec<TableFieldSpec> = serde_json::from_str(schema_json).map_err(|e| {
-            EngineError::InvalidArgument(format!("invalid schema json for rewrite: {e}"))
-        })?;
+        let expected_spec: Vec<TableFieldSpec> =
+            serde_json::from_str(schema_json).map_err(|e| {
+                EngineError::InvalidArgument(format!("invalid schema json for rewrite: {e}"))
+            })?;
         let expected_fields: Vec<Field> = expected_spec
             .iter()
             .map(|s| {
-                arrow_type_from_str(&s.data_type)
-                    .map(|dt| Field::new(&s.name, dt, s.nullable))
+                arrow_type_from_str(&s.data_type).map(|dt| Field::new(&s.name, dt, s.nullable))
             })
             .collect::<Result<_, _>>()?;
 
@@ -10667,8 +11030,7 @@ impl Db {
                 new_batches.push(aligned);
             }
             if !new_batches.is_empty() {
-                let ipc =
-                    record_batches_to_ipc(new_batches[0].schema().as_ref(), &new_batches)?;
+                let ipc = record_batches_to_ipc(new_batches[0].schema().as_ref(), &new_batches)?;
                 let stored = compress_payload(&ipc, compression.as_deref())?;
                 let checksum = compute_checksum(&stored);
                 let schema_hash =
@@ -10694,8 +11056,9 @@ impl Db {
                 .iter_mut()
                 .filter(|e| e.database == database && e.table == table)
             {
-                if let Some((_, stored, checksum, schema_hash)) =
-                    rewritten.iter().find(|(id, _, _, _)| id == &entry.segment_id)
+                if let Some((_, stored, checksum, schema_hash)) = rewritten
+                    .iter()
+                    .find(|(id, _, _, _)| id == &entry.segment_id)
                 {
                     entry.size_bytes = stored.len() as u64;
                     entry.checksum = *checksum;
@@ -10800,7 +11163,9 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
-            manifest.entries.retain(|e| !drop_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
@@ -10892,8 +11257,7 @@ impl Db {
             let mut updated_batches = Vec::new();
             let mut segment_changed = false;
             for batch in batches {
-                let (updated, count) =
-                    apply_assignments_to_batch(&batch, &filter, assignments)?;
+                let (updated, count) = apply_assignments_to_batch(&batch, &filter, assignments)?;
                 if count > 0 {
                     segment_changed = true;
                 }
@@ -10919,7 +11283,9 @@ impl Db {
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
-            manifest.entries.retain(|e| !drop_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
@@ -11393,9 +11759,10 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
         }
         if let Some(c) = &entry.compression {
             if c != "zstd" && c != "lz4" && c != "snappy" {
-                return Err(EngineError::InvalidArgument(
-                    format!("manifest entry has unsupported compression: {} (supported: zstd, lz4, snappy)", c),
-                ));
+                return Err(EngineError::InvalidArgument(format!(
+                    "manifest entry has unsupported compression: {} (supported: zstd, lz4, snappy)",
+                    c
+                )));
             }
         }
     }
@@ -11434,7 +11801,8 @@ fn compress_payload(payload: &[u8], compression: Option<&str>) -> Result<Vec<u8>
             let mut encoder = SnappyEncoder::new(Vec::new());
             std::io::copy(&mut Cursor::new(payload), &mut encoder)
                 .map_err(|e| EngineError::Internal(format!("snappy encode failed: {e}")))?;
-            encoder.into_inner()
+            encoder
+                .into_inner()
                 .map_err(|e| EngineError::Internal(format!("snappy finalize failed: {e}")))
         }
         Some(other) => Err(EngineError::InvalidArgument(format!(
@@ -11482,7 +11850,11 @@ pub(crate) fn persist_segment_ipc(
 }
 
 /// Hash an array value at a specific row index for deduplication key computation
-fn hash_array_value(hasher: &mut impl std::hash::Hasher, array: &dyn arrow_array::Array, row_idx: usize) {
+fn hash_array_value(
+    hasher: &mut impl std::hash::Hasher,
+    array: &dyn arrow_array::Array,
+    row_idx: usize,
+) {
     use arrow_array::*;
     use std::hash::Hash;
 
@@ -11614,38 +11986,46 @@ fn get_version_value(array: &dyn arrow_array::Array, row_idx: usize) -> i64 {
     }
 
     match array.data_type() {
-        arrow_schema::DataType::Int8 => {
-            array.as_any().downcast_ref::<Int8Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::Int16 => {
-            array.as_any().downcast_ref::<Int16Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::Int32 => {
-            array.as_any().downcast_ref::<Int32Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::Int64 => {
-            array.as_any().downcast_ref::<Int64Array>()
-                .map(|a| a.value(row_idx)).unwrap_or(0)
-        }
-        arrow_schema::DataType::UInt8 => {
-            array.as_any().downcast_ref::<UInt8Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::UInt16 => {
-            array.as_any().downcast_ref::<UInt16Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::UInt32 => {
-            array.as_any().downcast_ref::<UInt32Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::UInt64 => {
-            array.as_any().downcast_ref::<UInt64Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
+        arrow_schema::DataType::Int8 => array
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::Int16 => array
+            .as_any()
+            .downcast_ref::<Int16Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::Int32 => array
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::Int64 => array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .map(|a| a.value(row_idx))
+            .unwrap_or(0),
+        arrow_schema::DataType::UInt8 => array
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::UInt16 => array
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::UInt32 => array
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::UInt64 => array
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
         arrow_schema::DataType::Timestamp(_, _) => {
             if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
                 arr.value(row_idx)
@@ -11659,19 +12039,24 @@ fn get_version_value(array: &dyn arrow_array::Array, row_idx: usize) -> i64 {
                 0
             }
         }
-        arrow_schema::DataType::Date32 => {
-            array.as_any().downcast_ref::<Date32Array>()
-                .map(|a| a.value(row_idx) as i64).unwrap_or(0)
-        }
-        arrow_schema::DataType::Date64 => {
-            array.as_any().downcast_ref::<Date64Array>()
-                .map(|a| a.value(row_idx)).unwrap_or(0)
-        }
+        arrow_schema::DataType::Date32 => array
+            .as_any()
+            .downcast_ref::<Date32Array>()
+            .map(|a| a.value(row_idx) as i64)
+            .unwrap_or(0),
+        arrow_schema::DataType::Date64 => array
+            .as_any()
+            .downcast_ref::<Date64Array>()
+            .map(|a| a.value(row_idx))
+            .unwrap_or(0),
         _ => row_idx as i64, // Fallback: use row index
     }
 }
 
-fn load_segment(storage: &crate::storage::TieredStorage, entry: &ManifestEntry) -> Result<Vec<u8>, EngineError> {
+fn load_segment(
+    storage: &crate::storage::TieredStorage,
+    entry: &ManifestEntry,
+) -> Result<Vec<u8>, EngineError> {
     let data = storage.load_segment(entry)?;
     let actual = compute_checksum(&data);
     if actual != entry.checksum {
@@ -11683,7 +12068,10 @@ fn load_segment(storage: &crate::storage::TieredStorage, entry: &ManifestEntry) 
     decompress_payload(data, entry.compression.as_deref())
 }
 
-fn load_segment_raw(storage: &crate::storage::TieredStorage, entry: &ManifestEntry) -> Result<Vec<u8>, EngineError> {
+fn load_segment_raw(
+    storage: &crate::storage::TieredStorage,
+    entry: &ManifestEntry,
+) -> Result<Vec<u8>, EngineError> {
     let data = storage.load_segment(entry)?;
     let actual = compute_checksum(&data);
     if actual != entry.checksum {
@@ -11707,8 +12095,9 @@ fn sort_hot_payload(ipc_data: &[u8], granularity_rows: usize) -> Result<Vec<u8>,
     let concatenated = if batches.len() == 1 {
         batches.into_iter().next().unwrap()
     } else {
-        arrow_select::concat::concat_batches(&schema, &batches)
-            .map_err(|e| EngineError::Internal(format!("concat batches for hot sort failed: {e}")))?
+        arrow_select::concat::concat_batches(&schema, &batches).map_err(|e| {
+            EngineError::Internal(format!("concat batches for hot sort failed: {e}"))
+        })?
     };
     if concatenated.num_rows() == 0 {
         return Ok(ipc_data.to_vec());
@@ -11748,9 +12137,9 @@ fn sort_hot_payload(ipc_data: &[u8], granularity_rows: usize) -> Result<Vec<u8>,
             while offset < sorted_batch.num_rows() {
                 let len = (granularity_rows).min(sorted_batch.num_rows() - offset);
                 let slice = sorted_batch.slice(offset, len);
-                writer
-                    .write(&slice)
-                    .map_err(|e| EngineError::Internal(format!("hot sort ipc write failed: {e}")))?;
+                writer.write(&slice).map_err(|e| {
+                    EngineError::Internal(format!("hot sort ipc write failed: {e}"))
+                })?;
                 offset += len;
             }
         }
@@ -11899,10 +12288,12 @@ fn apply_offset(ipc_data: &[u8], offset: usize) -> Result<Vec<u8>, EngineError> 
             let mut writer = StreamWriter::try_new(&mut output, first_schema.as_ref())
                 .map_err(|e| EngineError::Internal(format!("create IPC writer failed: {e}")))?;
             for batch in &batches_to_write {
-                writer.write(batch)
+                writer
+                    .write(batch)
                     .map_err(|e| EngineError::Internal(format!("write batch failed: {e}")))?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("finish IPC writer failed: {e}")))?;
         }
         return Ok(output);
@@ -11968,7 +12359,11 @@ fn apply_projection(ipc_data: &[u8], columns: &[String]) -> Result<Vec<u8>, Engi
 }
 
 /// Apply projection with optional expected schema for handling missing columns (e.g. from ALTER TABLE ADD COLUMN)
-fn apply_projection_with_schema(ipc_data: &[u8], columns: &[String], expected_schema: Option<&Schema>) -> Result<Vec<u8>, EngineError> {
+fn apply_projection_with_schema(
+    ipc_data: &[u8],
+    columns: &[String],
+    expected_schema: Option<&Schema>,
+) -> Result<Vec<u8>, EngineError> {
     if columns.is_empty() {
         return Ok(ipc_data.to_vec());
     }
@@ -11995,8 +12390,8 @@ fn apply_projection_with_schema(ipc_data: &[u8], columns: &[String], expected_sc
 
     // Build projection info - handle missing columns with NULLs
     enum ColSource {
-        Existing(usize),    // Index in source batch
-        NullFilled(Field),  // Generate NULL column with this field
+        Existing(usize),   // Index in source batch
+        NullFilled(Field), // Generate NULL column with this field
     }
 
     let mut sources: Vec<ColSource> = Vec::with_capacity(columns.len());
@@ -12031,15 +12426,18 @@ fn apply_projection_with_schema(ipc_data: &[u8], columns: &[String], expected_sc
     let mut projected_batches = Vec::with_capacity(batches.len());
     for batch in &batches {
         let batch_rows = batch.num_rows();
-        let projected_columns: Vec<ArrayRef> = sources.iter().map(|src| {
-            match src {
-                ColSource::Existing(idx) => batch.column(*idx).clone(),
-                ColSource::NullFilled(field) => {
-                    // Create a NULL-filled array of the appropriate type
-                    create_null_array(field.data_type(), batch_rows)
+        let projected_columns: Vec<ArrayRef> = sources
+            .iter()
+            .map(|src| {
+                match src {
+                    ColSource::Existing(idx) => batch.column(*idx).clone(),
+                    ColSource::NullFilled(field) => {
+                        // Create a NULL-filled array of the appropriate type
+                        create_null_array(field.data_type(), batch_rows)
+                    }
                 }
-            }
-        }).collect();
+            })
+            .collect();
         let projected = RecordBatch::try_new(new_schema.clone(), projected_columns)
             .map_err(|e| EngineError::Internal(format!("create projected batch failed: {e}")))?;
         projected_batches.push(projected);
@@ -12048,16 +12446,17 @@ fn apply_projection_with_schema(ipc_data: &[u8], columns: &[String], expected_sc
     // Write back to IPC
     let mut output = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut output, new_schema.as_ref())
-            .map_err(|e| EngineError::Internal(format!("create IPC writer for projection failed: {e}")))?;
+        let mut writer = StreamWriter::try_new(&mut output, new_schema.as_ref()).map_err(|e| {
+            EngineError::Internal(format!("create IPC writer for projection failed: {e}"))
+        })?;
         for batch in &projected_batches {
             writer
                 .write(batch)
                 .map_err(|e| EngineError::Internal(format!("write projected batch failed: {e}")))?;
         }
-        writer
-            .finish()
-            .map_err(|e| EngineError::Internal(format!("finish IPC writer for projection failed: {e}")))?;
+        writer.finish().map_err(|e| {
+            EngineError::Internal(format!("finish IPC writer for projection failed: {e}"))
+        })?;
     }
 
     Ok(output)
@@ -12069,73 +12468,101 @@ fn create_null_array(data_type: &DataType, len: usize) -> ArrayRef {
     match data_type {
         DataType::Int8 => {
             let mut builder = Int8Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Int16 => {
             let mut builder = Int16Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Int32 => {
             let mut builder = Int32Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Int64 => {
             let mut builder = Int64Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::UInt8 => {
             let mut builder = UInt8Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::UInt16 => {
             let mut builder = UInt16Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::UInt32 => {
             let mut builder = UInt32Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::UInt64 => {
             let mut builder = UInt64Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Float32 => {
             let mut builder = Float32Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Float64 => {
             let mut builder = Float64Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Boolean => {
             let mut builder = BooleanBuilder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::Utf8 => {
             let mut builder = StringBuilder::with_capacity(len, 0);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         DataType::LargeUtf8 => {
             let mut builder = LargeStringBuilder::with_capacity(len, 0);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
         _ => {
             // Default fallback to nullable Int64
             let mut builder = Int64Builder::with_capacity(len);
-            for _ in 0..len { builder.append_null(); }
+            for _ in 0..len {
+                builder.append_null();
+            }
             Arc::new(builder.finish())
         }
     }
@@ -12363,8 +12790,6 @@ pub struct TableFieldSpec {
     pub encoding: Option<String>,
 }
 
-
-
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AggPlan {
     pub group_by: GroupBy,
@@ -12406,7 +12831,8 @@ pub enum HavingOp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum GroupBy {
-    #[default] None,
+    #[default]
+    None,
     Tenant,
     Route,
     Columns(Vec<GroupByColumn>),
@@ -12432,7 +12858,9 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
         crate::sql::AggKind::StddevPop { column } => AggKind::StddevPop { column },
         crate::sql::AggKind::VarianceSamp { column } => AggKind::VarianceSamp { column },
         crate::sql::AggKind::VariancePop { column } => AggKind::VariancePop { column },
-        crate::sql::AggKind::ApproxCountDistinct { column } => AggKind::ApproxCountDistinct { column },
+        crate::sql::AggKind::ApproxCountDistinct { column } => {
+            AggKind::ApproxCountDistinct { column }
+        }
     }
 }
 
@@ -12458,14 +12886,20 @@ fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
             crate::sql::GroupBy::Tenant => GroupBy::Tenant,
             crate::sql::GroupBy::Route => GroupBy::Route,
             crate::sql::GroupBy::Columns(cols) => GroupBy::Columns(
-                cols.into_iter().map(|c| match c {
-                    crate::sql::GroupByColumn::TenantId => GroupByColumn::TenantId,
-                    crate::sql::GroupByColumn::RouteId => GroupByColumn::RouteId,
-                }).collect()
+                cols.into_iter()
+                    .map(|c| match c {
+                        crate::sql::GroupByColumn::TenantId => GroupByColumn::TenantId,
+                        crate::sql::GroupByColumn::RouteId => GroupByColumn::RouteId,
+                    })
+                    .collect(),
             ),
         },
         aggs: plan.aggs.into_iter().map(agg_kind_from_sql).collect(),
-        having: plan.having.into_iter().map(having_condition_from_sql).collect(),
+        having: plan
+            .having
+            .into_iter()
+            .map(having_condition_from_sql)
+            .collect(),
     }
 }
 
@@ -12482,7 +12916,7 @@ fn query_filter_from_sql(filter: &crate::sql::QueryFilter) -> QueryFilter {
         route_id_eq: filter.route_id_eq,
         tenant_id_in: filter.tenant_id_in.clone(),
         route_id_in: filter.route_id_in.clone(),
-        order_by: None, // Handle at call site or improve mapping
+        order_by: None,  // Handle at call site or improve mapping
         distinct: false, // Handle at call site
         numeric_eq_filters: Vec::new(),
         float_eq_filters: Vec::new(),
@@ -12499,18 +12933,33 @@ fn build_query_plan(sql: &str) -> Result<CachedPlan, EngineError> {
     use crate::sql::{parse_sql, SqlStatement};
     let sql_upper = sql.to_uppercase();
     if sql_upper.contains(" JOIN ") {
-        return Ok(CachedPlan { kind: PlanKind::Join });
+        return Ok(CachedPlan {
+            kind: PlanKind::Join,
+        });
     }
-    if sql_upper.contains(" UNION ") || sql_upper.contains(" INTERSECT ") || sql_upper.contains(" EXCEPT ") {
-        return Ok(CachedPlan { kind: PlanKind::SetOperation });
+    if sql_upper.contains(" UNION ")
+        || sql_upper.contains(" INTERSECT ")
+        || sql_upper.contains(" EXCEPT ")
+    {
+        return Ok(CachedPlan {
+            kind: PlanKind::SetOperation,
+        });
     }
-    if sql_upper.contains(" IN (SELECT") || sql_upper.contains(" IN(SELECT") ||
-       sql_upper.contains("EXISTS (SELECT") || sql_upper.contains("EXISTS(SELECT") ||
-       sql_upper.contains("= (SELECT") || sql_upper.contains("=(SELECT") {
-        return Ok(CachedPlan { kind: PlanKind::Subquery });
+    if sql_upper.contains(" IN (SELECT")
+        || sql_upper.contains(" IN(SELECT")
+        || sql_upper.contains("EXISTS (SELECT")
+        || sql_upper.contains("EXISTS(SELECT")
+        || sql_upper.contains("= (SELECT")
+        || sql_upper.contains("=(SELECT")
+    {
+        return Ok(CachedPlan {
+            kind: PlanKind::Subquery,
+        });
     }
     if sql_upper.trim_start().starts_with("WITH ") {
-        return Ok(CachedPlan { kind: PlanKind::Cte });
+        return Ok(CachedPlan {
+            kind: PlanKind::Cte,
+        });
     }
     match parse_sql(sql)? {
         SqlStatement::Transaction(cmd) => Ok(CachedPlan {
@@ -12520,10 +12969,15 @@ fn build_query_plan(sql: &str) -> Result<CachedPlan, EngineError> {
             let mut filter = query_filter_from_sql(&parsed.filter);
             // Map extra fields
             if let Some(order_by) = parsed.order_by {
-                filter.order_by = Some(order_by.into_iter().map(|o| (o.column, o.ascending)).collect());
+                filter.order_by = Some(
+                    order_by
+                        .into_iter()
+                        .map(|o| (o.column, o.ascending))
+                        .collect(),
+                );
             }
             filter.distinct = parsed.distinct;
-            
+
             Ok(CachedPlan {
                 kind: PlanKind::Simple {
                     agg: parsed.aggregation.map(agg_plan_from_sql),
@@ -12534,8 +12988,10 @@ fn build_query_plan(sql: &str) -> Result<CachedPlan, EngineError> {
                     computed_columns: parsed.computed_columns,
                 },
             })
-        },
-        _ => Err(EngineError::NotImplemented("unsupported statement type".into())),
+        }
+        _ => Err(EngineError::NotImplemented(
+            "unsupported statement type".into(),
+        )),
     }
 }
 
@@ -12581,7 +13037,7 @@ fn extract_main_query_from_cte(sql: &str) -> String {
 
         // Check for 'AS' followed by '('
         if !in_as_block && depth == 0 && i + 3 < chars.len() {
-            let slice: String = chars[i..i+2].iter().collect();
+            let slice: String = chars[i..i + 2].iter().collect();
             if slice.to_uppercase() == "AS" {
                 // Check if followed by whitespace and '('
                 let mut j = i + 2;
@@ -12645,7 +13101,7 @@ fn extract_main_query_from_cte(sql: &str) -> String {
 
             // When at depth 0, check for SELECT
             if depth == 0 && i + 6 < chars.len() {
-                let slice: String = chars[i..i+6].iter().collect();
+                let slice: String = chars[i..i + 6].iter().collect();
                 if slice.to_uppercase() == "SELECT" {
                     return after_with[i..].to_string();
                 }
@@ -12667,10 +13123,10 @@ pub fn execute_query_with_ctes(
 
     for cte in ctes {
         if cte.recursive {
-             let result = execute_recursive_cte(db, cte, &cte_context, timeout_millis)?;
-             cte_context.add_result(cte.name.clone(), result);
+            let result = execute_recursive_cte(db, cte, &cte_context, timeout_millis)?;
+            cte_context.add_result(cte.name.clone(), result);
         } else {
-             let cte_sql = cte.raw_sql.clone();
+            let cte_sql = cte.raw_sql.clone();
 
             let result = db.query(QueryRequest {
                 sql: cte_sql,
@@ -12706,7 +13162,11 @@ pub enum ComputedValue {
     Binary(Vec<u8>),
     Timestamp(i64),
     Date(i32),
-    Decimal { value: i128, precision: u8, scale: i8 },
+    Decimal {
+        value: i128,
+        precision: u8,
+        scale: i8,
+    },
     Uuid([u8; 16]),
     Json(String),
 }
@@ -12750,14 +13210,23 @@ impl ComputedValue {
                     format!("Timestamp({})", micros)
                 }
             }
-            ComputedValue::Decimal { value, precision: _, scale } => {
+            ComputedValue::Decimal {
+                value,
+                precision: _,
+                scale,
+            } => {
                 if *scale == 0 {
                     value.to_string()
                 } else {
                     let divisor = 10i128.pow(*scale as u32);
                     let int_part = value / divisor;
                     let frac_part = (value % divisor).abs();
-                    format!("{}.{:0>width$}", int_part, frac_part, width = *scale as usize)
+                    format!(
+                        "{}.{:0>width$}",
+                        int_part,
+                        frac_part,
+                        width = *scale as usize
+                    )
                 }
             }
             ComputedValue::Binary(bytes) => {
@@ -12767,7 +13236,7 @@ impl ComputedValue {
             }
         }
     }
-    
+
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             ComputedValue::Float(f) => Some(*f),
@@ -12843,8 +13312,11 @@ impl<'a> EvalContext<'a> {
     }
 }
 
-pub fn evaluate_expr(expr: &crate::sql::SelectExpr, ctx: &EvalContext) -> Result<ComputedValue, EngineError> {
-    use crate::sql::{SelectExpr, LiteralValue, ScalarFunction};
+pub fn evaluate_expr(
+    expr: &crate::sql::SelectExpr,
+    ctx: &EvalContext,
+) -> Result<ComputedValue, EngineError> {
+    use crate::sql::{LiteralValue, SelectExpr};
 
     match expr {
         SelectExpr::Column(name) => {
@@ -12860,15 +13332,13 @@ pub fn evaluate_expr(expr: &crate::sql::SelectExpr, ctx: &EvalContext) -> Result
             })
         }
 
-        SelectExpr::Literal(lit) => {
-            Ok(match lit {
-                LiteralValue::Integer(i) => ComputedValue::Integer(*i),
-                LiteralValue::Float(f) => ComputedValue::Float(*f),
-                LiteralValue::String(s) => ComputedValue::String(s.clone()),
-                LiteralValue::Boolean(b) => ComputedValue::Boolean(*b),
-                LiteralValue::Null => ComputedValue::Null,
-            })
-        }
+        SelectExpr::Literal(lit) => Ok(match lit {
+            LiteralValue::Integer(i) => ComputedValue::Integer(*i),
+            LiteralValue::Float(f) => ComputedValue::Float(*f),
+            LiteralValue::String(s) => ComputedValue::String(s.clone()),
+            LiteralValue::Boolean(b) => ComputedValue::Boolean(*b),
+            LiteralValue::Null => ComputedValue::Null,
+        }),
 
         SelectExpr::Null => Ok(ComputedValue::Null),
 
@@ -12895,123 +13365,181 @@ pub fn evaluate_expr(expr: &crate::sql::SelectExpr, ctx: &EvalContext) -> Result
             Ok(ComputedValue::Null)
         }
 
-        SelectExpr::Case { operand, when_clauses, else_result } => {
-            evaluate_case_expr(operand, when_clauses, else_result, ctx)
-        }
+        SelectExpr::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => evaluate_case_expr(operand, when_clauses, else_result, ctx),
 
         SelectExpr::Subquery(_) => {
             // Subqueries not supported in expression evaluation context
-            Err(EngineError::Internal("subqueries not supported in expression evaluation".into()))
+            Err(EngineError::Internal(
+                "subqueries not supported in expression evaluation".into(),
+            ))
         }
     }
 }
 
-fn apply_binary_op(left: &ComputedValue, op: &str, right: &ComputedValue) -> Result<ComputedValue, EngineError> {
+fn apply_binary_op(
+    left: &ComputedValue,
+    op: &str,
+    right: &ComputedValue,
+) -> Result<ComputedValue, EngineError> {
     // Handle NULL propagation for most operations
     if matches!(left, ComputedValue::Null) || matches!(right, ComputedValue::Null) {
         return Ok(ComputedValue::Null);
     }
 
     match op {
-        "+" => {
-            match (left, right) {
-                (ComputedValue::Integer(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Integer(a + b)),
-                (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a + b)),
-                (ComputedValue::Integer(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(*a as f64 + b)),
-                (ComputedValue::Float(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Float(a + *b as f64)),
-                (ComputedValue::String(a), ComputedValue::String(b)) => Ok(ComputedValue::String(format!("{}{}", a, b))),
-                _ => Err(EngineError::Internal(format!("invalid operands for +: {:?} and {:?}", left, right)))
+        "+" => match (left, right) {
+            (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Integer(a + b))
             }
-        }
-        "-" => {
-            match (left, right) {
-                (ComputedValue::Integer(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Integer(a - b)),
-                (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a - b)),
-                (ComputedValue::Integer(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(*a as f64 - b)),
-                (ComputedValue::Float(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Float(a - *b as f64)),
-                _ => Err(EngineError::Internal(format!("invalid operands for -: {:?} and {:?}", left, right)))
+            (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a + b)),
+            (ComputedValue::Integer(a), ComputedValue::Float(b)) => {
+                Ok(ComputedValue::Float(*a as f64 + b))
             }
-        }
-        "*" => {
-            match (left, right) {
-                (ComputedValue::Integer(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Integer(a * b)),
-                (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a * b)),
-                (ComputedValue::Integer(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(*a as f64 * b)),
-                (ComputedValue::Float(a), ComputedValue::Integer(b)) => Ok(ComputedValue::Float(a * *b as f64)),
-                _ => Err(EngineError::Internal(format!("invalid operands for *: {:?} and {:?}", left, right)))
+            (ComputedValue::Float(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Float(a + *b as f64))
             }
-        }
-        "/" => {
-            match (left, right) {
-                (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
-                    if *b == 0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Integer(a / b))
-                }
-                (ComputedValue::Float(a), ComputedValue::Float(b)) => {
-                    if *b == 0.0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Float(a / b))
-                }
-                (ComputedValue::Integer(a), ComputedValue::Float(b)) => {
-                    if *b == 0.0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Float(*a as f64 / b))
-                }
-                (ComputedValue::Float(a), ComputedValue::Integer(b)) => {
-                    if *b == 0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Float(a / *b as f64))
-                }
-                _ => Err(EngineError::Internal(format!("invalid operands for /: {:?} and {:?}", left, right)))
+            (ComputedValue::String(a), ComputedValue::String(b)) => {
+                Ok(ComputedValue::String(format!("{}{}", a, b)))
             }
-        }
-        "%" => {
-            match (left, right) {
-                (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
-                    if *b == 0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Integer(a % b))
-                }
-                (ComputedValue::Float(a), ComputedValue::Float(b)) => {
-                    if *b == 0.0 { return Ok(ComputedValue::Null); }
-                    Ok(ComputedValue::Float(a % b))
-                }
-                _ => Err(EngineError::Internal(format!("invalid operands for %: {:?} and {:?}", left, right)))
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for +: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "-" => match (left, right) {
+            (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Integer(a - b))
             }
-        }
+            (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a - b)),
+            (ComputedValue::Integer(a), ComputedValue::Float(b)) => {
+                Ok(ComputedValue::Float(*a as f64 - b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Float(a - *b as f64))
+            }
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for -: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "*" => match (left, right) {
+            (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Integer(a * b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Float(b)) => Ok(ComputedValue::Float(a * b)),
+            (ComputedValue::Integer(a), ComputedValue::Float(b)) => {
+                Ok(ComputedValue::Float(*a as f64 * b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Integer(b)) => {
+                Ok(ComputedValue::Float(a * *b as f64))
+            }
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for *: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "/" => match (left, right) {
+            (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
+                if *b == 0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Integer(a / b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Float(b)) => {
+                if *b == 0.0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Float(a / b))
+            }
+            (ComputedValue::Integer(a), ComputedValue::Float(b)) => {
+                if *b == 0.0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Float(*a as f64 / b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Integer(b)) => {
+                if *b == 0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Float(a / *b as f64))
+            }
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for /: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "%" => match (left, right) {
+            (ComputedValue::Integer(a), ComputedValue::Integer(b)) => {
+                if *b == 0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Integer(a % b))
+            }
+            (ComputedValue::Float(a), ComputedValue::Float(b)) => {
+                if *b == 0.0 {
+                    return Ok(ComputedValue::Null);
+                }
+                Ok(ComputedValue::Float(a % b))
+            }
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for %: {:?} and {:?}",
+                left, right
+            ))),
+        },
         "||" => {
             // String concatenation
-            Ok(ComputedValue::String(format!("{}{}", left.to_string_value(), right.to_string_value())))
+            Ok(ComputedValue::String(format!(
+                "{}{}",
+                left.to_string_value(),
+                right.to_string_value()
+            )))
         }
-        "AND" | "and" => {
-            match (left, right) {
-                (ComputedValue::Boolean(a), ComputedValue::Boolean(b)) => Ok(ComputedValue::Boolean(*a && *b)),
-                _ => Err(EngineError::Internal(format!("invalid operands for AND: {:?} and {:?}", left, right)))
+        "AND" | "and" => match (left, right) {
+            (ComputedValue::Boolean(a), ComputedValue::Boolean(b)) => {
+                Ok(ComputedValue::Boolean(*a && *b))
             }
-        }
-        "OR" | "or" => {
-            match (left, right) {
-                (ComputedValue::Boolean(a), ComputedValue::Boolean(b)) => Ok(ComputedValue::Boolean(*a || *b)),
-                _ => Err(EngineError::Internal(format!("invalid operands for OR: {:?} and {:?}", left, right)))
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for AND: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "OR" | "or" => match (left, right) {
+            (ComputedValue::Boolean(a), ComputedValue::Boolean(b)) => {
+                Ok(ComputedValue::Boolean(*a || *b))
             }
-        }
-        "=" | "==" => {
-            Ok(ComputedValue::Boolean(computed_values_equal(left, right)))
-        }
-        "!=" | "<>" => {
-            Ok(ComputedValue::Boolean(!computed_values_equal(left, right)))
-        }
-        "<" => {
-            Ok(ComputedValue::Boolean(computed_values_cmp(left, right) == std::cmp::Ordering::Less))
-        }
+            _ => Err(EngineError::Internal(format!(
+                "invalid operands for OR: {:?} and {:?}",
+                left, right
+            ))),
+        },
+        "=" | "==" => Ok(ComputedValue::Boolean(computed_values_equal(left, right))),
+        "!=" | "<>" => Ok(ComputedValue::Boolean(!computed_values_equal(left, right))),
+        "<" => Ok(ComputedValue::Boolean(
+            computed_values_cmp(left, right) == std::cmp::Ordering::Less,
+        )),
         "<=" => {
             let cmp = computed_values_cmp(left, right);
-            Ok(ComputedValue::Boolean(cmp == std::cmp::Ordering::Less || cmp == std::cmp::Ordering::Equal))
+            Ok(ComputedValue::Boolean(
+                cmp == std::cmp::Ordering::Less || cmp == std::cmp::Ordering::Equal,
+            ))
         }
-        ">" => {
-            Ok(ComputedValue::Boolean(computed_values_cmp(left, right) == std::cmp::Ordering::Greater))
-        }
+        ">" => Ok(ComputedValue::Boolean(
+            computed_values_cmp(left, right) == std::cmp::Ordering::Greater,
+        )),
         ">=" => {
             let cmp = computed_values_cmp(left, right);
-            Ok(ComputedValue::Boolean(cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal))
+            Ok(ComputedValue::Boolean(
+                cmp == std::cmp::Ordering::Greater || cmp == std::cmp::Ordering::Equal,
+            ))
         }
-        _ => Err(EngineError::Internal(format!("unsupported binary operator: {}", op)))
+        _ => Err(EngineError::Internal(format!(
+            "unsupported binary operator: {}",
+            op
+        ))),
     }
 }
 
@@ -13019,12 +13547,16 @@ fn computed_values_equal(a: &ComputedValue, b: &ComputedValue) -> bool {
     match (a, b) {
         (ComputedValue::Integer(x), ComputedValue::Integer(y)) => x == y,
         (ComputedValue::Float(x), ComputedValue::Float(y)) => (x - y).abs() < f64::EPSILON,
-        (ComputedValue::Integer(x), ComputedValue::Float(y)) => (*x as f64 - y).abs() < f64::EPSILON,
-        (ComputedValue::Float(x), ComputedValue::Integer(y)) => (x - *y as f64).abs() < f64::EPSILON,
+        (ComputedValue::Integer(x), ComputedValue::Float(y)) => {
+            (*x as f64 - y).abs() < f64::EPSILON
+        }
+        (ComputedValue::Float(x), ComputedValue::Integer(y)) => {
+            (x - *y as f64).abs() < f64::EPSILON
+        }
         (ComputedValue::String(x), ComputedValue::String(y)) => x == y,
         (ComputedValue::Boolean(x), ComputedValue::Boolean(y)) => x == y,
         (ComputedValue::Null, ComputedValue::Null) => true,
-        _ => false
+        _ => false,
     }
 }
 
@@ -13032,36 +13564,50 @@ fn computed_values_cmp(a: &ComputedValue, b: &ComputedValue) -> std::cmp::Orderi
     use std::cmp::Ordering;
     match (a, b) {
         (ComputedValue::Integer(x), ComputedValue::Integer(y)) => x.cmp(y),
-        (ComputedValue::Float(x), ComputedValue::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-        (ComputedValue::Integer(x), ComputedValue::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
-        (ComputedValue::Float(x), ComputedValue::Integer(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
+        (ComputedValue::Float(x), ComputedValue::Float(y)) => {
+            x.partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (ComputedValue::Integer(x), ComputedValue::Float(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
+        }
+        (ComputedValue::Float(x), ComputedValue::Integer(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
+        }
         (ComputedValue::String(x), ComputedValue::String(y)) => x.cmp(y),
-        _ => Ordering::Equal
+        _ => Ordering::Equal,
     }
 }
 
 fn apply_unary_op(op: &str, val: &ComputedValue) -> Result<ComputedValue, EngineError> {
     match op {
-        "-" => {
-            match val {
-                ComputedValue::Integer(i) => Ok(ComputedValue::Integer(-i)),
-                ComputedValue::Float(f) => Ok(ComputedValue::Float(-f)),
-                ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal(format!("invalid operand for unary -: {:?}", val)))
-            }
-        }
-        "NOT" | "not" | "!" => {
-            match val {
-                ComputedValue::Boolean(b) => Ok(ComputedValue::Boolean(!b)),
-                ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal(format!("invalid operand for NOT: {:?}", val)))
-            }
-        }
-        _ => Err(EngineError::Internal(format!("unsupported unary operator: {}", op)))
+        "-" => match val {
+            ComputedValue::Integer(i) => Ok(ComputedValue::Integer(-i)),
+            ComputedValue::Float(f) => Ok(ComputedValue::Float(-f)),
+            ComputedValue::Null => Ok(ComputedValue::Null),
+            _ => Err(EngineError::Internal(format!(
+                "invalid operand for unary -: {:?}",
+                val
+            ))),
+        },
+        "NOT" | "not" | "!" => match val {
+            ComputedValue::Boolean(b) => Ok(ComputedValue::Boolean(!b)),
+            ComputedValue::Null => Ok(ComputedValue::Null),
+            _ => Err(EngineError::Internal(format!(
+                "invalid operand for NOT: {:?}",
+                val
+            ))),
+        },
+        _ => Err(EngineError::Internal(format!(
+            "unsupported unary operator: {}",
+            op
+        ))),
     }
 }
 
-fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext) -> Result<ComputedValue, EngineError> {
+fn evaluate_scalar_function(
+    func: &crate::sql::ScalarFunction,
+    ctx: &EvalContext,
+) -> Result<ComputedValue, EngineError> {
     use crate::sql::ScalarFunction;
 
     match func {
@@ -13071,7 +13617,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.to_uppercase())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::String(val.to_string_value().to_uppercase()))
+                _ => Ok(ComputedValue::String(val.to_string_value().to_uppercase())),
             }
         }
         ScalarFunction::Lower(expr) => {
@@ -13079,7 +13625,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.to_lowercase())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::String(val.to_string_value().to_lowercase()))
+                _ => Ok(ComputedValue::String(val.to_string_value().to_lowercase())),
             }
         }
         ScalarFunction::Length(expr) => {
@@ -13087,7 +13633,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::Integer(s.len() as i64)),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Integer(val.to_string_value().len() as i64))
+                _ => Ok(ComputedValue::Integer(val.to_string_value().len() as i64)),
             }
         }
         ScalarFunction::Trim(expr) => {
@@ -13095,7 +13641,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.trim().to_string())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::String(val.to_string_value().trim().to_string()))
+                _ => Ok(ComputedValue::String(
+                    val.to_string_value().trim().to_string(),
+                )),
             }
         }
         ScalarFunction::LTrim(expr) => {
@@ -13103,7 +13651,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.trim_start().to_string())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::String(val.to_string_value().trim_start().to_string()))
+                _ => Ok(ComputedValue::String(
+                    val.to_string_value().trim_start().to_string(),
+                )),
             }
         }
         ScalarFunction::RTrim(expr) => {
@@ -13111,7 +13661,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.trim_end().to_string())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::String(val.to_string_value().trim_end().to_string()))
+                _ => Ok(ComputedValue::String(
+                    val.to_string_value().trim_end().to_string(),
+                )),
             }
         }
         ScalarFunction::Concat(exprs) => {
@@ -13125,7 +13677,11 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             }
             Ok(ComputedValue::String(result))
         }
-        ScalarFunction::Substring { expr, start, length } => {
+        ScalarFunction::Substring {
+            expr,
+            start,
+            length,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             match val {
                 ComputedValue::String(s) => {
@@ -13143,7 +13699,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                     Ok(ComputedValue::String(substr))
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Null)
+                _ => Ok(ComputedValue::Null),
             }
         }
         ScalarFunction::Replace { expr, from, to } => {
@@ -13151,7 +13707,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.replace(from, to))),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Null)
+                _ => Ok(ComputedValue::Null),
             }
         }
         ScalarFunction::Left { expr, count } => {
@@ -13163,7 +13719,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                     Ok(ComputedValue::String(chars[..end].iter().collect()))
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Null)
+                _ => Ok(ComputedValue::Null),
             }
         }
         ScalarFunction::Right { expr, count } => {
@@ -13175,7 +13731,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                     Ok(ComputedValue::String(chars[start..].iter().collect()))
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Null)
+                _ => Ok(ComputedValue::Null),
             }
         }
         ScalarFunction::Reverse(expr) => {
@@ -13183,7 +13739,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             match val {
                 ComputedValue::String(s) => Ok(ComputedValue::String(s.chars().rev().collect())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Ok(ComputedValue::Null)
+                _ => Ok(ComputedValue::Null),
             }
         }
         ScalarFunction::Coalesce(exprs) => {
@@ -13203,7 +13759,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Integer(i) => Ok(ComputedValue::Integer(i.abs())),
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.abs())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("ABS requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "ABS requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Round { expr, precision } => {
@@ -13216,7 +13774,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 }
                 ComputedValue::Integer(i) => Ok(ComputedValue::Integer(i)),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("ROUND requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "ROUND requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Ceil(expr) => {
@@ -13225,7 +13785,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.ceil())),
                 ComputedValue::Integer(i) => Ok(ComputedValue::Integer(i)),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("CEIL requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "CEIL requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Floor(expr) => {
@@ -13234,7 +13796,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.floor())),
                 ComputedValue::Integer(i) => Ok(ComputedValue::Integer(i)),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("FLOOR requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "FLOOR requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Mod { dividend, divisor } => {
@@ -13246,7 +13810,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
             let base_val = evaluate_expr(base, ctx)?;
             let exp_val = evaluate_expr(exponent, ctx)?;
             match (&base_val, &exp_val) {
-                (ComputedValue::Float(b), ComputedValue::Float(e)) => Ok(ComputedValue::Float(b.powf(*e))),
+                (ComputedValue::Float(b), ComputedValue::Float(e)) => {
+                    Ok(ComputedValue::Float(b.powf(*e)))
+                }
                 (ComputedValue::Integer(b), ComputedValue::Integer(e)) => {
                     if *e >= 0 {
                         Ok(ComputedValue::Integer(b.pow(*e as u32)))
@@ -13254,10 +13820,16 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                         Ok(ComputedValue::Float((*b as f64).powf(*e as f64)))
                     }
                 }
-                (ComputedValue::Integer(b), ComputedValue::Float(e)) => Ok(ComputedValue::Float((*b as f64).powf(*e))),
-                (ComputedValue::Float(b), ComputedValue::Integer(e)) => Ok(ComputedValue::Float(b.powf(*e as f64))),
+                (ComputedValue::Integer(b), ComputedValue::Float(e)) => {
+                    Ok(ComputedValue::Float((*b as f64).powf(*e)))
+                }
+                (ComputedValue::Float(b), ComputedValue::Integer(e)) => {
+                    Ok(ComputedValue::Float(b.powf(*e as f64)))
+                }
                 (ComputedValue::Null, _) | (_, ComputedValue::Null) => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("POWER requires numeric arguments".into()))
+                _ => Err(EngineError::Internal(
+                    "POWER requires numeric arguments".into(),
+                )),
             }
         }
         ScalarFunction::Sqrt(expr) => {
@@ -13266,7 +13838,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.sqrt())),
                 ComputedValue::Integer(i) => Ok(ComputedValue::Float((i as f64).sqrt())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("SQRT requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "SQRT requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Log { expr, base } => {
@@ -13290,7 +13864,9 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                     Ok(ComputedValue::Float(result))
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("LOG requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "LOG requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Ln(expr) => {
@@ -13299,7 +13875,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.ln())),
                 ComputedValue::Integer(i) => Ok(ComputedValue::Float((i as f64).ln())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("LN requires numeric argument".into()))
+                _ => Err(EngineError::Internal("LN requires numeric argument".into())),
             }
         }
         ScalarFunction::Exp(expr) => {
@@ -13308,16 +13884,32 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
                 ComputedValue::Float(f) => Ok(ComputedValue::Float(f.exp())),
                 ComputedValue::Integer(i) => Ok(ComputedValue::Float((i as f64).exp())),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("EXP requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "EXP requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Sign(expr) => {
             let val = evaluate_expr(expr, ctx)?;
             match val {
-                ComputedValue::Float(f) => Ok(ComputedValue::Integer(if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 })),
-                ComputedValue::Integer(i) => Ok(ComputedValue::Integer(if i > 0 { 1 } else if i < 0 { -1 } else { 0 })),
+                ComputedValue::Float(f) => Ok(ComputedValue::Integer(if f > 0.0 {
+                    1
+                } else if f < 0.0 {
+                    -1
+                } else {
+                    0
+                })),
+                ComputedValue::Integer(i) => Ok(ComputedValue::Integer(if i > 0 {
+                    1
+                } else if i < 0 {
+                    -1
+                } else {
+                    0
+                })),
                 ComputedValue::Null => Ok(ComputedValue::Null),
-                _ => Err(EngineError::Internal("SIGN requires numeric argument".into()))
+                _ => Err(EngineError::Internal(
+                    "SIGN requires numeric argument".into(),
+                )),
             }
         }
         ScalarFunction::Greatest(exprs) => {
@@ -13374,7 +13966,7 @@ fn evaluate_scalar_function(func: &crate::sql::ScalarFunction, ctx: &EvalContext
         }
 
         // Default for unhandled functions
-        _ => Ok(ComputedValue::Null)
+        _ => Ok(ComputedValue::Null),
     }
 }
 
@@ -13412,21 +14004,45 @@ fn evaluate_case_expr(
     }
 }
 
-
-
 // --- RESTORED UTILITIES ---
 
 pub struct SegmentStats {
-    pub event_time_min: Option<u64>, pub event_time_max: Option<u64>,
-    pub tenant_id_min: Option<u64>, pub tenant_id_max: Option<u64>,
-    pub route_id_min: Option<u64>, pub route_id_max: Option<u64>,
-    pub bloom_tenant: Option<Vec<u8>>, pub bloom_route: Option<Vec<u8>>,
+    pub event_time_min: Option<u64>,
+    pub event_time_max: Option<u64>,
+    pub tenant_id_min: Option<u64>,
+    pub tenant_id_max: Option<u64>,
+    pub route_id_min: Option<u64>,
+    pub route_id_max: Option<u64>,
+    pub bloom_tenant: Option<Vec<u8>>,
+    pub bloom_route: Option<Vec<u8>>,
     pub column_stats: std::collections::HashMap<String, crate::replication::ColumnStats>,
 }
-#[derive(Default)] pub struct ValidatedSegment { pub stats: SegmentStats, pub schema_hash: u64, pub schema_spec: Option<String> }
-impl Default for SegmentStats { fn default() -> Self { Self { event_time_min:None, event_time_max:None, tenant_id_min:None, tenant_id_max:None, route_id_min:None, route_id_max:None, bloom_tenant:None, bloom_route:None, column_stats:std::collections::HashMap::new() } } }
+#[derive(Default)]
+pub struct ValidatedSegment {
+    pub stats: SegmentStats,
+    pub schema_hash: u64,
+    pub schema_spec: Option<String>,
+}
+impl Default for SegmentStats {
+    fn default() -> Self {
+        Self {
+            event_time_min: None,
+            event_time_max: None,
+            tenant_id_min: None,
+            tenant_id_max: None,
+            route_id_min: None,
+            route_id_max: None,
+            bloom_tenant: None,
+            bloom_route: None,
+            column_stats: std::collections::HashMap::new(),
+        }
+    }
+}
 
-pub struct SchemaWrapper { pub json: String, pub hash: u64 }
+pub struct SchemaWrapper {
+    pub json: String,
+    pub hash: u64,
+}
 
 pub fn is_valid_ident(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty()
@@ -13438,9 +14054,12 @@ pub fn compute_checksum(data: &[u8]) -> u64 {
     hasher.finalize() as u64
 }
 
-pub fn compute_schema_hash_from_payload(data: &[u8], compression: Option<&str>) -> Result<u64, EngineError> {
-    use std::hash::{Hash, Hasher};
+pub fn compute_schema_hash_from_payload(
+    data: &[u8],
+    compression: Option<&str>,
+) -> Result<u64, EngineError> {
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     // Decompress if needed
     let decompressed = decompress_payload(data.to_vec(), compression)?;
@@ -13454,34 +14073,41 @@ pub fn compute_schema_hash_from_payload(data: &[u8], compression: Option<&str>) 
     let schema = batches[0].schema();
 
     // Build same JSON format as validate_and_stats (TableFieldSpec format)
-    let schema_json = serde_json::to_string(&schema.fields().iter().map(|f| {
-        let data_type_str = match f.data_type() {
-            DataType::Int8 => "int8",
-            DataType::Int16 => "int16",
-            DataType::Int32 => "int32",
-            DataType::Int64 => "int64",
-            DataType::UInt8 => "uint8",
-            DataType::UInt16 => "uint16",
-            DataType::UInt32 => "uint32",
-            DataType::UInt64 => "uint64",
-            DataType::Float32 => "float32",
-            DataType::Float64 => "float64",
-            DataType::Boolean => "bool",
-            DataType::Utf8 => "string",
-            DataType::LargeUtf8 => "string",
-            DataType::Binary => "binary",
-            DataType::LargeBinary => "binary",
-            DataType::Date32 => "date",
-            DataType::Date64 => "date",
-            DataType::Timestamp(_, _) => "timestamp",
-            _ => "string",
-        };
-        serde_json::json!({
-            "name": f.name(),
-            "data_type": data_type_str,
-            "nullable": f.is_nullable()
-        })
-    }).collect::<Vec<_>>()).unwrap_or_default();
+    let schema_json = serde_json::to_string(
+        &schema
+            .fields()
+            .iter()
+            .map(|f| {
+                let data_type_str = match f.data_type() {
+                    DataType::Int8 => "int8",
+                    DataType::Int16 => "int16",
+                    DataType::Int32 => "int32",
+                    DataType::Int64 => "int64",
+                    DataType::UInt8 => "uint8",
+                    DataType::UInt16 => "uint16",
+                    DataType::UInt32 => "uint32",
+                    DataType::UInt64 => "uint64",
+                    DataType::Float32 => "float32",
+                    DataType::Float64 => "float64",
+                    DataType::Boolean => "bool",
+                    DataType::Utf8 => "string",
+                    DataType::LargeUtf8 => "string",
+                    DataType::Binary => "binary",
+                    DataType::LargeBinary => "binary",
+                    DataType::Date32 => "date",
+                    DataType::Date64 => "date",
+                    DataType::Timestamp(_, _) => "timestamp",
+                    _ => "string",
+                };
+                serde_json::json!({
+                    "name": f.name(),
+                    "data_type": data_type_str,
+                    "nullable": f.is_nullable()
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
 
     // Compute hash
     let mut hasher = DefaultHasher::new();
@@ -13490,21 +14116,35 @@ pub fn compute_schema_hash_from_payload(data: &[u8], compression: Option<&str>) 
 }
 
 pub fn read_ipc_batches(ipc: &[u8]) -> Result<Vec<RecordBatch>, EngineError> {
-    use arrow_ipc::reader::StreamReader; use std::io::Cursor;
+    use arrow_ipc::reader::StreamReader;
+    use std::io::Cursor;
     let cursor = Cursor::new(ipc);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| EngineError::Internal(format!("{e}")))?;
+    let mut reader =
+        StreamReader::try_new(cursor, None).map_err(|e| EngineError::Internal(format!("{e}")))?;
     let mut batches = Vec::new();
-    while let Some(b) = reader.next() { batches.push(b.map_err(|e| EngineError::Internal(format!("{e}")))?); }
+    while let Some(b) = reader.next() {
+        batches.push(b.map_err(|e| EngineError::Internal(format!("{e}")))?);
+    }
     Ok(batches)
 }
 
-pub fn record_batches_to_ipc(schema: &arrow_schema::Schema, batches: &[RecordBatch]) -> Result<Vec<u8>, EngineError> {
+pub fn record_batches_to_ipc(
+    schema: &arrow_schema::Schema,
+    batches: &[RecordBatch],
+) -> Result<Vec<u8>, EngineError> {
     use arrow_ipc::writer::StreamWriter;
     let mut buf = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut buf, schema).map_err(|e| EngineError::Internal(format!("{e}")))?;
-        for b in batches { writer.write(b).map_err(|e| EngineError::Internal(format!("{e}")))?; }
-        writer.finish().map_err(|e| EngineError::Internal(format!("{e}")))?;
+        let mut writer = StreamWriter::try_new(&mut buf, schema)
+            .map_err(|e| EngineError::Internal(format!("{e}")))?;
+        for b in batches {
+            writer
+                .write(b)
+                .map_err(|e| EngineError::Internal(format!("{e}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| EngineError::Internal(format!("{e}")))?;
     }
     Ok(buf)
 }
@@ -13542,7 +14182,11 @@ pub fn parse_where_filter(where_clause: Option<&str>) -> Result<QueryFilter, Eng
         // Parse: column = value
         if let Some(eq_idx) = part.find('=') {
             // Make sure it's not != or >=, <=
-            let before = if eq_idx > 0 { part.chars().nth(eq_idx - 1) } else { None };
+            let before = if eq_idx > 0 {
+                part.chars().nth(eq_idx - 1)
+            } else {
+                None
+            };
             if before == Some('!') || before == Some('>') || before == Some('<') {
                 continue;
             }
@@ -13557,10 +14201,13 @@ pub fn parse_where_filter(where_clause: Option<&str>) -> Result<QueryFilter, Eng
                 filter.bool_eq_filters.push((column.to_string(), false));
             }
             // Check for string literals (quoted)
-            else if (value.starts_with('\'') && value.ends_with('\'')) ||
-                    (value.starts_with('"') && value.ends_with('"')) {
-                let val = &value[1..value.len()-1];
-                filter.string_eq_filters.push((column.to_string(), val.to_string()));
+            else if (value.starts_with('\'') && value.ends_with('\''))
+                || (value.starts_with('"') && value.ends_with('"'))
+            {
+                let val = &value[1..value.len() - 1];
+                filter
+                    .string_eq_filters
+                    .push((column.to_string(), val.to_string()));
             }
             // Check for float literals
             else if value.contains('.') {
@@ -13579,15 +14226,20 @@ pub fn parse_where_filter(where_clause: Option<&str>) -> Result<QueryFilter, Eng
 }
 
 pub fn filter_is_empty(filter: &QueryFilter) -> bool {
-    filter.tenant_id_eq.is_none() && filter.route_id_eq.is_none() &&
-    filter.numeric_eq_filters.is_empty() && filter.string_eq_filters.is_empty() &&
-    filter.like_filters.is_empty()
+    filter.tenant_id_eq.is_none()
+        && filter.route_id_eq.is_none()
+        && filter.numeric_eq_filters.is_empty()
+        && filter.string_eq_filters.is_empty()
+        && filter.like_filters.is_empty()
 }
 
-pub fn filter_batch_for_delete(batch: &RecordBatch, filter: &QueryFilter) -> Result<(Option<RecordBatch>, usize), EngineError> {
-    use arrow_array::{Array, BooleanArray, UInt64Array, Int64Array, StringArray};
+pub fn filter_batch_for_delete(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+) -> Result<(Option<RecordBatch>, usize), EngineError> {
+    use arrow::compute::{and, filter_record_batch, not};
+    use arrow_array::{Array, BooleanArray, Int64Array, UInt64Array};
     use arrow_ord::cmp::eq;
-    use arrow::compute::{and, not, filter_record_batch};
 
     let num_rows = batch.num_rows();
     if num_rows == 0 {
@@ -13681,8 +14333,8 @@ pub fn filter_batch_for_delete(batch: &RecordBatch, filter: &QueryFilter) -> Res
     }
 
     // Invert mask to get rows to KEEP
-    let keep_mask = not(&delete_mask)
-        .map_err(|e| EngineError::Internal(format!("not error: {}", e)))?;
+    let keep_mask =
+        not(&delete_mask).map_err(|e| EngineError::Internal(format!("not error: {}", e)))?;
 
     // Filter batch to keep only non-deleted rows
     let filtered = filter_record_batch(batch, &keep_mask)
@@ -13691,11 +14343,15 @@ pub fn filter_batch_for_delete(batch: &RecordBatch, filter: &QueryFilter) -> Res
     Ok((Some(filtered), deleted_count))
 }
 
-pub fn apply_assignments_to_batch(batch: &RecordBatch, filter: &QueryFilter, assigns: &[(String, crate::sql::SqlValue)]) -> Result<(RecordBatch, usize), EngineError> {
-    use arrow_array::{Array, BooleanArray, UInt64Array, Int64Array};
-    use arrow_ord::cmp::eq;
-    use arrow::compute::and;
+pub fn apply_assignments_to_batch(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+    assigns: &[(String, crate::sql::SqlValue)],
+) -> Result<(RecordBatch, usize), EngineError> {
     use crate::sql::SqlValue;
+    use arrow::compute::and;
+    use arrow_array::{Array, BooleanArray, Int64Array, UInt64Array};
+    use arrow_ord::cmp::eq;
 
     let num_rows = batch.num_rows();
     if num_rows == 0 || assigns.is_empty() {
@@ -13802,9 +14458,16 @@ pub fn apply_assignments_to_batch(batch: &RecordBatch, filter: &QueryFilter, ass
 }
 
 /// Apply a value to specific rows in a column based on a mask
-fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql::SqlValue, dtype: &DataType) -> Result<ArrayRef, EngineError> {
-    use arrow_array::{Int64Array, UInt64Array, Float64Array, StringArray, BooleanArray as BoolArr};
+fn apply_value_to_column(
+    col: &ArrayRef,
+    mask: &BooleanArray,
+    value: &crate::sql::SqlValue,
+    dtype: &DataType,
+) -> Result<ArrayRef, EngineError> {
     use crate::sql::SqlValue;
+    use arrow_array::{
+        BooleanArray as BoolArr, Float64Array, Int64Array, StringArray, UInt64Array,
+    };
 
     let num_rows = col.len();
 
@@ -13813,9 +14476,15 @@ fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql
             let new_val = match value {
                 SqlValue::Integer(i) => *i,
                 SqlValue::Float(f) => *f as i64,
-                _ => return Err(EngineError::InvalidArgument("cannot assign non-numeric to Int64".into())),
+                _ => {
+                    return Err(EngineError::InvalidArgument(
+                        "cannot assign non-numeric to Int64".into(),
+                    ))
+                }
             };
-            let arr = col.as_any().downcast_ref::<Int64Array>()
+            let arr = col
+                .as_any()
+                .downcast_ref::<Int64Array>()
                 .ok_or_else(|| EngineError::Internal("expected Int64Array".into()))?;
             let mut builder = arrow_array::builder::Int64Builder::with_capacity(num_rows);
             for i in 0..num_rows {
@@ -13835,9 +14504,15 @@ fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql
             let new_val = match value {
                 SqlValue::Integer(i) => *i as u64,
                 SqlValue::Float(f) => *f as u64,
-                _ => return Err(EngineError::InvalidArgument("cannot assign non-numeric to UInt64".into())),
+                _ => {
+                    return Err(EngineError::InvalidArgument(
+                        "cannot assign non-numeric to UInt64".into(),
+                    ))
+                }
             };
-            let arr = col.as_any().downcast_ref::<UInt64Array>()
+            let arr = col
+                .as_any()
+                .downcast_ref::<UInt64Array>()
                 .ok_or_else(|| EngineError::Internal("expected UInt64Array".into()))?;
             let mut builder = arrow_array::builder::UInt64Builder::with_capacity(num_rows);
             for i in 0..num_rows {
@@ -13857,9 +14532,15 @@ fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql
             let new_val = match value {
                 SqlValue::Integer(i) => *i as f64,
                 SqlValue::Float(f) => *f,
-                _ => return Err(EngineError::InvalidArgument("cannot assign non-numeric to Float64".into())),
+                _ => {
+                    return Err(EngineError::InvalidArgument(
+                        "cannot assign non-numeric to Float64".into(),
+                    ))
+                }
             };
-            let arr = col.as_any().downcast_ref::<Float64Array>()
+            let arr = col
+                .as_any()
+                .downcast_ref::<Float64Array>()
                 .ok_or_else(|| EngineError::Internal("expected Float64Array".into()))?;
             let mut builder = arrow_array::builder::Float64Builder::with_capacity(num_rows);
             for i in 0..num_rows {
@@ -13881,11 +14562,18 @@ fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql
                 SqlValue::Integer(i) => i.to_string(),
                 SqlValue::Float(f) => f.to_string(),
                 SqlValue::Boolean(b) => b.to_string(),
-                _ => return Err(EngineError::InvalidArgument("cannot convert to string".into())),
+                _ => {
+                    return Err(EngineError::InvalidArgument(
+                        "cannot convert to string".into(),
+                    ))
+                }
             };
-            let arr = col.as_any().downcast_ref::<StringArray>()
+            let arr = col
+                .as_any()
+                .downcast_ref::<StringArray>()
                 .ok_or_else(|| EngineError::Internal("expected StringArray".into()))?;
-            let mut builder = arrow_array::builder::StringBuilder::with_capacity(num_rows, num_rows * 16);
+            let mut builder =
+                arrow_array::builder::StringBuilder::with_capacity(num_rows, num_rows * 16);
             for i in 0..num_rows {
                 if mask.value(i) {
                     builder.append_value(&new_val);
@@ -13906,11 +14594,16 @@ fn apply_value_to_column(col: &ArrayRef, mask: &BooleanArray, value: &crate::sql
     }
 }
 
-pub fn align_batch_to_fields(_fields: &[arrow_schema::Field], batch: &RecordBatch) -> Result<RecordBatch, EngineError> {
+pub fn align_batch_to_fields(
+    _fields: &[arrow_schema::Field],
+    batch: &RecordBatch,
+) -> Result<RecordBatch, EngineError> {
     Ok(batch.clone())
 }
 
-pub fn decode_binary_literal(_v: &str) -> Vec<u8> { vec![] }
+pub fn decode_binary_literal(_v: &str) -> Vec<u8> {
+    vec![]
+}
 
 pub fn arrow_type_from_str(s: &str) -> Result<arrow_schema::DataType, EngineError> {
     use arrow_schema::DataType;
@@ -13922,7 +14615,7 @@ pub fn arrow_type_from_str(s: &str) -> Result<arrow_schema::DataType, EngineErro
         if let Some(params) = s_trimmed.strip_prefix("decimal").and_then(|rest| {
             let rest = rest.trim();
             if rest.starts_with('(') && rest.ends_with(')') {
-                Some(&rest[1..rest.len()-1])
+                Some(&rest[1..rest.len() - 1])
             } else {
                 None
             }
@@ -13967,7 +14660,10 @@ pub fn arrow_type_from_str(s: &str) -> Result<arrow_schema::DataType, EngineErro
 
         // Date/Time types
         "date" | "date32" => Ok(DataType::Date32),
-        "timestamp" | "datetime" => Ok(DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None)),
+        "timestamp" | "datetime" => Ok(DataType::Timestamp(
+            arrow_schema::TimeUnit::Microsecond,
+            None,
+        )),
 
         // Special types
         "uuid" => Ok(DataType::FixedSizeBinary(16)),
@@ -13980,7 +14676,9 @@ pub fn arrow_type_from_str(s: &str) -> Result<arrow_schema::DataType, EngineErro
     }
 }
 
-pub fn canonicalize_schema_spec<T: Clone>(fields: &[T]) -> Result<Vec<T>, EngineError> { Ok(fields.to_vec()) }
+pub fn canonicalize_schema_spec<T: Clone>(fields: &[T]) -> Result<Vec<T>, EngineError> {
+    Ok(fields.to_vec())
+}
 
 /// Check if two schema JSONs represent compatible schemas (same fields)
 /// Returns true if schemas have the same field count and matching field names
@@ -13989,8 +14687,13 @@ fn schemas_are_compatible(schema1_json: &str, schema2_json: &str) -> bool {
     fn extract_field_names(json: &str) -> Option<Vec<String>> {
         // Try parsing as array of objects with "name" field
         if let Ok(fields) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
-            let names: Vec<String> = fields.iter()
-                .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            let names: Vec<String> = fields
+                .iter()
+                .filter_map(|f| {
+                    f.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect();
             if !names.is_empty() {
                 return Some(names);
@@ -14006,7 +14709,10 @@ fn schemas_are_compatible(schema1_json: &str, schema2_json: &str) -> bool {
         None
     }
 
-    match (extract_field_names(schema1_json), extract_field_names(schema2_json)) {
+    match (
+        extract_field_names(schema1_json),
+        extract_field_names(schema2_json),
+    ) {
         (Some(names1), Some(names2)) => {
             if names1.len() != names2.len() {
                 return false;
@@ -14036,47 +14742,57 @@ pub fn canonical_schema_from_json(s: &str) -> Result<SchemaWrapper, EngineError>
         };
 
         // IMPORTANT: Return the ORIGINAL json (TableFieldSpec format) so it can be parsed later
-        return Ok(SchemaWrapper { json: s.to_string(), hash });
+        return Ok(SchemaWrapper {
+            json: s.to_string(),
+            hash,
+        });
     }
 
     // Try to parse as validate_and_stats format (raw JSON with data_type field)
     if let Ok(fields) = serde_json::from_str::<Vec<serde_json::Value>>(s) {
         // Check if this is already in TableFieldSpec format (has data_type)
         // or if it's the old format (has type)
-        let needs_conversion = fields.iter().any(|f| f.get("type").is_some() && f.get("data_type").is_none());
+        let needs_conversion = fields
+            .iter()
+            .any(|f| f.get("type").is_some() && f.get("data_type").is_none());
 
         let result_json = if needs_conversion {
             // Convert from old format (type) to TableFieldSpec format (data_type)
-            let converted: Vec<serde_json::Value> = fields.iter().map(|f| {
-                let type_val = f.get("type").and_then(|t| t.as_str())
-                    .or_else(|| f.get("data_type").and_then(|t| t.as_str()))
-                    .unwrap_or("string");
-                // Convert Arrow DataType string back to our format
-                let data_type_str = match type_val {
-                    "Int64" => "int64",
-                    "Int32" => "int32",
-                    "Int16" => "int16",
-                    "Int8" => "int8",
-                    "UInt64" => "uint64",
-                    "UInt32" => "uint32",
-                    "UInt16" => "uint16",
-                    "UInt8" => "uint8",
-                    "Float64" => "float64",
-                    "Float32" => "float32",
-                    "Boolean" => "bool",
-                    "Utf8" => "string",
-                    "LargeUtf8" => "string",
-                    "Binary" => "binary",
-                    "Date32" | "Date64" => "date",
-                    s if s.starts_with("Timestamp") => "timestamp",
-                    other => other,
-                };
-                serde_json::json!({
-                    "name": f.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                    "data_type": data_type_str,
-                    "nullable": f.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true)
+            let converted: Vec<serde_json::Value> = fields
+                .iter()
+                .map(|f| {
+                    let type_val = f
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .or_else(|| f.get("data_type").and_then(|t| t.as_str()))
+                        .unwrap_or("string");
+                    // Convert Arrow DataType string back to our format
+                    let data_type_str = match type_val {
+                        "Int64" => "int64",
+                        "Int32" => "int32",
+                        "Int16" => "int16",
+                        "Int8" => "int8",
+                        "UInt64" => "uint64",
+                        "UInt32" => "uint32",
+                        "UInt16" => "uint16",
+                        "UInt8" => "uint8",
+                        "Float64" => "float64",
+                        "Float32" => "float32",
+                        "Boolean" => "bool",
+                        "Utf8" => "string",
+                        "LargeUtf8" => "string",
+                        "Binary" => "binary",
+                        "Date32" | "Date64" => "date",
+                        s if s.starts_with("Timestamp") => "timestamp",
+                        other => other,
+                    };
+                    serde_json::json!({
+                        "name": f.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                        "data_type": data_type_str,
+                        "nullable": f.get("nullable").and_then(|n| n.as_bool()).unwrap_or(true)
+                    })
                 })
-            }).collect();
+                .collect();
             serde_json::to_string(&converted).unwrap_or_default()
         } else {
             // Already has data_type or original format
@@ -14084,7 +14800,8 @@ pub fn canonical_schema_from_json(s: &str) -> Result<SchemaWrapper, EngineError>
         };
 
         // Compute hash from field names
-        let field_names: Vec<&str> = fields.iter()
+        let field_names: Vec<&str> = fields
+            .iter()
             .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
             .collect();
         let canonical_for_hash = serde_json::to_string(&field_names).unwrap_or_default();
@@ -14093,23 +14810,31 @@ pub fn canonical_schema_from_json(s: &str) -> Result<SchemaWrapper, EngineError>
             canonical_for_hash.hash(&mut hasher);
             hasher.finish()
         };
-        return Ok(SchemaWrapper { json: result_json, hash });
+        return Ok(SchemaWrapper {
+            json: result_json,
+            hash,
+        });
     }
 
     // Fallback: empty schema
-    Ok(SchemaWrapper { json: "[]".to_string(), hash: 0 })
+    Ok(SchemaWrapper {
+        json: "[]".to_string(),
+        hash: 0,
+    })
 }
 
 /// Validates IPC payload and computes column statistics for segment pruning.
 /// This is the core function that enables zone-map based query optimization.
-pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedSegment, EngineError> {
-    use arrow_array::{
-        Array, Int8Array, Int16Array, Int32Array, Int64Array,
-        UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        Float32Array, Float64Array, BooleanArray,
-        TimestampMicrosecondArray, Date32Array,
-    };
+pub fn validate_and_stats<T>(
+    ipc: &[u8],
+    _meta: Option<&T>,
+) -> Result<ValidatedSegment, EngineError> {
     use crate::replication::{ColumnStats, PrimitiveValue};
+    use arrow_array::{
+        Array, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array, Int8Array, TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
+    };
     use std::collections::HashMap;
 
     if ipc.is_empty() {
@@ -14143,14 +14868,16 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
             let col = batch.column(col_idx);
             let null_count = col.null_count() as u64;
 
-            let stats = column_stats.entry(col_name.clone()).or_insert_with(|| ColumnStats {
-                min: None,
-                max: None,
-                bloom_filter: None,
-                null_count: 0,
-                row_count: 0,
-                distinct_count: None,
-            });
+            let stats = column_stats
+                .entry(col_name.clone())
+                .or_insert_with(|| ColumnStats {
+                    min: None,
+                    max: None,
+                    bloom_filter: None,
+                    null_count: 0,
+                    row_count: 0,
+                    distinct_count: None,
+                });
 
             stats.null_count += null_count;
             stats.row_count += batch.num_rows() as u64;
@@ -14161,13 +14888,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::Int64(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::Int64(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14177,13 +14908,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::Int32(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::Int32(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14193,13 +14928,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::UInt64(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::UInt64(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14229,13 +14968,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<UInt32Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::UInt32(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::UInt32(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14245,13 +14988,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::Float64(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::Float64(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14261,13 +15008,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<Float32Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::Float32(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::Float32(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14277,13 +15028,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::TimestampMicros(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::TimestampMicros(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14303,13 +15058,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<Date32Array>() {
                         if let Some(min_val) = arrow::compute::min(arr) {
                             let new_min = PrimitiveValue::Date32(min_val);
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max(arr) {
                             let new_max = PrimitiveValue::Date32(max_val);
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14319,13 +15078,17 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
                     if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
                         if let Some(min_val) = arrow::compute::min_string(arr) {
                             let new_min = PrimitiveValue::String(min_val.to_string());
-                            if stats.min.is_none() || new_min.is_less_than(stats.min.as_ref().unwrap()) {
+                            if stats.min.is_none()
+                                || new_min.is_less_than(stats.min.as_ref().unwrap())
+                            {
                                 stats.min = Some(new_min);
                             }
                         }
                         if let Some(max_val) = arrow::compute::max_string(arr) {
                             let new_max = PrimitiveValue::String(max_val.to_string());
-                            if stats.max.is_none() || new_max.is_greater_than(stats.max.as_ref().unwrap()) {
+                            if stats.max.is_none()
+                                || new_max.is_greater_than(stats.max.as_ref().unwrap())
+                            {
                                 stats.max = Some(new_max);
                             }
                         }
@@ -14423,35 +15186,42 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
 
     // Compute schema hash for validation
     // Use TableFieldSpec format for consistency with create_table
-    let schema_json = serde_json::to_string(&schema.fields().iter().map(|f| {
-        // Convert Arrow DataType to our string format
-        let data_type_str = match f.data_type() {
-            DataType::Int8 => "int8",
-            DataType::Int16 => "int16",
-            DataType::Int32 => "int32",
-            DataType::Int64 => "int64",
-            DataType::UInt8 => "uint8",
-            DataType::UInt16 => "uint16",
-            DataType::UInt32 => "uint32",
-            DataType::UInt64 => "uint64",
-            DataType::Float32 => "float32",
-            DataType::Float64 => "float64",
-            DataType::Boolean => "bool",
-            DataType::Utf8 => "string",
-            DataType::LargeUtf8 => "string",
-            DataType::Binary => "binary",
-            DataType::LargeBinary => "binary",
-            DataType::Date32 => "date",
-            DataType::Date64 => "date",
-            DataType::Timestamp(_, _) => "timestamp",
-            _ => "string", // Default fallback
-        };
-        serde_json::json!({
-            "name": f.name(),
-            "data_type": data_type_str,
-            "nullable": f.is_nullable()
-        })
-    }).collect::<Vec<_>>()).unwrap_or_default();
+    let schema_json = serde_json::to_string(
+        &schema
+            .fields()
+            .iter()
+            .map(|f| {
+                // Convert Arrow DataType to our string format
+                let data_type_str = match f.data_type() {
+                    DataType::Int8 => "int8",
+                    DataType::Int16 => "int16",
+                    DataType::Int32 => "int32",
+                    DataType::Int64 => "int64",
+                    DataType::UInt8 => "uint8",
+                    DataType::UInt16 => "uint16",
+                    DataType::UInt32 => "uint32",
+                    DataType::UInt64 => "uint64",
+                    DataType::Float32 => "float32",
+                    DataType::Float64 => "float64",
+                    DataType::Boolean => "bool",
+                    DataType::Utf8 => "string",
+                    DataType::LargeUtf8 => "string",
+                    DataType::Binary => "binary",
+                    DataType::LargeBinary => "binary",
+                    DataType::Date32 => "date",
+                    DataType::Date64 => "date",
+                    DataType::Timestamp(_, _) => "timestamp",
+                    _ => "string", // Default fallback
+                };
+                serde_json::json!({
+                    "name": f.name(),
+                    "data_type": data_type_str,
+                    "nullable": f.is_nullable()
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
 
     let schema_hash = {
         let mut hasher = DefaultHasher::new();
@@ -14479,8 +15249,8 @@ pub fn validate_and_stats<T>(ipc: &[u8], _meta: Option<&T>) -> Result<ValidatedS
 /// Check if a segment can be pruned based on column statistics (zone maps).
 /// Returns true if the segment might contain matching rows, false if it can be skipped.
 pub fn segment_matches_column_stats(entry: &ManifestEntry, filter: &QueryFilter) -> bool {
-    use crate::sql::NumericOp;
     use crate::replication::PrimitiveValue;
+    use crate::sql::NumericOp;
 
     // If no column stats, assume segment might match
     let stats_map = match &entry.column_stats {
@@ -14528,7 +15298,10 @@ pub fn segment_matches_column_stats(entry: &ManifestEntry, filter: &QueryFilter)
                         match nf.op {
                             NumericOp::Lt => {
                                 // col < val means we need seg_min < val
-                                if !seg_min.is_less_than(&filter_val) && seg_min.partial_cmp_value(&filter_val) != Some(std::cmp::Ordering::Less) {
+                                if !seg_min.is_less_than(&filter_val)
+                                    && seg_min.partial_cmp_value(&filter_val)
+                                        != Some(std::cmp::Ordering::Less)
+                                {
                                     return false;
                                 }
                             }
@@ -14549,7 +15322,10 @@ pub fn segment_matches_column_stats(entry: &ManifestEntry, filter: &QueryFilter)
                         match nf.op {
                             NumericOp::Gt => {
                                 // col > val means we need seg_max > val
-                                if !seg_max.is_greater_than(&filter_val) && seg_max.partial_cmp_value(&filter_val) != Some(std::cmp::Ordering::Greater) {
+                                if !seg_max.is_greater_than(&filter_val)
+                                    && seg_max.partial_cmp_value(&filter_val)
+                                        != Some(std::cmp::Ordering::Greater)
+                                {
                                     return false;
                                 }
                             }
@@ -14565,9 +15341,12 @@ pub fn segment_matches_column_stats(entry: &ManifestEntry, filter: &QueryFilter)
                 }
                 NumericOp::Ne => {
                     // Can only skip if segment has exactly one value and it equals the filter value
-                    if let (Some(ref seg_min), Some(ref seg_max)) = (&col_stats.min, &col_stats.max) {
+                    if let (Some(ref seg_min), Some(ref seg_max)) = (&col_stats.min, &col_stats.max)
+                    {
                         if seg_min.partial_cmp_value(seg_max) == Some(std::cmp::Ordering::Equal) {
-                            if seg_min.partial_cmp_value(&filter_val) == Some(std::cmp::Ordering::Equal) {
+                            if seg_min.partial_cmp_value(&filter_val)
+                                == Some(std::cmp::Ordering::Equal)
+                            {
                                 return false; // Segment only has the value we're excluding
                             }
                         }
@@ -14590,11 +15369,16 @@ pub fn segment_matches_column_stats(entry: &ManifestEntry, filter: &QueryFilter)
     true
 }
 
-pub fn column_encodings_from_schema_json(_j: Option<&String>) -> Result<std::collections::HashMap<String, String>, EngineError> {
+pub fn column_encodings_from_schema_json(
+    _j: Option<&String>,
+) -> Result<std::collections::HashMap<String, String>, EngineError> {
     Ok(std::collections::HashMap::new())
 }
 
-pub fn apply_column_encodings(ipc: &[u8], enc: &std::collections::HashMap<String, String>) -> Result<Vec<u8>, EngineError> {
+pub fn apply_column_encodings(
+    ipc: &[u8],
+    enc: &std::collections::HashMap<String, String>,
+) -> Result<Vec<u8>, EngineError> {
     // If no encodings specified, return original data
     if enc.is_empty() {
         return Ok(ipc.to_vec());
@@ -14633,13 +15417,18 @@ pub fn parse_uuid_string(s: &str) -> Option<[u8; 16]> {
     None
 }
 
-pub fn current_time_micros() -> u64 { 
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros() as u64
+pub fn current_time_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
 }
 
 pub fn segment_age_micros(entry: &ManifestEntry, now: u64) -> Option<u64> {
     // Calculate segment age based on watermark or event time
-    let segment_time = entry.watermark_micros.max(entry.event_time_max.unwrap_or(0));
+    let segment_time = entry
+        .watermark_micros
+        .max(entry.event_time_max.unwrap_or(0));
     if segment_time == 0 {
         return None;
     }
@@ -14650,10 +15439,15 @@ pub fn segment_age_micros(entry: &ManifestEntry, now: u64) -> Option<u64> {
     }
 }
 
-pub fn validate_and_stats_legacy(_s: &arrow_schema::Schema) -> Result<(), EngineError> { Ok(()) }
+pub fn validate_and_stats_legacy(_s: &arrow_schema::Schema) -> Result<(), EngineError> {
+    Ok(())
+}
 
 // Additional Legacy Stubs
-pub fn filter_batches_with_query_filter(batches: Vec<RecordBatch>, _filter: &QueryFilter) -> Result<Vec<RecordBatch>, EngineError> {
+pub fn filter_batches_with_query_filter(
+    batches: Vec<RecordBatch>,
+    _filter: &QueryFilter,
+) -> Result<Vec<RecordBatch>, EngineError> {
     Ok(batches)
 }
 
@@ -14661,8 +15455,12 @@ pub fn decode_record_batch_encodings(batch: &RecordBatch) -> Result<RecordBatch,
     Ok(batch.clone())
 }
 
-pub fn parse_agg(_sql: &str) -> Result<Option<AggPlan>, EngineError> { Ok(None) }
-pub fn parse_projection(_sql: &str) -> Result<Option<Vec<String>>, EngineError> { Ok(None) }
+pub fn parse_agg(_sql: &str) -> Result<Option<AggPlan>, EngineError> {
+    Ok(None)
+}
+pub fn parse_projection(_sql: &str) -> Result<Option<Vec<String>>, EngineError> {
+    Ok(None)
+}
 pub fn parse_filters(sql: &str) -> Result<QueryFilter, EngineError> {
     // Find WHERE clause in SQL
     let sql_upper = sql.to_uppercase();
@@ -14688,11 +15486,11 @@ pub fn parse_filters(sql: &str) -> Result<QueryFilter, EngineError> {
     parse_where_filter(Some(where_clause))
 }
 
-
-
 // Duplicates removed
 // Missing Stubs for Joins/Agg
-pub fn entry_matches_string_filters<T>(_e: &T, _f: &QueryFilter) -> bool { true }
+pub fn entry_matches_string_filters<T>(_e: &T, _f: &QueryFilter) -> bool {
+    true
+}
 
 /// Filter IPC data using Arrow compute kernels
 /// Decodes IPC, applies filters, and re-encodes
@@ -14720,10 +15518,12 @@ pub fn filter_ipc(ipc: &[u8], filter: &QueryFilter) -> Result<Vec<u8>, EngineErr
         let mut writer = StreamWriter::try_new(&mut buf, &schema)
             .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
         for batch in &filtered {
-            writer.write(batch)
+            writer
+                .write(batch)
                 .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
         }
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| EngineError::Internal(format!("IPC finish error: {}", e)))?;
     }
     Ok(buf)
@@ -14748,7 +15548,10 @@ fn has_row_filters(filter: &QueryFilter) -> bool {
 }
 
 /// Filter record batches using Arrow compute kernels
-pub fn filter_ipc_batches(batches: Vec<RecordBatch>, filter: &QueryFilter) -> Result<Vec<RecordBatch>, EngineError> {
+pub fn filter_ipc_batches(
+    batches: Vec<RecordBatch>,
+    filter: &QueryFilter,
+) -> Result<Vec<RecordBatch>, EngineError> {
     if batches.is_empty() || !has_row_filters(filter) {
         return Ok(batches);
     }
@@ -14971,12 +15774,14 @@ fn build_in_mask_u64(col: &ArrayRef, values: &[u64]) -> Result<BooleanArray, Eng
     let values_set: std::collections::HashSet<u64> = values.iter().copied().collect();
 
     if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
-        let mask: BooleanArray = arr.iter()
+        let mask: BooleanArray = arr
+            .iter()
             .map(|v| v.map(|x| values_set.contains(&x)))
             .collect();
         Ok(mask)
     } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
-        let mask: BooleanArray = arr.iter()
+        let mask: BooleanArray = arr
+            .iter()
             .map(|v| v.map(|x| values_set.contains(&(x as u64))))
             .collect();
         Ok(mask)
@@ -14989,7 +15794,8 @@ fn build_in_mask_u64(col: &ArrayRef, values: &[u64]) -> Result<BooleanArray, Eng
 /// Build an IN mask for string values
 fn build_in_mask_string(arr: &StringArray, values: &[String]) -> Result<BooleanArray, EngineError> {
     let values_set: std::collections::HashSet<&str> = values.iter().map(|s| s.as_str()).collect();
-    let mask: BooleanArray = arr.iter()
+    let mask: BooleanArray = arr
+        .iter()
         .map(|v| v.map(|x| values_set.contains(x)))
         .collect();
     Ok(mask)
@@ -15076,7 +15882,10 @@ fn apply_float_eq(col: &ArrayRef, value: f64) -> Result<BooleanArray, EngineErro
 }
 
 /// Apply numeric range filter (GT, GE, LT, LE, EQ, NE)
-fn apply_numeric_range_filter(col: &ArrayRef, filter: &crate::sql::NumericFilter) -> Result<BooleanArray, EngineError> {
+fn apply_numeric_range_filter(
+    col: &ArrayRef,
+    filter: &crate::sql::NumericFilter,
+) -> Result<BooleanArray, EngineError> {
     use crate::sql::{NumericOp, NumericValue};
 
     let num_rows = col.len();
@@ -15089,7 +15898,11 @@ fn apply_numeric_range_filter(col: &ArrayRef, filter: &crate::sql::NumericFilter
     }
 }
 
-fn apply_numeric_range_i64(col: &ArrayRef, op: crate::sql::NumericOp, value: i64) -> Result<BooleanArray, EngineError> {
+fn apply_numeric_range_i64(
+    col: &ArrayRef,
+    op: crate::sql::NumericOp,
+    value: i64,
+) -> Result<BooleanArray, EngineError> {
     use crate::sql::NumericOp;
 
     if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
@@ -15101,7 +15914,8 @@ fn apply_numeric_range_i64(col: &ArrayRef, op: crate::sql::NumericOp, value: i64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
         let scalar = Int32Array::new_scalar(value as i32);
         match op {
@@ -15111,13 +15925,18 @@ fn apply_numeric_range_i64(col: &ArrayRef, op: crate::sql::NumericOp, value: i64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else {
         Ok(BooleanArray::from(vec![true; col.len()]))
     }
 }
 
-fn apply_numeric_range_u64(col: &ArrayRef, op: crate::sql::NumericOp, value: u64) -> Result<BooleanArray, EngineError> {
+fn apply_numeric_range_u64(
+    col: &ArrayRef,
+    op: crate::sql::NumericOp,
+    value: u64,
+) -> Result<BooleanArray, EngineError> {
     use crate::sql::NumericOp;
 
     if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
@@ -15129,7 +15948,8 @@ fn apply_numeric_range_u64(col: &ArrayRef, op: crate::sql::NumericOp, value: u64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else if let Some(arr) = col.as_any().downcast_ref::<UInt32Array>() {
         let scalar = UInt32Array::new_scalar(value as u32);
         match op {
@@ -15139,13 +15959,18 @@ fn apply_numeric_range_u64(col: &ArrayRef, op: crate::sql::NumericOp, value: u64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else {
         Ok(BooleanArray::from(vec![true; col.len()]))
     }
 }
 
-fn apply_numeric_range_f64(col: &ArrayRef, op: crate::sql::NumericOp, value: f64) -> Result<BooleanArray, EngineError> {
+fn apply_numeric_range_f64(
+    col: &ArrayRef,
+    op: crate::sql::NumericOp,
+    value: f64,
+) -> Result<BooleanArray, EngineError> {
     use crate::sql::NumericOp;
 
     if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
@@ -15157,7 +15982,8 @@ fn apply_numeric_range_f64(col: &ArrayRef, op: crate::sql::NumericOp, value: f64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else if let Some(arr) = col.as_any().downcast_ref::<Float32Array>() {
         let scalar = Float32Array::new_scalar(value as f32);
         match op {
@@ -15167,18 +15993,25 @@ fn apply_numeric_range_f64(col: &ArrayRef, op: crate::sql::NumericOp, value: f64
             NumericOp::Le => lt_eq(arr, &scalar),
             NumericOp::Gt => gt(arr, &scalar),
             NumericOp::Ge => gt_eq(arr, &scalar),
-        }.map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
+        }
+        .map_err(|e| EngineError::Internal(format!("cmp error: {}", e)))
     } else {
         Ok(BooleanArray::from(vec![true; col.len()]))
     }
 }
 
 /// Filter a record batch using a boolean mask
-fn filter_record_batch(batch: &RecordBatch, mask: &BooleanArray) -> Result<RecordBatch, EngineError> {
+fn filter_record_batch(
+    batch: &RecordBatch,
+    mask: &BooleanArray,
+) -> Result<RecordBatch, EngineError> {
     let filtered_columns: Result<Vec<ArrayRef>, _> = batch
         .columns()
         .iter()
-        .map(|col| arrow_filter(col.as_ref(), mask).map_err(|e| EngineError::Internal(format!("filter error: {}", e))))
+        .map(|col| {
+            arrow_filter(col.as_ref(), mask)
+                .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))
+        })
         .collect();
 
     RecordBatch::try_new(batch.schema(), filtered_columns?)
@@ -15228,7 +16061,11 @@ impl Aggregator {
         let has_group_by = !matches!(plan.group_by, GroupBy::None);
         Ok(Self {
             plan,
-            global_state: if has_group_by { None } else { Some(AggState::default()) },
+            global_state: if has_group_by {
+                None
+            } else {
+                Some(AggState::default())
+            },
             grouped_state: HashMap::new(),
             schema: None,
         })
@@ -15279,10 +16116,13 @@ impl Aggregator {
             }
             GroupBy::Columns(cols) => {
                 // Group by specified columns
-                let col_names: Vec<&str> = cols.iter().map(|c| match c {
-                    GroupByColumn::TenantId => "tenant_id",
-                    GroupByColumn::RouteId => "route_id",
-                }).collect();
+                let col_names: Vec<&str> = cols
+                    .iter()
+                    .map(|c| match c {
+                        GroupByColumn::TenantId => "tenant_id",
+                        GroupByColumn::RouteId => "route_id",
+                    })
+                    .collect();
                 self.accumulate_grouped(batch, &col_names)?;
             }
         }
@@ -15290,15 +16130,26 @@ impl Aggregator {
         Ok(())
     }
 
-    fn accumulate_grouped(&mut self, batch: &RecordBatch, group_cols: &[&str]) -> Result<(), EngineError> {
+    fn accumulate_grouped(
+        &mut self,
+        batch: &RecordBatch,
+        group_cols: &[&str],
+    ) -> Result<(), EngineError> {
         let num_rows = batch.num_rows();
         if num_rows == 0 {
             return Ok(());
         }
 
         // Extract group key columns
-        let key_arrays: Vec<&ArrayRef> = group_cols.iter()
-            .filter_map(|col| batch.schema().index_of(col).ok().map(|idx| batch.column(idx)))
+        let key_arrays: Vec<&ArrayRef> = group_cols
+            .iter()
+            .filter_map(|col| {
+                batch
+                    .schema()
+                    .index_of(col)
+                    .ok()
+                    .map(|idx| batch.column(idx))
+            })
             .collect();
 
         if key_arrays.is_empty() {
@@ -15313,7 +16164,10 @@ impl Aggregator {
                     AggKind::CountDistinct { column } | AggKind::ApproxCountDistinct { column } => {
                         if let Ok(col_idx) = batch.schema().index_of(column) {
                             let col = batch.column(col_idx);
-                            let set = state.count_distinct_sets.entry(column.clone()).or_insert_with(HashSet::new);
+                            let set = state
+                                .count_distinct_sets
+                                .entry(column.clone())
+                                .or_insert_with(HashSet::new);
                             let _ = add_distinct_values(col, set);
                         }
                     }
@@ -15337,8 +16191,13 @@ impl Aggregator {
                         if let Ok(col_idx) = batch.schema().index_of(column) {
                             let col = batch.column(col_idx);
                             if let Ok(Some(min)) = compute_min(col) {
-                                let entry = state.min_values.entry(column.clone()).or_insert(f64::INFINITY);
-                                if min < *entry { *entry = min; }
+                                let entry = state
+                                    .min_values
+                                    .entry(column.clone())
+                                    .or_insert(f64::INFINITY);
+                                if min < *entry {
+                                    *entry = min;
+                                }
                             }
                         }
                     }
@@ -15346,8 +16205,13 @@ impl Aggregator {
                         if let Ok(col_idx) = batch.schema().index_of(column) {
                             let col = batch.column(col_idx);
                             if let Ok(Some(max)) = compute_max(col) {
-                                let entry = state.max_values.entry(column.clone()).or_insert(f64::NEG_INFINITY);
-                                if max > *entry { *entry = max; }
+                                let entry = state
+                                    .max_values
+                                    .entry(column.clone())
+                                    .or_insert(f64::NEG_INFINITY);
+                                if max > *entry {
+                                    *entry = max;
+                                }
                             }
                         }
                     }
@@ -15359,11 +16223,15 @@ impl Aggregator {
 
         // For each row, compute the group key and accumulate
         for row in 0..num_rows {
-            let key: Vec<GroupKeyValue> = key_arrays.iter()
+            let key: Vec<GroupKeyValue> = key_arrays
+                .iter()
                 .map(|arr| extract_group_key_value(arr, row))
                 .collect();
 
-            let state = self.grouped_state.entry(key).or_insert_with(AggState::default);
+            let state = self
+                .grouped_state
+                .entry(key)
+                .or_insert_with(AggState::default);
             state.count_star += 1;
 
             // Accumulate individual row aggregations
@@ -15399,9 +16267,11 @@ impl Aggregator {
         {
             let mut writer = StreamWriter::try_new(&mut buf, &schema)
                 .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
-            writer.write(&batch)
+            writer
+                .write(&batch)
                 .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("IPC finish error: {}", e)))?;
         }
 
@@ -15438,16 +16308,27 @@ impl Aggregator {
         for agg in &self.plan.aggs {
             let (name, dtype) = match agg {
                 AggKind::CountStar => ("count".to_string(), DataType::UInt64),
-                AggKind::CountDistinct { column } => (format!("count_distinct_{}", column), DataType::UInt64),
+                AggKind::CountDistinct { column } => {
+                    (format!("count_distinct_{}", column), DataType::UInt64)
+                }
                 AggKind::Sum { column } => (format!("sum_{}", column), DataType::Int64),
                 AggKind::Avg { column } => (format!("avg_{}", column), DataType::Float64),
                 AggKind::Min { column } => (format!("min_{}", column), DataType::Int64),
                 AggKind::Max { column } => (format!("max_{}", column), DataType::Int64),
                 AggKind::StddevSamp { column } => (format!("stddev_{}", column), DataType::Float64),
-                AggKind::StddevPop { column } => (format!("stddev_pop_{}", column), DataType::Float64),
-                AggKind::VarianceSamp { column } => (format!("variance_{}", column), DataType::Float64),
-                AggKind::VariancePop { column } => (format!("var_pop_{}", column), DataType::Float64),
-                AggKind::ApproxCountDistinct { column } => (format!("approx_count_distinct_{}", column), DataType::UInt64),
+                AggKind::StddevPop { column } => {
+                    (format!("stddev_pop_{}", column), DataType::Float64)
+                }
+                AggKind::VarianceSamp { column } => {
+                    (format!("variance_{}", column), DataType::Float64)
+                }
+                AggKind::VariancePop { column } => {
+                    (format!("var_pop_{}", column), DataType::Float64)
+                }
+                AggKind::ApproxCountDistinct { column } => (
+                    format!("approx_count_distinct_{}", column),
+                    DataType::UInt64,
+                ),
             };
             fields.push(Field::new(name, dtype, true));
         }
@@ -15455,16 +16336,22 @@ impl Aggregator {
         Ok(Arc::new(Schema::new(fields)))
     }
 
-    fn build_global_result(&self, schema: &Arc<Schema>, state: &AggState) -> Result<RecordBatch, EngineError> {
+    fn build_global_result(
+        &self,
+        schema: &Arc<Schema>,
+        state: &AggState,
+    ) -> Result<RecordBatch, EngineError> {
         let mut columns: Vec<ArrayRef> = Vec::new();
 
         for agg in &self.plan.aggs {
             let arr: ArrayRef = match agg {
-                AggKind::CountStar => {
-                    Arc::new(UInt64Array::from(vec![state.count_star]))
-                }
+                AggKind::CountStar => Arc::new(UInt64Array::from(vec![state.count_star])),
                 AggKind::CountDistinct { column } => {
-                    let count = state.count_distinct_sets.get(column).map(|s| s.len()).unwrap_or(0);
+                    let count = state
+                        .count_distinct_sets
+                        .get(column)
+                        .map(|s| s.len())
+                        .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
                 }
                 AggKind::Sum { column } => {
@@ -15478,15 +16365,35 @@ impl Aggregator {
                     Arc::new(Float64Array::from(vec![avg]))
                 }
                 AggKind::Min { column } => {
-                    let min = state.min_values.get(column).copied().unwrap_or(f64::INFINITY);
-                    Arc::new(Int64Array::from(vec![if min.is_infinite() { 0 } else { min as i64 }]))
+                    let min = state
+                        .min_values
+                        .get(column)
+                        .copied()
+                        .unwrap_or(f64::INFINITY);
+                    Arc::new(Int64Array::from(vec![if min.is_infinite() {
+                        0
+                    } else {
+                        min as i64
+                    }]))
                 }
                 AggKind::Max { column } => {
-                    let max = state.max_values.get(column).copied().unwrap_or(f64::NEG_INFINITY);
-                    Arc::new(Int64Array::from(vec![if max.is_infinite() { 0 } else { max as i64 }]))
+                    let max = state
+                        .max_values
+                        .get(column)
+                        .copied()
+                        .unwrap_or(f64::NEG_INFINITY);
+                    Arc::new(Int64Array::from(vec![if max.is_infinite() {
+                        0
+                    } else {
+                        max as i64
+                    }]))
                 }
                 AggKind::ApproxCountDistinct { column } => {
-                    let count = state.count_distinct_sets.get(column).map(|s| s.len()).unwrap_or(0);
+                    let count = state
+                        .count_distinct_sets
+                        .get(column)
+                        .map(|s| s.len())
+                        .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
                 }
                 _ => {
@@ -15504,14 +16411,18 @@ impl Aggregator {
     fn build_grouped_result(&self, schema: &Arc<Schema>) -> Result<RecordBatch, EngineError> {
         if self.grouped_state.is_empty() {
             // Return empty batch
-            let columns: Vec<ArrayRef> = schema.fields().iter().map(|f| {
-                match f.data_type() {
+            let columns: Vec<ArrayRef> = schema
+                .fields()
+                .iter()
+                .map(|f| match f.data_type() {
                     DataType::Int64 => Arc::new(Int64Array::from(Vec::<i64>::new())) as ArrayRef,
                     DataType::UInt64 => Arc::new(UInt64Array::from(Vec::<u64>::new())) as ArrayRef,
-                    DataType::Float64 => Arc::new(Float64Array::from(Vec::<f64>::new())) as ArrayRef,
+                    DataType::Float64 => {
+                        Arc::new(Float64Array::from(Vec::<f64>::new())) as ArrayRef
+                    }
                     _ => Arc::new(Int64Array::from(Vec::<i64>::new())) as ArrayRef,
-                }
-            }).collect();
+                })
+                .collect();
             return RecordBatch::try_new(schema.clone(), columns)
                 .map_err(|e| EngineError::Internal(format!("batch creation error: {}", e)));
         }
@@ -15526,7 +16437,12 @@ impl Aggregator {
             .collect();
 
         // Build aggregate columns
-        let mut agg_columns: Vec<Vec<f64>> = self.plan.aggs.iter().map(|_| Vec::with_capacity(num_groups)).collect();
+        let mut agg_columns: Vec<Vec<f64>> = self
+            .plan
+            .aggs
+            .iter()
+            .map(|_| Vec::with_capacity(num_groups))
+            .collect();
         let mut count_star_values: Vec<i64> = Vec::with_capacity(num_groups);
 
         for (key, state) in &self.grouped_state {
@@ -15546,22 +16462,36 @@ impl Aggregator {
             for (i, agg) in self.plan.aggs.iter().enumerate() {
                 let value = match agg {
                     AggKind::CountStar => state.count_star as f64,
-                    AggKind::CountDistinct { column } => {
-                        state.count_distinct_sets.get(column).map(|s| s.len() as f64).unwrap_or(0.0)
-                    }
+                    AggKind::CountDistinct { column } => state
+                        .count_distinct_sets
+                        .get(column)
+                        .map(|s| s.len() as f64)
+                        .unwrap_or(0.0),
                     AggKind::Sum { column } => state.sum_values.get(column).copied().unwrap_or(0.0),
                     AggKind::Avg { column } => {
                         let sum = state.avg_sums.get(column).copied().unwrap_or(0.0);
                         let count = state.avg_counts.get(column).copied().unwrap_or(0);
-                        if count > 0 { sum / count as f64 } else { 0.0 }
+                        if count > 0 {
+                            sum / count as f64
+                        } else {
+                            0.0
+                        }
                     }
                     AggKind::Min { column } => {
                         let v = state.min_values.get(column).copied().unwrap_or(f64::NAN);
-                        if v.is_infinite() { f64::NAN } else { v }
+                        if v.is_infinite() {
+                            f64::NAN
+                        } else {
+                            v
+                        }
                     }
                     AggKind::Max { column } => {
                         let v = state.max_values.get(column).copied().unwrap_or(f64::NAN);
-                        if v.is_infinite() { f64::NAN } else { v }
+                        if v.is_infinite() {
+                            f64::NAN
+                        } else {
+                            v
+                        }
                     }
                     _ => f64::NAN,
                 };
@@ -15580,15 +16510,15 @@ impl Aggregator {
         // Add aggregate columns
         for (i, agg) in self.plan.aggs.iter().enumerate() {
             let arr: ArrayRef = match agg {
-                AggKind::CountStar | AggKind::CountDistinct { .. } | AggKind::ApproxCountDistinct { .. } => {
-                    Arc::new(UInt64Array::from(agg_columns[i].iter().map(|v| *v as u64).collect::<Vec<_>>()))
-                }
-                AggKind::Sum { .. } | AggKind::Min { .. } | AggKind::Max { .. } => {
-                    Arc::new(Int64Array::from(agg_columns[i].iter().map(|v| *v as i64).collect::<Vec<_>>()))
-                }
-                _ => {
-                    Arc::new(Float64Array::from(agg_columns[i].clone()))
-                }
+                AggKind::CountStar
+                | AggKind::CountDistinct { .. }
+                | AggKind::ApproxCountDistinct { .. } => Arc::new(UInt64Array::from(
+                    agg_columns[i].iter().map(|v| *v as u64).collect::<Vec<_>>(),
+                )),
+                AggKind::Sum { .. } | AggKind::Min { .. } | AggKind::Max { .. } => Arc::new(
+                    Int64Array::from(agg_columns[i].iter().map(|v| *v as i64).collect::<Vec<_>>()),
+                ),
+                _ => Arc::new(Float64Array::from(agg_columns[i].clone())),
             };
             columns.push(arr);
         }
@@ -15602,10 +16532,13 @@ impl Aggregator {
             GroupBy::None => vec![],
             GroupBy::Tenant => vec!["tenant_id"],
             GroupBy::Route => vec!["route_id"],
-            GroupBy::Columns(cols) => cols.iter().map(|c| match c {
-                GroupByColumn::TenantId => "tenant_id",
-                GroupByColumn::RouteId => "route_id",
-            }).collect(),
+            GroupBy::Columns(cols) => cols
+                .iter()
+                .map(|c| match c {
+                    GroupByColumn::TenantId => "tenant_id",
+                    GroupByColumn::RouteId => "route_id",
+                })
+                .collect(),
         }
     }
 }
@@ -15706,7 +16639,11 @@ fn compute_max(arr: &ArrayRef) -> Result<Option<f64>, EngineError> {
 }
 
 /// Accumulate aggregations into state (standalone function to avoid borrow issues)
-fn accumulate_aggs_into(state: &mut AggState, aggs: &[AggKind], batch: &RecordBatch) -> Result<(), EngineError> {
+fn accumulate_aggs_into(
+    state: &mut AggState,
+    aggs: &[AggKind],
+    batch: &RecordBatch,
+) -> Result<(), EngineError> {
     let num_rows = batch.num_rows();
     state.count_star += num_rows as u64;
 
@@ -15718,7 +16655,10 @@ fn accumulate_aggs_into(state: &mut AggState, aggs: &[AggKind], batch: &RecordBa
             AggKind::CountDistinct { column } | AggKind::ApproxCountDistinct { column } => {
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
-                    let set = state.count_distinct_sets.entry(column.clone()).or_insert_with(HashSet::new);
+                    let set = state
+                        .count_distinct_sets
+                        .entry(column.clone())
+                        .or_insert_with(HashSet::new);
                     add_distinct_values(col, set)?;
                 }
             }
@@ -15743,7 +16683,10 @@ fn accumulate_aggs_into(state: &mut AggState, aggs: &[AggKind], batch: &RecordBa
                     let col = batch.column(col_idx);
                     let min_val = compute_min(col)?;
                     if let Some(min) = min_val {
-                        let entry = state.min_values.entry(column.clone()).or_insert(f64::INFINITY);
+                        let entry = state
+                            .min_values
+                            .entry(column.clone())
+                            .or_insert(f64::INFINITY);
                         if min < *entry {
                             *entry = min;
                         }
@@ -15755,7 +16698,10 @@ fn accumulate_aggs_into(state: &mut AggState, aggs: &[AggKind], batch: &RecordBa
                     let col = batch.column(col_idx);
                     let max_val = compute_max(col)?;
                     if let Some(max) = max_val {
-                        let entry = state.max_values.entry(column.clone()).or_insert(f64::NEG_INFINITY);
+                        let entry = state
+                            .max_values
+                            .entry(column.clone())
+                            .or_insert(f64::NEG_INFINITY);
                         if max > *entry {
                             *entry = max;
                         }
@@ -15772,7 +16718,12 @@ fn accumulate_aggs_into(state: &mut AggState, aggs: &[AggKind], batch: &RecordBa
 }
 
 /// Accumulate aggregation for a single row (used in GROUP BY)
-fn accumulate_single_row(state: &mut AggState, agg: &AggKind, batch: &RecordBatch, row: usize) -> Result<(), EngineError> {
+fn accumulate_single_row(
+    state: &mut AggState,
+    agg: &AggKind,
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<(), EngineError> {
     match agg {
         AggKind::CountStar => {
             // Already counted in outer loop
@@ -15782,7 +16733,10 @@ fn accumulate_single_row(state: &mut AggState, agg: &AggKind, batch: &RecordBatc
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     let hash = hash_array_value_u64(col, row);
-                    let set = state.count_distinct_sets.entry(column.clone()).or_insert_with(HashSet::new);
+                    let set = state
+                        .count_distinct_sets
+                        .entry(column.clone())
+                        .or_insert_with(HashSet::new);
                     set.insert(hash);
                 }
             }
@@ -15807,7 +16761,10 @@ fn accumulate_single_row(state: &mut AggState, agg: &AggKind, batch: &RecordBatc
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
-                        let entry = state.min_values.entry(column.clone()).or_insert(f64::INFINITY);
+                        let entry = state
+                            .min_values
+                            .entry(column.clone())
+                            .or_insert(f64::INFINITY);
                         if v < *entry {
                             *entry = v;
                         }
@@ -15820,7 +16777,10 @@ fn accumulate_single_row(state: &mut AggState, agg: &AggKind, batch: &RecordBatc
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
-                        let entry = state.max_values.entry(column.clone()).or_insert(f64::NEG_INFINITY);
+                        let entry = state
+                            .max_values
+                            .entry(column.clone())
+                            .or_insert(f64::NEG_INFINITY);
                         if v > *entry {
                             *entry = v;
                         }
@@ -15848,7 +16808,10 @@ fn extract_f64(arr: &ArrayRef, row: usize) -> Option<f64> {
         Some(a.value(row) as f64)
     } else if let Some(a) = arr.as_any().downcast_ref::<Float32Array>() {
         Some(a.value(row) as f64)
-    } else if let Some(a) = arr.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+    } else if let Some(a) = arr
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampMicrosecondArray>()
+    {
         Some(a.value(row) as f64)
     } else if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Date32Array>() {
         Some(a.value(row) as f64)
@@ -15890,11 +16853,16 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
     for a in &agg.aggs {
         match a {
             AggKind::CountStar => {}
-            AggKind::CountDistinct { column } | AggKind::Sum { column } |
-            AggKind::Avg { column } | AggKind::Min { column } | AggKind::Max { column } |
-            AggKind::StddevSamp { column } | AggKind::StddevPop { column } |
-            AggKind::VarianceSamp { column } | AggKind::VariancePop { column } |
-            AggKind::ApproxCountDistinct { column } => {
+            AggKind::CountDistinct { column }
+            | AggKind::Sum { column }
+            | AggKind::Avg { column }
+            | AggKind::Min { column }
+            | AggKind::Max { column }
+            | AggKind::StddevSamp { column }
+            | AggKind::StddevPop { column }
+            | AggKind::VarianceSamp { column }
+            | AggKind::VariancePop { column }
+            | AggKind::ApproxCountDistinct { column } => {
                 if !needed.contains(column) {
                     needed.push(column.clone());
                 }
@@ -15904,12 +16872,30 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
 
     needed
 }
-pub fn split_filter_for_join(f: &QueryFilter, _l: Option<&arrow_schema::Schema>, _r: Option<&arrow_schema::Schema>) -> (QueryFilter, QueryFilter, QueryFilter) { (f.clone(), QueryFilter::default(), QueryFilter::default()) }
-pub fn join_projection_sets(_l: &arrow_schema::Schema, _r: &arrow_schema::Schema, _p: Option<&[String]>, _lc: &str, _rc: &str, _k: &[String]) -> Result<(Option<Vec<String>>, Option<Vec<String>>), EngineError> { Ok((None, None)) }
-pub fn extend_needed_with_filter(_n: &mut Vec<String>, _f: &QueryFilter, _s: Option<&arrow_schema::Schema>) {}
+pub fn split_filter_for_join(
+    f: &QueryFilter,
+    _l: Option<&arrow_schema::Schema>,
+    _r: Option<&arrow_schema::Schema>,
+) -> (QueryFilter, QueryFilter, QueryFilter) {
+    (f.clone(), QueryFilter::default(), QueryFilter::default())
+}
+pub fn join_projection_sets(
+    _l: &arrow_schema::Schema,
+    _r: &arrow_schema::Schema,
+    _p: Option<&[String]>,
+    _lc: &str,
+    _rc: &str,
+    _k: &[String],
+) -> Result<(Option<Vec<String>>, Option<Vec<String>>), EngineError> {
+    Ok((None, None))
+}
+pub fn extend_needed_with_filter(
+    _n: &mut Vec<String>,
+    _f: &QueryFilter,
+    _s: Option<&arrow_schema::Schema>,
+) {
+}
 // Duplicates removed
-
-
 
 /// Execute a recursive CTE
 /// Recursive CTEs have the form: anchor_query UNION [ALL] recursive_query
@@ -15926,7 +16912,8 @@ fn execute_recursive_cte(
     // Parse the CTE query to extract anchor and recursive parts
     // The raw_sql should be something like:
     // "SELECT 1 as n UNION ALL SELECT n + 1 FROM cte_name WHERE n < 10"
-    let (anchor_sql, recursive_sql, is_union_all) = parse_recursive_cte_parts(&cte.raw_sql, &cte.name)?;
+    let (anchor_sql, recursive_sql, is_union_all) =
+        parse_recursive_cte_parts(&cte.raw_sql, &cte.name)?;
 
     // Execute the anchor query
     let anchor_result = db.query(QueryRequest {
@@ -15977,10 +16964,12 @@ fn execute_recursive_cte(
             let mut writer = StreamWriter::try_new(&mut temp_ipc, schema.as_ref())
                 .map_err(|e| EngineError::Internal(format!("failed to create temp IPC: {e}")))?;
             for batch in &current_batches {
-                writer.write(batch)
-                    .map_err(|e| EngineError::Internal(format!("failed to write temp batch: {e}")))?;
+                writer.write(batch).map_err(|e| {
+                    EngineError::Internal(format!("failed to write temp batch: {e}"))
+                })?;
             }
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| EngineError::Internal(format!("failed to finish temp IPC: {e}")))?;
         }
 
@@ -15989,11 +16978,8 @@ fn execute_recursive_cte(
         // A more complete implementation would use a temporary table.
 
         // Replace CTE name references with inline VALUES or subquery
-        let recursive_with_data = replace_cte_reference_with_values(
-            &recursive_sql,
-            &cte.name,
-            &current_batches,
-        )?;
+        let recursive_with_data =
+            replace_cte_reference_with_values(&recursive_sql, &cte.name, &current_batches)?;
 
         // Execute the recursive step
         let recursive_result = db.query(QueryRequest {
@@ -16012,13 +16998,15 @@ fn execute_recursive_cte(
                 // Parse new results
                 current_batches.clear();
                 let cursor = Cursor::new(&result.records_ipc);
-                let mut reader = StreamReader::try_new(cursor, None)
-                    .map_err(|e| EngineError::Internal(format!("failed to read recursive result: {e}")))?;
+                let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
+                    EngineError::Internal(format!("failed to read recursive result: {e}"))
+                })?;
 
                 let mut has_rows = false;
                 while let Some(batch_result) = reader.next() {
-                    let batch = batch_result
-                        .map_err(|e| EngineError::Internal(format!("failed to read recursive batch: {e}")))?;
+                    let batch = batch_result.map_err(|e| {
+                        EngineError::Internal(format!("failed to read recursive batch: {e}"))
+                    })?;
                     if batch.num_rows() > 0 {
                         has_rows = true;
                         if is_union_all {
@@ -16056,13 +17044,16 @@ fn execute_recursive_cte(
 
     let mut output_ipc = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut output_ipc, all_batches[0].schema().as_ref())
-            .map_err(|e| EngineError::Internal(format!("failed to create output IPC: {e}")))?;
+        let mut writer =
+            StreamWriter::try_new(&mut output_ipc, all_batches[0].schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create output IPC: {e}")))?;
         for batch in &all_batches {
-            writer.write(batch)
+            writer
+                .write(batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write output batch: {e}")))?;
         }
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| EngineError::Internal(format!("failed to finish output IPC: {e}")))?;
     }
 
@@ -16121,13 +17112,10 @@ fn replace_cte_reference_with_values(
         chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    fn sql_literal_for_value(
-        col: &ArrayRef,
-        row_idx: usize,
-    ) -> Result<String, EngineError> {
+    fn sql_literal_for_value(col: &ArrayRef, row_idx: usize) -> Result<String, EngineError> {
         use arrow_array::{
-            BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
-            UInt64Array, LargeStringArray,
+            BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray,
+            StringArray, UInt64Array,
         };
 
         if col.is_null(row_idx) {
@@ -16200,9 +17188,7 @@ fn replace_cte_reference_with_values(
     }
 
     if !is_safe_cte_name(cte_name) {
-        return Err(EngineError::InvalidArgument(
-            "invalid CTE name".into(),
-        ));
+        return Err(EngineError::InvalidArgument("invalid CTE name".into()));
     }
 
     // If no data, return a query that returns no results
@@ -16253,7 +17239,9 @@ fn replace_cte_reference_with_values(
         .map_err(|e| EngineError::Internal(format!("regex error: {e}")))?;
 
     // Replace FROM cte_name with FROM (VALUES ...)
-    let result = re.replace_all(recursive_sql, values_sql.as_str()).to_string();
+    let result = re
+        .replace_all(recursive_sql, values_sql.as_str())
+        .to_string();
 
     Ok(result)
 }
@@ -16327,11 +17315,13 @@ pub fn merge_cte_results(
         if let Some(cte_data) = cte_context.get_result(cte_name) {
             if !cte_data.is_empty() {
                 let cursor = Cursor::new(cte_data);
-                let mut reader = StreamReader::try_new(cursor, None)
-                    .map_err(|e| EngineError::Internal(format!("failed to read CTE result: {e}")))?;
+                let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
+                    EngineError::Internal(format!("failed to read CTE result: {e}"))
+                })?;
                 while let Some(batch_result) = reader.next() {
-                    let batch = batch_result
-                        .map_err(|e| EngineError::Internal(format!("failed to read CTE batch: {e}")))?;
+                    let batch = batch_result.map_err(|e| {
+                        EngineError::Internal(format!("failed to read CTE batch: {e}"))
+                    })?;
                     all_batches.push(batch);
                 }
             }
@@ -16345,13 +17335,16 @@ pub fn merge_cte_results(
     // Encode all batches back to IPC
     let mut output_ipc = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut output_ipc, all_batches[0].schema().as_ref())
-            .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {e}")))?;
+        let mut writer =
+            StreamWriter::try_new(&mut output_ipc, all_batches[0].schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {e}")))?;
         for batch in &all_batches {
-            writer.write(batch)
+            writer
+                .write(batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {e}")))?;
         }
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| EngineError::Internal(format!("failed to finish IPC: {e}")))?;
     }
 
@@ -16362,7 +17355,7 @@ pub fn merge_cte_results(
 // Window Function Support
 // ============================================================================
 
-use crate::sql::{WindowFunction, WindowSpec, SelectColumn};
+use crate::sql::{SelectColumn, WindowFunction, WindowSpec};
 
 /// Apply window functions to query results
 /// This function evaluates window functions like ROW_NUMBER(), RANK(), LAG(), LEAD()
@@ -16378,9 +17371,9 @@ pub fn apply_window_functions(
     }
 
     // Check if there are any window functions to evaluate
-    let has_window_functions = window_columns.iter().any(|c| {
-        matches!(&c.expr, crate::sql::SelectExpr::Window { .. })
-    });
+    let has_window_functions = window_columns
+        .iter()
+        .any(|c| matches!(&c.expr, crate::sql::SelectExpr::Window { .. }));
 
     if !has_window_functions {
         return Ok(ipc_data.to_vec());
@@ -16428,9 +17421,10 @@ pub fn apply_window_functions(
 
     for select_col in window_columns {
         if let crate::sql::SelectExpr::Window { function, spec } = &select_col.expr {
-            let alias = select_col.alias.clone().unwrap_or_else(|| {
-                format!("window_{}", window_results.len())
-            });
+            let alias = select_col
+                .alias
+                .clone()
+                .unwrap_or_else(|| format!("window_{}", window_results.len()));
 
             // Evaluate the window function
             let results = evaluate_window_function(function, spec, &all_rows)?;
@@ -16475,9 +17469,11 @@ pub fn apply_window_functions(
     {
         let mut writer = StreamWriter::try_new(&mut output_ipc, new_schema.as_ref())
             .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {e}")))?;
-        writer.write(&new_batch)
+        writer
+            .write(&new_batch)
             .map_err(|e| EngineError::Internal(format!("failed to write batch: {e}")))?;
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| EngineError::Internal(format!("failed to finish IPC: {e}")))?;
     }
 
@@ -16530,11 +17526,19 @@ fn evaluate_window_function(
                     .map(|i| ComputedValue::Integer((i / bucket_size + 1) as i64))
                     .collect()
             }
-            WindowFunction::Lag { expr, offset, default } => {
+            WindowFunction::Lag {
+                expr,
+                offset,
+                default,
+            } => {
                 // LAG(expr, offset, default) - value from offset rows before
                 compute_lag_lead(partition_rows, expr, *offset, default.as_deref(), true)
             }
-            WindowFunction::Lead { expr, offset, default } => {
+            WindowFunction::Lead {
+                expr,
+                offset,
+                default,
+            } => {
                 // LEAD(expr, offset, default) - value from offset rows after
                 compute_lag_lead(partition_rows, expr, *offset, default.as_deref(), false)
             }
@@ -16608,7 +17612,8 @@ fn evaluate_window_function(
             }
             WindowFunction::WindowCount(expr_opt) => {
                 // COUNT() OVER - count within partition
-                compute_window_aggregate(partition_rows,
+                compute_window_aggregate(
+                    partition_rows,
                     expr_opt.as_deref().unwrap_or(&SelectExpr::Null),
                     |vals| {
                         let count = if expr_opt.is_some() {
@@ -16617,7 +17622,8 @@ fn evaluate_window_function(
                             vals.len()
                         };
                         ComputedValue::Integer(count as i64)
-                    })
+                    },
+                )
             }
         };
 
@@ -16636,22 +17642,37 @@ fn evaluate_window_function(
 fn get_partitions(
     rows: &[std::collections::HashMap<String, ComputedValue>],
     partition_by: &[String],
-) -> Vec<(Vec<std::collections::HashMap<String, ComputedValue>>, Vec<usize>)> {
+) -> Vec<(
+    Vec<std::collections::HashMap<String, ComputedValue>>,
+    Vec<usize>,
+)> {
     if partition_by.is_empty() {
         // No partitioning - all rows in one partition
         return vec![(rows.to_vec(), (0..rows.len()).collect())];
     }
 
-    let mut partitions: std::collections::HashMap<String, (Vec<std::collections::HashMap<String, ComputedValue>>, Vec<usize>)> = std::collections::HashMap::new();
+    let mut partitions: std::collections::HashMap<
+        String,
+        (
+            Vec<std::collections::HashMap<String, ComputedValue>>,
+            Vec<usize>,
+        ),
+    > = std::collections::HashMap::new();
 
     for (idx, row) in rows.iter().enumerate() {
         // Build partition key from PARTITION BY columns
-        let key: String = partition_by.iter()
-            .map(|col| row.get(col).map(|v| v.to_string_value()).unwrap_or_default())
+        let key: String = partition_by
+            .iter()
+            .map(|col| {
+                row.get(col)
+                    .map(|v| v.to_string_value())
+                    .unwrap_or_default()
+            })
             .collect::<Vec<_>>()
             .join("|");
 
-        let entry = partitions.entry(key)
+        let entry = partitions
+            .entry(key)
             .or_insert_with(|| (Vec::new(), Vec::new()));
         entry.0.push(row.clone());
         entry.1.push(idx);
@@ -16679,7 +17700,8 @@ fn compute_rank(
     // Without ORDER BY, all rows have rank 1
     // With ORDER BY, compute ranks based on value comparisons
     // For now, simple implementation: sequential ranks
-    _partition_rows.iter()
+    _partition_rows
+        .iter()
         .enumerate()
         .map(|(i, _)| ComputedValue::Integer((i + 1) as i64))
         .collect()
@@ -16729,7 +17751,8 @@ where
     F: Fn(&[ComputedValue]) -> ComputedValue,
 {
     // Evaluate expression for all rows in partition
-    let values: Vec<ComputedValue> = partition_rows.iter()
+    let values: Vec<ComputedValue> = partition_rows
+        .iter()
         .map(|row| {
             let ctx = EvalContext::new(row);
             evaluate_expr(expr, &ctx).unwrap_or(ComputedValue::Null)
@@ -16757,9 +17780,9 @@ pub fn apply_computed_columns(
     }
 
     // Check if there are any actual expressions to evaluate (not just column references)
-    let has_expressions = computed_columns.iter().any(|c| {
-        !matches!(&c.expr, crate::sql::SelectExpr::Column(_))
-    });
+    let has_expressions = computed_columns
+        .iter()
+        .any(|c| !matches!(&c.expr, crate::sql::SelectExpr::Column(_)));
 
     if !has_expressions {
         // No expressions to evaluate, just pass through
@@ -16800,9 +17823,10 @@ pub fn apply_computed_columns(
         let mut new_fields: Vec<Field> = Vec::new();
 
         for select_col in computed_columns {
-            let alias = select_col.alias.clone().unwrap_or_else(|| {
-                format!("expr_{}", new_fields.len())
-            });
+            let alias = select_col
+                .alias
+                .clone()
+                .unwrap_or_else(|| format!("expr_{}", new_fields.len()));
 
             // Evaluate the expression for each row
             let mut results: Vec<ComputedValue> = Vec::with_capacity(num_rows);
@@ -16819,7 +17843,8 @@ pub fn apply_computed_columns(
         }
 
         // Combine original columns with computed columns
-        let mut all_fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+        let mut all_fields: Vec<Field> =
+            schema.fields().iter().map(|f| f.as_ref().clone()).collect();
         let mut all_columns: Vec<ArrayRef> = (0..batch.num_columns())
             .map(|i| batch.column(i).clone())
             .collect();
@@ -16841,13 +17866,16 @@ pub fn apply_computed_columns(
 
     let mut output_ipc = Vec::new();
     {
-        let mut writer = StreamWriter::try_new(&mut output_ipc, output_batches[0].schema().as_ref())
-            .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {e}")))?;
+        let mut writer =
+            StreamWriter::try_new(&mut output_ipc, output_batches[0].schema().as_ref())
+                .map_err(|e| EngineError::Internal(format!("failed to create IPC writer: {e}")))?;
         for batch in &output_batches {
-            writer.write(batch)
+            writer
+                .write(batch)
                 .map_err(|e| EngineError::Internal(format!("failed to write batch: {e}")))?;
         }
-        writer.finish()
+        writer
+            .finish()
             .map_err(|e| EngineError::Internal(format!("failed to finish IPC: {e}")))?;
     }
 
@@ -16857,12 +17885,10 @@ pub fn apply_computed_columns(
 /// Extract a value from an Arrow array at a given row index
 fn extract_value_at(arr: &ArrayRef, row_idx: usize) -> ComputedValue {
     use arrow_array::{
-        Int8Array, Int16Array, Int32Array, Int64Array,
-        UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        Float32Array, Float64Array, StringArray, BooleanArray,
-        LargeStringArray, LargeBinaryArray, BinaryArray,
-        FixedSizeBinaryArray, Date32Array, TimestampMicrosecondArray,
-        Decimal128Array,
+        BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray,
+        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        LargeBinaryArray, LargeStringArray, StringArray, TimestampMicrosecondArray, UInt16Array,
+        UInt32Array, UInt64Array, UInt8Array,
     };
 
     if arr.is_null(row_idx) {
@@ -16949,7 +17975,10 @@ fn extract_value_at(arr: &ArrayRef, row_idx: usize) -> ComputedValue {
             ComputedValue::Date(a.value(row_idx))
         }
         DataType::Timestamp(_, _) => {
-            let a = arr.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+            let a = arr
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
             ComputedValue::Timestamp(a.value(row_idx))
         }
         DataType::Decimal128(precision, scale) => {
@@ -16970,9 +17999,8 @@ fn build_array_from_computed_values(
     _alias: &str,
 ) -> Result<(ArrayRef, DataType), EngineError> {
     use arrow_array::{
-        Float64Array, Int64Array, StringArray, BooleanArray, ArrayRef,
-        LargeStringArray, LargeBinaryArray, Date32Array,
-        Decimal128Array,
+        ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array,
+        LargeBinaryArray, LargeStringArray, StringArray,
     };
 
     // Determine the predominant type
@@ -16998,7 +18026,9 @@ fn build_array_from_computed_values(
             ComputedValue::Timestamp(_) => has_timestamp = true,
             ComputedValue::Uuid(_) => has_uuid = true,
             ComputedValue::Json(_) => has_json = true,
-            ComputedValue::Decimal { precision, scale, .. } => {
+            ComputedValue::Decimal {
+                precision, scale, ..
+            } => {
                 has_decimal = true;
                 decimal_precision = *precision;
                 decimal_scale = *scale;
@@ -17011,14 +18041,15 @@ fn build_array_from_computed_values(
 
     // Priority: specific types first, then generic coercion
     // UUID - must be all UUIDs or nulls
-    if has_uuid && !has_string && !has_int && !has_float && !has_json && !has_decimal && !has_binary {
+    if has_uuid && !has_string && !has_int && !has_float && !has_json && !has_decimal && !has_binary
+    {
         use arrow_array::builder::FixedSizeBinaryBuilder;
         let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
         for v in values {
             match v {
-                ComputedValue::Uuid(bytes) => builder.append_value(bytes).map_err(|e| {
-                    EngineError::Internal(format!("UUID append error: {e}"))
-                })?,
+                ComputedValue::Uuid(bytes) => builder
+                    .append_value(bytes)
+                    .map_err(|e| EngineError::Internal(format!("UUID append error: {e}")))?,
                 ComputedValue::Null => builder.append_null(),
                 _ => builder.append_null(),
             }
@@ -17029,68 +18060,74 @@ fn build_array_from_computed_values(
 
     // JSON - stored as LargeUtf8
     if has_json && !has_uuid && !has_binary {
-        let json_strings: Vec<Option<String>> = values.iter().map(|v| {
-            match v {
+        let json_strings: Vec<Option<String>> = values
+            .iter()
+            .map(|v| match v {
                 ComputedValue::Json(s) => Some(s.clone()),
                 ComputedValue::String(s) => Some(s.clone()),
                 ComputedValue::Null => None,
                 _ => Some(v.to_string_value()),
-            }
-        }).collect();
-        let arr: LargeStringArray = json_strings.iter()
-            .map(|s| s.as_deref())
+            })
             .collect();
+        let arr: LargeStringArray = json_strings.iter().map(|s| s.as_deref()).collect();
         return Ok((Arc::new(arr) as ArrayRef, DataType::LargeUtf8));
     }
 
     // Decimal - stored as Decimal128
     if has_decimal && !has_string && !has_uuid && !has_json && !has_binary {
-        let arr = Decimal128Array::from_iter(values.iter().map(|v| {
-            match v {
-                ComputedValue::Decimal { value, .. } => Some(*value),
-                ComputedValue::Integer(n) => Some(*n as i128),
-                ComputedValue::Null => None,
-                _ => None,
-            }
-        })).with_precision_and_scale(decimal_precision, decimal_scale)
-            .map_err(|e| EngineError::Internal(format!("Decimal array error: {e}")))?;
-        return Ok((Arc::new(arr) as ArrayRef, DataType::Decimal128(decimal_precision, decimal_scale)));
+        let arr = Decimal128Array::from_iter(values.iter().map(|v| match v {
+            ComputedValue::Decimal { value, .. } => Some(*value),
+            ComputedValue::Integer(n) => Some(*n as i128),
+            ComputedValue::Null => None,
+            _ => None,
+        }))
+        .with_precision_and_scale(decimal_precision, decimal_scale)
+        .map_err(|e| EngineError::Internal(format!("Decimal array error: {e}")))?;
+        return Ok((
+            Arc::new(arr) as ArrayRef,
+            DataType::Decimal128(decimal_precision, decimal_scale),
+        ));
     }
 
     // Binary - stored as LargeBinary
     if has_binary && !has_string && !has_uuid && !has_json {
-        let arr: LargeBinaryArray = values.iter().map(|v| {
-            match v {
+        let arr: LargeBinaryArray = values
+            .iter()
+            .map(|v| match v {
                 ComputedValue::Binary(bytes) => Some(bytes.as_slice()),
                 ComputedValue::Null => None,
                 _ => None,
-            }
-        }).collect();
+            })
+            .collect();
         return Ok((Arc::new(arr) as ArrayRef, DataType::LargeBinary));
     }
 
     // Date - stored as Date32
     if has_date && !has_string && !has_uuid && !has_json && !has_binary && !has_decimal {
-        let arr: Date32Array = values.iter().map(|v| {
-            match v {
+        let arr: Date32Array = values
+            .iter()
+            .map(|v| match v {
                 ComputedValue::Date(d) => Some(*d),
                 ComputedValue::Integer(n) => Some(*n as i32),
                 ComputedValue::Null => None,
                 _ => None,
-            }
-        }).collect();
+            })
+            .collect();
         return Ok((Arc::new(arr) as ArrayRef, DataType::Date32));
     }
 
     // Priority: String > Float > Integer > Boolean > Timestamp
     if has_string {
-        let arr: StringArray = values.iter().map(|v| {
-            if matches!(v, ComputedValue::Null) {
-                None
-            } else {
-                Some(v.to_string_value())
-            }
-        }).collect();
+        let arr: StringArray = values
+            .iter()
+            .map(|v| {
+                if matches!(v, ComputedValue::Null) {
+                    None
+                } else {
+                    Some(v.to_string_value())
+                }
+            })
+            .collect();
         Ok((Arc::new(arr) as ArrayRef, DataType::Utf8))
     } else if has_float {
         let arr: Float64Array = values.iter().map(|v| v.as_f64()).collect();
@@ -17099,13 +18136,14 @@ fn build_array_from_computed_values(
         let arr: Int64Array = values.iter().map(|v| v.as_i64()).collect();
         Ok((Arc::new(arr) as ArrayRef, DataType::Int64))
     } else if has_bool {
-        let arr: BooleanArray = values.iter().map(|v| {
-            match v {
+        let arr: BooleanArray = values
+            .iter()
+            .map(|v| match v {
                 ComputedValue::Boolean(b) => Some(*b),
                 ComputedValue::Null => None,
                 _ => Some(false),
-            }
-        }).collect();
+            })
+            .collect();
         Ok((Arc::new(arr) as ArrayRef, DataType::Boolean))
     } else {
         // All nulls - return as string nulls
@@ -17165,7 +18203,10 @@ pub fn matches_like_pattern(value: &str, pattern: &str) -> bool {
 
 /// Build a match mask for filtering records
 /// Returns a BooleanArray with true for rows that match all filter conditions
-pub fn build_match_mask(batch: &RecordBatch, filter: &QueryFilter) -> Result<BooleanArray, EngineError> {
+pub fn build_match_mask(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+) -> Result<BooleanArray, EngineError> {
     let num_rows = batch.num_rows();
     if num_rows == 0 {
         return Ok(BooleanArray::from(vec![] as Vec<bool>));
@@ -17286,7 +18327,10 @@ pub fn build_match_mask(batch: &RecordBatch, filter: &QueryFilter) -> Result<Boo
                     }
                 }
             // Handle FixedSizeBinary (UUIDs stored as strings in filter)
-            } else if let Some(fsb_arr) = col.as_any().downcast_ref::<arrow_array::FixedSizeBinaryArray>() {
+            } else if let Some(fsb_arr) = col
+                .as_any()
+                .downcast_ref::<arrow_array::FixedSizeBinaryArray>()
+            {
                 // Try to parse the filter value as UUID
                 if let Some(uuid_bytes) = parse_uuid_string(filter_val) {
                     for i in 0..num_rows {
@@ -17433,7 +18477,11 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
                         None
                     }
                 }
-                ComputedValue::Decimal { value, precision, scale } => Some(ComputedValue::Decimal {
+                ComputedValue::Decimal {
+                    value,
+                    precision,
+                    scale,
+                } => Some(ComputedValue::Decimal {
                     value: *value,
                     precision: *precision,
                     scale: *scale,
@@ -17449,7 +18497,10 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
                         Some(ComputedValue::Json(s.clone()))
                     } else {
                         // Wrap as JSON string
-                        Some(ComputedValue::Json(format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))))
+                        Some(ComputedValue::Json(format!(
+                            "\"{}\"",
+                            s.replace('\\', "\\\\").replace('"', "\\\"")
+                        )))
                     }
                 }
                 ComputedValue::Integer(i) => Some(ComputedValue::Json(i.to_string())),
@@ -17465,7 +18516,10 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
                     // Try to parse common date formats
                     let s = s.trim();
                     // YYYY-MM-DD format
-                    if s.len() >= 10 && s.chars().nth(4) == Some('-') && s.chars().nth(7) == Some('-') {
+                    if s.len() >= 10
+                        && s.chars().nth(4) == Some('-')
+                        && s.chars().nth(7) == Some('-')
+                    {
                         // Parse to days since epoch
                         if let Ok(date) = chrono::NaiveDate::parse_from_str(&s[0..10], "%Y-%m-%d") {
                             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
@@ -17493,70 +18547,67 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
                 _ => None,
             }
         }
-        "text" | "varchar" | "string" => {
-            Some(ComputedValue::String(match value {
-                ComputedValue::String(s) => s.clone(),
-                ComputedValue::Integer(i) => i.to_string(),
-                ComputedValue::Float(f) => f.to_string(),
-                ComputedValue::Boolean(b) => b.to_string(),
-                ComputedValue::Null => "NULL".to_string(),
-                ComputedValue::Binary(b) => format!("{:?}", b),
-                ComputedValue::Timestamp(ts) => ts.to_string(),
-                ComputedValue::Date(d) => {
-                    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                    let date = epoch + chrono::Duration::days(*d as i64);
-                    date.format("%Y-%m-%d").to_string()
-                }
-                ComputedValue::Decimal { value, scale, .. } => {
-                    let divisor = 10_i128.pow(*scale as u32);
-                    let int_part = value / divisor;
-                    let frac_part = (value % divisor).abs();
-                    format!("{}.{:0>width$}", int_part, frac_part, width = *scale as usize)
-                }
-                ComputedValue::Uuid(bytes) => {
-                    format!(
+        "text" | "varchar" | "string" => Some(ComputedValue::String(match value {
+            ComputedValue::String(s) => s.clone(),
+            ComputedValue::Integer(i) => i.to_string(),
+            ComputedValue::Float(f) => f.to_string(),
+            ComputedValue::Boolean(b) => b.to_string(),
+            ComputedValue::Null => "NULL".to_string(),
+            ComputedValue::Binary(b) => format!("{:?}", b),
+            ComputedValue::Timestamp(ts) => ts.to_string(),
+            ComputedValue::Date(d) => {
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let date = epoch + chrono::Duration::days(*d as i64);
+                date.format("%Y-%m-%d").to_string()
+            }
+            ComputedValue::Decimal { value, scale, .. } => {
+                let divisor = 10_i128.pow(*scale as u32);
+                let int_part = value / divisor;
+                let frac_part = (value % divisor).abs();
+                format!(
+                    "{}.{:0>width$}",
+                    int_part,
+                    frac_part,
+                    width = *scale as usize
+                )
+            }
+            ComputedValue::Uuid(bytes) => {
+                format!(
                         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
                         bytes[0], bytes[1], bytes[2], bytes[3],
                         bytes[4], bytes[5], bytes[6], bytes[7],
                         bytes[8], bytes[9], bytes[10], bytes[11],
                         bytes[12], bytes[13], bytes[14], bytes[15]
                     )
+            }
+            ComputedValue::Json(j) => j.clone(),
+        })),
+        "int" | "integer" | "bigint" => match value {
+            ComputedValue::Integer(i) => Some(ComputedValue::Integer(*i)),
+            ComputedValue::Float(f) => Some(ComputedValue::Integer(*f as i64)),
+            ComputedValue::String(s) => s.parse::<i64>().ok().map(ComputedValue::Integer),
+            ComputedValue::Boolean(b) => Some(ComputedValue::Integer(if *b { 1 } else { 0 })),
+            _ => None,
+        },
+        "float" | "double" | "real" => match value {
+            ComputedValue::Float(f) => Some(ComputedValue::Float(*f)),
+            ComputedValue::Integer(i) => Some(ComputedValue::Float(*i as f64)),
+            ComputedValue::String(s) => s.parse::<f64>().ok().map(ComputedValue::Float),
+            _ => None,
+        },
+        "bool" | "boolean" => match value {
+            ComputedValue::Boolean(b) => Some(ComputedValue::Boolean(*b)),
+            ComputedValue::Integer(i) => Some(ComputedValue::Boolean(*i != 0)),
+            ComputedValue::String(s) => {
+                let lower = s.to_lowercase();
+                match lower.as_str() {
+                    "true" | "t" | "yes" | "y" | "1" => Some(ComputedValue::Boolean(true)),
+                    "false" | "f" | "no" | "n" | "0" => Some(ComputedValue::Boolean(false)),
+                    _ => None,
                 }
-                ComputedValue::Json(j) => j.clone(),
-            }))
-        }
-        "int" | "integer" | "bigint" => {
-            match value {
-                ComputedValue::Integer(i) => Some(ComputedValue::Integer(*i)),
-                ComputedValue::Float(f) => Some(ComputedValue::Integer(*f as i64)),
-                ComputedValue::String(s) => s.parse::<i64>().ok().map(ComputedValue::Integer),
-                ComputedValue::Boolean(b) => Some(ComputedValue::Integer(if *b { 1 } else { 0 })),
-                _ => None,
             }
-        }
-        "float" | "double" | "real" => {
-            match value {
-                ComputedValue::Float(f) => Some(ComputedValue::Float(*f)),
-                ComputedValue::Integer(i) => Some(ComputedValue::Float(*i as f64)),
-                ComputedValue::String(s) => s.parse::<f64>().ok().map(ComputedValue::Float),
-                _ => None,
-            }
-        }
-        "bool" | "boolean" => {
-            match value {
-                ComputedValue::Boolean(b) => Some(ComputedValue::Boolean(*b)),
-                ComputedValue::Integer(i) => Some(ComputedValue::Boolean(*i != 0)),
-                ComputedValue::String(s) => {
-                    let lower = s.to_lowercase();
-                    match lower.as_str() {
-                        "true" | "t" | "yes" | "y" | "1" => Some(ComputedValue::Boolean(true)),
-                        "false" | "f" | "no" | "n" | "0" => Some(ComputedValue::Boolean(false)),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
-        }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -17565,8 +18616,8 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
 mod tests {
     use super::*;
     use arrow_array::{Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array};
-    use std::time::{Duration, Instant};
     use std::io::Cursor;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn ingest_sets_schema_hash_and_replays() {
@@ -17604,7 +18655,8 @@ mod tests {
 
         drop(db);
         let reopened = Db::open_for_test(cfg).unwrap();
-        let manifest: Manifest = serde_json::from_slice(&reopened.export_manifest().unwrap()).unwrap();
+        let manifest: Manifest =
+            serde_json::from_slice(&reopened.export_manifest().unwrap()).unwrap();
         assert_eq!(manifest.entries[0].schema_hash, Some(expected_hash));
     }
 
@@ -17640,11 +18692,7 @@ mod tests {
         }
     }
 
-    fn ingest_simple_batch(
-        db: &Db,
-        payload_ipc: Vec<u8>,
-        watermark_micros: u64,
-    ) -> String {
+    fn ingest_simple_batch(db: &Db, payload_ipc: Vec<u8>, watermark_micros: u64) -> String {
         db.ingest_ipc(IngestBatch {
             payload_ipc,
             database: Some("default".to_string()),
@@ -17746,16 +18794,15 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        let schema_json = serde_json::to_string(&vec![
-            TableFieldSpec {
-                name: "name".into(),
-                data_type: "string".into(),
-                nullable: false,
-                encoding: Some("dictionary".into()),
-            },
-        ])
+        let schema_json = serde_json::to_string(&vec![TableFieldSpec {
+            name: "name".into(),
+            data_type: "string".into(),
+            nullable: false,
+            encoding: Some("dictionary".into()),
+        }])
         .unwrap();
-        db.create_table("testdb", "users", Some(schema_json)).unwrap();
+        db.create_table("testdb", "users", Some(schema_json))
+            .unwrap();
 
         let schema = Schema::new(vec![Field::new("name", DataType::Utf8, false)]);
         let batch = RecordBatch::try_new(
@@ -17803,16 +18850,15 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        let schema_json = serde_json::to_string(&vec![
-            TableFieldSpec {
-                name: "value".into(),
-                data_type: "int64".into(),
-                nullable: false,
-                encoding: Some("delta".into()),
-            },
-        ])
+        let schema_json = serde_json::to_string(&vec![TableFieldSpec {
+            name: "value".into(),
+            data_type: "int64".into(),
+            nullable: false,
+            encoding: Some("delta".into()),
+        }])
         .unwrap();
-        db.create_table("testdb", "metrics", Some(schema_json)).unwrap();
+        db.create_table("testdb", "metrics", Some(schema_json))
+            .unwrap();
 
         let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
         let batch = RecordBatch::try_new(
@@ -17860,16 +18906,15 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        let schema_json = serde_json::to_string(&vec![
-            TableFieldSpec {
-                name: "name".into(),
-                data_type: "string".into(),
-                nullable: false,
-                encoding: Some("dictionary".into()),
-            },
-        ])
+        let schema_json = serde_json::to_string(&vec![TableFieldSpec {
+            name: "name".into(),
+            data_type: "string".into(),
+            nullable: false,
+            encoding: Some("dictionary".into()),
+        }])
         .unwrap();
-        db.create_table("testdb", "users", Some(schema_json)).unwrap();
+        db.create_table("testdb", "users", Some(schema_json))
+            .unwrap();
 
         let schema = Schema::new(vec![Field::new("name", DataType::Utf8, false)]);
         let batch = RecordBatch::try_new(
@@ -17917,16 +18962,15 @@ mod tests {
         let db = Db::open_for_test(cfg).unwrap();
 
         db.create_database("testdb").unwrap();
-        let schema_json = serde_json::to_string(&vec![
-            TableFieldSpec {
-                name: "ts".into(),
-                data_type: "timestamp".into(),
-                nullable: false,
-                encoding: Some("delta".into()),
-            },
-        ])
+        let schema_json = serde_json::to_string(&vec![TableFieldSpec {
+            name: "ts".into(),
+            data_type: "timestamp".into(),
+            nullable: false,
+            encoding: Some("delta".into()),
+        }])
         .unwrap();
-        db.create_table("testdb", "events", Some(schema_json)).unwrap();
+        db.create_table("testdb", "events", Some(schema_json))
+            .unwrap();
 
         let schema = Schema::new(vec![Field::new(
             "ts",
@@ -18115,11 +19159,7 @@ mod tests {
 
         let mut values = Vec::new();
         for b in &batches {
-            let col = b
-                .column(0)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap();
+            let col = b.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
             for i in 0..col.len() {
                 values.push(col.value(i));
             }
@@ -18657,7 +19697,7 @@ mod tests {
 
     #[test]
     fn test_expression_evaluator_scalar_functions() {
-        use crate::sql::{SelectColumn, SelectExpr, ScalarFunction};
+        use crate::sql::{ScalarFunction, SelectColumn, SelectExpr};
 
         // Create test data
         let schema = Schema::new(vec![
@@ -18684,14 +19724,12 @@ mod tests {
         }
 
         // Test UPPER function - ScalarFunction::Upper takes Box<SelectExpr>
-        let computed_columns = vec![
-            SelectColumn {
-                expr: SelectExpr::Function(
-                    ScalarFunction::Upper(Box::new(SelectExpr::Column("name".to_string())))
-                ),
-                alias: Some("upper_name".to_string()),
-            },
-        ];
+        let computed_columns = vec![SelectColumn {
+            expr: SelectExpr::Function(ScalarFunction::Upper(Box::new(SelectExpr::Column(
+                "name".to_string(),
+            )))),
+            alias: Some("upper_name".to_string()),
+        }];
 
         let result = apply_computed_columns(&ipc, &computed_columns).unwrap();
         assert!(!result.is_empty());
@@ -18717,17 +19755,15 @@ mod tests {
 
     #[test]
     fn test_expression_evaluator_math_functions() {
-        use crate::sql::{SelectColumn, SelectExpr, ScalarFunction};
+        use crate::sql::{ScalarFunction, SelectColumn, SelectExpr};
 
         // Create test data with numbers
-        let schema = Schema::new(vec![
-            Field::new("value", DataType::Float64, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("value", DataType::Float64, false)]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
-            vec![
-                Arc::new(arrow_array::Float64Array::from(vec![-5.5, 16.0, 2.718])),
-            ],
+            vec![Arc::new(arrow_array::Float64Array::from(vec![
+                -5.5, 16.0, 2.718,
+            ]))],
         )
         .unwrap();
 
@@ -18742,15 +19778,15 @@ mod tests {
         // Test ABS and SQRT functions
         let computed_columns = vec![
             SelectColumn {
-                expr: SelectExpr::Function(
-                    ScalarFunction::Abs(Box::new(SelectExpr::Column("value".to_string())))
-                ),
+                expr: SelectExpr::Function(ScalarFunction::Abs(Box::new(SelectExpr::Column(
+                    "value".to_string(),
+                )))),
                 alias: Some("abs_value".to_string()),
             },
             SelectColumn {
-                expr: SelectExpr::Function(
-                    ScalarFunction::Sqrt(Box::new(SelectExpr::Column("value".to_string())))
-                ),
+                expr: SelectExpr::Function(ScalarFunction::Sqrt(Box::new(SelectExpr::Column(
+                    "value".to_string(),
+                )))),
                 alias: Some("sqrt_value".to_string()),
             },
         ];
@@ -18811,16 +19847,14 @@ mod tests {
         }
 
         // Test price * quantity
-        let computed_columns = vec![
-            SelectColumn {
-                expr: SelectExpr::BinaryOp {
-                    left: Box::new(SelectExpr::Column("price".to_string())),
-                    op: "*".to_string(),
-                    right: Box::new(SelectExpr::Column("quantity".to_string())),
-                },
-                alias: Some("total".to_string()),
+        let computed_columns = vec![SelectColumn {
+            expr: SelectExpr::BinaryOp {
+                left: Box::new(SelectExpr::Column("price".to_string())),
+                op: "*".to_string(),
+                right: Box::new(SelectExpr::Column("quantity".to_string())),
             },
-        ];
+            alias: Some("total".to_string()),
+        }];
 
         let result = apply_computed_columns(&ipc, &computed_columns).unwrap();
         assert!(!result.is_empty());
@@ -18839,9 +19873,9 @@ mod tests {
             .as_any()
             .downcast_ref::<arrow_array::Float64Array>()
             .unwrap();
-        assert!((total_col.value(0) - 50.0).abs() < 0.001);  // 10 * 5
-        assert!((total_col.value(1) - 60.0).abs() < 0.001);  // 20 * 3
-        assert!((total_col.value(2) - 60.0).abs() < 0.001);  // 30 * 2
+        assert!((total_col.value(0) - 50.0).abs() < 0.001); // 10 * 5
+        assert!((total_col.value(1) - 60.0).abs() < 0.001); // 20 * 3
+        assert!((total_col.value(2) - 60.0).abs() < 0.001); // 30 * 2
     }
 
     #[test]
@@ -18942,15 +19976,13 @@ mod tests {
         }
 
         // Test ROW_NUMBER() window function
-        let window_columns = vec![
-            SelectColumn {
-                expr: SelectExpr::Window {
-                    function: WindowFunction::RowNumber,
-                    spec: WindowSpec::default(),
-                },
-                alias: Some("row_num".to_string()),
+        let window_columns = vec![SelectColumn {
+            expr: SelectExpr::Window {
+                function: WindowFunction::RowNumber,
+                spec: WindowSpec::default(),
             },
-        ];
+            alias: Some("row_num".to_string()),
+        }];
 
         let result = apply_window_functions(&ipc, &window_columns).unwrap();
         assert!(!result.is_empty());
@@ -18980,14 +20012,10 @@ mod tests {
         use crate::sql::{SelectColumn, SelectExpr, WindowFunction, WindowSpec};
 
         // Create test data
-        let schema = Schema::new(vec![
-            Field::new("value", DataType::Int64, false),
-        ]);
+        let schema = Schema::new(vec![Field::new("value", DataType::Int64, false)]);
         let batch = RecordBatch::try_new(
             Arc::new(schema),
-            vec![
-                Arc::new(Int64Array::from(vec![10i64, 20, 30, 40])),
-            ],
+            vec![Arc::new(Int64Array::from(vec![10i64, 20, 30, 40]))],
         )
         .unwrap();
 
@@ -19172,10 +20200,12 @@ mod tests {
 
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT COUNT(*),SUM(value),AVG(value) FROM analytics.events WHERE tenant_id=7".into(),
+                sql:
+                    "SELECT COUNT(*),SUM(value),AVG(value) FROM analytics.events WHERE tenant_id=7"
+                        .into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -19246,8 +20276,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT COUNT(*),MIN(value),MAX(value) FROM analytics.events".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -19326,8 +20356,8 @@ mod tests {
 
     #[test]
     fn match_mask_float_uuid_timestamp() {
-        use arrow_array::{Float32Array, TimestampMicrosecondArray};
         use arrow_array::builder::FixedSizeBinaryBuilder;
+        use arrow_array::{Float32Array, TimestampMicrosecondArray};
 
         let uuid1 = parse_uuid_string("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let uuid2 = parse_uuid_string("550e8400-e29b-41d4-a716-446655440001").unwrap();
@@ -19363,10 +20393,8 @@ mod tests {
         let mask = build_match_mask(&batch, &filter).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![true, false]));
 
-        let filter = parse_where_filter(Some(
-            "uid = '550e8400-e29b-41d4-a716-446655440001'",
-        ))
-        .unwrap();
+        let filter =
+            parse_where_filter(Some("uid = '550e8400-e29b-41d4-a716-446655440001'")).unwrap();
         let mask = build_match_mask(&batch, &filter).unwrap();
         assert_eq!(mask, BooleanArray::from(vec![false, true]));
 
@@ -19420,8 +20448,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT COUNT(*),SUM(value) FROM analytics.events GROUP BY route_id".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -19633,8 +20661,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT tenant_id,value FROM testdb.events".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
         let mut reader = StreamReader::try_new(cursor, None).unwrap();
@@ -19907,8 +20935,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT latency_ms FROM testdb.events".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
         let mut reader = StreamReader::try_new(cursor, None).unwrap();
@@ -19993,8 +21021,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT value FROM testdb.events".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
         let mut reader = StreamReader::try_new(cursor, None).unwrap();
@@ -20135,8 +21163,8 @@ mod tests {
                     "SELECT COUNT(*), SUM(value) FROM analytics.events GROUP BY tenant_id, route_id"
                         .into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20242,10 +21270,12 @@ mod tests {
         // Test multiple MIN/MAX on different columns
         let resp = db
             .query(QueryRequest {
-                sql: "SELECT MIN(value), MAX(value), MIN(amount), MAX(amount) FROM analytics.events".into(),
+                sql:
+                    "SELECT MIN(value), MAX(value), MIN(amount), MAX(amount) FROM analytics.events"
+                        .into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20333,8 +21363,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT DISTINCT tenant_id, route_id FROM test.data".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20413,8 +21443,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT * FROM test.data WHERE event_time BETWEEN 200 AND 400".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20484,8 +21514,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT * FROM test.data WHERE tenant_id IN (1, 3, 5)".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20513,8 +21543,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT * FROM test.data WHERE route_id IN (20, 40)".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor2 = Cursor::new(resp2.records_ipc);
@@ -20584,8 +21614,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT * FROM test.data WHERE tenant_id = 1 OR tenant_id = 3".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20615,8 +21645,8 @@ mod tests {
                     "SELECT * FROM test.data WHERE route_id = 10 OR route_id = 30 OR route_id = 50"
                         .into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor2 = Cursor::new(resp2.records_ipc);
@@ -20728,8 +21758,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT name FROM test.users WHERE name LIKE '%alice%'".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20742,8 +21772,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT name FROM test.users WHERE name LIKE 'bob%'".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor2 = Cursor::new(resp2.records_ipc);
@@ -20773,10 +21803,7 @@ mod tests {
                 Arc::new(UInt64Array::from(vec![1u64, 1, 1, 1])),
                 Arc::new(UInt64Array::from(vec![10u64, 10, 10, 10])),
                 Arc::new(StringArray::from(vec![
-                    "active",
-                    "inactive",
-                    "active",
-                    "pending",
+                    "active", "inactive", "active", "pending",
                 ])),
             ],
         )
@@ -20803,8 +21830,8 @@ mod tests {
             .query(QueryRequest {
                 sql: "SELECT status FROM test.accounts WHERE status = 'active'".into(),
                 timeout_millis: 1000,
-            collect_stats: false,
-        })
+                collect_stats: false,
+            })
             .unwrap();
 
         let cursor = Cursor::new(resp.records_ipc);
@@ -20817,8 +21844,8 @@ mod tests {
     fn test_computed_value_uuid() {
         // Test UUID formatting
         let uuid_bytes: [u8; 16] = [
-            0x55, 0x06, 0x4a, 0x5b, 0x1e, 0xc0, 0x4b, 0x8a,
-            0x9e, 0x0b, 0x5a, 0x7a, 0x4e, 0x69, 0x9a, 0xbc,
+            0x55, 0x06, 0x4a, 0x5b, 0x1e, 0xc0, 0x4b, 0x8a, 0x9e, 0x0b, 0x5a, 0x7a, 0x4e, 0x69,
+            0x9a, 0xbc,
         ];
         let cv = ComputedValue::Uuid(uuid_bytes);
         assert_eq!(cv.to_string_value(), "55064a5b-1ec0-4b8a-9e0b-5a7a4e699abc");
@@ -20829,17 +21856,29 @@ mod tests {
     #[test]
     fn test_computed_value_decimal() {
         // Test decimal formatting
-        let cv = ComputedValue::Decimal { value: 12345, precision: 10, scale: 2 };
+        let cv = ComputedValue::Decimal {
+            value: 12345,
+            precision: 10,
+            scale: 2,
+        };
         assert_eq!(cv.to_string_value(), "123.45");
         assert_eq!(cv.as_f64(), Some(123.45));
 
         // Negative decimal
-        let cv_neg = ComputedValue::Decimal { value: -12345, precision: 10, scale: 2 };
+        let cv_neg = ComputedValue::Decimal {
+            value: -12345,
+            precision: 10,
+            scale: 2,
+        };
         assert_eq!(cv_neg.to_string_value(), "-123.45");
         assert_eq!(cv_neg.as_f64(), Some(-123.45));
 
         // Small decimal (fractional only)
-        let cv_small = ComputedValue::Decimal { value: 45, precision: 10, scale: 3 };
+        let cv_small = ComputedValue::Decimal {
+            value: 45,
+            precision: 10,
+            scale: 3,
+        };
         assert_eq!(cv_small.to_string_value(), "0.045");
     }
 
@@ -21041,7 +22080,8 @@ mod tests {
         use crate::sql::{parse_sql, SqlStatement};
 
         // Test NOT IN subquery parsing
-        let sql = "SELECT * FROM default.users WHERE id NOT IN (SELECT banned_id FROM default.banned)";
+        let sql =
+            "SELECT * FROM default.users WHERE id NOT IN (SELECT banned_id FROM default.banned)";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Query(q) => {
@@ -21095,7 +22135,8 @@ mod tests {
         use crate::sql::{parse_sql, SqlStatement};
 
         // Test scalar subquery with > comparison
-        let sql = "SELECT * FROM default.users WHERE salary > (SELECT AVG(salary) FROM default.users)";
+        let sql =
+            "SELECT * FROM default.users WHERE salary > (SELECT AVG(salary) FROM default.users)";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Query(q) => {
@@ -21110,7 +22151,7 @@ mod tests {
 
     #[test]
     fn test_extract_column_value_as_string() {
-        use arrow_array::{Int64Array, Float64Array, BooleanArray};
+        use arrow_array::{BooleanArray, Float64Array, Int64Array};
         use std::sync::Arc;
 
         // Test Int64
@@ -21137,17 +22178,38 @@ mod tests {
     #[test]
     fn test_compare_string_values() {
         // Numeric comparison
-        assert_eq!(Db::compare_string_values("10", "5"), std::cmp::Ordering::Greater);
-        assert_eq!(Db::compare_string_values("3", "10"), std::cmp::Ordering::Less);
-        assert_eq!(Db::compare_string_values("42", "42"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            Db::compare_string_values("10", "5"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            Db::compare_string_values("3", "10"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            Db::compare_string_values("42", "42"),
+            std::cmp::Ordering::Equal
+        );
 
         // Float comparison
-        assert_eq!(Db::compare_string_values("3.14", "2.71"), std::cmp::Ordering::Greater);
-        assert_eq!(Db::compare_string_values("1.5", "1.5"), std::cmp::Ordering::Equal);
+        assert_eq!(
+            Db::compare_string_values("3.14", "2.71"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            Db::compare_string_values("1.5", "1.5"),
+            std::cmp::Ordering::Equal
+        );
 
         // String comparison (when not numeric)
-        assert_eq!(Db::compare_string_values("apple", "banana"), std::cmp::Ordering::Less);
-        assert_eq!(Db::compare_string_values("zebra", "apple"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            Db::compare_string_values("apple", "banana"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            Db::compare_string_values("zebra", "apple"),
+            std::cmp::Ordering::Greater
+        );
     }
 
     #[test]
@@ -21174,8 +22236,10 @@ mod tests {
                 nullable: false,
                 encoding: None,
             },
-        ]).unwrap();
-        db.create_table("testdb", "users", Some(schema_json)).unwrap();
+        ])
+        .unwrap();
+        db.create_table("testdb", "users", Some(schema_json))
+            .unwrap();
 
         // Insert some data
         let schema = Schema::new(vec![
@@ -21188,7 +22252,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1i64, 2])),
                 Arc::new(Int64Array::from(vec![30i64, 25])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let mut ipc = Vec::new();
         {
             let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).unwrap();
@@ -21201,7 +22266,8 @@ mod tests {
             shard_override: None,
             database: Some("testdb".into()),
             table: Some("users".into()),
-        }).unwrap();
+        })
+        .unwrap();
 
         // Create a materialized view
         db.create_materialized_view(
@@ -21209,7 +22275,8 @@ mod tests {
             "user_stats",
             "SELECT COUNT(*) as cnt FROM testdb.users",
             false,
-        ).unwrap();
+        )
+        .unwrap();
 
         // List materialized views
         let views = db.list_materialized_views(Some("testdb")).unwrap();
@@ -21218,22 +22285,27 @@ mod tests {
         assert_eq!(views[0].1, "user_stats");
 
         // Refresh the materialized view
-        db.refresh_materialized_view("testdb", "user_stats").unwrap();
+        db.refresh_materialized_view("testdb", "user_stats")
+            .unwrap();
 
         // Verify data was stored
-        let data = db.get_materialized_view_data("testdb", "user_stats").unwrap();
+        let data = db
+            .get_materialized_view_data("testdb", "user_stats")
+            .unwrap();
         assert!(data.is_some());
         assert!(!data.unwrap().is_empty());
 
         // Drop the materialized view
-        db.drop_materialized_view("testdb", "user_stats", false).unwrap();
+        db.drop_materialized_view("testdb", "user_stats", false)
+            .unwrap();
 
         // Verify it's gone
         let views = db.list_materialized_views(Some("testdb")).unwrap();
         assert_eq!(views.len(), 0);
 
         // Drop with if_exists should not error
-        db.drop_materialized_view("testdb", "user_stats", true).unwrap();
+        db.drop_materialized_view("testdb", "user_stats", true)
+            .unwrap();
     }
 
     #[test]
@@ -21245,14 +22317,16 @@ mod tests {
         db.create_database("testdb").unwrap();
 
         // Create a materialized view
-        db.create_materialized_view("testdb", "test_mv", "SELECT 1 as x", false).unwrap();
+        db.create_materialized_view("testdb", "test_mv", "SELECT 1 as x", false)
+            .unwrap();
 
         // Try to create again without or_replace should fail
         let result = db.create_materialized_view("testdb", "test_mv", "SELECT 2 as x", false);
         assert!(result.is_err());
 
         // Create with or_replace should succeed
-        db.create_materialized_view("testdb", "test_mv", "SELECT 3 as y", true).unwrap();
+        db.create_materialized_view("testdb", "test_mv", "SELECT 3 as y", true)
+            .unwrap();
 
         // Verify the query was replaced
         let views = db.list_materialized_views(Some("testdb")).unwrap();
@@ -21344,13 +22418,18 @@ mod tests {
 
     #[test]
     fn test_materialized_view_sql_parsing() {
-        use crate::sql::{parse_sql, SqlStatement, DdlCommand};
+        use crate::sql::{parse_sql, DdlCommand, SqlStatement};
 
         // Test CREATE MATERIALIZED VIEW parsing
         let sql = "CREATE MATERIALIZED VIEW testdb.my_view AS SELECT COUNT(*) FROM testdb.events";
         let result = parse_sql(sql).unwrap();
         match result {
-            SqlStatement::Ddl(DdlCommand::CreateMaterializedView { database, name, query_sql, or_replace }) => {
+            SqlStatement::Ddl(DdlCommand::CreateMaterializedView {
+                database,
+                name,
+                query_sql,
+                or_replace,
+            }) => {
                 assert_eq!(database, "testdb");
                 assert_eq!(name, "my_view");
                 assert!(query_sql.contains("SELECT"));
@@ -21363,7 +22442,11 @@ mod tests {
         let sql = "DROP MATERIALIZED VIEW IF EXISTS testdb.my_view";
         let result = parse_sql(sql).unwrap();
         match result {
-            SqlStatement::Ddl(DdlCommand::DropMaterializedView { database, name, if_exists }) => {
+            SqlStatement::Ddl(DdlCommand::DropMaterializedView {
+                database,
+                name,
+                if_exists,
+            }) => {
                 assert_eq!(database, "testdb");
                 assert_eq!(name, "my_view");
                 assert!(if_exists);
@@ -21400,34 +22483,67 @@ mod tests {
 
         // Test LZ4 compression
         let lz4_compressed = compress_payload(&original_data, Some("lz4")).unwrap();
-        assert!(lz4_compressed.len() < original_data.len(), "LZ4 should compress data");
+        assert!(
+            lz4_compressed.len() < original_data.len(),
+            "LZ4 should compress data"
+        );
         let lz4_decompressed = decompress_payload(lz4_compressed, Some("lz4")).unwrap();
-        assert_eq!(lz4_decompressed, original_data, "LZ4 roundtrip should preserve data");
+        assert_eq!(
+            lz4_decompressed, original_data,
+            "LZ4 roundtrip should preserve data"
+        );
 
         // Test Snappy compression
         let snappy_compressed = compress_payload(&original_data, Some("snappy")).unwrap();
-        assert!(snappy_compressed.len() < original_data.len(), "Snappy should compress data");
+        assert!(
+            snappy_compressed.len() < original_data.len(),
+            "Snappy should compress data"
+        );
         let snappy_decompressed = decompress_payload(snappy_compressed, Some("snappy")).unwrap();
-        assert_eq!(snappy_decompressed, original_data, "Snappy roundtrip should preserve data");
+        assert_eq!(
+            snappy_decompressed, original_data,
+            "Snappy roundtrip should preserve data"
+        );
 
         // Test ZSTD compression
         let zstd_compressed = compress_payload(&original_data, Some("zstd")).unwrap();
-        assert!(zstd_compressed.len() < original_data.len(), "ZSTD should compress data");
+        assert!(
+            zstd_compressed.len() < original_data.len(),
+            "ZSTD should compress data"
+        );
         let zstd_decompressed = decompress_payload(zstd_compressed, Some("zstd")).unwrap();
-        assert_eq!(zstd_decompressed, original_data, "ZSTD roundtrip should preserve data");
+        assert_eq!(
+            zstd_decompressed, original_data,
+            "ZSTD roundtrip should preserve data"
+        );
 
         // Test no compression
         let no_compress = compress_payload(&original_data, None).unwrap();
-        assert_eq!(no_compress, original_data, "No compression should preserve data");
+        assert_eq!(
+            no_compress, original_data,
+            "No compression should preserve data"
+        );
         let no_decompress = decompress_payload(no_compress, None).unwrap();
-        assert_eq!(no_decompress, original_data, "No decompression should preserve data");
+        assert_eq!(
+            no_decompress, original_data,
+            "No decompression should preserve data"
+        );
     }
 
     #[test]
     fn test_compression_normalize() {
-        assert_eq!(normalize_compression(Some("lz4".into())).unwrap(), Some("lz4".into()));
-        assert_eq!(normalize_compression(Some("snappy".into())).unwrap(), Some("snappy".into()));
-        assert_eq!(normalize_compression(Some("zstd".into())).unwrap(), Some("zstd".into()));
+        assert_eq!(
+            normalize_compression(Some("lz4".into())).unwrap(),
+            Some("lz4".into())
+        );
+        assert_eq!(
+            normalize_compression(Some("snappy".into())).unwrap(),
+            Some("snappy".into())
+        );
+        assert_eq!(
+            normalize_compression(Some("zstd".into())).unwrap(),
+            Some("zstd".into())
+        );
         assert_eq!(normalize_compression(Some("none".into())).unwrap(), None);
         assert_eq!(normalize_compression(None).unwrap(), None);
         assert!(normalize_compression(Some("invalid".into())).is_err());
@@ -21475,12 +22591,24 @@ mod tests {
 
         // Print comparison (visible in test output with --nocapture)
         println!("\n=== Compression Benchmark (800KB timestamp data) ===");
-        println!("LZ4:    compress {:?}, decompress {:?}, ratio {:.2}x",
-            lz4_compress_time, lz4_decompress_time, data.len() as f64 / lz4_compressed.len() as f64);
-        println!("Snappy: compress {:?}, decompress {:?}, ratio {:.2}x",
-            snappy_compress_time, snappy_decompress_time, data.len() as f64 / snappy_compressed.len() as f64);
-        println!("ZSTD:   compress {:?}, decompress {:?}, ratio {:.2}x",
-            zstd_compress_time, zstd_decompress_time, data.len() as f64 / zstd_compressed.len() as f64);
+        println!(
+            "LZ4:    compress {:?}, decompress {:?}, ratio {:.2}x",
+            lz4_compress_time,
+            lz4_decompress_time,
+            data.len() as f64 / lz4_compressed.len() as f64
+        );
+        println!(
+            "Snappy: compress {:?}, decompress {:?}, ratio {:.2}x",
+            snappy_compress_time,
+            snappy_decompress_time,
+            data.len() as f64 / snappy_compressed.len() as f64
+        );
+        println!(
+            "ZSTD:   compress {:?}, decompress {:?}, ratio {:.2}x",
+            zstd_compress_time,
+            zstd_decompress_time,
+            data.len() as f64 / zstd_compressed.len() as f64
+        );
 
         // LZ4 should be fastest for decompression (key for OLAP reads)
         // This is a soft assertion - just verify they all work
@@ -21524,7 +22652,7 @@ mod tests {
         // String literals should be preserved exactly
         let sql = "SELECT * FROM users WHERE name = 'John  Doe'";
         let normalized = normalize_sql_for_cache(sql);
-        assert!(normalized.contains("'John  Doe'"));  // Preserved with double space
+        assert!(normalized.contains("'John  Doe'")); // Preserved with double space
 
         // Double-quoted identifiers too
         let sql2 = r#"SELECT * FROM "My Table" WHERE x = 1"#;
@@ -21543,7 +22671,10 @@ mod tests {
         let hash2 = hash_query_key(sql2);
         let hash3 = hash_query_key(sql3);
 
-        assert_eq!(hash1, hash2, "Different whitespace should produce same hash");
+        assert_eq!(
+            hash1, hash2,
+            "Different whitespace should produce same hash"
+        );
         assert_eq!(hash2, hash3, "Newlines should normalize to spaces");
     }
 
@@ -21558,8 +22689,14 @@ mod tests {
         let hash2 = hash_query_key(sql2);
         let hash3 = hash_query_key(sql3);
 
-        assert_ne!(hash1, hash2, "Different tables should have different hashes");
-        assert_ne!(hash1, hash3, "Different columns should have different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different tables should have different hashes"
+        );
+        assert_ne!(
+            hash1, hash3,
+            "Different columns should have different hashes"
+        );
     }
 
     #[test]
@@ -21572,7 +22709,12 @@ mod tests {
 
         // Create database and table
         db.create_database("testdb").unwrap();
-        db.create_table("testdb", "users", Some(r#"[{"name":"id","type":"int64"},{"name":"email","type":"string"}]"#.to_string())).unwrap();
+        db.create_table(
+            "testdb",
+            "users",
+            Some(r#"[{"name":"id","type":"int64"},{"name":"email","type":"string"}]"#.to_string()),
+        )
+        .unwrap();
 
         // Add a PRIMARY KEY constraint
         let pk = TableConstraint::PrimaryKey {
@@ -21584,7 +22726,9 @@ mod tests {
         // Verify constraint was added
         let constraints = db.get_table_constraints("testdb", "users").unwrap();
         assert_eq!(constraints.len(), 1);
-        assert!(matches!(&constraints[0], TableConstraint::PrimaryKey { name: Some(n), .. } if n == "pk_users"));
+        assert!(
+            matches!(&constraints[0], TableConstraint::PrimaryKey { name: Some(n), .. } if n == "pk_users")
+        );
 
         // Adding another PRIMARY KEY should fail
         let pk2 = TableConstraint::PrimaryKey {
@@ -21609,16 +22753,24 @@ mod tests {
             column: "email".to_string(),
         };
         db.add_constraint("testdb", "users", not_null).unwrap();
-        assert_eq!(db.get_table_constraints("testdb", "users").unwrap().len(), 3);
+        assert_eq!(
+            db.get_table_constraints("testdb", "users").unwrap().len(),
+            3
+        );
 
         // Drop a constraint by name
-        db.drop_constraint("testdb", "users", "unique_email").unwrap();
+        db.drop_constraint("testdb", "users", "unique_email")
+            .unwrap();
         let constraints = db.get_table_constraints("testdb", "users").unwrap();
         assert_eq!(constraints.len(), 2);
-        assert!(!constraints.iter().any(|c| matches!(c, TableConstraint::Unique { name: Some(n), .. } if n == "unique_email")));
+        assert!(!constraints.iter().any(
+            |c| matches!(c, TableConstraint::Unique { name: Some(n), .. } if n == "unique_email")
+        ));
 
         // Dropping non-existent constraint should fail
-        assert!(db.drop_constraint("testdb", "users", "nonexistent").is_err());
+        assert!(db
+            .drop_constraint("testdb", "users", "nonexistent")
+            .is_err());
     }
 
     #[test]
@@ -21631,7 +22783,8 @@ mod tests {
         db.create_database("testdb").unwrap();
 
         // Create a sequence
-        db.create_sequence("testdb", "user_id_seq", 1, 1, None, None, false, false).unwrap();
+        db.create_sequence("testdb", "user_id_seq", 1, 1, None, None, false, false)
+            .unwrap();
 
         // NEXTVAL should return 1, 2, 3...
         assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 1);
@@ -21642,17 +22795,20 @@ mod tests {
         assert_eq!(db.currval("testdb", "user_id_seq").unwrap(), 3);
 
         // Create sequence with custom start and increment
-        db.create_sequence("testdb", "order_seq", 100, 10, None, None, false, false).unwrap();
+        db.create_sequence("testdb", "order_seq", 100, 10, None, None, false, false)
+            .unwrap();
         assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 100);
         assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 110);
         assert_eq!(db.nextval("testdb", "order_seq").unwrap(), 120);
 
         // ALTER SEQUENCE RESTART
-        db.alter_sequence("testdb", "user_id_seq", Some(10), None).unwrap();
+        db.alter_sequence("testdb", "user_id_seq", Some(10), None)
+            .unwrap();
         assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 10);
 
         // ALTER SEQUENCE INCREMENT BY
-        db.alter_sequence("testdb", "user_id_seq", None, Some(5)).unwrap();
+        db.alter_sequence("testdb", "user_id_seq", None, Some(5))
+            .unwrap();
         assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 15);
         assert_eq!(db.nextval("testdb", "user_id_seq").unwrap(), 20);
 
@@ -21673,7 +22829,8 @@ mod tests {
         assert!(db.drop_sequence("testdb", "nonexistent", false).is_err());
 
         // IF NOT EXISTS should not fail on existing sequence
-        db.create_sequence("testdb", "order_seq", 1, 1, None, None, false, true).unwrap();
+        db.create_sequence("testdb", "order_seq", 1, 1, None, None, false, true)
+            .unwrap();
     }
 
     #[test]
@@ -21684,7 +22841,12 @@ mod tests {
 
         // Create database and table
         db.create_database("testdb").unwrap();
-        db.create_table("testdb", "old_users", Some(r#"[{"name":"id","type":"int64"},{"name":"name","type":"string"}]"#.to_string())).unwrap();
+        db.create_table(
+            "testdb",
+            "old_users",
+            Some(r#"[{"name":"id","type":"int64"},{"name":"name","type":"string"}]"#.to_string()),
+        )
+        .unwrap();
 
         // Rename table
         db.rename_table("testdb", "old_users", "new_users").unwrap();
@@ -21695,7 +22857,11 @@ mod tests {
         // Verify new name exists
         let desc = db.describe_table("testdb", "new_users").unwrap();
         assert_eq!(desc.table, "new_users");
-        assert!(desc.schema_json.as_ref().map(|s| s.contains("id")).unwrap_or(false));
+        assert!(desc
+            .schema_json
+            .as_ref()
+            .map(|s| s.contains("id"))
+            .unwrap_or(false));
 
         // Renaming to same name should succeed (no-op)
         db.rename_table("testdb", "new_users", "new_users").unwrap();
@@ -21705,6 +22871,8 @@ mod tests {
 
         // Create another table and try to rename to it (should fail)
         db.create_table("testdb", "other_table", None).unwrap();
-        assert!(db.rename_table("testdb", "new_users", "other_table").is_err());
+        assert!(db
+            .rename_table("testdb", "new_users", "other_table")
+            .is_err());
     }
 }

@@ -18,8 +18,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Errors that can occur during authentication/authorization operations
 #[derive(Debug, Clone, Error)]
@@ -557,8 +557,8 @@ impl AuthManager {
             // Create default store with root superuser
             let mut store = AuthStore::default();
 
-            let bootstrap_password =
-                env::var("BOYODB_BOOTSTRAP_PASSWORD").map_err(|_| AuthError::BootstrapPasswordMissing)?;
+            let bootstrap_password = env::var("BOYODB_BOOTSTRAP_PASSWORD")
+                .map_err(|_| AuthError::BootstrapPasswordMissing)?;
             Self::validate_password_with_policy(&store.password_policy, &bootstrap_password)?;
 
             // Create default root user with provided password
@@ -2191,8 +2191,7 @@ mod tests {
         assert_ne!(id1, id2);
 
         fn is_hex(s: &str) -> bool {
-            s.chars()
-                .all(|c| c.is_ascii_hexdigit())
+            s.chars().all(|c| c.is_ascii_hexdigit())
         }
 
         assert!(is_hex(&id1));

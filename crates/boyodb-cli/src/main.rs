@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use boyodb_core::types::{BoyodbStatus, OwnedBuffer};
 use clap::{Args, Parser, Subcommand};
-use serde_json;
 use std::ffi::CString;
 use std::io::Write;
 use std::path::PathBuf;
@@ -213,7 +212,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Shell { host, token, user, password, database, tls, tls_ca, tls_skip_verify, command } => {
+        Commands::Shell {
+            host,
+            token,
+            user,
+            password,
+            database,
+            tls,
+            tls_ca,
+            tls_skip_verify,
+            command,
+        } => {
             let tls_config = if *tls {
                 Some(shell::TlsConfig {
                     ca_path: tls_ca.clone(),
@@ -226,13 +235,20 @@ fn main() -> Result<()> {
                 (Some(u), Some(p)) => Some((u.clone(), p.clone())),
                 (Some(u), None) => {
                     // Username provided without password - prompt for it
-                    let pwd = rpassword::prompt_password("Password: ")
-                        .unwrap_or_else(|_| String::new());
+                    let pwd =
+                        rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
                     Some((u.clone(), pwd))
-                },
+                }
                 _ => None,
             };
-            shell::run_shell(host.as_deref(), token.clone(), database.clone(), tls_config, auth, command.clone())?;
+            shell::run_shell(
+                host.as_deref(),
+                token.clone(),
+                database.clone(),
+                tls_config,
+                auth,
+                command.clone(),
+            )?;
         }
         Commands::WalStats {
             host,
@@ -254,8 +270,8 @@ fn main() -> Result<()> {
             let auth = match (user, password) {
                 (Some(u), Some(p)) => Some((u.clone(), p.clone())),
                 (Some(u), None) => {
-                    let pwd = rpassword::prompt_password("Password: ")
-                        .unwrap_or_else(|_| String::new());
+                    let pwd =
+                        rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
                     Some((u.clone(), pwd))
                 }
                 _ => None,
@@ -294,7 +310,11 @@ fn main() -> Result<()> {
             check_status(status)?;
             println!("ingest ok");
         }
-        Commands::Query { data_dir, sql, engine } => {
+        Commands::Query {
+            data_dir,
+            sql,
+            engine,
+        } => {
             let handle = open(data_dir, false, engine)?;
             let c_sql = CString::new(sql.as_str())?;
             let mut buf = BufferGuard::new();
@@ -345,7 +365,11 @@ fn main() -> Result<()> {
             check_status(status)?;
             println!("checkpoint ok");
         }
-        Commands::CreateDb { data_dir, name, engine } => {
+        Commands::CreateDb {
+            data_dir,
+            name,
+            engine,
+        } => {
             let handle = open(data_dir, false, engine)?;
             let c_name = CString::new(name.as_str())?;
             let status = boyodb_core::ffi::boyodb_create_database(handle.as_ptr(), c_name.as_ptr());
@@ -388,7 +412,11 @@ fn main() -> Result<()> {
             check_status(status)?;
             println!("{}", String::from_utf8_lossy(buf.bytes()));
         }
-        Commands::ListTables { data_dir, database, engine } => {
+        Commands::ListTables {
+            data_dir,
+            database,
+            engine,
+        } => {
             let handle = open(data_dir, false, engine)?;
             let mut buf = BufferGuard::new();
             let _c_db: Option<CString> = match database {
@@ -453,11 +481,18 @@ fn main() -> Result<()> {
             std::fs::write(output, buf.bytes())?;
             println!("backup written to {}", output.display());
         }
-        Commands::Restore { data_dir, input, engine } => {
+        Commands::Restore {
+            data_dir,
+            input,
+            engine,
+        } => {
             let handle = open(data_dir, true, engine)?;
             let payload = std::fs::read(input)?;
-            let status =
-                boyodb_core::ffi::boyodb_apply_bundle(handle.as_ptr(), payload.as_ptr(), payload.len());
+            let status = boyodb_core::ffi::boyodb_apply_bundle(
+                handle.as_ptr(),
+                payload.as_ptr(),
+                payload.len(),
+            );
             check_status(status)?;
             println!("restore applied from {}", input.display());
         }

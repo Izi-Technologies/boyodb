@@ -3,12 +3,12 @@
 // System Tables, Query Cache, and Prometheus Metrics for production monitoring
 // and debugging via system tables.
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
 
 // ============================================================================
 // System Tables
@@ -75,12 +75,30 @@ impl SystemTable {
 
     pub fn all() -> &'static [SystemTable] {
         &[
-            Self::QueryLog, Self::QueryThreadLog, Self::PartLog, Self::ProcessList,
-            Self::Metrics, Self::Events, Self::AsynchronousMetrics, Self::Merges,
-            Self::Mutations, Self::Replicas, Self::ReplicationQueue, Self::Databases,
-            Self::Tables, Self::Columns, Self::Parts, Self::Disks, Self::StoragePolicies,
-            Self::Users, Self::Roles, Self::Grants, Self::Settings, Self::Clusters,
-            Self::Functions, Self::Errors,
+            Self::QueryLog,
+            Self::QueryThreadLog,
+            Self::PartLog,
+            Self::ProcessList,
+            Self::Metrics,
+            Self::Events,
+            Self::AsynchronousMetrics,
+            Self::Merges,
+            Self::Mutations,
+            Self::Replicas,
+            Self::ReplicationQueue,
+            Self::Databases,
+            Self::Tables,
+            Self::Columns,
+            Self::Parts,
+            Self::Disks,
+            Self::StoragePolicies,
+            Self::Users,
+            Self::Roles,
+            Self::Grants,
+            Self::Settings,
+            Self::Clusters,
+            Self::Functions,
+            Self::Errors,
         ]
     }
 }
@@ -278,22 +296,49 @@ impl SystemTablesManager {
             ("PartMutation", "Number of mutations in progress"),
             ("ReplicatedFetch", "Number of data parts being fetched"),
             ("ReplicatedSend", "Number of data parts being sent"),
-            ("ReplicatedChecks", "Number of data parts checking for consistency"),
-            ("BackgroundPoolTask", "Number of active background pool tasks"),
-            ("BackgroundMovePoolTask", "Number of active background move tasks"),
-            ("BackgroundSchedulePoolTask", "Number of active scheduled tasks"),
-            ("DiskSpaceReservedForMerge", "Disk space reserved for running merges"),
-            ("DistributedSend", "Number of connections sending data to remote servers"),
+            (
+                "ReplicatedChecks",
+                "Number of data parts checking for consistency",
+            ),
+            (
+                "BackgroundPoolTask",
+                "Number of active background pool tasks",
+            ),
+            (
+                "BackgroundMovePoolTask",
+                "Number of active background move tasks",
+            ),
+            (
+                "BackgroundSchedulePoolTask",
+                "Number of active scheduled tasks",
+            ),
+            (
+                "DiskSpaceReservedForMerge",
+                "Disk space reserved for running merges",
+            ),
+            (
+                "DistributedSend",
+                "Number of connections sending data to remote servers",
+            ),
             ("QueryThread", "Number of query processing threads"),
             ("ReadonlyReplica", "Number of replicas in readonly state"),
             ("MemoryTracking", "Total memory allocated for queries"),
-            ("ContextLockWait", "Number of threads waiting for context lock"),
+            (
+                "ContextLockWait",
+                "Number of threads waiting for context lock",
+            ),
             ("StorageBufferRows", "Number of rows in Buffer tables"),
             ("StorageBufferBytes", "Number of bytes in Buffer tables"),
-            ("DictCacheRequests", "Number of requests to dictionary cache"),
+            (
+                "DictCacheRequests",
+                "Number of requests to dictionary cache",
+            ),
             ("Revision", "Server revision number"),
             ("VersionInteger", "Server version as integer"),
-            ("MaxPartCountForPartition", "Maximum active parts per partition"),
+            (
+                "MaxPartCountForPartition",
+                "Maximum active parts per partition",
+            ),
             ("TCPConnection", "Number of TCP connections"),
             ("HTTPConnection", "Number of HTTP connections"),
             ("OpenFileForRead", "Number of files open for reading"),
@@ -328,7 +373,9 @@ impl SystemTablesManager {
 
     /// Register a running query in process list
     pub fn register_query(&self, entry: ProcessEntry) {
-        self.process_list.write().insert(entry.query_id.clone(), entry);
+        self.process_list
+            .write()
+            .insert(entry.query_id.clone(), entry);
     }
 
     /// Update a running query's progress
@@ -366,7 +413,8 @@ impl SystemTablesManager {
 
     /// Check if a query is cancelled
     pub fn is_query_cancelled(&self, query_id: &str) -> bool {
-        self.process_list.read()
+        self.process_list
+            .read()
             .get(query_id)
             .map(|e| e.is_cancelled)
             .unwrap_or(false)
@@ -379,7 +427,9 @@ impl SystemTablesManager {
             m.store(value);
         } else {
             drop(metrics);
-            self.metrics.write().insert(name.to_string(), AtomicI64Wrapper::new(value));
+            self.metrics
+                .write()
+                .insert(name.to_string(), AtomicI64Wrapper::new(value));
         }
     }
 
@@ -390,7 +440,9 @@ impl SystemTablesManager {
             m.fetch_add(delta);
         } else {
             drop(metrics);
-            self.metrics.write().insert(name.to_string(), AtomicI64Wrapper::new(delta));
+            self.metrics
+                .write()
+                .insert(name.to_string(), AtomicI64Wrapper::new(delta));
         }
     }
 
@@ -406,13 +458,16 @@ impl SystemTablesManager {
             e.fetch_add(count, Ordering::Relaxed);
         } else {
             drop(events);
-            self.events.write().insert(name.to_string(), AtomicU64::new(count));
+            self.events
+                .write()
+                .insert(name.to_string(), AtomicU64::new(count));
         }
     }
 
     /// Get event count
     pub fn get_event(&self, name: &str) -> u64 {
-        self.events.read()
+        self.events
+            .read()
             .get(name)
             .map(|e| e.load(Ordering::Relaxed))
             .unwrap_or(0)
@@ -449,12 +504,24 @@ impl SystemTablesManager {
 
     /// Get query log entries
     pub fn get_query_log(&self, limit: usize) -> Vec<QueryLogEntry> {
-        self.query_log.read().iter().rev().take(limit).cloned().collect()
+        self.query_log
+            .read()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Get part log entries
     pub fn get_part_log(&self, limit: usize) -> Vec<PartLogEntry> {
-        self.part_log.read().iter().rev().take(limit).cloned().collect()
+        self.part_log
+            .read()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Get current process list
@@ -467,31 +534,36 @@ impl SystemTablesManager {
         let metrics = self.metrics.read();
         let descs = self.metric_descriptions.read();
 
-        metrics.iter().map(|(name, val)| {
-            MetricDefinition {
+        metrics
+            .iter()
+            .map(|(name, val)| MetricDefinition {
                 name: name.clone(),
                 value: val.load(),
                 description: descs.get(name).cloned().unwrap_or_default(),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Get all async metrics
     pub fn get_async_metrics(&self) -> Vec<AsyncMetric> {
-        self.async_metrics.read().iter().map(|(name, &value)| {
-            AsyncMetric {
+        self.async_metrics
+            .read()
+            .iter()
+            .map(|(name, &value)| AsyncMetric {
                 metric: name.clone(),
                 value,
                 description: String::new(),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Get all events
     pub fn get_events(&self) -> Vec<(String, u64)> {
-        self.events.read().iter().map(|(k, v)| {
-            (k.clone(), v.load(Ordering::Relaxed))
-        }).collect()
+        self.events
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+            .collect()
     }
 
     /// Get all errors
@@ -680,7 +752,8 @@ impl QueryCache {
 
         // Update stats for replacement
         if let Some(old) = cache.get(&query_hash) {
-            self.current_size.fetch_sub(old.byte_size, Ordering::Relaxed);
+            self.current_size
+                .fetch_sub(old.byte_size, Ordering::Relaxed);
         }
 
         cache.insert(query_hash, entry);
@@ -698,7 +771,8 @@ impl QueryCache {
     pub fn evict(&self, query_hash: u64) -> bool {
         let mut cache = self.cache.write();
         if let Some(entry) = cache.remove(&query_hash) {
-            self.current_size.fetch_sub(entry.byte_size, Ordering::Relaxed);
+            self.current_size
+                .fetch_sub(entry.byte_size, Ordering::Relaxed);
             self.stats.write().evictions += 1;
             true
         } else {
@@ -727,13 +801,15 @@ impl QueryCache {
             || cache.len() >= self.config.max_entries
         {
             // Find LRU entry
-            let lru_hash = cache.iter()
+            let lru_hash = cache
+                .iter()
                 .min_by_key(|(_, v)| *v.last_accessed.read())
                 .map(|(h, _)| *h);
 
             if let Some(hash) = lru_hash {
                 if let Some(entry) = cache.remove(&hash) {
-                    self.current_size.fetch_sub(entry.byte_size, Ordering::Relaxed);
+                    self.current_size
+                        .fetch_sub(entry.byte_size, Ordering::Relaxed);
                     self.stats.write().evictions += 1;
                 }
             } else {
@@ -745,14 +821,16 @@ impl QueryCache {
     /// Evict all expired entries
     pub fn evict_expired(&self) {
         let mut cache = self.cache.write();
-        let expired: Vec<u64> = cache.iter()
+        let expired: Vec<u64> = cache
+            .iter()
             .filter(|(_, v)| v.is_expired())
             .map(|(k, _)| *k)
             .collect();
 
         for hash in expired {
             if let Some(entry) = cache.remove(&hash) {
-                self.current_size.fetch_sub(entry.byte_size, Ordering::Relaxed);
+                self.current_size
+                    .fetch_sub(entry.byte_size, Ordering::Relaxed);
                 self.stats.write().expired_evictions += 1;
             }
         }
@@ -848,7 +926,10 @@ impl PrometheusHistogram {
             name: name.to_string(),
             help: help.to_string(),
             labels: HashMap::new(),
-            buckets: bucket_bounds.iter().map(|&le| HistogramBucket { le, count: 0 }).collect(),
+            buckets: bucket_bounds
+                .iter()
+                .map(|&le| HistogramBucket { le, count: 0 })
+                .collect(),
             sum: 0.0,
             count: 0,
         }
@@ -875,34 +956,56 @@ impl PrometheusHistogram {
 
         for bucket in &self.buckets {
             if labels_str.is_empty() {
-                output.push_str(&format!("{}_bucket{{le=\"{}\"}} {}\n",
-                    full_name, format_le(bucket.le), bucket.count));
+                output.push_str(&format!(
+                    "{}_bucket{{le=\"{}\"}} {}\n",
+                    full_name,
+                    format_le(bucket.le),
+                    bucket.count
+                ));
             } else {
-                output.push_str(&format!("{}_bucket{{{},le=\"{}\"}} {}\n",
-                    full_name, labels_str, format_le(bucket.le), bucket.count));
+                output.push_str(&format!(
+                    "{}_bucket{{{},le=\"{}\"}} {}\n",
+                    full_name,
+                    labels_str,
+                    format_le(bucket.le),
+                    bucket.count
+                ));
             }
         }
 
         // +Inf bucket
         if labels_str.is_empty() {
-            output.push_str(&format!("{}_bucket{{le=\"+Inf\"}} {}\n", full_name, self.count));
+            output.push_str(&format!(
+                "{}_bucket{{le=\"+Inf\"}} {}\n",
+                full_name, self.count
+            ));
         } else {
-            output.push_str(&format!("{}_bucket{{{},le=\"+Inf\"}} {}\n", full_name, labels_str, self.count));
+            output.push_str(&format!(
+                "{}_bucket{{{},le=\"+Inf\"}} {}\n",
+                full_name, labels_str, self.count
+            ));
         }
 
         if labels_str.is_empty() {
             output.push_str(&format!("{}_sum {}\n", full_name, self.sum));
             output.push_str(&format!("{}_count {}\n", full_name, self.count));
         } else {
-            output.push_str(&format!("{}_sum{{{}}} {}\n", full_name, labels_str, self.sum));
-            output.push_str(&format!("{}_count{{{}}} {}\n", full_name, labels_str, self.count));
+            output.push_str(&format!(
+                "{}_sum{{{}}} {}\n",
+                full_name, labels_str, self.sum
+            ));
+            output.push_str(&format!(
+                "{}_count{{{}}} {}\n",
+                full_name, labels_str, self.count
+            ));
         }
 
         output
     }
 
     fn format_labels(&self) -> String {
-        self.labels.iter()
+        self.labels
+            .iter()
             .map(|(k, v)| format!("{}=\"{}\"", k, v))
             .collect::<Vec<_>>()
             .join(",")
@@ -944,18 +1047,16 @@ impl PrometheusExporter {
 
     /// Register a counter
     pub fn register_counter(&self, name: &str, help: &str) {
-        self.counters.write().insert(
-            name.to_string(),
-            (0.0, help.to_string(), HashMap::new()),
-        );
+        self.counters
+            .write()
+            .insert(name.to_string(), (0.0, help.to_string(), HashMap::new()));
     }
 
     /// Register a gauge
     pub fn register_gauge(&self, name: &str, help: &str) {
-        self.gauges.write().insert(
-            name.to_string(),
-            (0.0, help.to_string(), HashMap::new()),
-        );
+        self.gauges
+            .write()
+            .insert(name.to_string(), (0.0, help.to_string(), HashMap::new()));
     }
 
     /// Register a histogram
@@ -1042,7 +1143,11 @@ impl PrometheusExporter {
         for metric in system.get_metrics() {
             self.gauges.write().insert(
                 metric.name.clone(),
-                (metric.value as f64, metric.description.clone(), HashMap::new()),
+                (
+                    metric.value as f64,
+                    metric.description.clone(),
+                    HashMap::new(),
+                ),
             );
         }
 
@@ -1051,7 +1156,11 @@ impl PrometheusExporter {
             let counter_name = format!("events_{}", name.to_lowercase());
             self.counters.write().insert(
                 counter_name,
-                (count as f64, format!("Event counter: {}", name), HashMap::new()),
+                (
+                    count as f64,
+                    format!("Event counter: {}", name),
+                    HashMap::new(),
+                ),
             );
         }
     }
@@ -1083,7 +1192,9 @@ impl Default for PrometheusExporter {
         exporter.register_histogram(
             "query_duration_seconds",
             "Query execution time in seconds",
-            &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0],
+            &[
+                0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0,
+            ],
         );
         exporter.register_histogram(
             "query_result_rows",
@@ -1127,8 +1238,10 @@ impl ObservabilityManager {
     /// Record a query start
     pub fn query_started(&self, query_id: &str, query: &str, user: &str) {
         self.system_tables.increment_metric("Query", 1);
-        self.prometheus.set_gauge("running_queries",
-            self.system_tables.get_metric("Query").unwrap_or(0) as f64);
+        self.prometheus.set_gauge(
+            "running_queries",
+            self.system_tables.get_metric("Query").unwrap_or(0) as f64,
+        );
 
         let entry = ProcessEntry {
             query_id: query_id.to_string(),
@@ -1156,15 +1269,18 @@ impl ObservabilityManager {
     /// Record a query completion
     pub fn query_completed(&self, entry: QueryLogEntry) {
         self.system_tables.increment_metric("Query", -1);
-        self.prometheus.set_gauge("running_queries",
-            self.system_tables.get_metric("Query").unwrap_or(0) as f64);
+        self.prometheus.set_gauge(
+            "running_queries",
+            self.system_tables.get_metric("Query").unwrap_or(0) as f64,
+        );
 
         self.prometheus.inc_counter("queries_total", 1.0);
         self.prometheus.observe_histogram(
             "query_duration_seconds",
             entry.query_duration_ms as f64 / 1000.0,
         );
-        self.prometheus.observe_histogram("query_result_rows", entry.result_rows as f64);
+        self.prometheus
+            .observe_histogram("query_result_rows", entry.result_rows as f64);
 
         if entry.exception.is_some() {
             self.prometheus.inc_counter("queries_failed_total", 1.0);
@@ -1338,7 +1454,9 @@ mod tests {
         assert_eq!(manager.get_metric("TestMetric"), Some(50));
 
         let metrics = manager.get_metrics();
-        assert!(metrics.iter().any(|m| m.name == "TestMetric" && m.value == 50));
+        assert!(metrics
+            .iter()
+            .any(|m| m.name == "TestMetric" && m.value == 50));
     }
 
     #[test]
@@ -1531,9 +1649,9 @@ mod tests {
     fn test_prometheus_histogram_buckets() {
         let mut hist = PrometheusHistogram::new("test", "Test histogram", &[1.0, 5.0, 10.0]);
 
-        hist.observe(0.5);  // <= 1, 5, 10
-        hist.observe(3.0);  // <= 5, 10
-        hist.observe(7.0);  // <= 10
+        hist.observe(0.5); // <= 1, 5, 10
+        hist.observe(3.0); // <= 5, 10
+        hist.observe(7.0); // <= 10
         hist.observe(15.0); // > 10
 
         assert_eq!(hist.buckets[0].count, 1); // <= 1
@@ -1688,6 +1806,8 @@ mod tests {
 
         let metrics = manager.get_async_metrics();
         assert_eq!(metrics.len(), 2);
-        assert!(metrics.iter().any(|m| m.metric == "cpu_usage" && (m.value - 45.5).abs() < 0.001));
+        assert!(metrics
+            .iter()
+            .any(|m| m.metric == "cpu_usage" && (m.value - 45.5).abs() < 0.001));
     }
 }

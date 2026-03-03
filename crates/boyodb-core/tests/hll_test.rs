@@ -80,28 +80,33 @@ async fn test_approx_count_distinct_accuracy() {
             collect_stats: false,
         })
         .unwrap();
-    
-    let mut reader = StreamReader::try_new(std::io::Cursor::new(response.records_ipc), None).unwrap();
+
+    let mut reader =
+        StreamReader::try_new(std::io::Cursor::new(response.records_ipc), None).unwrap();
     let batch = reader.next().unwrap().unwrap();
-    
+
     // Check schema
-    // Expecting: [count, approx_count_distinct_val] (assuming global agg adds count?) 
+    // Expecting: [count, approx_count_distinct_val] (assuming global agg adds count?)
     // Wait, global agg without group by returns count + fields.
     // Let's print schema to debug if needed.
-    
+
     // The field name should be "approx_count_distinct_val"
     let schema = batch.schema();
     let col_idx = schema.index_of("approx_count_distinct_val").unwrap();
-    
-    let col = batch.column(col_idx).as_any().downcast_ref::<UInt64Array>().unwrap();
+
+    let col = batch
+        .column(col_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
     let val = col.value(0);
-    
+
     println!("Approximate Count Distinct: {}", val);
-    
+
     // HLL accuracy for 100 distinct items with p=12 should be very close to 100.
     // Allow error margin.
-    assert!(val >= 98 && val <= 102, "Expected ~100, got {}", val);
-    
+    assert!((98..=102).contains(&val), "Expected ~100, got {}", val);
+
     // Query 2: Exact COUNT(DISTINCT) for comparison
     let response = db
         .query(QueryRequest {
@@ -110,12 +115,17 @@ async fn test_approx_count_distinct_accuracy() {
             collect_stats: false,
         })
         .unwrap();
-    let mut reader = StreamReader::try_new(std::io::Cursor::new(response.records_ipc), None).unwrap();
+    let mut reader =
+        StreamReader::try_new(std::io::Cursor::new(response.records_ipc), None).unwrap();
     let batch = reader.next().unwrap().unwrap();
     let schema = batch.schema();
     let col_idx = schema.index_of("count_distinct_val").unwrap();
-    let col = batch.column(col_idx).as_any().downcast_ref::<UInt64Array>().unwrap();
+    let col = batch
+        .column(col_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
     let val_exact = col.value(0);
-    
+
     assert_eq!(val_exact, 100);
 }

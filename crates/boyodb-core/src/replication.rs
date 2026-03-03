@@ -19,8 +19,8 @@ pub fn serialize_manifest_binary(manifest: &Manifest) -> Result<Vec<u8>, String>
     buf.extend_from_slice(MANIFEST_BINARY_MAGIC);
     buf.extend_from_slice(&MANIFEST_FORMAT_VERSION.to_le_bytes());
 
-    let data = bincode::serialize(manifest)
-        .map_err(|e| format!("bincode serialize failed: {}", e))?;
+    let data =
+        bincode::serialize(manifest).map_err(|e| format!("bincode serialize failed: {}", e))?;
     buf.extend_from_slice(&data);
     Ok(buf)
 }
@@ -39,7 +39,10 @@ pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
     // Read version
     let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     if version > MANIFEST_FORMAT_VERSION {
-        return Err(format!("manifest version {} is newer than supported {}", version, MANIFEST_FORMAT_VERSION));
+        return Err(format!(
+            "manifest version {} is newer than supported {}",
+            version, MANIFEST_FORMAT_VERSION
+        ));
     }
 
     // Deserialize with bincode
@@ -158,7 +161,9 @@ impl PrimitiveValue {
             (PrimitiveValue::Float32(a), PrimitiveValue::Float32(b)) => a.partial_cmp(b),
             (PrimitiveValue::String(a), PrimitiveValue::String(b)) => Some(a.cmp(b)),
             (PrimitiveValue::Boolean(a), PrimitiveValue::Boolean(b)) => Some(a.cmp(b)),
-            (PrimitiveValue::TimestampMicros(a), PrimitiveValue::TimestampMicros(b)) => Some(a.cmp(b)),
+            (PrimitiveValue::TimestampMicros(a), PrimitiveValue::TimestampMicros(b)) => {
+                Some(a.cmp(b))
+            }
             (PrimitiveValue::Date32(a), PrimitiveValue::Date32(b)) => Some(a.cmp(b)),
             // Cross-type numeric comparisons (widening to i128/f64)
             (PrimitiveValue::Int64(a), PrimitiveValue::Int32(b)) => Some((*a).cmp(&(*b as i64))),
@@ -171,12 +176,14 @@ impl PrimitiveValue {
 
     /// Check if a value is less than this (for min check)
     pub fn is_less_than(&self, other: &PrimitiveValue) -> bool {
-        self.partial_cmp_value(other).map_or(false, |ord| ord == std::cmp::Ordering::Less)
+        self.partial_cmp_value(other)
+            .map_or(false, |ord| ord == std::cmp::Ordering::Less)
     }
 
     /// Check if a value is greater than this (for max check)
     pub fn is_greater_than(&self, other: &PrimitiveValue) -> bool {
-        self.partial_cmp_value(other).map_or(false, |ord| ord == std::cmp::Ordering::Greater)
+        self.partial_cmp_value(other)
+            .map_or(false, |ord| ord == std::cmp::Ordering::Greater)
     }
 }
 
@@ -221,7 +228,11 @@ impl ColumnStats {
     }
 
     /// Check if a range overlaps with this column's min/max
-    pub fn range_overlaps(&self, range_min: Option<&PrimitiveValue>, range_max: Option<&PrimitiveValue>) -> bool {
+    pub fn range_overlaps(
+        &self,
+        range_min: Option<&PrimitiveValue>,
+        range_max: Option<&PrimitiveValue>,
+    ) -> bool {
         // If no stats, assume overlap
         if self.min.is_none() && self.max.is_none() {
             return true;
@@ -385,10 +396,14 @@ impl ManifestEntry {
         let bloom_size = self.bloom_tenant.as_ref().map_or(0, |b| b.len())
             + self.bloom_route.as_ref().map_or(0, |b| b.len());
         let stats_size = self.column_stats.as_ref().map_or(0, |stats| {
-            stats.iter().map(|(k, v)| {
-                k.len() + std::mem::size_of::<ColumnStats>()
-                    + v.bloom_filter.as_ref().map_or(0, |b| b.len())
-            }).sum()
+            stats
+                .iter()
+                .map(|(k, v)| {
+                    k.len()
+                        + std::mem::size_of::<ColumnStats>()
+                        + v.bloom_filter.as_ref().map_or(0, |b| b.len())
+                })
+                .sum()
         });
         bloom_size + stats_size
     }

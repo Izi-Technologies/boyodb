@@ -3,6 +3,8 @@
 // Native Parquet/ORC support with predicate pushdown, column projection,
 // and data lake integration (Delta Lake / Iceberg style features).
 
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -10,8 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Native Parquet Support
@@ -98,10 +98,22 @@ pub enum ParquetLogicalType {
     String,
     Uuid,
     Date,
-    Time { is_adjusted_utc: bool, unit: TimeUnitType },
-    Timestamp { is_adjusted_utc: bool, unit: TimeUnitType },
-    Integer { bit_width: u8, is_signed: bool },
-    Decimal { precision: u32, scale: u32 },
+    Time {
+        is_adjusted_utc: bool,
+        unit: TimeUnitType,
+    },
+    Timestamp {
+        is_adjusted_utc: bool,
+        unit: TimeUnitType,
+    },
+    Integer {
+        bit_width: u8,
+        is_signed: bool,
+    },
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
     Json,
     Bson,
     List,
@@ -587,12 +599,10 @@ impl PartialOrd for OrcValue {
             (Self::String(a), Self::String(b)) => a.partial_cmp(b),
             (Self::Binary(a), Self::Binary(b)) => a.partial_cmp(b),
             (Self::Date(a), Self::Date(b)) => a.partial_cmp(b),
-            (Self::Timestamp(a1, a2), Self::Timestamp(b1, b2)) => {
-                match a1.partial_cmp(b1) {
-                    Some(std::cmp::Ordering::Equal) => a2.partial_cmp(b2),
-                    other => other,
-                }
-            }
+            (Self::Timestamp(a1, a2), Self::Timestamp(b1, b2)) => match a1.partial_cmp(b1) {
+                Some(std::cmp::Ordering::Equal) => a2.partial_cmp(b2),
+                other => other,
+            },
             (Self::Decimal(a1, _), Self::Decimal(b1, _)) => a1.partial_cmp(b1),
             _ => None,
         }
@@ -1058,10 +1068,8 @@ impl DataLakeTable {
         let log_path = path.join("_delta_log");
 
         // Create directories
-        std::fs::create_dir_all(&path)
-            .map_err(|e| DataFormatError::IoError(e.to_string()))?;
-        std::fs::create_dir_all(&log_path)
-            .map_err(|e| DataFormatError::IoError(e.to_string()))?;
+        std::fs::create_dir_all(&path).map_err(|e| DataFormatError::IoError(e.to_string()))?;
+        std::fs::create_dir_all(&log_path).map_err(|e| DataFormatError::IoError(e.to_string()))?;
 
         let table = Self {
             path: path.clone(),
@@ -1088,7 +1096,7 @@ impl DataLakeTable {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_millis() as u64
+                    .as_millis() as u64,
             ),
         };
 
@@ -1180,13 +1188,13 @@ impl DataLakeTable {
 
         // Write log file
         let log_file = self.log_path.join(format!("{:020}.json", new_version));
-        let content = all_actions.iter()
+        let content = all_actions
+            .iter()
             .map(|a| serde_json::to_string(a).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
 
-        std::fs::write(&log_file, content)
-            .map_err(|e| DataFormatError::IoError(e.to_string()))?;
+        std::fs::write(&log_file, content).map_err(|e| DataFormatError::IoError(e.to_string()))?;
 
         // Invalidate cache
         *self.snapshot_cache.write() = None;
@@ -1196,15 +1204,17 @@ impl DataLakeTable {
 
     /// Add files to the table
     pub fn add_files(&self, files: Vec<AddFile>) -> Result<u64, DataFormatError> {
-        let actions: Vec<TransactionAction> = files
-            .into_iter()
-            .map(TransactionAction::Add)
-            .collect();
+        let actions: Vec<TransactionAction> =
+            files.into_iter().map(TransactionAction::Add).collect();
         self.commit(actions)
     }
 
     /// Remove files from the table
-    pub fn remove_files(&self, paths: Vec<String>, data_change: bool) -> Result<u64, DataFormatError> {
+    pub fn remove_files(
+        &self,
+        paths: Vec<String>,
+        data_change: bool,
+    ) -> Result<u64, DataFormatError> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1212,14 +1222,16 @@ impl DataLakeTable {
 
         let actions: Vec<TransactionAction> = paths
             .into_iter()
-            .map(|path| TransactionAction::Remove(RemoveFile {
-                path,
-                deletion_timestamp: Some(timestamp),
-                data_change,
-                extended_file_metadata: false,
-                partition_values: None,
-                size: None,
-            }))
+            .map(|path| {
+                TransactionAction::Remove(RemoveFile {
+                    path,
+                    deletion_timestamp: Some(timestamp),
+                    data_change,
+                    extended_file_metadata: false,
+                    partition_values: None,
+                    size: None,
+                })
+            })
             .collect();
 
         self.commit(actions)
@@ -1278,12 +1290,18 @@ impl DataLakeTable {
     }
 
     /// Optimize (compact) the table
-    pub fn optimize(&self, predicate: Option<String>, z_order_by: Vec<String>) -> Result<OptimizeResult, DataFormatError> {
+    pub fn optimize(
+        &self,
+        predicate: Option<String>,
+        z_order_by: Vec<String>,
+    ) -> Result<OptimizeResult, DataFormatError> {
         let snapshot = self.snapshot()?;
 
         // Find small files to compact
         let small_file_threshold = 128 * 1024 * 1024; // 128MB
-        let small_files: Vec<_> = snapshot.files.iter()
+        let small_files: Vec<_> = snapshot
+            .files
+            .iter()
             .filter(|f| f.size < small_file_threshold)
             .collect();
 
@@ -1296,15 +1314,23 @@ impl DataLakeTable {
             bytes_added: 0,
             bytes_removed: bytes_compacted,
             partitions_optimized: 0,
-            z_order_stats: if z_order_by.is_empty() { None } else { Some(ZOrderStats {
-                columns: z_order_by,
-                files_affected: files_compacted,
-            })},
+            z_order_stats: if z_order_by.is_empty() {
+                None
+            } else {
+                Some(ZOrderStats {
+                    columns: z_order_by,
+                    files_affected: files_compacted,
+                })
+            },
         })
     }
 
     /// Vacuum (delete old files)
-    pub fn vacuum(&self, retention_hours: u64, dry_run: bool) -> Result<VacuumResult, DataFormatError> {
+    pub fn vacuum(
+        &self,
+        retention_hours: u64,
+        dry_run: bool,
+    ) -> Result<VacuumResult, DataFormatError> {
         let retention_ms = retention_hours * 3600 * 1000;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1533,25 +1559,23 @@ mod tests {
             row_group_id: 0,
             num_rows: 1000,
             total_byte_size: 10000,
-            columns: vec![
-                ColumnChunkMeta {
-                    column_name: "id".to_string(),
-                    column_type: ParquetType::Int64,
-                    encodings: vec![ParquetEncoding::Plain],
-                    compression: ParquetCompressionCodec::Zstd,
-                    num_values: 1000,
-                    total_uncompressed_size: 8000,
-                    total_compressed_size: 4000,
-                    data_page_offset: 0,
-                    dictionary_page_offset: None,
-                    statistics: Some(ColumnStatsMeta {
-                        null_count: 0,
-                        distinct_count: Some(1000),
-                        min_value: Some(ParquetValue::Int64(100)),
-                        max_value: Some(ParquetValue::Int64(1100)),
-                    }),
-                },
-            ],
+            columns: vec![ColumnChunkMeta {
+                column_name: "id".to_string(),
+                column_type: ParquetType::Int64,
+                encodings: vec![ParquetEncoding::Plain],
+                compression: ParquetCompressionCodec::Zstd,
+                num_values: 1000,
+                total_uncompressed_size: 8000,
+                total_compressed_size: 4000,
+                data_page_offset: 0,
+                dictionary_page_offset: None,
+                statistics: Some(ColumnStatsMeta {
+                    null_count: 0,
+                    distinct_count: Some(1000),
+                    min_value: Some(ParquetValue::Int64(100)),
+                    max_value: Some(ParquetValue::Int64(1100)),
+                }),
+            }],
         };
 
         // Should skip - looking for value outside range
@@ -1575,9 +1599,10 @@ mod tests {
     fn test_parquet_row_batch() {
         let mut columns = HashMap::new();
         columns.insert("id".to_string(), ParquetColumnData::Int64(vec![1, 2, 3]));
-        columns.insert("name".to_string(), ParquetColumnData::String(vec![
-            "a".to_string(), "b".to_string(), "c".to_string()
-        ]));
+        columns.insert(
+            "name".to_string(),
+            ParquetColumnData::String(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+        );
 
         let batch = ParquetRowBatch {
             row_group_id: 0,
@@ -1620,22 +1645,20 @@ mod tests {
             data_length: 1000,
             footer_length: 50,
             num_rows: 10000,
-            columns: vec![
-                OrcColumnMeta {
-                    column_id: 0,
-                    column_name: "value".to_string(),
-                    column_type: OrcType::BigInt,
+            columns: vec![OrcColumnMeta {
+                column_id: 0,
+                column_name: "value".to_string(),
+                column_type: OrcType::BigInt,
+                num_values: 10000,
+                has_null: false,
+                statistics: Some(OrcColumnStats {
                     num_values: 10000,
                     has_null: false,
-                    statistics: Some(OrcColumnStats {
-                        num_values: 10000,
-                        has_null: false,
-                        min: Some(OrcValue::BigInt(0)),
-                        max: Some(OrcValue::BigInt(100)),
-                        sum: None,
-                    }),
-                },
-            ],
+                    min: Some(OrcValue::BigInt(0)),
+                    max: Some(OrcValue::BigInt(100)),
+                    sum: None,
+                }),
+            }],
         };
 
         // Should skip - between outside range
@@ -1670,19 +1693,16 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
         // Create table
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
         assert_eq!(table.version(), 1);
 
         // Open table
@@ -1696,31 +1716,26 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
 
         // Add files
-        let files = vec![
-            AddFile {
-                path: "part-00000.parquet".to_string(),
-                partition_values: HashMap::new(),
-                size: 1024,
-                modification_time: 1000,
-                data_change: true,
-                stats: None,
-                tags: HashMap::new(),
-            },
-        ];
+        let files = vec![AddFile {
+            path: "part-00000.parquet".to_string(),
+            partition_values: HashMap::new(),
+            size: 1024,
+            modification_time: 1000,
+            data_change: true,
+            stats: None,
+            tags: HashMap::new(),
+        }];
 
         let version = table.add_files(files).unwrap();
         assert_eq!(version, 2);
@@ -1735,18 +1750,15 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
 
         // Add file
         let files = vec![AddFile {
@@ -1761,7 +1773,9 @@ mod tests {
         table.add_files(files).unwrap();
 
         // Remove file
-        table.remove_files(vec!["part-00000.parquet".to_string()], true).unwrap();
+        table
+            .remove_files(vec!["part-00000.parquet".to_string()], true)
+            .unwrap();
 
         let snapshot = table.snapshot().unwrap();
         assert_eq!(snapshot.num_files(), 0);
@@ -1773,40 +1787,41 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
 
         // Add first file
-        table.add_files(vec![AddFile {
-            path: "part-00000.parquet".to_string(),
-            partition_values: HashMap::new(),
-            size: 1024,
-            modification_time: 1000,
-            data_change: true,
-            stats: None,
-            tags: HashMap::new(),
-        }]).unwrap();
+        table
+            .add_files(vec![AddFile {
+                path: "part-00000.parquet".to_string(),
+                partition_values: HashMap::new(),
+                size: 1024,
+                modification_time: 1000,
+                data_change: true,
+                stats: None,
+                tags: HashMap::new(),
+            }])
+            .unwrap();
 
         // Add second file
-        table.add_files(vec![AddFile {
-            path: "part-00001.parquet".to_string(),
-            partition_values: HashMap::new(),
-            size: 2048,
-            modification_time: 2000,
-            data_change: true,
-            stats: None,
-            tags: HashMap::new(),
-        }]).unwrap();
+        table
+            .add_files(vec![AddFile {
+                path: "part-00001.parquet".to_string(),
+                partition_values: HashMap::new(),
+                size: 2048,
+                modification_time: 2000,
+                data_change: true,
+                stats: None,
+                tags: HashMap::new(),
+            }])
+            .unwrap();
 
         // Time travel to version 2
         let snapshot_v2 = table.at_version(2).unwrap();
@@ -1823,30 +1838,29 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
 
         // Add small files
         for i in 0..5 {
-            table.add_files(vec![AddFile {
-                path: format!("part-{:05}.parquet", i),
-                partition_values: HashMap::new(),
-                size: 1024 * 1024, // 1MB - small file
-                modification_time: 1000,
-                data_change: true,
-                stats: None,
-                tags: HashMap::new(),
-            }]).unwrap();
+            table
+                .add_files(vec![AddFile {
+                    path: format!("part-{:05}.parquet", i),
+                    partition_values: HashMap::new(),
+                    size: 1024 * 1024, // 1MB - small file
+                    modification_time: 1000,
+                    data_change: true,
+                    stats: None,
+                    tags: HashMap::new(),
+                }])
+                .unwrap();
         }
 
         let result = table.optimize(None, vec![]).unwrap();
@@ -1859,18 +1873,15 @@ mod tests {
         let table_path = temp_dir.path().join("test_table");
 
         let schema = DataLakeSchema {
-            fields: vec![
-                DataLakeField {
-                    name: "id".to_string(),
-                    data_type: DataLakeType::Long,
-                    nullable: false,
-                    metadata: HashMap::new(),
-                },
-            ],
+            fields: vec![DataLakeField {
+                name: "id".to_string(),
+                data_type: DataLakeType::Long,
+                nullable: false,
+                metadata: HashMap::new(),
+            }],
         };
 
-        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![])
-            .unwrap();
+        let table = DataLakeTable::create(&table_path, TableFormat::Delta, schema, vec![]).unwrap();
 
         let result = table.vacuum(168, true).unwrap(); // 7 days, dry run
         assert!(result.dry_run);
@@ -1949,7 +1960,10 @@ mod tests {
                 },
                 DataLakeField {
                     name: "decimal_col".to_string(),
-                    data_type: DataLakeType::Decimal { precision: 10, scale: 2 },
+                    data_type: DataLakeType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
                     nullable: false,
                     metadata: HashMap::new(),
                 },

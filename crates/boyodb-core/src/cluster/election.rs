@@ -450,7 +450,9 @@ mod tests {
         assert!(state.votes_received.contains(&NodeId::from_string("node1")));
 
         match msg {
-            ElectionMessage::RequestVote { term, candidate_id, .. } => {
+            ElectionMessage::RequestVote {
+                term, candidate_id, ..
+            } => {
                 assert_eq!(term, 1);
                 assert_eq!(candidate_id, NodeId::from_string("node1"));
             }
@@ -554,7 +556,10 @@ mod tests {
         let result = state.handle_vote_response(1, &NodeId::from_string("node1"), true, 2);
 
         // Self-vote reaches quorum (1), should produce heartbeat and transition to leader
-        assert!(matches!(result, Some(ElectionMessage::LeaderHeartbeat { .. })));
+        assert!(matches!(
+            result,
+            Some(ElectionMessage::LeaderHeartbeat { .. })
+        ));
         assert_eq!(state.role, NodeRole::Leader);
         assert_eq!(state.current_leader, Some(NodeId::from_string("node1")));
         assert_eq!(state.votes_received.len(), 1);
@@ -611,7 +616,7 @@ mod tests {
         standard_state.lease_expires = Some(Instant::now() + Duration::from_secs(10));
 
         assert!(!standard_state.has_write_quorum(1, 2)); // 1 of 2 not enough
-        assert!(standard_state.has_write_quorum(2, 2));  // Both nodes needed
+        assert!(standard_state.has_write_quorum(2, 2)); // Both nodes needed
     }
 
     #[test]

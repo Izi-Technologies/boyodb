@@ -70,7 +70,10 @@ pub enum RlsExpression {
     /// Column not equals a value
     Ne { column: String, value: RlsValue },
     /// Column in list of values
-    In { column: String, values: Vec<RlsValue> },
+    In {
+        column: String,
+        values: Vec<RlsValue>,
+    },
     /// Column matches current user
     CurrentUser { column: String },
     /// Column matches current role
@@ -221,14 +224,22 @@ impl RlsManager {
     }
 
     /// Drop a policy
-    pub fn drop_policy(&self, database: &str, table: &str, name: &str) -> Result<RlsPolicy, RlsError> {
+    pub fn drop_policy(
+        &self,
+        database: &str,
+        table: &str,
+        name: &str,
+    ) -> Result<RlsPolicy, RlsError> {
         let key = format!("{}.{}", database, table);
 
         let mut policies = self.policies.write().unwrap();
-        let table_policies = policies.get_mut(&key)
+        let table_policies = policies
+            .get_mut(&key)
             .ok_or_else(|| RlsError::PolicyNotFound(name.to_string()))?;
 
-        let idx = table_policies.iter().position(|p| p.name == name)
+        let idx = table_policies
+            .iter()
+            .position(|p| p.name == name)
             .ok_or_else(|| RlsError::PolicyNotFound(name.to_string()))?;
 
         Ok(table_policies.remove(idx))
@@ -237,7 +248,9 @@ impl RlsManager {
     /// Get all policies for a table
     pub fn get_policies(&self, database: &str, table: &str) -> Vec<RlsPolicy> {
         let key = format!("{}.{}", database, table);
-        self.policies.read().unwrap()
+        self.policies
+            .read()
+            .unwrap()
             .get(&key)
             .cloned()
             .unwrap_or_default()
@@ -292,12 +305,11 @@ impl RlsManager {
         };
 
         // Filter policies by command and role
-        let applicable: Vec<_> = table_policies.iter()
+        let applicable: Vec<_> = table_policies
+            .iter()
             .filter(|p| p.enabled)
             .filter(|p| p.commands.contains(&command) || p.commands.contains(&RlsCommand::All))
-            .filter(|p| {
-                p.roles.is_empty() || p.roles.iter().any(|r| context.roles.contains(r))
-            })
+            .filter(|p| p.roles.is_empty() || p.roles.iter().any(|r| context.roles.contains(r)))
             .collect();
 
         if applicable.is_empty() {
@@ -347,7 +359,8 @@ impl RlsManager {
                 format!("{} <> {}", column, self.value_to_sql(value, context))
             }
             RlsExpression::In { column, values } => {
-                let vals: Vec<_> = values.iter()
+                let vals: Vec<_> = values
+                    .iter()
                     .map(|v| self.value_to_sql(v, context))
                     .collect();
                 format!("{} IN ({})", column, vals.join(", "))
@@ -359,9 +372,7 @@ impl RlsManager {
                 if context.roles.is_empty() {
                     "FALSE".to_string()
                 } else {
-                    let roles: Vec<_> = context.roles.iter()
-                        .map(|r| format!("'{}'", r))
-                        .collect();
+                    let roles: Vec<_> = context.roles.iter().map(|r| format!("'{}'", r)).collect();
                     format!("{} IN ({})", column, roles.join(", "))
                 }
             }
@@ -369,21 +380,22 @@ impl RlsManager {
                 if context.groups.is_empty() {
                     "FALSE".to_string()
                 } else {
-                    let groups: Vec<_> = context.groups.iter()
-                        .map(|g| format!("'{}'", g))
-                        .collect();
+                    let groups: Vec<_> =
+                        context.groups.iter().map(|g| format!("'{}'", g)).collect();
                     format!("{} IN ({})", column, groups.join(", "))
                 }
             }
             RlsExpression::Custom(sql) => sql.clone(),
             RlsExpression::And(exprs) => {
-                let parts: Vec<_> = exprs.iter()
+                let parts: Vec<_> = exprs
+                    .iter()
                     .map(|e| format!("({})", self.expr_to_sql(e, context)))
                     .collect();
                 parts.join(" AND ")
             }
             RlsExpression::Or(exprs) => {
-                let parts: Vec<_> = exprs.iter()
+                let parts: Vec<_> = exprs
+                    .iter()
                     .map(|e| format!("({})", self.expr_to_sql(e, context)))
                     .collect();
                 parts.join(" OR ")
@@ -403,11 +415,11 @@ impl RlsManager {
             RlsValue::Int64(i) => i.to_string(),
             RlsValue::Float64(f) => f.to_string(),
             RlsValue::String(s) => format!("'{}'", s.replace('\'', "''")),
-            RlsValue::SessionVar(name) => {
-                context.session_vars.get(name)
-                    .map(|v| self.value_to_sql(v, context))
-                    .unwrap_or_else(|| "NULL".to_string())
-            }
+            RlsValue::SessionVar(name) => context
+                .session_vars
+                .get(name)
+                .map(|v| self.value_to_sql(v, context))
+                .unwrap_or_else(|| "NULL".to_string()),
         }
     }
 
@@ -415,7 +427,8 @@ impl RlsManager {
         let mut parts = Vec::new();
 
         if !permissive.is_empty() {
-            let perm_combined = permissive.iter()
+            let perm_combined = permissive
+                .iter()
                 .map(|f| format!("({})", f))
                 .collect::<Vec<_>>()
                 .join(" OR ");
@@ -777,7 +790,8 @@ impl AuditLogger {
     pub fn query(&self, filter: &AuditFilter) -> Vec<AuditEntry> {
         let entries = self.entries.read().unwrap();
 
-        entries.iter()
+        entries
+            .iter()
             .filter(|e| self.matches_filter(e, filter))
             .cloned()
             .take(filter.limit.unwrap_or(1000))
@@ -1081,7 +1095,11 @@ impl EncryptedValue {
             2 => EncryptionAlgorithm::Aes256CbcHmac,
             3 => EncryptionAlgorithm::ChaCha20Poly1305,
             4 => EncryptionAlgorithm::DeterministicAes256,
-            _ => return Err(EncryptionError::InvalidData("Unknown algorithm".to_string())),
+            _ => {
+                return Err(EncryptionError::InvalidData(
+                    "Unknown algorithm".to_string(),
+                ))
+            }
         };
 
         // IV
@@ -1140,7 +1158,11 @@ impl ColumnEncryptionManager {
     }
 
     /// Create a new encryption key
-    pub fn create_key(&self, id: &str, algorithm: EncryptionAlgorithm) -> Result<EncryptionKey, EncryptionError> {
+    pub fn create_key(
+        &self,
+        id: &str,
+        algorithm: EncryptionAlgorithm,
+    ) -> Result<EncryptionKey, EncryptionError> {
         // Generate random key material (32 bytes for AES-256)
         let mut key_material = vec![0u8; 32];
         OsRng.fill_bytes(&mut key_material);
@@ -1166,10 +1188,12 @@ impl ColumnEncryptionManager {
     /// Rotate a key (create new version)
     pub fn rotate_key(&self, id: &str) -> Result<EncryptionKey, EncryptionError> {
         let mut keys = self.keys.write().unwrap();
-        let key_versions = keys.get_mut(id)
+        let key_versions = keys
+            .get_mut(id)
             .ok_or_else(|| EncryptionError::KeyNotFound(id.to_string()))?;
 
-        let last = key_versions.last()
+        let last = key_versions
+            .last()
             .ok_or_else(|| EncryptionError::KeyNotFound(id.to_string()))?;
 
         let algorithm = last.algorithm;
@@ -1205,7 +1229,12 @@ impl ColumnEncryptionManager {
     }
 
     /// Get policy for a column
-    pub fn get_policy(&self, database: &str, table: &str, column: &str) -> Option<ColumnEncryptionPolicy> {
+    pub fn get_policy(
+        &self,
+        database: &str,
+        table: &str,
+        column: &str,
+    ) -> Option<ColumnEncryptionPolicy> {
         let key = format!("{}.{}.{}", database, table, column);
         self.policies.read().unwrap().get(&key).cloned()
     }
@@ -1219,7 +1248,9 @@ impl ColumnEncryptionManager {
     /// List all policies for a table
     pub fn list_policies(&self, database: &str, table: &str) -> Vec<ColumnEncryptionPolicy> {
         let prefix = format!("{}.{}.", database, table);
-        self.policies.read().unwrap()
+        self.policies
+            .read()
+            .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, v)| v.clone())
@@ -1227,8 +1258,13 @@ impl ColumnEncryptionManager {
     }
 
     /// Encrypt a value
-    pub fn encrypt(&self, plaintext: &[u8], key_id: &str) -> Result<EncryptedValue, EncryptionError> {
-        let key = self.get_key(key_id)
+    pub fn encrypt(
+        &self,
+        plaintext: &[u8],
+        key_id: &str,
+    ) -> Result<EncryptedValue, EncryptionError> {
+        let key = self
+            .get_key(key_id)
             .ok_or_else(|| EncryptionError::KeyNotFound(key_id.to_string()))?;
 
         match key.algorithm {
@@ -1271,12 +1307,16 @@ impl ColumnEncryptionManager {
     pub fn decrypt(&self, encrypted: &EncryptedValue) -> Result<Vec<u8>, EncryptionError> {
         // Find the key version used
         let keys = self.keys.read().unwrap();
-        let key_versions = keys.get(&encrypted.key_id)
+        let key_versions = keys
+            .get(&encrypted.key_id)
             .ok_or_else(|| EncryptionError::KeyNotFound(encrypted.key_id.clone()))?;
 
-        let key = key_versions.iter()
+        let key = key_versions
+            .iter()
             .find(|k| k.version == encrypted.key_version)
-            .ok_or_else(|| EncryptionError::KeyVersionNotFound(encrypted.key_id.clone(), encrypted.key_version))?;
+            .ok_or_else(|| {
+                EncryptionError::KeyVersionNotFound(encrypted.key_id.clone(), encrypted.key_version)
+            })?;
 
         match key.algorithm {
             EncryptionAlgorithm::Aes256Gcm => {
@@ -1294,7 +1334,8 @@ impl ColumnEncryptionManager {
                         "invalid tag length".to_string(),
                     ));
                 }
-                let mut ciphertext_and_tag = Vec::with_capacity(encrypted.ciphertext.len() + tag.len());
+                let mut ciphertext_and_tag =
+                    Vec::with_capacity(encrypted.ciphertext.len() + tag.len());
                 ciphertext_and_tag.extend_from_slice(&encrypted.ciphertext);
                 ciphertext_and_tag.extend_from_slice(tag);
 
@@ -1312,9 +1353,16 @@ impl ColumnEncryptionManager {
     }
 
     /// Encrypt with column policy
-    pub fn encrypt_column(&self, database: &str, table: &str, column: &str, plaintext: &[u8]) -> Result<EncryptedValue, EncryptionError> {
-        let policy = self.get_policy(database, table, column)
-            .ok_or_else(|| EncryptionError::NoPolicyDefined(format!("{}.{}.{}", database, table, column)))?;
+    pub fn encrypt_column(
+        &self,
+        database: &str,
+        table: &str,
+        column: &str,
+        plaintext: &[u8],
+    ) -> Result<EncryptedValue, EncryptionError> {
+        let policy = self.get_policy(database, table, column).ok_or_else(|| {
+            EncryptionError::NoPolicyDefined(format!("{}.{}.{}", database, table, column))
+        })?;
 
         if !policy.enabled {
             return Err(EncryptionError::PolicyDisabled);
@@ -1353,9 +1401,13 @@ impl std::fmt::Display for EncryptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EncryptionError::KeyNotFound(id) => write!(f, "Encryption key not found: {}", id),
-            EncryptionError::KeyVersionNotFound(id, v) => write!(f, "Key version not found: {} v{}", id, v),
+            EncryptionError::KeyVersionNotFound(id, v) => {
+                write!(f, "Key version not found: {} v{}", id, v)
+            }
             EncryptionError::KeyExpired(id) => write!(f, "Encryption key expired: {}", id),
-            EncryptionError::NoPolicyDefined(col) => write!(f, "No encryption policy for column: {}", col),
+            EncryptionError::NoPolicyDefined(col) => {
+                write!(f, "No encryption policy for column: {}", col)
+            }
             EncryptionError::PolicyDisabled => write!(f, "Encryption policy is disabled"),
             EncryptionError::InvalidData(e) => write!(f, "Invalid encrypted data: {}", e),
             EncryptionError::DecryptionFailed(e) => write!(f, "Decryption failed: {}", e),
@@ -1397,7 +1449,9 @@ mod tests {
             policy_type: RlsPolicyType::Permissive,
             commands: vec![RlsCommand::All],
             roles: vec![],
-            using_expr: Some(RlsExpression::CurrentUser { column: "owner".to_string() }),
+            using_expr: Some(RlsExpression::CurrentUser {
+                column: "owner".to_string(),
+            }),
             check_expr: None,
             enabled: true,
             created_at: 0,
@@ -1448,8 +1502,7 @@ mod tests {
         manager.enable_rls("db", "table");
         manager.add_bypass_role("superuser");
 
-        let context = RlsContext::new("admin")
-            .with_roles(vec!["superuser".to_string()]);
+        let context = RlsContext::new("admin").with_roles(vec!["superuser".to_string()]);
 
         let result = manager.evaluate("db", "table", RlsCommand::Select, &context);
         assert!(result.allowed);
@@ -1468,7 +1521,9 @@ mod tests {
             policy_type: RlsPolicyType::Permissive,
             commands: vec![RlsCommand::Select],
             roles: vec![],
-            using_expr: Some(RlsExpression::CurrentUser { column: "user_id".to_string() }),
+            using_expr: Some(RlsExpression::CurrentUser {
+                column: "user_id".to_string(),
+            }),
             check_expr: None,
             enabled: true,
             created_at: 0,
@@ -1490,35 +1545,41 @@ mod tests {
         manager.enable_rls("db", "data");
 
         // Permissive policy
-        manager.create_policy(RlsPolicy {
-            name: "own_data".to_string(),
-            table: "data".to_string(),
-            database: "db".to_string(),
-            policy_type: RlsPolicyType::Permissive,
-            commands: vec![RlsCommand::Select],
-            roles: vec![],
-            using_expr: Some(RlsExpression::CurrentUser { column: "owner".to_string() }),
-            check_expr: None,
-            enabled: true,
-            created_at: 0,
-        }).unwrap();
+        manager
+            .create_policy(RlsPolicy {
+                name: "own_data".to_string(),
+                table: "data".to_string(),
+                database: "db".to_string(),
+                policy_type: RlsPolicyType::Permissive,
+                commands: vec![RlsCommand::Select],
+                roles: vec![],
+                using_expr: Some(RlsExpression::CurrentUser {
+                    column: "owner".to_string(),
+                }),
+                check_expr: None,
+                enabled: true,
+                created_at: 0,
+            })
+            .unwrap();
 
         // Restrictive policy
-        manager.create_policy(RlsPolicy {
-            name: "active_only".to_string(),
-            table: "data".to_string(),
-            database: "db".to_string(),
-            policy_type: RlsPolicyType::Restrictive,
-            commands: vec![RlsCommand::Select],
-            roles: vec![],
-            using_expr: Some(RlsExpression::Eq {
-                column: "active".to_string(),
-                value: RlsValue::Bool(true),
-            }),
-            check_expr: None,
-            enabled: true,
-            created_at: 0,
-        }).unwrap();
+        manager
+            .create_policy(RlsPolicy {
+                name: "active_only".to_string(),
+                table: "data".to_string(),
+                database: "db".to_string(),
+                policy_type: RlsPolicyType::Restrictive,
+                commands: vec![RlsCommand::Select],
+                roles: vec![],
+                using_expr: Some(RlsExpression::Eq {
+                    column: "active".to_string(),
+                    value: RlsValue::Bool(true),
+                }),
+                check_expr: None,
+                enabled: true,
+                created_at: 0,
+            })
+            .unwrap();
 
         let context = RlsContext::new("bob");
         let result = manager.evaluate("db", "data", RlsCommand::Select, &context);
@@ -1532,15 +1593,17 @@ mod tests {
     #[test]
     fn test_rls_expr_to_sql() {
         let manager = RlsManager::new();
-        let context = RlsContext::new("user1")
-            .with_roles(vec!["admin".to_string(), "user".to_string()]);
+        let context =
+            RlsContext::new("user1").with_roles(vec!["admin".to_string(), "user".to_string()]);
 
         let expr = RlsExpression::And(vec![
             RlsExpression::Eq {
                 column: "status".to_string(),
                 value: RlsValue::String("active".to_string()),
             },
-            RlsExpression::CurrentRole { column: "role".to_string() },
+            RlsExpression::CurrentRole {
+                column: "role".to_string(),
+            },
         ]);
 
         let sql = manager.expr_to_sql(&expr, &context);
@@ -1668,7 +1731,9 @@ mod tests {
     fn test_encryption_key_create() {
         let manager = ColumnEncryptionManager::new();
 
-        let key = manager.create_key("key1", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        let key = manager
+            .create_key("key1", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
         assert_eq!(key.id, "key1");
         assert_eq!(key.version, 1);
@@ -1679,7 +1744,9 @@ mod tests {
     fn test_encryption_key_rotate() {
         let manager = ColumnEncryptionManager::new();
 
-        manager.create_key("key1", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("key1", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
         let rotated = manager.rotate_key("key1").unwrap();
 
         assert_eq!(rotated.version, 2);
@@ -1695,7 +1762,9 @@ mod tests {
     #[test]
     fn test_encryption_policy() {
         let manager = ColumnEncryptionManager::new();
-        manager.create_key("pii_key", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("pii_key", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
         let policy = ColumnEncryptionPolicy {
             database: "app".to_string(),
@@ -1718,7 +1787,9 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt() {
         let manager = ColumnEncryptionManager::new();
-        manager.create_key("test_key", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("test_key", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
         let plaintext = b"sensitive data";
         let encrypted = manager.encrypt(plaintext, "test_key").unwrap();
@@ -1733,18 +1804,24 @@ mod tests {
     #[test]
     fn test_encrypt_with_policy() {
         let manager = ColumnEncryptionManager::new();
-        manager.create_key("col_key", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("col_key", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
-        manager.create_policy(ColumnEncryptionPolicy {
-            database: "db".to_string(),
-            table: "tbl".to_string(),
-            column: "secret".to_string(),
-            key_id: "col_key".to_string(),
-            algorithm: EncryptionAlgorithm::Aes256Gcm,
-            enabled: true,
-        }).unwrap();
+        manager
+            .create_policy(ColumnEncryptionPolicy {
+                database: "db".to_string(),
+                table: "tbl".to_string(),
+                column: "secret".to_string(),
+                key_id: "col_key".to_string(),
+                algorithm: EncryptionAlgorithm::Aes256Gcm,
+                enabled: true,
+            })
+            .unwrap();
 
-        let encrypted = manager.encrypt_column("db", "tbl", "secret", b"my secret").unwrap();
+        let encrypted = manager
+            .encrypt_column("db", "tbl", "secret", b"my secret")
+            .unwrap();
         let decrypted = manager.decrypt(&encrypted).unwrap();
 
         assert_eq!(decrypted, b"my secret");
@@ -1783,25 +1860,31 @@ mod tests {
     #[test]
     fn test_list_encryption_policies() {
         let manager = ColumnEncryptionManager::new();
-        manager.create_key("key1", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("key1", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
-        manager.create_policy(ColumnEncryptionPolicy {
-            database: "db".to_string(),
-            table: "users".to_string(),
-            column: "ssn".to_string(),
-            key_id: "key1".to_string(),
-            algorithm: EncryptionAlgorithm::Aes256Gcm,
-            enabled: true,
-        }).unwrap();
+        manager
+            .create_policy(ColumnEncryptionPolicy {
+                database: "db".to_string(),
+                table: "users".to_string(),
+                column: "ssn".to_string(),
+                key_id: "key1".to_string(),
+                algorithm: EncryptionAlgorithm::Aes256Gcm,
+                enabled: true,
+            })
+            .unwrap();
 
-        manager.create_policy(ColumnEncryptionPolicy {
-            database: "db".to_string(),
-            table: "users".to_string(),
-            column: "dob".to_string(),
-            key_id: "key1".to_string(),
-            algorithm: EncryptionAlgorithm::Aes256Gcm,
-            enabled: true,
-        }).unwrap();
+        manager
+            .create_policy(ColumnEncryptionPolicy {
+                database: "db".to_string(),
+                table: "users".to_string(),
+                column: "dob".to_string(),
+                key_id: "key1".to_string(),
+                algorithm: EncryptionAlgorithm::Aes256Gcm,
+                enabled: true,
+            })
+            .unwrap();
 
         let policies = manager.list_policies("db", "users");
         assert_eq!(policies.len(), 2);
@@ -1810,16 +1893,20 @@ mod tests {
     #[test]
     fn test_drop_encryption_policy() {
         let manager = ColumnEncryptionManager::new();
-        manager.create_key("key1", EncryptionAlgorithm::Aes256Gcm).unwrap();
+        manager
+            .create_key("key1", EncryptionAlgorithm::Aes256Gcm)
+            .unwrap();
 
-        manager.create_policy(ColumnEncryptionPolicy {
-            database: "db".to_string(),
-            table: "tbl".to_string(),
-            column: "col".to_string(),
-            key_id: "key1".to_string(),
-            algorithm: EncryptionAlgorithm::Aes256Gcm,
-            enabled: true,
-        }).unwrap();
+        manager
+            .create_policy(ColumnEncryptionPolicy {
+                database: "db".to_string(),
+                table: "tbl".to_string(),
+                column: "col".to_string(),
+                key_id: "key1".to_string(),
+                algorithm: EncryptionAlgorithm::Aes256Gcm,
+                enabled: true,
+            })
+            .unwrap();
 
         assert!(manager.drop_policy("db", "tbl", "col"));
         assert!(!manager.should_encrypt("db", "tbl", "col"));
@@ -1835,7 +1922,10 @@ mod tests {
 
         assert_eq!(context.user, "alice");
         assert_eq!(context.roles.len(), 2);
-        assert_eq!(context.session_vars.get("tenant_id"), Some(&RlsValue::Int64(42)));
+        assert_eq!(
+            context.session_vars.get("tenant_id"),
+            Some(&RlsValue::Int64(42))
+        );
     }
 
     #[test]

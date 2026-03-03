@@ -421,7 +421,8 @@ impl GossipProtocol {
                 if cluster_id == self.membership.cluster_id {
                     self.handle_join(node.clone());
                     // Send join ack with current membership
-                    let members: Vec<NodeMeta> = self.membership.members.values().cloned().collect();
+                    let members: Vec<NodeMeta> =
+                        self.membership.members.values().cloned().collect();
                     let ack = GossipMessage::JoinAck {
                         from: self.membership.local_node.node_id.clone(),
                         members,
@@ -443,7 +444,10 @@ impl GossipProtocol {
                 }
             }
 
-            GossipMessage::Leave { node_id, incarnation } => {
+            GossipMessage::Leave {
+                node_id,
+                incarnation,
+            } => {
                 if let Some(meta) = self.membership.members.get_mut(&node_id) {
                     if incarnation >= meta.incarnation {
                         meta.state = NodeState::Leaving;
@@ -771,7 +775,8 @@ mod tests {
 
         // Should forward ping to indirect target
         assert!(responses.iter().any(|(addr, msg)| match msg {
-            GossipMessage::Ping { sequence, .. } => *sequence == seq && *addr == target_indirect.gossip_addr,
+            GossipMessage::Ping { sequence, .. } =>
+                *sequence == seq && *addr == target_indirect.gossip_addr,
             _ => false,
         }));
 
@@ -793,7 +798,9 @@ mod tests {
 
         assert!(responses_ack.iter().any(|(addr, msg)| match msg {
             GossipMessage::Ack { from, sequence, .. } => {
-                *from == target_indirect.node_id && *sequence == seq && *addr == requester.gossip_addr
+                *from == target_indirect.node_id
+                    && *sequence == seq
+                    && *addr == requester.gossip_addr
             }
             _ => false,
         }));

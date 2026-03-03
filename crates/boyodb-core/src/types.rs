@@ -60,7 +60,10 @@ impl OwnedBuffer {
             return;
         }
         if len > cap {
-            warn!(len, cap, "OwnedBuffer.drop_vec received len > cap; skipping free to avoid UB");
+            warn!(
+                len,
+                cap, "OwnedBuffer.drop_vec received len > cap; skipping free to avoid UB"
+            );
             return;
         }
         unsafe {
