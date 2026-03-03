@@ -133,7 +133,8 @@ impl Default for SequenceMeta {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(untagged)]
 pub enum PrimitiveValue {
     Int64(i64),
     Int32(i32),
@@ -147,6 +148,126 @@ pub enum PrimitiveValue {
     TimestampMicros(i64),
     /// Date as days since Unix epoch
     Date32(i32),
+}
+
+// Custom deserializer to handle both old format {"type": "String", "value": "..."}
+// and new format {"String": "..."}
+impl<'de> serde::Deserialize<'de> for PrimitiveValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct PrimitiveValueVisitor;
+
+        impl<'de> Visitor<'de> for PrimitiveValueVisitor {
+            type Value = PrimitiveValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a PrimitiveValue")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<PrimitiveValue, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut type_name: Option<String> = None;
+                let mut value: Option<serde_json::Value> = None;
+                let mut direct_value: Option<(String, serde_json::Value)> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => {
+                            type_name = Some(map.next_value()?);
+                        }
+                        "value" => {
+                            value = Some(map.next_value()?);
+                        }
+                        // New format: {"String": "value"} or {"Int64": 123}
+                        _ => {
+                            let v: serde_json::Value = map.next_value()?;
+                            direct_value = Some((key, v));
+                        }
+                    }
+                }
+
+                // Old format: {"type": "String", "value": "..."}
+                if let (Some(t), Some(v)) = (type_name, value) {
+                    return match t.as_str() {
+                        "Int64" | "int64" => {
+                            let n = v.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?;
+                            Ok(PrimitiveValue::Int64(n))
+                        }
+                        "Int32" | "int32" => {
+                            let n = v.as_i64().ok_or_else(|| de::Error::custom("expected i32"))? as i32;
+                            Ok(PrimitiveValue::Int32(n))
+                        }
+                        "UInt64" | "uint64" => {
+                            let n = v.as_u64().ok_or_else(|| de::Error::custom("expected u64"))?;
+                            Ok(PrimitiveValue::UInt64(n))
+                        }
+                        "UInt32" | "uint32" => {
+                            let n = v.as_u64().ok_or_else(|| de::Error::custom("expected u32"))? as u32;
+                            Ok(PrimitiveValue::UInt32(n))
+                        }
+                        "Float64" | "float64" => {
+                            let n = v.as_f64().ok_or_else(|| de::Error::custom("expected f64"))?;
+                            Ok(PrimitiveValue::Float64(n))
+                        }
+                        "Float32" | "float32" => {
+                            let n = v.as_f64().ok_or_else(|| de::Error::custom("expected f32"))? as f32;
+                            Ok(PrimitiveValue::Float32(n))
+                        }
+                        "String" | "string" => {
+                            let s = v.as_str().ok_or_else(|| de::Error::custom("expected string"))?;
+                            Ok(PrimitiveValue::String(s.to_string()))
+                        }
+                        "Boolean" | "boolean" | "bool" => {
+                            let b = v.as_bool().ok_or_else(|| de::Error::custom("expected bool"))?;
+                            Ok(PrimitiveValue::Boolean(b))
+                        }
+                        "TimestampMicros" | "timestamp_micros" => {
+                            let n = v.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?;
+                            Ok(PrimitiveValue::TimestampMicros(n))
+                        }
+                        "Date32" | "date32" => {
+                            let n = v.as_i64().ok_or_else(|| de::Error::custom("expected i32"))? as i32;
+                            Ok(PrimitiveValue::Date32(n))
+                        }
+                        _ => Err(de::Error::unknown_variant(&t, &[
+                            "Int64", "Int32", "UInt64", "UInt32", "Float64", "Float32",
+                            "String", "Boolean", "TimestampMicros", "Date32"
+                        ])),
+                    };
+                }
+
+                // New format: {"String": "value"}
+                if let Some((key, val)) = direct_value {
+                    return match key.as_str() {
+                        "Int64" => Ok(PrimitiveValue::Int64(val.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?)),
+                        "Int32" => Ok(PrimitiveValue::Int32(val.as_i64().ok_or_else(|| de::Error::custom("expected i32"))? as i32)),
+                        "UInt64" => Ok(PrimitiveValue::UInt64(val.as_u64().ok_or_else(|| de::Error::custom("expected u64"))?)),
+                        "UInt32" => Ok(PrimitiveValue::UInt32(val.as_u64().ok_or_else(|| de::Error::custom("expected u32"))? as u32)),
+                        "Float64" => Ok(PrimitiveValue::Float64(val.as_f64().ok_or_else(|| de::Error::custom("expected f64"))?)),
+                        "Float32" => Ok(PrimitiveValue::Float32(val.as_f64().ok_or_else(|| de::Error::custom("expected f32"))? as f32)),
+                        "String" => Ok(PrimitiveValue::String(val.as_str().ok_or_else(|| de::Error::custom("expected string"))?.to_string())),
+                        "Boolean" => Ok(PrimitiveValue::Boolean(val.as_bool().ok_or_else(|| de::Error::custom("expected bool"))?)),
+                        "TimestampMicros" => Ok(PrimitiveValue::TimestampMicros(val.as_i64().ok_or_else(|| de::Error::custom("expected i64"))?)),
+                        "Date32" => Ok(PrimitiveValue::Date32(val.as_i64().ok_or_else(|| de::Error::custom("expected i32"))? as i32)),
+                        _ => Err(de::Error::unknown_variant(&key, &[
+                            "Int64", "Int32", "UInt64", "UInt32", "Float64", "Float32",
+                            "String", "Boolean", "TimestampMicros", "Date32"
+                        ])),
+                    };
+                }
+
+                Err(de::Error::custom("expected type/value or variant name"))
+            }
+        }
+
+        deserializer.deserialize_map(PrimitiveValueVisitor)
+    }
 }
 
 impl PrimitiveValue {
