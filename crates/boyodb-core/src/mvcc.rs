@@ -432,7 +432,16 @@ pub trait MvccVisibility {
 
     /// Check if this entry is visible to a snapshot
     fn is_visible_to(&self, snapshot: &Snapshot) -> bool {
-        let created_txn = self.created_txn().unwrap_or(0);
+        // Entries without created_txn were created outside of any transaction
+        // and are automatically visible to all transactions (they're committed)
+        let created_txn = match self.created_txn() {
+            Some(txn) => txn,
+            None => {
+                // No transaction context - check if deleted
+                return !snapshot.is_deleted(self.deleted_txn(), self.deleted_version());
+            }
+        };
+
         let created_version = self.created_version();
 
         // Check if creation is visible

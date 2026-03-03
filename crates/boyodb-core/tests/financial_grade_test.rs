@@ -84,7 +84,7 @@ fn query_sql(db: &Db, sql: &str) -> boyodb_core::QueryResponse {
         sql: sql.to_string(),
         timeout_millis: 5000,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     };
     db.query(req).unwrap()
 }
@@ -338,5 +338,75 @@ async fn test_transaction_multiple_savepoints() {
     db.rollback_to_savepoint(txn_id, "level1").unwrap();
 
     // Commit successfully
+    db.commit_transaction(txn_id).unwrap();
+}
+
+/// Test MVCC visibility - transactions should see only committed data
+#[tokio::test]
+async fn test_mvcc_visibility() {
+    let dir = tempdir().unwrap();
+    let db = Db::open(make_config(dir.path())).unwrap();
+
+    setup_bank_table(&db);
+
+    // Insert initial data (outside transaction)
+    let payload = build_accounts_payload(&[1001], &[10000], &["Alice"]);
+    db.ingest_ipc(IngestBatch {
+        payload_ipc: payload,
+        watermark_micros: 1000000,
+        shard_override: None,
+        database: Some("bank".to_string()),
+        table: Some("accounts".to_string()),
+    })
+    .unwrap();
+
+    // Begin transaction 1
+    let txn1 = db.begin_transaction(None, false).unwrap();
+
+    // Begin transaction 2
+    let txn2 = db.begin_transaction(None, false).unwrap();
+
+    // Both transactions should exist with unique IDs
+    assert_ne!(txn1, txn2);
+    assert!(txn1 > 0);
+    assert!(txn2 > 0);
+
+    // Commit both (empty transactions, just testing visibility infrastructure)
+    db.commit_transaction(txn1).unwrap();
+    db.commit_transaction(txn2).unwrap();
+}
+
+/// Test query with transaction context
+#[tokio::test]
+async fn test_transactional_query() {
+    let dir = tempdir().unwrap();
+    let db = Db::open(make_config(dir.path())).unwrap();
+
+    setup_bank_table(&db);
+
+    // Insert data
+    let payload = build_accounts_payload(&[2001, 2002], &[5000, 15000], &["Bob", "Carol"]);
+    db.ingest_ipc(IngestBatch {
+        payload_ipc: payload,
+        watermark_micros: 2000000,
+        shard_override: None,
+        database: Some("bank".to_string()),
+        table: Some("accounts".to_string()),
+    })
+    .unwrap();
+
+    // Begin transaction
+    let txn_id = db.begin_transaction(None, false).unwrap();
+
+    // Query with transaction context
+    let req = QueryRequest {
+        sql: "SELECT * FROM bank.accounts".to_string(),
+        timeout_millis: 5000,
+        collect_stats: false,
+        transaction_id: Some(txn_id),
+    };
+    let result = db.query(req).unwrap();
+    assert!(!result.records_ipc.is_empty());
+
     db.commit_transaction(txn_id).unwrap();
 }

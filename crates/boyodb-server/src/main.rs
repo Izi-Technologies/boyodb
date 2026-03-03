@@ -13,6 +13,7 @@ use boyodb_core::{
     DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest, Privilege,
     PrivilegeTarget, QueryRequest, SqlStatement, SqlValue, UpdateCommand,
 };
+use boyodb_core::cluster::ReplicationState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Seek, Write};
@@ -1409,6 +1410,63 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         });
 
         Some(manager)
+    } else {
+        None
+    };
+
+    // Initialize ReplicationState for cluster mode
+    let replication_state: Option<Arc<ReplicationState>> = if let Some(ref cluster) = cluster_manager {
+        let node_id = boyodb_core::cluster::NodeId(
+            cfg.node_id.clone().unwrap_or_else(|| "node-1".to_string()),
+        );
+        // Use a port offset from bind_addr for replication (e.g., bind_addr + 100)
+        let replication_port = cfg
+            .bind_addr
+            .split(':')
+            .nth(1)
+            .and_then(|p| p.parse::<u16>().ok())
+            .map(|p| p + 100)
+            .unwrap_or(8865);
+        let replication_addr: Option<std::net::SocketAddr> =
+            format!("0.0.0.0:{}", replication_port).parse().ok();
+
+        let state = Arc::new(ReplicationState::new(node_id, db.clone(), replication_addr));
+
+        // Start replication listener in background
+        if let Some(addr) = replication_addr.as_ref() {
+            let state_clone = state.clone();
+            let (ack_tx, _ack_rx) = tokio::sync::mpsc::channel(1000);
+            tokio::spawn(async move {
+                if let Err(e) = state_clone.start_listener(ack_tx).await {
+                    tracing::warn!("replication listener error: {}", e);
+                }
+            });
+            info!(addr = %addr, "replication listener started");
+        }
+
+        // Subscribe to leader changes
+        let state_for_leader = state.clone();
+        let cluster_for_leader = cluster.clone();
+        tokio::spawn(async move {
+            let mut last_is_leader = false;
+            loop {
+                let is_leader = cluster_for_leader.is_leader();
+                if is_leader != last_is_leader {
+                    let term = cluster_for_leader.current_term();
+                    if is_leader {
+                        state_for_leader.become_leader(term).await;
+                        tracing::info!(term, "node became leader, replication coordinator active");
+                    } else {
+                        state_for_leader.become_follower(term).await;
+                        tracing::info!(term, "node became follower");
+                    }
+                    last_is_leader = is_leader;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+
+        Some(state)
     } else {
         None
     };
@@ -5116,47 +5174,141 @@ where
         }
         DdlCommand::RecoverToTimestamp { timestamp } => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
-            // PITR recovery requires superuser privileges and proper backup infrastructure
+            let db = db.clone();
+            let ts = timestamp.clone();
+            let result = blocking(move || {
+                db.recover_to_timestamp(&ts)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             let msg = format!(
-                "PITR to timestamp {} not yet implemented - requires backup infrastructure",
-                timestamp
+                "Recovery complete. Recovered to LSN {}, timestamp {}. {} WAL segments replayed ({} bytes). Path: {:?}",
+                result.recovered_lsn,
+                result.recovered_timestamp,
+                result.wal_segments_replayed,
+                result.wal_bytes_replayed,
+                result.recovery_path
             );
-            Ok(Response::ok_message(&msg))
+            if !result.warnings.is_empty() {
+                let warnings = result.warnings.join("; ");
+                Ok(Response::ok_message(&format!(
+                    "{}. Warnings: {}",
+                    msg, warnings
+                )))
+            } else {
+                Ok(Response::ok_message(&msg))
+            }
         }
         DdlCommand::RecoverToLsn { lsn } => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let result = blocking(move || {
+                db.recover_to_lsn(lsn)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             let msg = format!(
-                "PITR to LSN {} not yet implemented - requires backup infrastructure",
-                lsn
+                "Recovery complete. Recovered to LSN {}, timestamp {}. {} WAL segments replayed ({} bytes). Path: {:?}",
+                result.recovered_lsn,
+                result.recovered_timestamp,
+                result.wal_segments_replayed,
+                result.wal_bytes_replayed,
+                result.recovery_path
             );
-            Ok(Response::ok_message(&msg))
+            if !result.warnings.is_empty() {
+                let warnings = result.warnings.join("; ");
+                Ok(Response::ok_message(&format!(
+                    "{}. Warnings: {}",
+                    msg, warnings
+                )))
+            } else {
+                Ok(Response::ok_message(&msg))
+            }
         }
         DdlCommand::CreateBackup { label } => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
-            let label_str = label.unwrap_or_else(|| "unlabeled".to_string());
+            let db = db.clone();
+            let backup_info = blocking(move || {
+                db.create_backup(label)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             let msg = format!(
-                "Backup '{}' not yet implemented - requires backup infrastructure",
-                label_str
+                "Backup created: id='{}', label={:?}, size={} bytes, LSN range {}-{}, path='{}'",
+                backup_info.id,
+                backup_info.label,
+                backup_info.size_bytes,
+                backup_info.start_lsn,
+                backup_info.end_lsn,
+                backup_info.backup_path
             );
             Ok(Response::ok_message(&msg))
         }
         DdlCommand::ShowBackups => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
-            Ok(Response::ok_message(
-                "No backups available - backup infrastructure not yet configured",
-            ))
+            let db = db.clone();
+            let backups = blocking(move || {
+                db.list_backups()
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if backups.is_empty() {
+                Ok(Response::ok_message("No backups available"))
+            } else {
+                let lines: Vec<String> = backups
+                    .iter()
+                    .map(|b| {
+                        format!(
+                            "{} | {} | {} bytes | LSN {}-{} | {}",
+                            b.id,
+                            b.label.as_deref().unwrap_or("(no label)"),
+                            b.size_bytes,
+                            b.start_lsn,
+                            b.end_lsn,
+                            b.backup_path
+                        )
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Available backups ({}):\n{}",
+                    backups.len(),
+                    lines.join("\n")
+                )))
+            }
         }
         DdlCommand::ShowWalStatus => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
-            Ok(Response::ok_message("WAL archiving status: not configured"))
+            let db = db.clone();
+            let status = blocking(move || {
+                db.get_wal_status()
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            let msg = format!(
+                "WAL Archive Status:\n  Path: {:?}\n  Segments: {}\n  Total size: {} bytes\n  LSN range: {:?} - {:?}\n  Timestamp range: {:?} - {:?}",
+                status.archive_path,
+                status.segment_count,
+                status.total_bytes,
+                status.oldest_lsn,
+                status.newest_lsn,
+                status.oldest_timestamp,
+                status.newest_timestamp
+            );
+            Ok(Response::ok_message(&msg))
         }
         DdlCommand::DeleteBackup { backup_id } => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
-            let msg = format!(
-                "Backup '{}' deletion not yet implemented - requires backup infrastructure",
+            let db = db.clone();
+            let id = backup_id.clone();
+            blocking(move || {
+                db.delete_backup(&id)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!(
+                "Backup '{}' deleted successfully",
                 backup_id
-            );
-            Ok(Response::ok_message(&msg))
+            )))
         }
     }
 }

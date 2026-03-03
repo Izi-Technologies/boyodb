@@ -144,7 +144,7 @@ async fn test_automated_tiering() {
         sql: "SELECT * FROM auto_tier".into(),
         timeout_millis: 1000,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     };
     let resp = db.query(req).unwrap();
     let batches = boyodb_core::engine::read_ipc_batches(&resp.records_ipc).unwrap();

@@ -31,6 +31,7 @@
 //!   --seed-nodes "10.0.0.1:8766,10.0.0.2:8766"
 //! ```
 
+pub mod distributed_recovery;
 pub mod election;
 pub mod failure_detector;
 pub mod gossip;
@@ -38,6 +39,11 @@ pub mod messages;
 pub mod replication;
 
 // Re-export main types
+pub use distributed_recovery::{
+    ClusterRecoveryStatus, CrashRecoveryMetadata, DistributedRecoveryConfig,
+    DistributedRecoveryManager, LocalRecoveryProtocol, NodeRecoveryInfo, NodeRecoveryState,
+    RecoveryAction, RecoveryResult,
+};
 pub use election::{ElectionConfig, ElectionState};
 pub use failure_detector::PhiAccrualDetector;
 pub use gossip::{GossipConfig, GossipProtocol, Membership};
@@ -47,6 +53,7 @@ pub use messages::{
 };
 pub use replication::{
     create_write_operation, start_replication_listener, ReplicationCoordinator, ReplicationHandler,
+    ReplicationState,
 };
 
 use crate::engine::{Db, EngineError};

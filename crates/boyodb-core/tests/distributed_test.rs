@@ -255,7 +255,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT * FROM test_dist".into(),
         timeout_millis: 5000,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     });
     println!("Test: Local query on db2: {:?}", local_resp.is_ok());
     assert!(local_resp.is_ok(), "db2 should be able to query locally");
@@ -264,7 +264,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT COUNT(*) FROM test_dist".into(),
         timeout_millis: 5000,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     });
     println!("Test: Local COUNT(*) on db2: {:?}", local_count.is_ok());
     assert!(local_count.is_ok(), "db2 should be able to COUNT locally");

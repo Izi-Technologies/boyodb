@@ -25,6 +25,9 @@ impl BoyodbStatus {
             Err(crate::engine::EngineError::Timeout(_)) => BoyodbStatus::Timeout,
             Err(crate::engine::EngineError::Remote(_)) => BoyodbStatus::Internal,
             Err(crate::engine::EngineError::Configuration(_)) => BoyodbStatus::Internal,
+            Err(crate::engine::EngineError::ConstraintViolation(_)) => {
+                BoyodbStatus::InvalidArgument
+            }
         }
     }
 }

@@ -459,6 +459,183 @@ pub fn create_write_operation(
     }
 }
 
+// ============================================================================
+// Unified Replication State for Server Integration
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// Unified replication state that manages both leader (coordinator) and follower (handler) roles.
+/// This is the main integration point for server-level write replication.
+pub struct ReplicationState {
+    /// The replication coordinator (used when this node is the leader).
+    /// Uses tokio Mutex to allow holding across await points.
+    coordinator: tokio::sync::Mutex<Option<ReplicationCoordinator>>,
+    /// The replication handler (used when this node is a follower).
+    handler: Option<Arc<ReplicationHandler>>,
+    /// Node ID for this server.
+    node_id: NodeId,
+    /// Database instance.
+    db: Arc<Db>,
+    /// Current election term for fencing.
+    current_term: AtomicU64,
+    /// Fencing token for write validation.
+    fencing_token: AtomicU64,
+    /// Write ID counter for unique operation IDs.
+    write_id_counter: AtomicU64,
+    /// Replication listener address.
+    replication_addr: Option<SocketAddr>,
+    /// Shutdown flag.
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ReplicationState {
+    /// Create a new replication state.
+    pub fn new(
+        node_id: NodeId,
+        db: Arc<Db>,
+        replication_addr: Option<SocketAddr>,
+    ) -> Self {
+        let handler = if replication_addr.is_some() {
+            Some(Arc::new(ReplicationHandler::new(node_id.clone(), db.clone())))
+        } else {
+            None
+        };
+
+        ReplicationState {
+            coordinator: tokio::sync::Mutex::new(None),
+            handler,
+            node_id,
+            db,
+            current_term: AtomicU64::new(0),
+            fencing_token: AtomicU64::new(0),
+            write_id_counter: AtomicU64::new(0),
+            replication_addr,
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Called when this node becomes the leader.
+    pub async fn become_leader(&self, term: u64) {
+        tracing::info!(term, "node becoming leader, initializing replication coordinator");
+        self.current_term.store(term, AtomicOrdering::SeqCst);
+        self.fencing_token.fetch_add(1, AtomicOrdering::SeqCst);
+
+        let mut coordinator = self.coordinator.lock().await;
+        *coordinator = Some(ReplicationCoordinator::new(self.node_id.clone()));
+    }
+
+    /// Called when this node becomes a follower.
+    pub async fn become_follower(&self, term: u64) {
+        tracing::info!(term, "node becoming follower, clearing coordinator");
+        self.current_term.store(term, AtomicOrdering::SeqCst);
+
+        let mut coordinator = self.coordinator.lock().await;
+        *coordinator = None;
+    }
+
+    /// Add a follower to replicate to (leader only).
+    pub async fn add_follower(&self, follower_id: NodeId, addr: SocketAddr) {
+        let mut coordinator = self.coordinator.lock().await;
+        if let Some(ref mut coord) = *coordinator {
+            coord.add_follower(follower_id, addr);
+        }
+    }
+
+    /// Remove a follower (leader only).
+    pub async fn remove_follower(&self, follower_id: &NodeId) {
+        let mut coordinator = self.coordinator.lock().await;
+        if let Some(ref mut coord) = *coordinator {
+            coord.remove_follower(follower_id);
+        }
+    }
+
+    /// Get the next write ID.
+    fn next_write_id(&self) -> u64 {
+        self.write_id_counter.fetch_add(1, AtomicOrdering::SeqCst)
+    }
+
+    /// Replicate an ingest operation to followers.
+    pub async fn replicate_ingest(
+        &self,
+        database: &str,
+        table: &str,
+        ipc_data: &[u8],
+        watermark_micros: u64,
+    ) -> Result<usize, EngineError> {
+        let mut coordinator = self.coordinator.lock().await;
+        if let Some(ref mut coord) = *coordinator {
+            let operation = create_write_operation(
+                self.next_write_id(),
+                self.current_term.load(AtomicOrdering::SeqCst),
+                self.fencing_token.load(AtomicOrdering::SeqCst),
+                database,
+                table,
+                WritePayload::Ingest {
+                    ipc_data: ipc_data.to_vec(),
+                    watermark_micros,
+                },
+            );
+            Ok(coord.replicate_write(operation).await)
+        } else {
+            // Not a leader, no replication needed
+            Ok(0)
+        }
+    }
+
+    /// Replicate a DDL operation (CREATE DATABASE, CREATE TABLE, etc.).
+    pub async fn replicate_ddl(
+        &self,
+        database: &str,
+        table: &str,
+        payload: WritePayload,
+    ) -> Result<usize, EngineError> {
+        let mut coordinator = self.coordinator.lock().await;
+        if let Some(ref mut coord) = *coordinator {
+            let operation = create_write_operation(
+                self.next_write_id(),
+                self.current_term.load(AtomicOrdering::SeqCst),
+                self.fencing_token.load(AtomicOrdering::SeqCst),
+                database,
+                table,
+                payload,
+            );
+            Ok(coord.replicate_write(operation).await)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Check if this node is currently the leader (has a coordinator).
+    pub async fn is_leader(&self) -> bool {
+        self.coordinator.lock().await.is_some()
+    }
+
+    /// Get the replication handler for follower mode.
+    pub fn handler(&self) -> Option<Arc<ReplicationHandler>> {
+        self.handler.clone()
+    }
+
+    /// Get the shutdown flag.
+    pub fn shutdown_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.shutdown.clone()
+    }
+
+    /// Start the replication listener (for followers).
+    pub async fn start_listener(&self, ack_tx: mpsc::Sender<WriteAck>) -> Result<(), EngineError> {
+        if let (Some(addr), Some(ref handler)) = (self.replication_addr, &self.handler) {
+            start_replication_listener(addr, handler.clone(), ack_tx, self.shutdown.clone()).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Signal shutdown.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

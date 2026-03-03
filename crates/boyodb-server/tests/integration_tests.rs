@@ -161,6 +161,7 @@ mod server_tests {
                 sql: "SELECT * FROM test_db.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+                transaction_id: None,
             };
             let result = db.query(request).unwrap();
             assert!(!result.records_ipc.is_empty());
@@ -198,6 +199,7 @@ mod server_tests {
                     sql: "SELECT COUNT(*) FROM agg_test.data".to_string(),
                     timeout_millis: 5000,
                     collect_stats: false,
+                    transaction_id: None,
                 })
                 .unwrap();
             assert!(!result.records_ipc.is_empty());
@@ -209,6 +211,7 @@ mod server_tests {
                         .to_string(),
                     timeout_millis: 5000,
                     collect_stats: false,
+                    transaction_id: None,
                 })
                 .unwrap();
             assert!(!result.records_ipc.is_empty());
@@ -298,6 +301,7 @@ mod server_tests {
                 sql: "DROP TABLE IF EXISTS ddl_test.test_table".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+                transaction_id: None,
             });
 
             // DROP DATABASE (via SQL)
@@ -305,6 +309,7 @@ mod server_tests {
                 sql: "DROP DATABASE IF EXISTS ddl_test".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+                transaction_id: None,
             });
         });
     }

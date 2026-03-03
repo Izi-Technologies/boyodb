@@ -48,6 +48,7 @@ pub mod pitr;
 pub mod transaction;
 pub mod undo_log;
 pub mod wal_archive;
+pub mod optimizer_integration;
 
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,

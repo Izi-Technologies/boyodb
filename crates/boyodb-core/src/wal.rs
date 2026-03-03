@@ -127,7 +127,10 @@ impl Wal {
         let next_lsn = recovered_lsn.map(|l| l + 1).unwrap_or(1);
         let file_start_lsn = recovered_lsn.unwrap_or(0) + 1;
 
-        info!("WAL opened: recovered_lsn={:?}, next_lsn={}", recovered_lsn, next_lsn);
+        info!(
+            "WAL opened: recovered_lsn={:?}, next_lsn={}",
+            recovered_lsn, next_lsn
+        );
 
         Ok(Wal {
             writer: BufWriter::new(file),
@@ -171,7 +174,8 @@ impl Wal {
 
                     // Also check for explicit LSN in checkpoint records
                     if let Some(lsn) = Self::extract_lsn_from_record(&line) {
-                        max_checkpoint_lsn = Some(max_checkpoint_lsn.map(|m| m.max(lsn)).unwrap_or(lsn));
+                        max_checkpoint_lsn =
+                            Some(max_checkpoint_lsn.map(|m| m.max(lsn)).unwrap_or(lsn));
                     }
                 }
             }
@@ -184,8 +188,10 @@ impl Wal {
             None => None,
         };
 
-        info!("Recovered LSN from WAL scan: {:?} (records={}, checkpoint_lsn={:?})",
-            recovered, total_records, max_checkpoint_lsn);
+        info!(
+            "Recovered LSN from WAL scan: {:?} (records={}, checkpoint_lsn={:?})",
+            recovered, total_records, max_checkpoint_lsn
+        );
 
         Ok(recovered)
     }
@@ -201,7 +207,11 @@ impl Wal {
         // Try to parse as JSON and extract LSN from checkpoint records
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(parts[1]) {
             // Check for checkpoint LSN
-            if let Some(lsn) = value.get("Checkpoint").and_then(|c| c.get("lsn")).and_then(|l| l.as_u64()) {
+            if let Some(lsn) = value
+                .get("Checkpoint")
+                .and_then(|c| c.get("lsn"))
+                .and_then(|l| l.as_u64())
+            {
                 return Some(lsn);
             }
         }

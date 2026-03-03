@@ -65,6 +65,153 @@ pub enum EngineError {
     Remote(String),
     #[error("configuration error: {0}")]
     Configuration(String),
+    #[error("constraint violation: {0}")]
+    ConstraintViolation(String),
+}
+
+/// Data provider for constraint validation that queries existing data from the engine
+struct EngineDataProvider<'a> {
+    engine: &'a Db,
+    database: String,
+}
+
+impl<'a> crate::constraint_validator::ExistingDataProvider for EngineDataProvider<'a> {
+    fn key_exists(
+        &self,
+        database: &str,
+        table: &str,
+        columns: &[String],
+        key: &[u8],
+    ) -> Result<bool, EngineError> {
+        // Build a query to check for key existence
+        // This is a simplified implementation - production would use indexes
+        let columns_sql = columns.join(", ");
+        let sql = format!(
+            "SELECT COUNT(*) FROM {}.{} WHERE {} LIMIT 1",
+            database,
+            table,
+            columns
+                .iter()
+                .enumerate()
+                .map(|(i, col)| format!("{} IS NOT NULL", col))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        );
+
+        // For now, use a simple hash-based check
+        // In production, this would use B-tree index lookups
+        let entries = self.engine.table_entries(database, table)?;
+        if entries.is_empty() {
+            return Ok(false);
+        }
+
+        // Load data and check for key existence
+        // This is a basic implementation - would be optimized with indexes
+        let batches = self.engine.load_table_batches(database, table)?;
+        for batch in &batches {
+            let schema = batch.schema();
+            let col_indices: Vec<usize> = columns
+                .iter()
+                .filter_map(|c| schema.index_of(c).ok())
+                .collect();
+
+            if col_indices.len() != columns.len() {
+                continue; // Columns not found in this batch
+            }
+
+            for row_idx in 0..batch.num_rows() {
+                let mut row_key = Vec::new();
+                for &col_idx in &col_indices {
+                    let array = batch.column(col_idx);
+                    let value_bytes = array_value_to_bytes_helper(array, row_idx);
+                    row_key.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+                    row_key.extend_from_slice(&value_bytes);
+                }
+                if row_key == key {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn get_values(
+        &self,
+        database: &str,
+        table: &str,
+        columns: &[String],
+    ) -> Result<std::collections::HashSet<Vec<u8>>, EngineError> {
+        let mut values = std::collections::HashSet::new();
+        let batches = self.engine.load_table_batches(database, table)?;
+
+        for batch in &batches {
+            let schema = batch.schema();
+            let col_indices: Vec<usize> = columns
+                .iter()
+                .filter_map(|c| schema.index_of(c).ok())
+                .collect();
+
+            if col_indices.len() != columns.len() {
+                continue;
+            }
+
+            for row_idx in 0..batch.num_rows() {
+                let mut row_key = Vec::new();
+                for &col_idx in &col_indices {
+                    let array = batch.column(col_idx);
+                    let value_bytes = array_value_to_bytes_helper(array, row_idx);
+                    row_key.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+                    row_key.extend_from_slice(&value_bytes);
+                }
+                values.insert(row_key);
+            }
+        }
+        Ok(values)
+    }
+}
+
+/// Helper function to convert array value to bytes for constraint validation
+fn array_value_to_bytes_helper(array: &ArrayRef, row: usize) -> Vec<u8> {
+    if array.is_null(row) {
+        return vec![0u8]; // NULL marker
+    }
+
+    use arrow::datatypes::DataType;
+    match array.data_type() {
+        DataType::Int64 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                return arr.value(row).to_le_bytes().to_vec();
+            }
+        }
+        DataType::Int32 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                return arr.value(row).to_le_bytes().to_vec();
+            }
+        }
+        DataType::UInt64 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                return arr.value(row).to_le_bytes().to_vec();
+            }
+        }
+        DataType::UInt32 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                return arr.value(row).to_le_bytes().to_vec();
+            }
+        }
+        DataType::Utf8 => {
+            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                return arr.value(row).as_bytes().to_vec();
+            }
+        }
+        DataType::Boolean => {
+            if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+                return vec![if arr.value(row) { 1u8 } else { 0u8 }];
+            }
+        }
+        _ => {}
+    }
+    // Fallback: return empty for unsupported types
+    Vec::new()
 }
 
 /// Maximum length for database and table identifiers
@@ -1520,6 +1667,10 @@ pub struct Db {
     /// Constraint validator for data integrity
     pub constraint_validator:
         Option<std::sync::Arc<crate::constraint_validator::ConstraintValidator>>,
+    /// Recovery manager for PITR and backups (lazily initialized)
+    recovery_manager: parking_lot::RwLock<Option<std::sync::Arc<crate::pitr::RecoveryManager>>>,
+    /// Query optimizer context for cost-based optimization
+    pub optimizer_context: parking_lot::RwLock<crate::optimizer_integration::OptimizationContext>,
 }
 
 impl Drop for Db {
@@ -1747,6 +1898,11 @@ pub struct ExplainPlan {
     pub estimated_rows: Option<u64>,
     pub uses_parallel_scan: bool,
     pub uses_bloom_filter: bool,
+    // Cost-based optimizer estimates
+    pub estimated_cost: Option<f64>,
+    pub cpu_cost: Option<f64>,
+    pub io_cost: Option<f64>,
+    pub selectivity: Option<f64>,
 }
 
 impl Db {
@@ -1919,11 +2075,13 @@ impl Db {
                 let lock_manager = std::sync::Arc::new(crate::lock_manager::LockManager::new());
                 let undo_log = std::sync::Arc::new(crate::undo_log::UndoLog::new());
                 let mvcc_manager = std::sync::Arc::new(crate::mvcc::MvccManager::new());
-                Some(std::sync::Arc::new(crate::transaction::TransactionManager::new(
-                    lock_manager,
-                    undo_log,
-                    mvcc_manager,
-                )))
+                Some(std::sync::Arc::new(
+                    crate::transaction::TransactionManager::new(
+                        lock_manager,
+                        undo_log,
+                        mvcc_manager,
+                    ),
+                ))
             } else {
                 None
             },
@@ -1934,6 +2092,12 @@ impl Db {
             } else {
                 None
             },
+            // Recovery manager is lazily initialized when backup/PITR operations are used
+            recovery_manager: parking_lot::RwLock::new(None),
+            // Initialize query optimizer context
+            optimizer_context: parking_lot::RwLock::new(
+                crate::optimizer_integration::OptimizationContext::default(),
+            ),
         };
 
         db.spawn_background_compaction_loop();
@@ -2075,6 +2239,137 @@ impl Db {
         validator.validate_constraints(&table_meta, batch, None)
     }
 
+    // --- Backup and Point-in-Time Recovery (PITR) Methods ---
+
+    /// Get or create the recovery manager
+    fn get_or_create_recovery_manager(
+        &self,
+    ) -> Result<std::sync::Arc<crate::pitr::RecoveryManager>, EngineError> {
+        // Fast path: check if already initialized
+        {
+            let guard = self.recovery_manager.read();
+            if let Some(ref mgr) = *guard {
+                return Ok(mgr.clone());
+            }
+        }
+
+        // Slow path: create new recovery manager
+        let mut guard = self.recovery_manager.write();
+        // Double-check after acquiring write lock
+        if let Some(ref mgr) = *guard {
+            return Ok(mgr.clone());
+        }
+
+        // Create recovery manager with default paths based on data_dir
+        let config = crate::pitr::RecoveryConfig {
+            backup_path: self.cfg.data_dir.join("backups"),
+            wal_archive_path: self.cfg.data_dir.join("wal_archive"),
+            recovery_path: self.cfg.data_dir.join("recovery"),
+            verify_checksums: true,
+            apply_all_wal: true,
+            target_timestamp: None,
+            target_lsn: None,
+            target_name: None,
+            standby_mode: false,
+            parallel_workers: 4,
+        };
+
+        let mgr = std::sync::Arc::new(crate::pitr::RecoveryManager::new(config)?);
+        *guard = Some(mgr.clone());
+        Ok(mgr)
+    }
+
+    /// Create a backup of the database
+    ///
+    /// # Arguments
+    /// * `label` - Optional user-provided label for the backup
+    ///
+    /// # Returns
+    /// BackupInfo containing details about the created backup
+    pub fn create_backup(
+        &self,
+        label: Option<String>,
+    ) -> Result<crate::pitr::BackupInfo, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+
+        // Get current LSN from WAL
+        let current_lsn = self
+            .wal
+            .lock()
+            .map(|wal| Some(wal.current_lsn()))
+            .unwrap_or(None);
+
+        recovery_mgr.create_backup(&self.cfg.data_dir, label, current_lsn)
+    }
+
+    /// List all available backups
+    pub fn list_backups(&self) -> Result<Vec<crate::pitr::BackupInfo>, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+        Ok(recovery_mgr.list_backups())
+    }
+
+    /// Delete a specific backup
+    pub fn delete_backup(&self, backup_id: &str) -> Result<(), EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+        recovery_mgr.delete_backup(backup_id)
+    }
+
+    /// Get WAL archiving status
+    pub fn get_wal_status(&self) -> Result<crate::pitr::WalStatus, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+        recovery_mgr.wal_status()
+    }
+
+    /// Recover to a specific timestamp (Point-in-Time Recovery)
+    ///
+    /// # Arguments
+    /// * `timestamp` - Target timestamp in ISO 8601 format or microseconds since epoch
+    ///
+    /// # Returns
+    /// RecoveryResult with details about the recovery operation
+    pub fn recover_to_timestamp(
+        &self,
+        timestamp: &str,
+    ) -> Result<crate::pitr::RecoveryResult, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+
+        // Parse timestamp - try ISO 8601 first, then microseconds
+        let target_micros = if let Ok(micros) = timestamp.parse::<u64>() {
+            micros
+        } else {
+            // Try parsing ISO 8601 format
+            chrono::DateTime::parse_from_rfc3339(timestamp)
+                .or_else(|_| chrono::DateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S"))
+                .map_err(|e| {
+                    EngineError::InvalidArgument(format!(
+                        "Invalid timestamp format '{}': {}",
+                        timestamp, e
+                    ))
+                })?
+                .timestamp_micros() as u64
+        };
+
+        recovery_mgr.recover_to_time(target_micros)
+    }
+
+    /// Recover to a specific LSN (Log Sequence Number)
+    ///
+    /// # Arguments
+    /// * `lsn` - Target LSN to recover to
+    ///
+    /// # Returns
+    /// RecoveryResult with details about the recovery operation
+    pub fn recover_to_lsn(&self, lsn: u64) -> Result<crate::pitr::RecoveryResult, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+        recovery_mgr.recover_to_lsn(lsn)
+    }
+
+    /// Recover to the latest available state
+    pub fn recover_latest(&self) -> Result<crate::pitr::RecoveryResult, EngineError> {
+        let recovery_mgr = self.get_or_create_recovery_manager()?;
+        recovery_mgr.recover_latest()
+    }
+
     pub fn ingest_ipc(&self, batch: IngestBatch) -> Result<(), EngineError> {
         let payload_len = batch.payload_ipc.len() as u64;
         if batch.payload_ipc.is_empty() {
@@ -2114,6 +2409,38 @@ impl Db {
 
         // Validate IPC payload decodes and collect simple stats (min/max) for pruning.
         let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
+
+        // Validate constraints (NOT NULL, PRIMARY KEY, UNIQUE, CHECK, FOREIGN KEY)
+        if let Some(ref table_meta) = existing_table {
+            if !table_meta.constraints.is_empty() {
+                if let Some(ref validator) = self.constraint_validator {
+                    // Decode batch for constraint validation
+                    let batches = read_ipc_batches(&batch.payload_ipc)?;
+                    for batch in &batches {
+                        // Create a data provider for existing data lookups (for UNIQUE, FK validation)
+                        let data_provider = EngineDataProvider {
+                            engine: self,
+                            database: db_name.to_string(),
+                        };
+                        let result = validator.validate_constraints(
+                            table_meta,
+                            batch,
+                            Some(&data_provider),
+                        )?;
+                        if !result.valid {
+                            let violation_msgs: Vec<String> = result
+                                .violations
+                                .iter()
+                                .map(|v| format!("{}: {}", v.constraint_type, v.message))
+                                .collect();
+                            return Err(EngineError::ConstraintViolation(
+                                violation_msgs.join("; "),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         // Apply on-ingest deduplication if configured
         let deduped_payload = if let Some(ref dedup_config) = existing_table
@@ -2386,9 +2713,9 @@ impl Db {
         if let Some(tid) = txn_id {
             if let Some(ref txn_mgr) = self.transaction_manager {
                 // Verify transaction is active
-                let txn = txn_mgr
-                    .get_transaction(tid)
-                    .ok_or_else(|| EngineError::InvalidArgument(format!("Transaction {} not found", tid)))?;
+                let txn = txn_mgr.get_transaction(tid).ok_or_else(|| {
+                    EngineError::InvalidArgument(format!("Transaction {} not found", tid))
+                })?;
                 if !txn.state.is_active() {
                     return Err(EngineError::InvalidArgument(format!(
                         "Transaction {} is not active (state: {:?})",
@@ -2397,7 +2724,13 @@ impl Db {
                 }
 
                 // Acquire exclusive lock on the table
-                txn_mgr.acquire_lock(tid, db_name, table_name, None, crate::lock_manager::LockMode::Exclusive)?;
+                txn_mgr.acquire_lock(
+                    tid,
+                    db_name,
+                    table_name,
+                    None,
+                    crate::lock_manager::LockMode::Exclusive,
+                )?;
             }
         }
 
@@ -2688,6 +3021,7 @@ impl Db {
                 manifest_version,
                 collect_stats,
                 query_start,
+                request.transaction_id,
             ),
         }
     }
@@ -3067,6 +3401,7 @@ impl Db {
                 manifest_version,
                 false,
                 query_start,
+                None, // Distributed queries don't support transactions yet
             ),
             _ => Err(EngineError::NotImplemented(
                 "Distributed execution supports Simple plans only".into(),
@@ -3086,7 +3421,18 @@ impl Db {
         _manifest_version: u64,
         collect_stats: bool,
         query_start: std::time::Instant,
+        transaction_id: Option<crate::transaction::TransactionId>,
     ) -> Result<QueryResponse, EngineError> {
+        // Create MVCC snapshot for visibility filtering if within a transaction
+        let mvcc_snapshot = if let Some(txn_id) = transaction_id {
+            if let Some(txn_mgr) = self.get_transaction_manager() {
+                txn_mgr.mvcc_manager.create_snapshot(txn_id).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let manifest = self
             .manifest
             .read()
@@ -3336,6 +3682,14 @@ impl Db {
             // Zone-map pruning using column_stats
             if !segment_matches_column_stats(e, &filter) {
                 continue;
+            }
+
+            // MVCC visibility filtering - skip segments not visible to this transaction
+            if let Some(ref snapshot) = mvcc_snapshot {
+                use crate::mvcc::MvccVisibility;
+                if !e.is_visible_to(snapshot) {
+                    continue;
+                }
             }
 
             matching.push(e.clone());
@@ -3667,6 +4021,17 @@ impl Db {
         let join_partition_bytes = self.cfg.join_partition_bytes;
         let join_max_partitions = self.cfg.join_max_partitions.max(1);
 
+        // Create MVCC snapshot for visibility filtering if within a transaction
+        let mvcc_snapshot = if let Some(txn_id) = request.transaction_id {
+            if let Some(txn_mgr) = self.get_transaction_manager() {
+                txn_mgr.mvcc_manager.create_snapshot(txn_id).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Parse the SQL to get JOIN information
         let parsed = match parse_sql(&request.sql)? {
             SqlStatement::Query(q) => q,
@@ -3698,10 +4063,11 @@ impl Db {
 
         let mut segments_scanned = 0usize;
 
-        // Load data from the left (main) table
-        let left_entries = self.table_entries(
+        // Load data from the left (main) table with MVCC visibility
+        let left_entries = self.table_entries_with_visibility(
             parsed.database.as_deref().unwrap_or("default"),
             parsed.table.as_deref().unwrap_or("dual"),
+            mvcc_snapshot.as_ref(),
         )?;
         segments_scanned += left_entries.len();
 
@@ -3718,7 +4084,11 @@ impl Db {
 
         // Iterate through all JOINs, chaining results
         for (join_idx, join) in parsed.joins.iter().enumerate() {
-            let right_entries = self.table_entries(&join.database, &join.table)?;
+            let right_entries = self.table_entries_with_visibility(
+                &join.database,
+                &join.table,
+                mvcc_snapshot.as_ref(),
+            )?;
             let right_size = Self::entries_total_bytes(&right_entries);
             let (left_bytes, left_schema) = if let Some((paths, schema)) = &current_spilled {
                 (Self::paths_total_bytes(paths)?, Some(schema.clone()))
@@ -4830,7 +5200,7 @@ impl Db {
             sql: left_sql,
             timeout_millis: request.timeout_millis,
             collect_stats: false,
-            transaction_id: None,
+            transaction_id: request.transaction_id, // Propagate transaction context
         };
         let left_response = self.query(left_request)?;
         check_timeout()?;
@@ -4858,7 +5228,7 @@ impl Db {
             sql: right_sql,
             timeout_millis: request.timeout_millis,
             collect_stats: false,
-            transaction_id: None,
+            transaction_id: request.transaction_id, // Propagate transaction context
         };
         let right_response = self.query(right_request)?;
         check_timeout()?;
@@ -4985,7 +5355,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: request.transaction_id, // Propagate transaction context
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -5019,7 +5389,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: request.transaction_id, // Propagate transaction context
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -5050,7 +5420,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: request.transaction_id, // Propagate transaction context
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -5164,7 +5534,7 @@ impl Db {
                 sql: request.sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: request.transaction_id, // Propagate transaction context
             });
         }
 
@@ -5571,7 +5941,7 @@ impl Db {
     }
 
     /// Load all data from a table as decoded RecordBatches without concatenating IPC bytes.
-    fn load_table_batches(
+    pub(crate) fn load_table_batches(
         &self,
         database: &str,
         table: &str,
@@ -5594,6 +5964,18 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Vec<ManifestEntry>, EngineError> {
+        self.table_entries_with_visibility(database, table, None)
+    }
+
+    /// Get table entries filtered by MVCC visibility
+    fn table_entries_with_visibility(
+        &self,
+        database: &str,
+        table: &str,
+        snapshot: Option<&crate::mvcc::Snapshot>,
+    ) -> Result<Vec<ManifestEntry>, EngineError> {
+        use crate::mvcc::MvccVisibility;
+
         let manifest = self
             .manifest
             .read()
@@ -5613,7 +5995,16 @@ impl Db {
                 } else {
                     &e.table
                 };
-                entry_db == database && entry_table == table
+                if entry_db != database || entry_table != table {
+                    return false;
+                }
+                // Apply MVCC visibility filter if snapshot provided
+                if let Some(snap) = snapshot {
+                    if !e.is_visible_to(snap) {
+                        return false;
+                    }
+                }
+                true
             })
             .cloned()
             .collect();
@@ -6339,6 +6730,32 @@ impl Db {
                 .collect()
         });
 
+        // Calculate cost estimates using optimizer cost model
+        let cost_params = crate::optimizer::CostModelParams::default();
+        let num_pages = total_bytes as f64 / cost_params.page_size as f64;
+        let io_cost = if uses_bloom {
+            // Index scan - mostly random reads
+            num_pages * cost_params.random_page_cost * 0.1 // Bloom filter reduces to ~10%
+        } else {
+            // Sequential scan
+            num_pages * cost_params.seq_page_cost
+        };
+
+        // Estimate rows based on segment count and average rows per segment (assumed ~10K)
+        let estimated_row_count = matching.len() as u64 * 10_000;
+        let estimated_rows = Some(estimated_row_count);
+        let cpu_cost = estimated_row_count as f64 * cost_params.cpu_tuple_cost;
+
+        // Calculate selectivity based on filters
+        let selectivity = if filters.is_empty() {
+            Some(1.0)
+        } else {
+            // Rough estimate: each filter reduces selectivity by ~50%
+            Some(0.5_f64.powi(filters.len() as i32))
+        };
+
+        let estimated_cost = Some(io_cost + cpu_cost);
+
         Ok(ExplainPlan {
             database: db.to_string(),
             table: table.to_string(),
@@ -6350,9 +6767,13 @@ impl Db {
             offset: filter.offset,
             segments_to_scan: matching.len(),
             total_bytes,
-            estimated_rows: None, // Row count not tracked in manifest
+            estimated_rows,
             uses_parallel_scan: matching.len() >= self.cfg.parallel_scan_threshold,
             uses_bloom_filter: uses_bloom,
+            estimated_cost,
+            cpu_cost: Some(cpu_cost),
+            io_cost: Some(io_cost),
+            selectivity,
         })
     }
 
@@ -6363,6 +6784,138 @@ impl Db {
             self.run_compaction_pass()?;
         }
         Ok(())
+    }
+
+    // ==========================================================================
+    // Query Optimizer Integration
+    // ==========================================================================
+
+    /// Update table statistics for the optimizer's cost model
+    pub fn update_optimizer_stats(&self, database: &str, table: &str) -> Result<(), EngineError> {
+        use crate::optimizer::{ColumnStatistics as OptimizerColStats, StatValue, TableStats};
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Collect statistics from manifest entries
+        let matching: Vec<&ManifestEntry> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.database == database && e.table == table)
+            .collect();
+
+        if matching.is_empty() {
+            return Ok(());
+        }
+
+        let total_bytes: u64 = matching.iter().map(|e| e.size_bytes).sum();
+        // Estimate rows based on average row size of 100 bytes
+        let estimated_rows = total_bytes / 100;
+
+        let mut stats = TableStats {
+            row_count: estimated_rows,
+            size_bytes: total_bytes,
+            segment_count: matching.len() as u64,
+            columns: std::collections::HashMap::new(),
+            last_updated: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        // Helper function to convert PrimitiveValue to StatValue
+        fn primitive_to_stat_value(
+            pv: &crate::replication::PrimitiveValue,
+        ) -> crate::optimizer::StatValue {
+            use crate::optimizer::StatValue;
+            use crate::replication::PrimitiveValue;
+            match pv {
+                PrimitiveValue::Int64(v) => StatValue::Int64(*v),
+                PrimitiveValue::Int32(v) => StatValue::Int64(*v as i64),
+                PrimitiveValue::UInt64(v) => StatValue::Int64(*v as i64),
+                PrimitiveValue::UInt32(v) => StatValue::Int64(*v as i64),
+                PrimitiveValue::Float64(v) => StatValue::Float64(*v),
+                PrimitiveValue::Float32(v) => StatValue::Float64(*v as f64),
+                PrimitiveValue::String(s) => StatValue::String(s.clone()),
+                PrimitiveValue::Boolean(b) => StatValue::Bool(*b),
+                PrimitiveValue::TimestampMicros(v) => StatValue::Int64(*v),
+                PrimitiveValue::Date32(v) => StatValue::Int64(*v as i64),
+            }
+        }
+
+        // Extract column statistics from segments
+        for entry in &matching {
+            if let Some(ref col_stats_map) = entry.column_stats {
+                for (col, col_stats) in col_stats_map {
+                    let entry_stats = stats
+                        .columns
+                        .entry(col.clone())
+                        .or_insert_with(OptimizerColStats::default);
+
+                    // Update min value
+                    if let Some(ref min) = col_stats.min {
+                        let min_val = primitive_to_stat_value(min);
+                        if entry_stats.min_value.is_none() {
+                            entry_stats.min_value = Some(min_val);
+                        }
+                    }
+
+                    // Update max value
+                    if let Some(ref max) = col_stats.max {
+                        let max_val = primitive_to_stat_value(max);
+                        if entry_stats.max_value.is_none() {
+                            entry_stats.max_value = Some(max_val);
+                        }
+                    }
+
+                    // Update distinct count (sum across segments)
+                    if let Some(distinct) = col_stats.distinct_count {
+                        entry_stats.distinct_count += distinct;
+                    }
+
+                    // Update null count (sum across segments)
+                    entry_stats.null_count += col_stats.null_count;
+                }
+            }
+        }
+
+        // Update the optimizer context
+        let mut optimizer_ctx = self.optimizer_context.write();
+        optimizer_ctx.update_table_stats(database, table, stats);
+
+        Ok(())
+    }
+
+    /// Enable or disable the query optimizer
+    pub fn set_optimizer_enabled(&self, enabled: bool) {
+        let mut optimizer_ctx = self.optimizer_context.write();
+        optimizer_ctx.enabled = enabled;
+    }
+
+    /// Check if the optimizer is enabled
+    pub fn is_optimizer_enabled(&self) -> bool {
+        let optimizer_ctx = self.optimizer_context.read();
+        optimizer_ctx.enabled
+    }
+
+    /// Generate an optimized physical plan for a query
+    pub fn optimize_query(
+        &self,
+        query: &crate::sql::ParsedQuery,
+    ) -> Result<crate::optimizer::PhysicalPlan, EngineError> {
+        let optimizer_ctx = self.optimizer_context.read();
+        optimizer_ctx.optimize_query(query)
+    }
+
+    /// Execute a physical plan and return results
+    pub fn execute_physical_plan(
+        &self,
+        plan: &crate::optimizer::PhysicalPlan,
+    ) -> Result<Vec<arrow_array::RecordBatch>, EngineError> {
+        let mut executor = crate::optimizer_integration::PhysicalPlanExecutor::new(self);
+        executor.execute(plan)
     }
 
     fn prune_by_retention(&self) -> Result<(), EngineError> {
@@ -11372,12 +11925,90 @@ impl Db {
         table: &str,
         where_clause: Option<&str>,
     ) -> Result<usize, EngineError> {
+        use crate::sql::{ForeignKeyAction, TableConstraint};
+
         let filter = parse_where_filter(where_clause)?;
         if let Some(clause) = where_clause {
             if !clause.trim().is_empty() && filter_is_empty(&filter) {
                 return Err(EngineError::InvalidArgument(
                     "unsupported WHERE clause for DELETE".into(),
                 ));
+            }
+        }
+
+        // Check for foreign key constraints that reference this table (ON DELETE RESTRICT)
+        let referencing_tables: Vec<(String, String, TableConstraint)> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            manifest
+                .tables
+                .iter()
+                .flat_map(|t| {
+                    t.constraints
+                        .iter()
+                        .filter_map(|c| {
+                            if let TableConstraint::ForeignKey {
+                                referenced_table,
+                                on_delete,
+                                ..
+                            } = c
+                            {
+                                // Check if this FK references our table
+                                let ref_table_full = if referenced_table.contains('.') {
+                                    referenced_table.clone()
+                                } else {
+                                    format!("{}.{}", t.database, referenced_table)
+                                };
+                                let target_full = format!("{}.{}", database, table);
+                                if ref_table_full == target_full || *referenced_table == table {
+                                    return Some((t.database.clone(), t.name.clone(), c.clone()));
+                                }
+                            }
+                            None
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+
+        // Check ON DELETE RESTRICT constraints
+        for (ref_db, ref_table, constraint) in &referencing_tables {
+            if let TableConstraint::ForeignKey {
+                columns,
+                referenced_columns,
+                on_delete,
+                name,
+                ..
+            } = constraint
+            {
+                if *on_delete == ForeignKeyAction::Restrict
+                    || *on_delete == ForeignKeyAction::NoAction
+                {
+                    // Check if any rows in the referencing table point to rows we're deleting
+                    let ref_batches = self.load_table_batches(ref_db, ref_table)?;
+                    if !ref_batches.is_empty() {
+                        // This is a simplified check - a production implementation would
+                        // check specific rows being deleted against FK values
+                        return Err(EngineError::ConstraintViolation(format!(
+                            "Cannot delete from {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON DELETE {})",
+                            database,
+                            table,
+                            name.as_deref().unwrap_or("unnamed"),
+                            ref_db,
+                            ref_table,
+                            match on_delete {
+                                ForeignKeyAction::Restrict => "RESTRICT",
+                                _ => "NO ACTION",
+                            }
+                        )));
+                    }
+                }
+                // TODO: Implement ON DELETE CASCADE - recursively delete referencing rows
+                // TODO: Implement ON DELETE SET NULL - set FK columns to NULL
+                // TODO: Implement ON DELETE SET DEFAULT - set FK columns to default values
             }
         }
 
@@ -11489,6 +12120,8 @@ impl Db {
         assignments: &[(String, SqlValue)],
         where_clause: Option<&str>,
     ) -> Result<usize, EngineError> {
+        use crate::sql::{ForeignKeyAction, TableConstraint};
+
         if assignments.is_empty() {
             return Err(EngineError::InvalidArgument(
                 "UPDATE requires at least one assignment".into(),
@@ -11500,6 +12133,95 @@ impl Db {
                 return Err(EngineError::InvalidArgument(
                     "unsupported WHERE clause for UPDATE".into(),
                 ));
+            }
+        }
+
+        // Get columns being updated
+        let updated_columns: HashSet<String> = assignments
+            .iter()
+            .map(|(col, _)| col.to_lowercase())
+            .collect();
+
+        // Check for foreign key constraints that reference this table's updated columns (ON UPDATE RESTRICT)
+        let referencing_tables: Vec<(String, String, TableConstraint)> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            manifest
+                .tables
+                .iter()
+                .flat_map(|t| {
+                    t.constraints
+                        .iter()
+                        .filter_map(|c| {
+                            if let TableConstraint::ForeignKey {
+                                referenced_table,
+                                referenced_columns,
+                                on_update,
+                                ..
+                            } = c
+                            {
+                                // Check if this FK references columns we're updating
+                                let ref_table_full = if referenced_table.contains('.') {
+                                    referenced_table.clone()
+                                } else {
+                                    format!("{}.{}", t.database, referenced_table)
+                                };
+                                let target_full = format!("{}.{}", database, table);
+
+                                if ref_table_full == target_full || *referenced_table == table {
+                                    // Check if any referenced column is being updated
+                                    let refs_updated = referenced_columns
+                                        .iter()
+                                        .any(|c| updated_columns.contains(&c.to_lowercase()));
+                                    if refs_updated {
+                                        return Some((
+                                            t.database.clone(),
+                                            t.name.clone(),
+                                            c.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+
+        // Check ON UPDATE RESTRICT constraints
+        for (ref_db, ref_table, constraint) in &referencing_tables {
+            if let TableConstraint::ForeignKey {
+                on_update, name, ..
+            } = constraint
+            {
+                if *on_update == ForeignKeyAction::Restrict
+                    || *on_update == ForeignKeyAction::NoAction
+                {
+                    // Check if any rows in the referencing table point to rows we're updating
+                    let ref_batches = self.load_table_batches(ref_db, ref_table)?;
+                    if !ref_batches.is_empty() {
+                        // This is a simplified check - production would check specific rows
+                        return Err(EngineError::ConstraintViolation(format!(
+                            "Cannot update {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON UPDATE {})",
+                            database,
+                            table,
+                            name.as_deref().unwrap_or("unnamed"),
+                            ref_db,
+                            ref_table,
+                            match on_update {
+                                ForeignKeyAction::Restrict => "RESTRICT",
+                                _ => "NO ACTION",
+                            }
+                        )));
+                    }
+                }
+                // TODO: Implement ON UPDATE CASCADE - update referencing rows
+                // TODO: Implement ON UPDATE SET NULL - set FK columns to NULL
+                // TODO: Implement ON UPDATE SET DEFAULT - set FK columns to default values
             }
         }
 
@@ -11761,6 +12483,16 @@ impl Db {
             .read()
             .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
         Ok(manifest.version)
+    }
+
+    /// Get the current WAL LSN (Log Sequence Number).
+    /// Returns 0 if WAL is not available or empty.
+    pub fn wal_lsn(&self) -> u64 {
+        self.wal
+            .lock()
+            .ok()
+            .map(|wal| wal.current_lsn())
+            .unwrap_or(0)
     }
 
     /// Convenience method to ingest IPC data with database and table parameters.
@@ -13414,7 +14146,7 @@ pub fn execute_query_with_ctes(
                 sql: cte_sql,
                 timeout_millis,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })?;
 
             // Store the result in the CTE context
@@ -13430,7 +14162,7 @@ pub fn execute_query_with_ctes(
         sql: main_query,
         timeout_millis,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     })
 }
 
@@ -17204,7 +17936,7 @@ fn execute_recursive_cte(
         sql: anchor_sql.clone(),
         timeout_millis,
         collect_stats: false,
-            transaction_id: None,
+        transaction_id: None,
     })?;
 
     if anchor_result.records_ipc.is_empty() {
@@ -19116,7 +19848,7 @@ mod tests {
                 sql: "SELECT name FROM testdb.users".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19173,7 +19905,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.metrics".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19230,7 +19962,7 @@ mod tests {
                 sql: "SELECT name FROM testdb.users WHERE name = 'alice'".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19295,7 +20027,7 @@ mod tests {
                 sql: "SELECT ts FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19354,7 +20086,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19413,7 +20145,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -20516,7 +21248,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -20589,7 +21321,7 @@ mod tests {
                 sql: "SELECT COUNT(*),MIN(value),MAX(value) FROM analytics.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -20762,7 +21494,7 @@ mod tests {
                 sql: "SELECT COUNT(*),SUM(value) FROM analytics.events GROUP BY route_id".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -20977,7 +21709,7 @@ mod tests {
                 sql: "SELECT tenant_id,value FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21253,7 +21985,7 @@ mod tests {
                 sql: "SELECT latency_ms FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21340,7 +22072,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21486,7 +22218,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21598,7 +22330,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21688,7 +22420,7 @@ mod tests {
                 sql: "SELECT DISTINCT tenant_id, route_id FROM test.data".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21769,7 +22501,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE event_time BETWEEN 200 AND 400".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21841,7 +22573,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE tenant_id IN (1, 3, 5)".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21871,7 +22603,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE route_id IN (20, 40)".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21943,7 +22675,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE tenant_id = 1 OR tenant_id = 3".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -21975,7 +22707,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -22089,7 +22821,7 @@ mod tests {
                 sql: "SELECT name FROM test.users WHERE name LIKE '%alice%'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -22104,7 +22836,7 @@ mod tests {
                 sql: "SELECT name FROM test.users WHERE name LIKE 'bob%'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 
@@ -22163,7 +22895,7 @@ mod tests {
                 sql: "SELECT status FROM test.accounts WHERE status = 'active'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
-            transaction_id: None,
+                transaction_id: None,
             })
             .unwrap();
 

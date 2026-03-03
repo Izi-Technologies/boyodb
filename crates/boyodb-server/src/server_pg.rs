@@ -175,15 +175,21 @@ impl BoyodbPgHandler {
         let read_only = upper.contains("READ ONLY");
 
         // Start the transaction
-        let txn_id = self.db.begin_transaction(isolation, read_only)
+        let txn_id = self
+            .db
+            .begin_transaction(isolation, read_only)
             .map_err(|e| format!("failed to begin transaction: {}", e))?;
 
         state.txn_id = Some(txn_id);
         state.isolation_level = isolation;
         state.read_only = read_only;
 
-        tracing::debug!("Started transaction {:?} (isolation={:?}, read_only={})",
-            txn_id, isolation, read_only);
+        tracing::debug!(
+            "Started transaction {:?} (isolation={:?}, read_only={})",
+            txn_id,
+            isolation,
+            read_only
+        );
 
         Ok(())
     }
@@ -192,10 +198,13 @@ impl BoyodbPgHandler {
     fn handle_commit(&self) -> Result<(), String> {
         let mut state = self.txn_state.lock().unwrap();
 
-        let txn_id = state.txn_id.take()
+        let txn_id = state
+            .txn_id
+            .take()
             .ok_or_else(|| "not in a transaction".to_string())?;
 
-        self.db.commit_transaction(txn_id)
+        self.db
+            .commit_transaction(txn_id)
             .map_err(|e| format!("failed to commit transaction: {}", e))?;
 
         state.isolation_level = None;
@@ -217,12 +226,18 @@ impl BoyodbPgHandler {
 
         if let Some(sp_name) = savepoint {
             // Rollback to savepoint (don't end the transaction)
-            self.db.rollback_to_savepoint(txn_id, sp_name)
+            self.db
+                .rollback_to_savepoint(txn_id, sp_name)
                 .map_err(|e| format!("failed to rollback to savepoint: {}", e))?;
-            tracing::debug!("Rolled back to savepoint '{}' in transaction {:?}", sp_name, txn_id);
+            tracing::debug!(
+                "Rolled back to savepoint '{}' in transaction {:?}",
+                sp_name,
+                txn_id
+            );
         } else {
             // Full rollback
-            self.db.rollback_transaction(txn_id)
+            self.db
+                .rollback_transaction(txn_id)
                 .map_err(|e| format!("failed to rollback transaction: {}", e))?;
             state.txn_id = None;
             state.isolation_level = None;
@@ -237,10 +252,12 @@ impl BoyodbPgHandler {
     fn handle_savepoint(&self, name: &str) -> Result<(), String> {
         let state = self.txn_state.lock().unwrap();
 
-        let txn_id = state.txn_id
+        let txn_id = state
+            .txn_id
             .ok_or_else(|| "not in a transaction".to_string())?;
 
-        self.db.create_savepoint(txn_id, name)
+        self.db
+            .create_savepoint(txn_id, name)
             .map_err(|e| format!("failed to create savepoint: {}", e))?;
 
         tracing::debug!("Created savepoint '{}' in transaction {:?}", name, txn_id);
@@ -252,10 +269,12 @@ impl BoyodbPgHandler {
     fn handle_release_savepoint(&self, name: &str) -> Result<(), String> {
         let state = self.txn_state.lock().unwrap();
 
-        let txn_id = state.txn_id
+        let txn_id = state
+            .txn_id
             .ok_or_else(|| "not in a transaction".to_string())?;
 
-        self.db.release_savepoint(txn_id, name)
+        self.db
+            .release_savepoint(txn_id, name)
             .map_err(|e| format!("failed to release savepoint: {}", e))?;
 
         tracing::debug!("Released savepoint '{}' in transaction {:?}", name, txn_id);
@@ -295,7 +314,8 @@ impl BoyodbPgHandler {
         }
 
         if upper.starts_with("SAVEPOINT ") {
-            let sp_name = upper.strip_prefix("SAVEPOINT ")
+            let sp_name = upper
+                .strip_prefix("SAVEPOINT ")
                 .unwrap()
                 .trim()
                 .trim_matches('"')
@@ -304,7 +324,8 @@ impl BoyodbPgHandler {
         }
 
         if upper.starts_with("RELEASE SAVEPOINT ") {
-            let sp_name = upper.strip_prefix("RELEASE SAVEPOINT ")
+            let sp_name = upper
+                .strip_prefix("RELEASE SAVEPOINT ")
                 .unwrap()
                 .trim()
                 .trim_matches('"')
@@ -313,7 +334,8 @@ impl BoyodbPgHandler {
         }
 
         if upper.starts_with("RELEASE ") {
-            let sp_name = upper.strip_prefix("RELEASE ")
+            let sp_name = upper
+                .strip_prefix("RELEASE ")
                 .unwrap()
                 .trim()
                 .trim_matches('"')
@@ -1428,6 +1450,10 @@ fn engine_error_to_pg(e: boyodb_core::engine::EngineError) -> PgWireError {
         EngineError::Configuration(msg) => (
             sqlstate::INTERNAL_ERROR,
             format!("configuration error: {}", msg),
+        ),
+        EngineError::ConstraintViolation(msg) => (
+            sqlstate::INTEGRITY_CONSTRAINT,
+            format!("constraint violation: {}", msg),
         ),
     };
 

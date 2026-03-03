@@ -47,10 +47,7 @@ pub enum WalRecordData {
         timestamp_micros: u64,
     },
     /// Transaction abort record
-    TxnAbort {
-        txn_id: u64,
-        timestamp_micros: u64,
-    },
+    TxnAbort { txn_id: u64, timestamp_micros: u64 },
     /// Checkpoint record
     Checkpoint {
         lsn: u64,
@@ -181,6 +178,15 @@ pub struct RecoveryManager {
 
     /// Index of available backups
     backup_index: parking_lot::RwLock<Vec<BackupInfo>>,
+}
+
+impl std::fmt::Debug for RecoveryManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryManager")
+            .field("config", &self.config)
+            .field("backup_count", &self.backup_index.read().len())
+            .finish()
+    }
 }
 
 impl RecoveryManager {
@@ -794,9 +800,8 @@ impl RecoveryManager {
                 })?;
 
                 let segment_path = segments_dir.join(&entry.segment_id);
-                fs::write(&segment_path, &payload).map_err(|e| {
-                    EngineError::Io(format!("Failed to write segment: {}", e))
-                })?;
+                fs::write(&segment_path, &payload)
+                    .map_err(|e| EngineError::Io(format!("Failed to write segment: {}", e)))?;
 
                 tracing::debug!(
                     "Applied segment record: {} ({} bytes)",
@@ -883,16 +888,16 @@ impl RecoveryManager {
                 .map_err(|e| EngineError::Io(format!("Failed to read directory entry: {}", e)))?;
             let src_path = entry.path();
             let dst_path = dst.join(entry.file_name());
-            let entry_name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
+            let entry_name = entry.file_name().to_string_lossy().to_string();
 
             if src_path.is_dir() {
                 // Detect database and table directories based on path structure
                 // Structure is typically: data/{database}/{table}/segments/
                 let (new_db, new_table) = if current_database.is_none()
-                    && src_path.parent().map(|p| p.ends_with("data")).unwrap_or(false)
+                    && src_path
+                        .parent()
+                        .map(|p| p.ends_with("data"))
+                        .unwrap_or(false)
                 {
                     // This is a database directory
                     (Some(entry_name.as_str()), None)
@@ -907,12 +912,7 @@ impl RecoveryManager {
                 };
 
                 self.copy_directory_inner(
-                    &src_path,
-                    &dst_path,
-                    total_size,
-                    tables,
-                    new_db,
-                    new_table,
+                    &src_path, &dst_path, total_size, tables, new_db, new_table,
                 )?;
             } else {
                 fs::copy(&src_path, &dst_path).map_err(|e| {

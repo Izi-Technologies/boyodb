@@ -320,8 +320,8 @@ pub struct TransactionManager {
     /// Undo log for rollback support
     undo_log: Arc<UndoLog>,
 
-    /// MVCC manager for snapshot isolation
-    mvcc_manager: Arc<MvccManager>,
+    /// MVCC manager for snapshot isolation (public for query execution access)
+    pub mvcc_manager: Arc<MvccManager>,
 
     /// Default isolation level for new transactions
     default_isolation_level: IsolationLevel,
@@ -431,14 +431,17 @@ impl TransactionManager {
 
     /// Get a reference to a transaction (for read operations)
     pub fn get_transaction(&self, txn_id: TransactionId) -> Option<TransactionSnapshot> {
-        self.active_transactions.read().get(&txn_id).map(|t| TransactionSnapshot {
-            id: t.id,
-            state: t.state,
-            isolation_level: t.isolation_level,
-            start_version: t.start_version,
-            read_only: t.read_only,
-            undo_records: t.undo_records.clone(),
-        })
+        self.active_transactions
+            .read()
+            .get(&txn_id)
+            .map(|t| TransactionSnapshot {
+                id: t.id,
+                state: t.state,
+                isolation_level: t.isolation_level,
+                start_version: t.start_version,
+                read_only: t.read_only,
+                undo_records: t.undo_records.clone(),
+            })
     }
 
     /// Get just the transaction state

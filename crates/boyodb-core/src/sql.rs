@@ -1223,6 +1223,83 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         return parse_set_deduplication(sql);
     }
 
+    // CREATE BACKUP ['label'] - Create an online backup
+    if upper_trimmed.starts_with("CREATE BACKUP") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        let label = if tokens.len() > 2 {
+            // Label is the third token, optionally quoted
+            Some(
+                tokens[2]
+                    .trim_end_matches(';')
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        return Ok(Some(DdlCommand::CreateBackup { label }));
+    }
+
+    // SHOW BACKUPS - List all available backups
+    if upper_trimmed == "SHOW BACKUPS" || upper_trimmed == "SHOW BACKUPS;" {
+        return Ok(Some(DdlCommand::ShowBackups));
+    }
+
+    // SHOW WAL STATUS - Show WAL archiving status
+    if upper_trimmed == "SHOW WAL STATUS" || upper_trimmed == "SHOW WAL STATUS;" {
+        return Ok(Some(DdlCommand::ShowWalStatus));
+    }
+
+    // DELETE BACKUP backup_id - Delete a specific backup
+    if upper_trimmed.starts_with("DELETE BACKUP ") || upper_trimmed.starts_with("DROP BACKUP ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() < 3 {
+            return Err(EngineError::InvalidArgument(
+                "DELETE BACKUP requires backup_id".into(),
+            ));
+        }
+        let backup_id = tokens[2]
+            .trim_end_matches(';')
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string();
+        return Ok(Some(DdlCommand::DeleteBackup { backup_id }));
+    }
+
+    // RECOVER TO TIMESTAMP 'timestamp' - Point-in-time recovery
+    if upper_trimmed.starts_with("RECOVER TO TIMESTAMP ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() < 4 {
+            return Err(EngineError::InvalidArgument(
+                "RECOVER TO TIMESTAMP requires timestamp value".into(),
+            ));
+        }
+        // Join remaining tokens for timestamp (may contain spaces)
+        let timestamp = tokens[3..]
+            .join(" ")
+            .trim_end_matches(';')
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string();
+        return Ok(Some(DdlCommand::RecoverToTimestamp { timestamp }));
+    }
+
+    // RECOVER TO LSN lsn_number - Recover to specific log sequence number
+    if upper_trimmed.starts_with("RECOVER TO LSN ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() < 4 {
+            return Err(EngineError::InvalidArgument(
+                "RECOVER TO LSN requires LSN value".into(),
+            ));
+        }
+        let lsn: u64 = tokens[3]
+            .trim_end_matches(';')
+            .parse()
+            .map_err(|_| EngineError::InvalidArgument("Invalid LSN value".into()))?;
+        return Ok(Some(DdlCommand::RecoverToLsn { lsn }));
+    }
+
     Ok(None)
 }
 

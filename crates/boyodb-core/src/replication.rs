@@ -396,6 +396,25 @@ pub struct ManifestEntry {
     pub deleted_version: Option<u64>,
 }
 
+/// Implement MvccVisibility for ManifestEntry to enable transactional visibility filtering
+impl crate::mvcc::MvccVisibility for ManifestEntry {
+    fn created_txn(&self) -> Option<crate::transaction::TransactionId> {
+        self.created_txn
+    }
+
+    fn created_version(&self) -> u64 {
+        self.version_added
+    }
+
+    fn deleted_txn(&self) -> Option<crate::transaction::TransactionId> {
+        self.deleted_txn
+    }
+
+    fn deleted_version(&self) -> Option<u64> {
+        self.deleted_version
+    }
+}
+
 impl ManifestEntry {
     /// Convert to lightweight SegmentInfo
     pub fn to_info(&self) -> SegmentInfo {
