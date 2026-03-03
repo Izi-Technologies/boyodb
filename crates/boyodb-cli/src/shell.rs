@@ -1029,6 +1029,227 @@ async fn async_execute_sql_command(
     }
 }
 
+/// Execute a SQL query with format options (for CLI sql command)
+pub fn execute_sql_query(
+    host: Option<&str>,
+    token: Option<String>,
+    tls_config: Option<TlsConfig>,
+    auth: Option<(String, String)>,
+    sql: &str,
+    database: Option<&str>,
+    format: &str,
+) -> Result<String> {
+    let config = ShellConfig::load();
+    let config_tls_enabled = config.tls == Some(true);
+
+    let auto_user = if auth.is_some() { None } else { config.user };
+
+    let effective_host = host
+        .map(|s| s.to_string())
+        .or(config.host)
+        .unwrap_or_else(|| "localhost:8765".to_string());
+
+    let effective_token = token.or(config.token);
+    let effective_tls = if tls_config.is_some() {
+        tls_config
+    } else if config_tls_enabled {
+        Some(TlsConfig {
+            ca_path: config.ca_cert,
+            skip_verify: false,
+        })
+    } else {
+        None
+    };
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async_execute_sql_query(
+        &effective_host,
+        effective_token,
+        effective_tls,
+        auto_user,
+        auth,
+        sql,
+        database,
+        format,
+    ))
+}
+
+async fn async_execute_sql_query(
+    host: &str,
+    token: Option<String>,
+    tls_config: Option<TlsConfig>,
+    auto_user: Option<String>,
+    cli_auth: Option<(String, String)>,
+    sql: &str,
+    database: Option<&str>,
+    format: &str,
+) -> Result<String> {
+    let mut state = ShellState::new(host.to_string(), token, database.map(|s| s.to_string()), tls_config);
+
+    // Handle authentication
+    if let Some((username, password)) = cli_auth {
+        let resp = send_request(
+            &state,
+            Operation::Login {
+                username: username.clone(),
+                password,
+            },
+        )
+        .await?;
+        if resp.status != "ok" {
+            let msg = resp.message.unwrap_or_else(|| "login failed".into());
+            return Err(anyhow!("Login failed: {}", msg));
+        }
+        state.session_id = resp.session_id;
+        state.current_user = Some(username);
+    } else if let Some(username) = auto_user {
+        let password = rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
+        if password.is_empty() {
+            return Err(anyhow!("Password required"));
+        }
+        let resp = send_request(
+            &state,
+            Operation::Login {
+                username: username.clone(),
+                password,
+            },
+        )
+        .await?;
+        if resp.status != "ok" {
+            let msg = resp.message.unwrap_or_else(|| "login failed".into());
+            return Err(anyhow!("Login failed: {}", msg));
+        }
+        state.session_id = resp.session_id;
+        state.current_user = Some(username);
+    }
+
+    // Execute the SQL query
+    let resp = send_request(
+        &state,
+        Operation::Query {
+            sql: sql.to_string(),
+            database: database.map(|s| s.to_string()),
+            timeout_millis: state.timeout_millis,
+        },
+    )
+    .await?;
+
+    if resp.status != "ok" {
+        let msg = resp.message.unwrap_or_else(|| "query failed".into());
+        return Err(anyhow!("Query failed: {}", msg));
+    }
+
+    // Format the response based on format option
+    if let Some(ipc_base64) = resp.ipc_base64 {
+        let ipc_data = general_purpose::STANDARD
+            .decode(&ipc_base64)
+            .map_err(|e| anyhow!("Failed to decode IPC data: {}", e))?;
+
+        match format.to_lowercase().as_str() {
+            "json" => format_ipc_as_json(&ipc_data),
+            "csv" => format_ipc_as_csv(&ipc_data),
+            _ => format_ipc_as_table_simple(&ipc_data),
+        }
+    } else if let Some(msg) = resp.message {
+        Ok(msg)
+    } else {
+        Ok("OK".to_string())
+    }
+}
+
+fn format_ipc_as_json(ipc_data: &[u8]) -> Result<String> {
+    let cursor = Cursor::new(ipc_data);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| anyhow!("Failed to create IPC reader: {}", e))?;
+
+    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| anyhow!("Failed to read batch: {}", e))?;
+        let schema = batch.schema();
+
+        for row_idx in 0..batch.num_rows() {
+            let mut row_obj = serde_json::Map::new();
+            for (col_idx, field) in schema.fields().iter().enumerate() {
+                let col = batch.column(col_idx);
+                let value_str = arrow_cast::display::array_value_to_string(col, row_idx)
+                    .unwrap_or_else(|_| "null".to_string());
+
+                // Try to parse as number or boolean, otherwise use string
+                let value = if value_str == "null" || value_str.is_empty() {
+                    serde_json::Value::Null
+                } else if let Ok(n) = value_str.parse::<i64>() {
+                    serde_json::Value::Number(n.into())
+                } else if let Ok(n) = value_str.parse::<f64>() {
+                    serde_json::Number::from_f64(n)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::String(value_str.clone()))
+                } else if value_str == "true" {
+                    serde_json::Value::Bool(true)
+                } else if value_str == "false" {
+                    serde_json::Value::Bool(false)
+                } else {
+                    serde_json::Value::String(value_str)
+                };
+
+                row_obj.insert(field.name().to_string(), value);
+            }
+            rows.push(row_obj);
+        }
+    }
+
+    serde_json::to_string_pretty(&rows).map_err(|e| anyhow!("Failed to serialize JSON: {}", e))
+}
+
+fn format_ipc_as_csv(ipc_data: &[u8]) -> Result<String> {
+    let cursor = Cursor::new(ipc_data);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| anyhow!("Failed to create IPC reader: {}", e))?;
+
+    let mut output = String::new();
+    let mut header_printed = false;
+
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| anyhow!("Failed to read batch: {}", e))?;
+        let schema = batch.schema();
+
+        // Print header
+        if !header_printed {
+            let headers: Vec<String> = schema
+                .fields()
+                .iter()
+                .map(|f| escape_csv_field(f.name()))
+                .collect();
+            output.push_str(&headers.join(","));
+            output.push('\n');
+            header_printed = true;
+        }
+
+        // Print rows
+        for row_idx in 0..batch.num_rows() {
+            let mut row_values = Vec::new();
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                let value = arrow_cast::display::array_value_to_string(col, row_idx)
+                    .unwrap_or_else(|_| "".to_string());
+                row_values.push(escape_csv_field(&value));
+            }
+            output.push_str(&row_values.join(","));
+            output.push('\n');
+        }
+    }
+
+    Ok(output)
+}
+
+fn escape_csv_field(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 fn format_ipc_as_table_simple(ipc_data: &[u8]) -> Result<String> {
     let cursor = Cursor::new(ipc_data);
     let reader = StreamReader::try_new(cursor, None)

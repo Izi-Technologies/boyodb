@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use boyodb_core::types::{BoyodbStatus, OwnedBuffer};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::CString;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::slice;
 
@@ -151,6 +151,119 @@ enum Commands {
     },
     /// Show transaction status and active transactions
     TxnStatus {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Execute a SQL query against a running server
+    #[command(name = "sql")]
+    Sql {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// SQL query to execute
+        query: String,
+        /// Database to use
+        #[arg(short, long)]
+        database: Option<String>,
+        /// Output format (table, csv, json)
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+    /// Create a database on a running server
+    #[command(name = "create-db")]
+    RemoteCreateDb {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Database name
+        name: String,
+    },
+    /// Drop a database on a running server
+    #[command(name = "drop-db")]
+    RemoteDropDb {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Database name
+        name: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
+    /// List databases on a running server
+    #[command(name = "databases")]
+    RemoteListDbs {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// List tables on a running server
+    #[command(name = "tables")]
+    RemoteListTables {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Database to filter by
+        #[arg(short, long)]
+        database: Option<String>,
+    },
+    /// Describe a table schema
+    #[command(name = "describe")]
+    RemoteDescribe {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Table name (database.table format)
+        table: String,
+    },
+    /// Vacuum/compact a table
+    #[command(name = "vacuum-remote")]
+    RemoteVacuum {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Database name
+        database: String,
+        /// Table name
+        table: String,
+        /// Full vacuum (more thorough)
+        #[arg(long)]
+        full: bool,
+    },
+    /// Export data to a file
+    Export {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// SQL query to export
+        #[arg(short, long)]
+        query: String,
+        /// Output file path
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Output format (csv, json, parquet)
+        #[arg(short, long, default_value = "csv")]
+        format: String,
+    },
+    /// Import data from a file
+    Import {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Target table (database.table format)
+        #[arg(short, long)]
+        table: String,
+        /// Input file path
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Input format (csv, json) - auto-detected from extension if not specified
+        #[arg(short, long)]
+        format: Option<String>,
+        /// CSV has header row
+        #[arg(long, default_value = "true")]
+        header: bool,
+    },
+    /// Show server metrics
+    Metrics {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Output format (table, json)
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+    /// Show server info and version
+    Info {
         #[command(flatten)]
         server: ServerArgs,
     },
@@ -409,6 +522,248 @@ fn main() -> Result<()> {
                 tls_config,
                 auth,
                 "SHOW TRANSACTIONS",
+            )?;
+            println!("{}", result);
+        }
+        Commands::Sql {
+            server,
+            query,
+            database,
+            format,
+        } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                query,
+                database.as_deref(),
+                &format,
+            )?;
+            println!("{}", result);
+        }
+        Commands::RemoteCreateDb { server, name } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = format!("CREATE DATABASE {}", name);
+            shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+            )?;
+            println!("Database '{}' created successfully", name);
+        }
+        Commands::RemoteDropDb {
+            server,
+            name,
+            force,
+        } => {
+            if !force {
+                print!("Are you sure you want to drop database '{}'? [y/N] ", name);
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    println!("Aborted");
+                    return Ok(());
+                }
+            }
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = format!("DROP DATABASE {}", name);
+            shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+            )?;
+            println!("Database '{}' dropped successfully", name);
+        }
+        Commands::RemoteListDbs { server } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW DATABASES",
+                None,
+                "table",
+            )?;
+            println!("{}", result);
+        }
+        Commands::RemoteListTables { server, database } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = match database {
+                Some(db) => format!("SHOW TABLES IN {}", db),
+                None => "SHOW TABLES".to_string(),
+            };
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+                None,
+                "table",
+            )?;
+            println!("{}", result);
+        }
+        Commands::RemoteDescribe { server, table } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = format!("DESCRIBE {}", table);
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+                None,
+                "table",
+            )?;
+            println!("{}", result);
+        }
+        Commands::RemoteVacuum {
+            server,
+            database,
+            table,
+            full,
+        } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = if *full {
+                format!("VACUUM FULL {}.{}", database, table)
+            } else {
+                format!("VACUUM {}.{}", database, table)
+            };
+            println!("Vacuuming {}.{}...", database, table);
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+            )?;
+            println!("{}", result);
+        }
+        Commands::Export {
+            server,
+            query,
+            output,
+            format,
+        } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                query,
+                None,
+                &format,
+            )?;
+            std::fs::write(output, &result)?;
+            println!("Exported to {}", output.display());
+        }
+        Commands::Import {
+            server,
+            table,
+            input,
+            format,
+            header,
+        } => {
+            let (tls_config, auth) = parse_server_args(server);
+
+            // Detect format from extension if not specified
+            let fmt = format.clone().unwrap_or_else(|| {
+                input
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("csv")
+                    .to_string()
+            });
+
+            let data = std::fs::read_to_string(input)?;
+            let parts: Vec<&str> = table.split('.').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("Table must be in database.table format"));
+            }
+            let (db, tbl) = (parts[0], parts[1]);
+
+            match fmt.as_str() {
+                "csv" => {
+                    let sql = format!(
+                        "INSERT INTO {}.{} FORMAT CSV {} DATA '{}'",
+                        db,
+                        tbl,
+                        if *header { "HEADER" } else { "" },
+                        data.replace('\'', "''")
+                    );
+                    shell::execute_sql_command(
+                        server.host.as_deref(),
+                        server.token.clone(),
+                        tls_config,
+                        auth,
+                        &sql,
+                    )?;
+                }
+                "json" => {
+                    // Parse JSON and insert row by row
+                    let rows: Vec<serde_json::Value> = serde_json::from_str(&data)?;
+                    for row in rows {
+                        if let Some(obj) = row.as_object() {
+                            let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+                            let vals: Vec<String> = obj
+                                .values()
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+                                    serde_json::Value::Null => "NULL".to_string(),
+                                    other => other.to_string(),
+                                })
+                                .collect();
+                            let sql = format!(
+                                "INSERT INTO {}.{} ({}) VALUES ({})",
+                                db,
+                                tbl,
+                                cols.join(", "),
+                                vals.join(", ")
+                            );
+                            shell::execute_sql_command(
+                                server.host.as_deref(),
+                                server.token.clone(),
+                                tls_config.clone(),
+                                auth.clone(),
+                                &sql,
+                            )?;
+                        }
+                    }
+                }
+                _ => return Err(anyhow!("Unsupported format: {}", fmt)),
+            }
+            println!("Import completed");
+        }
+        Commands::Metrics { server, format } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_query(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW METRICS",
+                None,
+                &format,
+            )?;
+            println!("{}", result);
+        }
+        Commands::Info { server } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW SERVER INFO",
             )?;
             println!("{}", result);
         }
