@@ -11,3 +11,19 @@ dist/
 build/
 *.egg
 tmp/
+
+# AI assistant config
+.claude/
+
+# Arrow IPC test files
+*.ipc
+
+# macOS
+.DS_Store
+
+# Backup files
+*.bak
+
+# IDE
+.idea/
+.vscode/
