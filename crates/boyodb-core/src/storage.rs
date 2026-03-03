@@ -2,7 +2,7 @@ use crate::engine::{EngineConfig, EngineError};
 use crate::replication::{ManifestEntry, SegmentTier};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjPath;
-use object_store::{GetResult, ObjectStore};
+use object_store::{GetResult, ObjectStore, ObjectStoreExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;

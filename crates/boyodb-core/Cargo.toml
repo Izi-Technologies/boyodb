@@ -56,7 +56,7 @@ libm = "0.2"                # For erf function in phi accrual detector
 hex = "0.4"                 # For hex encoding binary data
 tempfile = "3"              # For temporary files in JOIN operations
 hyperloglogplus = "0.4.1"
-object_store = { version = "0.10", features = ["aws"] }
+object_store = { version = "0.13", features = ["aws"] }
 aws-config = "1.1"
 aws-sdk-s3 = "1.15"
 aws-credential-types = "1.1"
