@@ -122,17 +122,105 @@ impl Wal {
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
 
+        // Recover the highest LSN from existing WAL records
+        let recovered_lsn = Self::recover_max_lsn(path)?;
+        let next_lsn = recovered_lsn.map(|l| l + 1).unwrap_or(1);
+        let file_start_lsn = recovered_lsn.unwrap_or(0) + 1;
+
+        info!("WAL opened: recovered_lsn={:?}, next_lsn={}", recovered_lsn, next_lsn);
+
         Ok(Wal {
             writer: BufWriter::new(file),
             path: path.to_path_buf(),
             pending_bytes: 0,
             max_segments: 4,
             last_sync: Instant::now(),
-            current_lsn: std::sync::atomic::AtomicU64::new(1),
-            file_start_lsn: 1,
+            current_lsn: std::sync::atomic::AtomicU64::new(next_lsn),
+            file_start_lsn,
             file_start_timestamp: now_micros,
             archive_callback: None,
         })
+    }
+
+    /// Scan WAL files to recover the highest LSN
+    /// Uses both metadata file and record counting for reliability
+    fn recover_max_lsn(path: &Path) -> Result<Option<u64>, EngineError> {
+        // First, try to read from metadata file
+        let metadata_path = Self::lsn_metadata_path(path);
+        if let Ok(content) = std::fs::read_to_string(&metadata_path) {
+            if let Ok(lsn) = content.trim().parse::<u64>() {
+                info!("Recovered LSN {} from metadata file", lsn);
+                return Ok(Some(lsn));
+            }
+        }
+
+        // Fall back to counting records in WAL files
+        let wal_paths = wal_paths_for_replay(path)?;
+        if wal_paths.is_empty() {
+            return Ok(None);
+        }
+
+        let mut total_records: u64 = 0;
+        let mut max_checkpoint_lsn: Option<u64> = None;
+
+        for wal_path in wal_paths {
+            if let Ok(file) = File::open(&wal_path) {
+                let reader = BufReader::new(file);
+                for line in reader.lines().map_while(Result::ok) {
+                    total_records += 1;
+
+                    // Also check for explicit LSN in checkpoint records
+                    if let Some(lsn) = Self::extract_lsn_from_record(&line) {
+                        max_checkpoint_lsn = Some(max_checkpoint_lsn.map(|m| m.max(lsn)).unwrap_or(lsn));
+                    }
+                }
+            }
+        }
+
+        // Use the higher of: checkpoint LSN or record count
+        let recovered = match max_checkpoint_lsn {
+            Some(ckpt_lsn) => Some(ckpt_lsn.max(total_records)),
+            None if total_records > 0 => Some(total_records),
+            None => None,
+        };
+
+        info!("Recovered LSN from WAL scan: {:?} (records={}, checkpoint_lsn={:?})",
+            recovered, total_records, max_checkpoint_lsn);
+
+        Ok(recovered)
+    }
+
+    /// Extract LSN from a WAL record line (if present)
+    fn extract_lsn_from_record(line: &str) -> Option<u64> {
+        // Records are formatted as: "LENGTH JSON_DATA"
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        // Try to parse as JSON and extract LSN from checkpoint records
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(parts[1]) {
+            // Check for checkpoint LSN
+            if let Some(lsn) = value.get("Checkpoint").and_then(|c| c.get("lsn")).and_then(|l| l.as_u64()) {
+                return Some(lsn);
+            }
+        }
+
+        None
+    }
+
+    /// Get the path to the LSN metadata file
+    fn lsn_metadata_path(wal_path: &Path) -> PathBuf {
+        wal_path.with_extension("lsn")
+    }
+
+    /// Persist the current LSN to metadata file
+    pub fn persist_lsn(&self) -> Result<(), EngineError> {
+        let metadata_path = Self::lsn_metadata_path(&self.path);
+        let lsn = self.current_lsn();
+        std::fs::write(&metadata_path, lsn.to_string())
+            .map_err(|e| EngineError::Io(format!("Failed to persist LSN: {}", e)))?;
+        Ok(())
     }
 
     /// Set the archive callback for PITR support
@@ -299,6 +387,8 @@ impl Wal {
             .map_err(|e| EngineError::Io(format!("wal fsync failed: {e}")))?;
         self.pending_bytes = 0;
         self.last_sync = Instant::now();
+        // Persist LSN to metadata file for recovery
+        let _ = self.persist_lsn();
         Ok(())
     }
 

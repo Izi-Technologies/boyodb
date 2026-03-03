@@ -132,6 +132,28 @@ pub struct Savepoint {
     pub created_at: Instant,
 }
 
+/// A snapshot of transaction state for external access
+#[derive(Debug, Clone)]
+pub struct TransactionSnapshot {
+    /// Unique transaction ID
+    pub id: TransactionId,
+
+    /// Current transaction state
+    pub state: TransactionState,
+
+    /// Isolation level for this transaction
+    pub isolation_level: IsolationLevel,
+
+    /// Version number at transaction start (for MVCC)
+    pub start_version: u64,
+
+    /// Whether this is a read-only transaction
+    pub read_only: bool,
+
+    /// Undo records for this transaction (for rollback)
+    pub undo_records: Vec<UndoRecord>,
+}
+
 /// Individual transaction representation
 #[derive(Debug)]
 pub struct Transaction {
@@ -408,7 +430,19 @@ impl TransactionManager {
     }
 
     /// Get a reference to a transaction (for read operations)
-    pub fn get_transaction(&self, txn_id: TransactionId) -> Option<TransactionState> {
+    pub fn get_transaction(&self, txn_id: TransactionId) -> Option<TransactionSnapshot> {
+        self.active_transactions.read().get(&txn_id).map(|t| TransactionSnapshot {
+            id: t.id,
+            state: t.state,
+            isolation_level: t.isolation_level,
+            start_version: t.start_version,
+            read_only: t.read_only,
+            undo_records: t.undo_records.clone(),
+        })
+    }
+
+    /// Get just the transaction state
+    pub fn get_transaction_state(&self, txn_id: TransactionId) -> Option<TransactionState> {
         self.active_transactions
             .read()
             .get(&txn_id)
@@ -853,7 +887,7 @@ mod tests {
         let txn_id = manager.begin(None, false, None).unwrap();
         assert!(manager.is_active(txn_id));
         assert_eq!(
-            manager.get_transaction(txn_id),
+            manager.get_transaction_state(txn_id),
             Some(TransactionState::Active)
         );
 
@@ -946,7 +980,7 @@ mod tests {
         let result = manager.prepare(txn_id).unwrap();
         assert!(result.prepared);
         assert_eq!(
-            manager.get_transaction(txn_id),
+            manager.get_transaction_state(txn_id),
             Some(TransactionState::Prepared)
         );
 

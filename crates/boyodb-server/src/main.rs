@@ -2518,6 +2518,7 @@ async fn process_request(
                             sql: effective_sql,
                             timeout_millis,
                             collect_stats: false,
+                            transaction_id: None,
                         })
                         .map_err(|e| ServerError::Db(e.to_string()))
                     })
@@ -2734,6 +2735,7 @@ async fn process_request(
                     sql,
                     timeout_millis,
                     collect_stats: false,
+                    transaction_id: None,
                 })
                 .map_err(|e| ServerError::Db(e.to_string()))
             })
@@ -3555,6 +3557,7 @@ async fn process_query_binary(
         sql: effective_sql,
         timeout_millis,
         collect_stats: false,
+        transaction_id: None,
     };
     let db = db.clone();
     let meta = match blocking(move || {
@@ -3729,6 +3732,7 @@ async fn process_query_binary_stream(
         sql: effective_sql,
         timeout_millis,
         collect_stats: false,
+        transaction_id: None,
     };
     let db = db.clone();
     let chunk_size = max_frame_len.min(256 * 1024).max(1024);
@@ -3857,6 +3861,7 @@ async fn process_execute_prepared_binary(
         sql: prepared.sql.clone(),
         timeout_millis,
         collect_stats: false,
+        transaction_id: None,
     };
     let db = db.clone();
     let meta = match blocking(move || {
@@ -3979,6 +3984,7 @@ async fn process_execute_prepared_binary_stream(
         sql: prepared.sql.clone(),
         timeout_millis,
         collect_stats: false,
+        transaction_id: None,
     };
     let db = db.clone();
     let chunk_size = max_frame_len.min(256 * 1024).max(1024);
@@ -5889,6 +5895,7 @@ where
                             sql,
                             timeout_millis: 5000,
                             collect_stats: true,
+                            transaction_id: None,
                         })
                         .map_err(|e| ServerError::Db(e.to_string()))
                 })

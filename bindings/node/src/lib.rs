@@ -98,6 +98,7 @@ impl Database {
             sql,
             timeout_millis,
             collect_stats: false,
+            transaction_id: None,
         };
         let resp = self.inner.query(request).map_err(to_napi_error)?;
         Ok(Buffer::from(resp.records_ipc))

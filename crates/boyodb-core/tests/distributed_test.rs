@@ -255,6 +255,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT * FROM test_dist".into(),
         timeout_millis: 5000,
         collect_stats: false,
+            transaction_id: None,
     });
     println!("Test: Local query on db2: {:?}", local_resp.is_ok());
     assert!(local_resp.is_ok(), "db2 should be able to query locally");
@@ -263,6 +264,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT COUNT(*) FROM test_dist".into(),
         timeout_millis: 5000,
         collect_stats: false,
+            transaction_id: None,
     });
     println!("Test: Local COUNT(*) on db2: {:?}", local_count.is_ok());
     assert!(local_count.is_ok(), "db2 should be able to COUNT locally");
@@ -276,6 +278,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT * FROM test_dist".into(),
         timeout_millis: 10000,
         collect_stats: true,
+        transaction_id: None,
     };
     let resp = db1.query(req);
     println!("Test: SELECT * result: {:?}", resp.is_ok());
@@ -290,6 +293,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT COUNT(*) FROM test_dist".into(),
         timeout_millis: 10000,
         collect_stats: true,
+        transaction_id: None,
     };
     let agg_resp = db1.query(agg_req);
     println!("Test: COUNT(*) result: {:?}", agg_resp.is_ok());
@@ -334,6 +338,7 @@ async fn test_distributed_query_broadcast() {
         sql: "SELECT SUM(val) FROM test_dist".into(),
         timeout_millis: 10000,
         collect_stats: true,
+        transaction_id: None,
     };
     let sum_resp = db1.query(sum_req);
     println!("Test: SUM(val) result: {:?}", sum_resp.is_ok());

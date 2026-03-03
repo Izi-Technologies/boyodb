@@ -108,6 +108,24 @@ pub enum UndoRecord {
         /// Serialized batch data (Arrow IPC format)
         batch_data: Vec<u8>,
     },
+
+    /// Undo segment-level operations by storing the entire segment data
+    /// Used for efficient rollback of UPDATE/DELETE on segments
+    SegmentData {
+        segment_id: String,
+        database: String,
+        table: String,
+        /// Original segment data (Arrow IPC format)
+        data: Vec<u8>,
+    },
+
+    /// Undo an INSERT by recording the new segment ID
+    /// (rollback will delete this segment)
+    SegmentDelete {
+        segment_id: String,
+        database: String,
+        table: String,
+    },
 }
 
 impl UndoRecord {
@@ -125,7 +143,9 @@ impl UndoRecord {
             | UndoRecord::DropConstraint { database, .. }
             | UndoRecord::SequenceAdvance { database, .. }
             | UndoRecord::BatchInsert { database, .. }
-            | UndoRecord::BatchDelete { database, .. } => database,
+            | UndoRecord::BatchDelete { database, .. }
+            | UndoRecord::SegmentData { database, .. }
+            | UndoRecord::SegmentDelete { database, .. } => database,
         }
     }
 
@@ -142,7 +162,9 @@ impl UndoRecord {
             | UndoRecord::AddConstraint { table, .. }
             | UndoRecord::DropConstraint { table, .. }
             | UndoRecord::BatchInsert { table, .. }
-            | UndoRecord::BatchDelete { table, .. } => Some(table),
+            | UndoRecord::BatchDelete { table, .. }
+            | UndoRecord::SegmentData { table, .. }
+            | UndoRecord::SegmentDelete { table, .. } => Some(table),
             UndoRecord::SequenceAdvance { .. } => None,
         }
     }
@@ -216,6 +238,17 @@ impl UndoRecord {
                     table,
                     batch_data,
                 } => database.len() + table.len() + batch_data.len(),
+                UndoRecord::SegmentData {
+                    segment_id,
+                    database,
+                    table,
+                    data,
+                } => segment_id.len() + database.len() + table.len() + data.len(),
+                UndoRecord::SegmentDelete {
+                    segment_id,
+                    database,
+                    table,
+                } => segment_id.len() + database.len() + table.len(),
             }
     }
 }

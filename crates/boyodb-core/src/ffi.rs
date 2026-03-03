@@ -241,6 +241,7 @@ pub extern "C" fn boyodb_query_ipc(
         sql,
         timeout_millis: req.timeout_millis,
         collect_stats: false,
+        transaction_id: None,
     };
     match unsafe { &mut *handle }.db.query(query) {
         Ok(resp) => {

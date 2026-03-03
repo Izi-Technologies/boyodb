@@ -110,6 +110,27 @@ impl StartupHandler for BoyodbPgAuthHandler {
     }
 }
 
+/// Session transaction state for PostgreSQL connections
+#[derive(Debug, Clone)]
+struct SessionTransactionState {
+    /// Active transaction ID (None if not in a transaction)
+    txn_id: Option<boyodb_core::transaction::TransactionId>,
+    /// Whether the transaction is read-only
+    read_only: bool,
+    /// Isolation level for the transaction
+    isolation_level: Option<boyodb_core::transaction::IsolationLevel>,
+}
+
+impl Default for SessionTransactionState {
+    fn default() -> Self {
+        Self {
+            txn_id: None,
+            read_only: false,
+            isolation_level: None,
+        }
+    }
+}
+
 pub struct BoyodbPgHandler {
     db: Arc<Db>,
     query_parser: Arc<NoopQueryParser>,
@@ -117,6 +138,8 @@ pub struct BoyodbPgHandler {
     statements: Arc<Mutex<HashMap<String, String>>>,
     /// Map of Portal Name -> SQL (with params substituted)
     portals: Arc<Mutex<HashMap<String, String>>>,
+    /// Session transaction state
+    txn_state: Arc<Mutex<SessionTransactionState>>,
 }
 
 impl BoyodbPgHandler {
@@ -126,7 +149,179 @@ impl BoyodbPgHandler {
             query_parser: Arc::new(NoopQueryParser::new()),
             statements: Arc::new(Mutex::new(HashMap::new())),
             portals: Arc::new(Mutex::new(HashMap::new())),
+            txn_state: Arc::new(Mutex::new(SessionTransactionState::default())),
         }
+    }
+
+    /// Handle BEGIN/START TRANSACTION command
+    fn handle_begin(&self, query: &str) -> Result<(), String> {
+        let mut state = self.txn_state.lock().unwrap();
+
+        if state.txn_id.is_some() {
+            return Err("already in a transaction".to_string());
+        }
+
+        // Parse isolation level and read-only from the query
+        let upper = query.to_uppercase();
+        let isolation = if upper.contains("SERIALIZABLE") {
+            Some(boyodb_core::transaction::IsolationLevel::Serializable)
+        } else if upper.contains("REPEATABLE READ") {
+            Some(boyodb_core::transaction::IsolationLevel::RepeatableRead)
+        } else if upper.contains("READ COMMITTED") {
+            Some(boyodb_core::transaction::IsolationLevel::ReadCommitted)
+        } else {
+            None
+        };
+        let read_only = upper.contains("READ ONLY");
+
+        // Start the transaction
+        let txn_id = self.db.begin_transaction(isolation, read_only)
+            .map_err(|e| format!("failed to begin transaction: {}", e))?;
+
+        state.txn_id = Some(txn_id);
+        state.isolation_level = isolation;
+        state.read_only = read_only;
+
+        tracing::debug!("Started transaction {:?} (isolation={:?}, read_only={})",
+            txn_id, isolation, read_only);
+
+        Ok(())
+    }
+
+    /// Handle COMMIT command
+    fn handle_commit(&self) -> Result<(), String> {
+        let mut state = self.txn_state.lock().unwrap();
+
+        let txn_id = state.txn_id.take()
+            .ok_or_else(|| "not in a transaction".to_string())?;
+
+        self.db.commit_transaction(txn_id)
+            .map_err(|e| format!("failed to commit transaction: {}", e))?;
+
+        state.isolation_level = None;
+        state.read_only = false;
+
+        tracing::debug!("Committed transaction {:?}", txn_id);
+
+        Ok(())
+    }
+
+    /// Handle ROLLBACK command
+    fn handle_rollback(&self, savepoint: Option<&str>) -> Result<(), String> {
+        let mut state = self.txn_state.lock().unwrap();
+
+        let txn_id = match state.txn_id {
+            Some(id) => id,
+            None => return Err("not in a transaction".to_string()),
+        };
+
+        if let Some(sp_name) = savepoint {
+            // Rollback to savepoint (don't end the transaction)
+            self.db.rollback_to_savepoint(txn_id, sp_name)
+                .map_err(|e| format!("failed to rollback to savepoint: {}", e))?;
+            tracing::debug!("Rolled back to savepoint '{}' in transaction {:?}", sp_name, txn_id);
+        } else {
+            // Full rollback
+            self.db.rollback_transaction(txn_id)
+                .map_err(|e| format!("failed to rollback transaction: {}", e))?;
+            state.txn_id = None;
+            state.isolation_level = None;
+            state.read_only = false;
+            tracing::debug!("Rolled back transaction {:?}", txn_id);
+        }
+
+        Ok(())
+    }
+
+    /// Handle SAVEPOINT command
+    fn handle_savepoint(&self, name: &str) -> Result<(), String> {
+        let state = self.txn_state.lock().unwrap();
+
+        let txn_id = state.txn_id
+            .ok_or_else(|| "not in a transaction".to_string())?;
+
+        self.db.create_savepoint(txn_id, name)
+            .map_err(|e| format!("failed to create savepoint: {}", e))?;
+
+        tracing::debug!("Created savepoint '{}' in transaction {:?}", name, txn_id);
+
+        Ok(())
+    }
+
+    /// Handle RELEASE SAVEPOINT command
+    fn handle_release_savepoint(&self, name: &str) -> Result<(), String> {
+        let state = self.txn_state.lock().unwrap();
+
+        let txn_id = state.txn_id
+            .ok_or_else(|| "not in a transaction".to_string())?;
+
+        self.db.release_savepoint(txn_id, name)
+            .map_err(|e| format!("failed to release savepoint: {}", e))?;
+
+        tracing::debug!("Released savepoint '{}' in transaction {:?}", name, txn_id);
+
+        Ok(())
+    }
+
+    /// Get current transaction ID (if any)
+    fn current_txn_id(&self) -> Option<boyodb_core::transaction::TransactionId> {
+        self.txn_state.lock().unwrap().txn_id
+    }
+
+    /// Check if a query is a transaction control command and handle it
+    /// Returns Some(tag) if handled, None if not a transaction command
+    fn try_handle_transaction_command(&self, query: &str) -> Option<Result<&'static str, String>> {
+        let upper = query.trim().to_uppercase();
+
+        if upper.starts_with("BEGIN") || upper.starts_with("START TRANSACTION") {
+            return Some(self.handle_begin(query).map(|_| "BEGIN"));
+        }
+
+        if upper.starts_with("COMMIT") || upper.starts_with("END") {
+            return Some(self.handle_commit().map(|_| "COMMIT"));
+        }
+
+        if upper.starts_with("ROLLBACK") {
+            // Check for ROLLBACK TO SAVEPOINT
+            if let Some(captures) = upper.strip_prefix("ROLLBACK TO SAVEPOINT ") {
+                let sp_name = captures.trim().trim_matches('"').trim_matches('\'');
+                return Some(self.handle_rollback(Some(sp_name)).map(|_| "ROLLBACK"));
+            } else if let Some(captures) = upper.strip_prefix("ROLLBACK TO ") {
+                let sp_name = captures.trim().trim_matches('"').trim_matches('\'');
+                return Some(self.handle_rollback(Some(sp_name)).map(|_| "ROLLBACK"));
+            } else {
+                return Some(self.handle_rollback(None).map(|_| "ROLLBACK"));
+            }
+        }
+
+        if upper.starts_with("SAVEPOINT ") {
+            let sp_name = upper.strip_prefix("SAVEPOINT ")
+                .unwrap()
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            return Some(self.handle_savepoint(sp_name).map(|_| "SAVEPOINT"));
+        }
+
+        if upper.starts_with("RELEASE SAVEPOINT ") {
+            let sp_name = upper.strip_prefix("RELEASE SAVEPOINT ")
+                .unwrap()
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            return Some(self.handle_release_savepoint(sp_name).map(|_| "RELEASE"));
+        }
+
+        if upper.starts_with("RELEASE ") {
+            let sp_name = upper.strip_prefix("RELEASE ")
+                .unwrap()
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
+            return Some(self.handle_release_savepoint(sp_name).map(|_| "RELEASE"));
+        }
+
+        None
     }
 }
 
@@ -171,10 +366,28 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
             };
         }
 
+        // Handle transaction control commands
+        if let Some(txn_result) = self.try_handle_transaction_command(query) {
+            match txn_result {
+                Ok(tag) => return Ok(Response::Execution(Tag::new(tag))),
+                Err(e) => {
+                    let error_info = ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "25000".to_owned(), // SQLSTATE for invalid transaction state
+                        e,
+                    );
+                    return Err(PgWireError::UserError(Box::new(error_info)));
+                }
+            }
+        }
+
+        // Get current transaction ID if in a transaction
+        let transaction_id = self.txn_state.lock().unwrap().txn_id;
         let req = QueryRequest {
             sql: query.clone(),
             timeout_millis: 10000,
             collect_stats: false,
+            transaction_id,
         };
 
         let db = self.db.clone();
@@ -185,19 +398,7 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         match resp {
             Ok(result) => {
                 if result.records_ipc.is_empty() {
-                    let tag_str = query.trim().to_uppercase();
-                    let tag = if tag_str.starts_with("BEGIN")
-                        || tag_str.starts_with("START TRANSACTION")
-                    {
-                        "BEGIN"
-                    } else if tag_str.starts_with("COMMIT") || tag_str.starts_with("END") {
-                        "COMMIT"
-                    } else if tag_str.starts_with("ROLLBACK") {
-                        "ROLLBACK"
-                    } else {
-                        "OK"
-                    };
-                    return Ok(Response::Execution(Tag::new(tag)));
+                    return Ok(Response::Execution(Tag::new("OK")));
                 }
 
                 let batches = boyodb_core::engine::read_ipc_batches(&result.records_ipc)
@@ -334,10 +535,28 @@ impl SimpleQueryHandler for BoyodbPgHandler {
             return result;
         }
 
+        // Handle transaction control commands
+        if let Some(txn_result) = self.try_handle_transaction_command(query) {
+            match txn_result {
+                Ok(tag) => return Ok(vec![Response::Execution(Tag::new(tag))]),
+                Err(e) => {
+                    let error_info = ErrorInfo::new(
+                        "ERROR".to_owned(),
+                        "25000".to_owned(), // SQLSTATE for invalid transaction state
+                        e,
+                    );
+                    return Err(PgWireError::UserError(Box::new(error_info)));
+                }
+            }
+        }
+
+        // Get current transaction ID if in a transaction
+        let transaction_id = self.txn_state.lock().unwrap().txn_id;
         let req = QueryRequest {
             sql: query.to_string(),
             timeout_millis: 10000,
             collect_stats: false,
+            transaction_id,
         };
 
         let db = self.db.clone();
@@ -348,19 +567,7 @@ impl SimpleQueryHandler for BoyodbPgHandler {
         match resp {
             Ok(result) => {
                 if result.records_ipc.is_empty() {
-                    let tag_str = query.trim().to_uppercase();
-                    let tag = if tag_str.starts_with("BEGIN")
-                        || tag_str.starts_with("START TRANSACTION")
-                    {
-                        "BEGIN"
-                    } else if tag_str.starts_with("COMMIT") || tag_str.starts_with("END") {
-                        "COMMIT"
-                    } else if tag_str.starts_with("ROLLBACK") {
-                        "ROLLBACK"
-                    } else {
-                        "OK"
-                    };
-                    return Ok(vec![Response::Execution(Tag::new(tag))]);
+                    return Ok(vec![Response::Execution(Tag::new("OK"))]);
                 }
 
                 let batches = boyodb_core::engine::read_ipc_batches(&result.records_ipc)

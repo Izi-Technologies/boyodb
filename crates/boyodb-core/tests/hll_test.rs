@@ -78,6 +78,7 @@ async fn test_approx_count_distinct_accuracy() {
             sql: "SELECT APPROX_COUNT_DISTINCT(val) FROM events".to_string(),
             timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         })
         .unwrap();
 
@@ -113,6 +114,7 @@ async fn test_approx_count_distinct_accuracy() {
             sql: "SELECT COUNT(DISTINCT val) FROM events".to_string(),
             timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         })
         .unwrap();
     let mut reader =

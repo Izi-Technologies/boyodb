@@ -222,6 +222,8 @@ pub struct EngineConfig {
     pub max_concurrent_transactions: usize,
     /// Enable constraint validation on insert/update
     pub constraint_validation_enabled: bool,
+    /// Enable transaction support (ACID transactions, MVCC)
+    pub transactions_enabled: bool,
 }
 
 impl EngineConfig {
@@ -294,7 +296,13 @@ impl EngineConfig {
             transaction_timeout_secs: 60,
             max_concurrent_transactions: 10000,
             constraint_validation_enabled: true,
+            transactions_enabled: false,
         }
+    }
+
+    pub fn with_transactions_enabled(mut self, enabled: bool) -> Self {
+        self.transactions_enabled = enabled;
+        self
     }
 
     pub fn with_segment_cache_bytes(mut self, bytes: u64) -> Self {
@@ -1599,6 +1607,9 @@ pub struct QueryRequest {
     /// Whether to collect detailed execution statistics
     #[serde(default)]
     pub collect_stats: bool,
+    /// Transaction ID for MVCC visibility - queries within a transaction see uncommitted changes
+    #[serde(default)]
+    pub transaction_id: Option<crate::transaction::TransactionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1903,8 +1914,19 @@ impl Db {
             shard_map: RwLock::new(ShardMap::new(cfg.shard_count as u16)),
             cluster_manager: RwLock::new(None),
             storage,
-            // Initialize transaction infrastructure (will be fully initialized later if needed)
-            transaction_manager: None,
+            // Initialize transaction infrastructure
+            transaction_manager: if cfg.transactions_enabled {
+                let lock_manager = std::sync::Arc::new(crate::lock_manager::LockManager::new());
+                let undo_log = std::sync::Arc::new(crate::undo_log::UndoLog::new());
+                let mvcc_manager = std::sync::Arc::new(crate::mvcc::MvccManager::new());
+                Some(std::sync::Arc::new(crate::transaction::TransactionManager::new(
+                    lock_manager,
+                    undo_log,
+                    mvcc_manager,
+                )))
+            } else {
+                None
+            },
             constraint_validator: if cfg.constraint_validation_enabled {
                 Some(std::sync::Arc::new(
                     crate::constraint_validator::ConstraintValidator::new(),
@@ -1948,6 +1970,76 @@ impl Db {
     /// Check if transactions are enabled
     pub fn transactions_enabled(&self) -> bool {
         self.transaction_manager.is_some()
+    }
+
+    /// Begin a new transaction
+    pub fn begin_transaction(
+        &self,
+        isolation_level: Option<crate::transaction::IsolationLevel>,
+        read_only: bool,
+    ) -> Result<crate::transaction::TransactionId, EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.begin(isolation_level, read_only, None)
+    }
+
+    /// Commit a transaction
+    pub fn commit_transaction(
+        &self,
+        txn_id: crate::transaction::TransactionId,
+    ) -> Result<u64, EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.commit(txn_id)
+    }
+
+    /// Rollback a transaction
+    pub fn rollback_transaction(
+        &self,
+        txn_id: crate::transaction::TransactionId,
+    ) -> Result<(), EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.rollback(txn_id)
+    }
+
+    /// Create a savepoint within a transaction
+    pub fn create_savepoint(
+        &self,
+        txn_id: crate::transaction::TransactionId,
+        name: &str,
+    ) -> Result<(), EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.savepoint(txn_id, name.to_string())
+    }
+
+    /// Rollback to a savepoint
+    pub fn rollback_to_savepoint(
+        &self,
+        txn_id: crate::transaction::TransactionId,
+        name: &str,
+    ) -> Result<(), EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.rollback_to_savepoint(txn_id, name)
+    }
+
+    /// Release a savepoint
+    pub fn release_savepoint(
+        &self,
+        txn_id: crate::transaction::TransactionId,
+        name: &str,
+    ) -> Result<(), EngineError> {
+        let txn_mgr = self.transaction_manager.as_ref().ok_or_else(|| {
+            EngineError::NotImplemented("Transaction manager not initialized".into())
+        })?;
+        txn_mgr.release_savepoint(txn_id, name)
     }
 
     /// Validate constraints for a batch before insertion
@@ -2278,6 +2370,39 @@ impl Db {
             .ingests_bytes
             .fetch_add(payload_len, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Ingest data within a transaction context
+    /// The transaction must be active and will acquire necessary locks
+    pub fn ingest_ipc_txn(
+        &self,
+        batch: IngestBatch,
+        txn_id: Option<crate::transaction::TransactionId>,
+    ) -> Result<(), EngineError> {
+        let db_name = batch.database.as_deref().unwrap_or("default");
+        let table_name = batch.table.as_deref().unwrap_or("default");
+
+        // If transaction is provided, validate and acquire locks
+        if let Some(tid) = txn_id {
+            if let Some(ref txn_mgr) = self.transaction_manager {
+                // Verify transaction is active
+                let txn = txn_mgr
+                    .get_transaction(tid)
+                    .ok_or_else(|| EngineError::InvalidArgument(format!("Transaction {} not found", tid)))?;
+                if !txn.state.is_active() {
+                    return Err(EngineError::InvalidArgument(format!(
+                        "Transaction {} is not active (state: {:?})",
+                        tid, txn.state
+                    )));
+                }
+
+                // Acquire exclusive lock on the table
+                txn_mgr.acquire_lock(tid, db_name, table_name, None, crate::lock_manager::LockMode::Exclusive)?;
+            }
+        }
+
+        // Perform the actual ingest
+        self.ingest_ipc(batch)
     }
 
     fn buffer_memtable_entry(
@@ -4705,6 +4830,7 @@ impl Db {
             sql: left_sql,
             timeout_millis: request.timeout_millis,
             collect_stats: false,
+            transaction_id: None,
         };
         let left_response = self.query(left_request)?;
         check_timeout()?;
@@ -4732,6 +4858,7 @@ impl Db {
             sql: right_sql,
             timeout_millis: request.timeout_millis,
             collect_stats: false,
+            transaction_id: None,
         };
         let right_response = self.query(right_request)?;
         check_timeout()?;
@@ -4858,6 +4985,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
+            transaction_id: None,
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -4891,6 +5019,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
+            transaction_id: None,
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -4921,6 +5050,7 @@ impl Db {
                 sql: subquery_sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
+            transaction_id: None,
             };
             let subquery_response = self.query(subquery_request)?;
             check_timeout()?;
@@ -4960,6 +5090,7 @@ impl Db {
             sql: main_sql,
             timeout_millis: request.timeout_millis,
             collect_stats: false,
+            transaction_id: None,
         };
         let main_response = self.query(main_request)?;
         check_timeout()?;
@@ -5033,6 +5164,7 @@ impl Db {
                 sql: request.sql.clone(),
                 timeout_millis: request.timeout_millis,
                 collect_stats: false,
+            transaction_id: None,
             });
         }
 
@@ -7235,6 +7367,7 @@ impl Db {
             sql: query_sql,
             timeout_millis: 0,
             collect_stats: false,
+            transaction_id: None,
         })?;
 
         // Create a unique segment ID for the materialized view data
@@ -9939,6 +10072,7 @@ impl Db {
             sql: query_sql.to_string(),
             timeout_millis: 0,
             collect_stats: false,
+            transaction_id: None,
         };
         let result = self.query(query_request)?;
 
@@ -10659,6 +10793,7 @@ impl Db {
             sql: format!("SELECT * FROM \"{}\".\"{}\"", database, table),
             timeout_millis: 0,
             collect_stats: false,
+            transaction_id: None,
         };
         let result = self.query(query_request)?;
 
@@ -13279,6 +13414,7 @@ pub fn execute_query_with_ctes(
                 sql: cte_sql,
                 timeout_millis,
                 collect_stats: false,
+            transaction_id: None,
             })?;
 
             // Store the result in the CTE context
@@ -13294,6 +13430,7 @@ pub fn execute_query_with_ctes(
         sql: main_query,
         timeout_millis,
         collect_stats: false,
+            transaction_id: None,
     })
 }
 
@@ -17067,6 +17204,7 @@ fn execute_recursive_cte(
         sql: anchor_sql.clone(),
         timeout_millis,
         collect_stats: false,
+            transaction_id: None,
     })?;
 
     if anchor_result.records_ipc.is_empty() {
@@ -17133,6 +17271,7 @@ fn execute_recursive_cte(
             sql: recursive_with_data,
             timeout_millis,
             collect_stats: false,
+            transaction_id: None,
         });
 
         match recursive_result {
@@ -18977,6 +19116,7 @@ mod tests {
                 sql: "SELECT name FROM testdb.users".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19033,6 +19173,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.metrics".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19089,6 +19230,7 @@ mod tests {
                 sql: "SELECT name FROM testdb.users WHERE name = 'alice'".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19153,6 +19295,7 @@ mod tests {
                 sql: "SELECT ts FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19211,6 +19354,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -19269,6 +19413,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".to_string(),
                 timeout_millis: 5000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let decoded = decode_single_batch(&result.records_ipc);
@@ -20300,6 +20445,7 @@ mod tests {
                 sql: "SELECT watermark_micros,label FROM analytics.events WHERE watermark>=5 AND event_time<=250 AND tenant_id=7 AND route_id=102 LIMIT 1".into(),
                 timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         })
             .unwrap();
 
@@ -20370,6 +20516,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -20442,6 +20589,7 @@ mod tests {
                 sql: "SELECT COUNT(*),MIN(value),MAX(value) FROM analytics.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -20614,6 +20762,7 @@ mod tests {
                 sql: "SELECT COUNT(*),SUM(value) FROM analytics.events GROUP BY route_id".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -20771,6 +20920,7 @@ mod tests {
             sql: "SELECT * FROM testdb.testtable".into(),
             timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         });
         assert!(result.is_err());
     }
@@ -20827,6 +20977,7 @@ mod tests {
                 sql: "SELECT tenant_id,value FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -20905,6 +21056,7 @@ mod tests {
                     .into(),
                 timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21101,6 +21253,7 @@ mod tests {
                 sql: "SELECT latency_ms FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21187,6 +21340,7 @@ mod tests {
                 sql: "SELECT value FROM testdb.events".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
         let cursor = Cursor::new(resp.records_ipc);
@@ -21233,6 +21387,7 @@ mod tests {
             sql: "SELECT * FROM test.data".into(),
             timeout_millis: 5000,
             collect_stats: false,
+            transaction_id: None,
         });
         assert!(result.is_ok());
 
@@ -21241,6 +21396,7 @@ mod tests {
             sql: "SELECT * FROM test.data".into(),
             timeout_millis: 0,
             collect_stats: false,
+            transaction_id: None,
         });
         assert!(result.is_ok());
     }
@@ -21272,6 +21428,7 @@ mod tests {
             sql: "   ".into(),
             timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         });
         assert!(result.is_err());
     }
@@ -21329,6 +21486,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21440,6 +21598,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21529,6 +21688,7 @@ mod tests {
                 sql: "SELECT DISTINCT tenant_id, route_id FROM test.data".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21609,6 +21769,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE event_time BETWEEN 200 AND 400".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21680,6 +21841,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE tenant_id IN (1, 3, 5)".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21709,6 +21871,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE route_id IN (20, 40)".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21780,6 +21943,7 @@ mod tests {
                 sql: "SELECT * FROM test.data WHERE tenant_id = 1 OR tenant_id = 3".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21811,6 +21975,7 @@ mod tests {
                         .into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21924,6 +22089,7 @@ mod tests {
                 sql: "SELECT name FROM test.users WHERE name LIKE '%alice%'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21938,6 +22104,7 @@ mod tests {
                 sql: "SELECT name FROM test.users WHERE name LIKE 'bob%'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -21996,6 +22163,7 @@ mod tests {
                 sql: "SELECT status FROM test.accounts WHERE status = 'active'".into(),
                 timeout_millis: 1000,
                 collect_stats: false,
+            transaction_id: None,
             })
             .unwrap();
 
@@ -22574,6 +22742,7 @@ mod tests {
             sql: sql.to_string(),
             timeout_millis: 1000,
             collect_stats: false,
+            transaction_id: None,
         });
 
         // We just verify it doesn't panic - the actual execution may fail

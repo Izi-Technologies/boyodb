@@ -212,10 +212,16 @@ impl RecoveryManager {
     }
 
     /// Create a base backup
+    ///
+    /// # Arguments
+    /// * `data_path` - Path to the data directory to backup
+    /// * `label` - Optional user-provided label for the backup
+    /// * `current_lsn` - Current LSN from the WAL (for PITR recovery)
     pub fn create_backup(
         &self,
         data_path: &Path,
         label: Option<String>,
+        current_lsn: Option<u64>,
     ) -> Result<BackupInfo, EngineError> {
         let start_time = std::time::Instant::now();
         let start_timestamp = SystemTime::now()
@@ -267,9 +273,9 @@ impl RecoveryManager {
             0
         };
 
-        // TODO: Get actual LSN from database
-        let start_lsn = 0;
-        let end_lsn = 0;
+        // Use provided LSN or default to 0 if not available
+        let start_lsn = current_lsn.unwrap_or(0);
+        let end_lsn = current_lsn.unwrap_or(0);
 
         let info = BackupInfo {
             id: backup_id,
@@ -1004,9 +1010,9 @@ mod tests {
         fs::create_dir_all(&segments_dir).unwrap();
         fs::write(segments_dir.join("seg1.dat"), b"segment data").unwrap();
 
-        // Create backup
+        // Create backup with test LSN
         let backup = manager
-            .create_backup(&data_dir, Some("test backup".to_string()))
+            .create_backup(&data_dir, Some("test backup".to_string()), Some(100))
             .unwrap();
 
         assert_eq!(backup.label, Some("test backup".to_string()));
@@ -1029,11 +1035,11 @@ mod tests {
 
         // Create multiple backups
         manager
-            .create_backup(&data_dir, Some("backup1".to_string()))
+            .create_backup(&data_dir, Some("backup1".to_string()), Some(100))
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         manager
-            .create_backup(&data_dir, Some("backup2".to_string()))
+            .create_backup(&data_dir, Some("backup2".to_string()), Some(200))
             .unwrap();
 
         let backups = manager.list_backups();
@@ -1050,7 +1056,7 @@ mod tests {
         fs::write(data_dir.join("manifest.bin"), b"test").unwrap();
 
         // Create and delete backup
-        let backup = manager.create_backup(&data_dir, None).unwrap();
+        let backup = manager.create_backup(&data_dir, None, Some(50)).unwrap();
         let backup_path = PathBuf::from(&backup.backup_path);
 
         assert!(backup_path.exists());
@@ -1069,7 +1075,7 @@ mod tests {
         fs::write(data_dir.join("manifest.bin"), b"test manifest data").unwrap();
 
         // Create backup
-        let backup = manager.create_backup(&data_dir, None).unwrap();
+        let backup = manager.create_backup(&data_dir, None, Some(75)).unwrap();
 
         // Restore it
         manager.restore_backup(&backup).unwrap();

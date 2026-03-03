@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
             sql: "SELECT count(*) FROM logs".to_string(),
             timeout_millis: 10000,
             collect_stats: false,
+            transaction_id: None,
         })
         .map_err(|e| anyhow::anyhow!("query failed: {e}"))?;
 
@@ -215,6 +216,7 @@ fn measure_query(db: &Db, name: &str, sql: &str, iters: usize) -> Result<()> {
             sql: sql.to_string(),
             timeout_millis: 10000,
             collect_stats: false,
+            transaction_id: None,
         })
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -226,6 +228,7 @@ fn measure_query(db: &Db, name: &str, sql: &str, iters: usize) -> Result<()> {
                 sql: sql.to_string(),
                 timeout_millis: 10000,
                 collect_stats: false,
+                transaction_id: None,
             })
             .map_err(|e| anyhow::anyhow!(e))?;
         durs.push(start.elapsed());
