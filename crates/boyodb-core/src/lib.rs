@@ -39,6 +39,16 @@ pub mod vector;
 pub mod vectorized;
 pub mod wal;
 
+// --- Financial-Grade ACID Transaction Support (New Modules) ---
+pub mod btree;
+pub mod constraint_validator;
+pub mod lock_manager;
+pub mod mvcc;
+pub mod pitr;
+pub mod transaction;
+pub mod undo_log;
+pub mod wal_archive;
+
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
@@ -211,3 +221,43 @@ pub use gpu::{
     AggregateResult, AggregationType, FilterOp, FilterPredicate, GpuConfig, GpuDecision,
     GpuDeviceInfo, GpuError, GpuExecutionStats, GpuExecutor, GpuOperation, GpuStatus,
 };
+
+// --- Financial-Grade ACID Transaction Support re-exports ---
+
+// Transaction Management (ACID compliance)
+pub use transaction::{
+    IsolationLevel as TxnIsolationLevel, PrepareResult, Savepoint, Transaction, TransactionId,
+    TransactionManager, TransactionState, TransactionStats, NO_TRANSACTION,
+};
+
+// Lock Manager (Concurrency Control)
+pub use lock_manager::{
+    LockHandle, LockManager, LockManagerConfig, LockMode, LockStats, LockTarget,
+};
+
+// Undo Log (Rollback Support)
+pub use undo_log::{UndoLog, UndoLogConfig, UndoLogStats, UndoRecord};
+
+// MVCC (Snapshot Isolation)
+pub use mvcc::{MvccManager, MvccStats, MvccVisibility, RowKey, Snapshot};
+
+// B-Tree Index (Range Queries)
+pub use btree::{
+    build_btree_from_sorted, BTree, BTreeBuilder, BTreeHeader, BTreeKey, BTreeNode, BTreeRange,
+    NodeType,
+};
+
+// WAL Archiving (for PITR)
+pub use wal_archive::{WalArchiveConfig, WalArchiveInfo, WalArchiveStats, WalArchiver};
+
+// Point-in-Time Recovery
+pub use pitr::{BackupInfo, RecoveryConfig, RecoveryManager, RecoveryResult, WalStatus};
+
+// Constraint Validation (Data Integrity)
+pub use constraint_validator::{
+    ConstraintType, ConstraintValidator, ConstraintViolation, ExistingDataProvider,
+    InMemoryDataProvider, ValidationConfig, ValidationResult,
+};
+
+// Extended SQL types for financial features
+pub use sql::{ForeignKeyAction, SqlIsolationLevel, TableConstraint, TransactionCommand};

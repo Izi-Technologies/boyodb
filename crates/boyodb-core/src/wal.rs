@@ -12,21 +12,90 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
+/// Header for each WAL record with LSN and timestamp for PITR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalRecordHeader {
+    /// Log Sequence Number - monotonically increasing
+    pub lsn: u64,
+    /// Wall clock time in microseconds since epoch
+    pub timestamp_micros: u64,
+    /// Transaction ID if this record is part of a transaction
+    pub transaction_id: Option<u64>,
+}
+
+impl WalRecordHeader {
+    pub fn new(lsn: u64, transaction_id: Option<u64>) -> Self {
+        let timestamp_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        WalRecordHeader {
+            lsn,
+            timestamp_micros,
+            transaction_id,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 enum WalRecord {
+    /// Segment data record (existing)
     Segment {
         entry: ManifestEntry,
         payload: Vec<u8>,
     },
+    /// Transaction begin record
+    TxnBegin {
+        txn_id: u64,
+        timestamp_micros: u64,
+        isolation_level: Option<String>,
+    },
+    /// Transaction commit record
+    TxnCommit {
+        txn_id: u64,
+        commit_version: u64,
+        timestamp_micros: u64,
+    },
+    /// Transaction abort record
+    TxnAbort { txn_id: u64, timestamp_micros: u64 },
+    /// Checkpoint record (for recovery starting point)
+    Checkpoint {
+        lsn: u64,
+        timestamp_micros: u64,
+        manifest_version: u64,
+    },
 }
 
-#[derive(Debug)]
+/// Callback type for WAL archiving
+pub type ArchiveCallback = Box<dyn Fn(&Path, u64, u64) -> Result<(), EngineError> + Send + Sync>;
+
 pub struct Wal {
     writer: BufWriter<File>,
     path: std::path::PathBuf,
     pending_bytes: usize,
     max_segments: u64,
     last_sync: Instant,
+    /// Current Log Sequence Number
+    current_lsn: std::sync::atomic::AtomicU64,
+    /// First LSN in current WAL file
+    file_start_lsn: u64,
+    /// First timestamp in current WAL file
+    file_start_timestamp: u64,
+    /// Archive callback for PITR support
+    archive_callback: Option<std::sync::Arc<ArchiveCallback>>,
+}
+
+impl std::fmt::Debug for Wal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wal")
+            .field("path", &self.path)
+            .field("pending_bytes", &self.pending_bytes)
+            .field("max_segments", &self.max_segments)
+            .field("current_lsn", &self.current_lsn)
+            .field("file_start_lsn", &self.file_start_lsn)
+            .field("archive_callback", &self.archive_callback.is_some())
+            .finish()
+    }
 }
 
 impl Drop for Wal {
@@ -47,13 +116,132 @@ impl Wal {
             .append(true)
             .open(path)
             .map_err(|e| EngineError::Io(format!("open wal failed: {e}")))?;
+
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
         Ok(Wal {
             writer: BufWriter::new(file),
             path: path.to_path_buf(),
             pending_bytes: 0,
             max_segments: 4,
             last_sync: Instant::now(),
+            current_lsn: std::sync::atomic::AtomicU64::new(1),
+            file_start_lsn: 1,
+            file_start_timestamp: now_micros,
+            archive_callback: None,
         })
+    }
+
+    /// Set the archive callback for PITR support
+    pub fn set_archive_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(&Path, u64, u64) -> Result<(), EngineError> + Send + Sync + 'static,
+    {
+        self.archive_callback = Some(std::sync::Arc::new(Box::new(callback)));
+    }
+
+    /// Get the current LSN
+    pub fn current_lsn(&self) -> u64 {
+        self.current_lsn.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Get the next LSN and increment
+    fn next_lsn(&self) -> u64 {
+        self.current_lsn
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Append a transaction begin record
+    pub fn append_txn_begin(
+        &mut self,
+        txn_id: u64,
+        isolation_level: Option<&str>,
+    ) -> Result<u64, EngineError> {
+        let lsn = self.next_lsn();
+        let timestamp_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let rec = WalRecord::TxnBegin {
+            txn_id,
+            timestamp_micros,
+            isolation_level: isolation_level.map(String::from),
+        };
+        self.write_record(&rec)?;
+        Ok(lsn)
+    }
+
+    /// Append a transaction commit record
+    pub fn append_txn_commit(
+        &mut self,
+        txn_id: u64,
+        commit_version: u64,
+    ) -> Result<u64, EngineError> {
+        let lsn = self.next_lsn();
+        let timestamp_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let rec = WalRecord::TxnCommit {
+            txn_id,
+            commit_version,
+            timestamp_micros,
+        };
+        self.write_record(&rec)?;
+        Ok(lsn)
+    }
+
+    /// Append a transaction abort record
+    pub fn append_txn_abort(&mut self, txn_id: u64) -> Result<u64, EngineError> {
+        let lsn = self.next_lsn();
+        let timestamp_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let rec = WalRecord::TxnAbort {
+            txn_id,
+            timestamp_micros,
+        };
+        self.write_record(&rec)?;
+        Ok(lsn)
+    }
+
+    /// Append a checkpoint record
+    pub fn append_checkpoint(&mut self, manifest_version: u64) -> Result<u64, EngineError> {
+        let lsn = self.next_lsn();
+        let timestamp_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let rec = WalRecord::Checkpoint {
+            lsn,
+            timestamp_micros,
+            manifest_version,
+        };
+        self.write_record(&rec)?;
+        Ok(lsn)
+    }
+
+    /// Write a record to the WAL
+    fn write_record(&mut self, rec: &WalRecord) -> Result<(), EngineError> {
+        let bytes = serde_json::to_vec(rec)
+            .map_err(|e| EngineError::Internal(format!("wal encode: {e}")))?;
+        let len_line = format!("{} ", bytes.len());
+        self.writer
+            .write_all(len_line.as_bytes())
+            .and_then(|_| self.writer.write_all(&bytes))
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .map_err(|e| EngineError::Io(format!("wal append failed: {e}")))?;
+
+        self.pending_bytes += len_line.len() + bytes.len() + 1;
+        Ok(())
     }
 
     pub fn append_segment(
@@ -208,9 +396,21 @@ impl Wal {
         if len <= max_bytes {
             return Ok(());
         }
+
+        let end_lsn = self.current_lsn();
+        let start_lsn = self.file_start_lsn;
+
         let rotated = rotate_path(&self.path)?;
         std::fs::rename(&self.path, &rotated)
             .map_err(|e| EngineError::Io(format!("wal rotate rename failed: {e}")))?;
+
+        // Call archive callback if set (for PITR)
+        if let Some(ref callback) = self.archive_callback {
+            if let Err(e) = callback(&rotated, start_lsn, end_lsn) {
+                warn!("WAL archive callback failed: {:?}", e);
+            }
+        }
+
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -219,13 +419,47 @@ impl Wal {
             .map_err(|e| EngineError::Io(format!("wal rotate open failed: {e}")))?;
         self.writer = BufWriter::new(file);
         self.pending_bytes = 0;
+
+        // Update file start tracking for new file
+        self.file_start_lsn = end_lsn;
+        self.file_start_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
         info!(
-            "wal rotated: size={} > max_bytes={}, new_file={:?}, keep_max_segments={}",
-            len, max_bytes, rotated, self.max_segments
+            "wal rotated: size={} > max_bytes={}, new_file={:?}, keep_max_segments={}, lsn_range={}..{}",
+            len, max_bytes, rotated, self.max_segments, start_lsn, end_lsn
         );
         cleanup_old_segments(&self.path, self.max_segments)?;
         Ok(())
     }
+
+    /// Get WAL status information for monitoring
+    pub fn status(&self) -> WalStatus {
+        WalStatus {
+            current_lsn: self.current_lsn(),
+            file_start_lsn: self.file_start_lsn,
+            file_start_timestamp: self.file_start_timestamp,
+            pending_bytes: self.pending_bytes,
+            path: self.path.clone(),
+        }
+    }
+}
+
+/// WAL status information
+#[derive(Debug, Clone)]
+pub struct WalStatus {
+    /// Current LSN
+    pub current_lsn: u64,
+    /// First LSN in current file
+    pub file_start_lsn: u64,
+    /// First timestamp in current file
+    pub file_start_timestamp: u64,
+    /// Bytes pending sync
+    pub pending_bytes: usize,
+    /// WAL file path
+    pub path: PathBuf,
 }
 
 fn rotate_path(path: &Path) -> Result<PathBuf, EngineError> {
@@ -350,6 +584,14 @@ fn replay_wal_file_parallel(
 
                 entries.push((entry, payload));
             }
+            // Transaction records are processed separately during recovery
+            WalRecord::TxnBegin { .. }
+            | WalRecord::TxnCommit { .. }
+            | WalRecord::TxnAbort { .. }
+            | WalRecord::Checkpoint { .. } => {
+                // Transaction records are logged but not replayed for segment recovery
+                // They would be used by the transaction manager during PITR
+            }
         }
     }
 
@@ -426,6 +668,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: Some(schema_hash),
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         }
     }
 

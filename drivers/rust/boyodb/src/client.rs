@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::Error;
-use crate::result::{QueryResult, Response, TableInfo};
+use crate::result::{parse_arrow_ipc, QueryResult, Response, TableInfo};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -678,57 +678,6 @@ fn parse_host(host: &str) -> (&str, u16) {
     (hostname, port)
 }
 
-/// Parse Arrow IPC data (simplified parser).
-/// For production use, consider using the arrow crate.
-fn parse_arrow_ipc(data: &[u8], result: &mut QueryResult) {
-    let mut offset = 0;
-
-    while offset < data.len() {
-        if offset + 4 > data.len() {
-            break;
-        }
-
-        let msg_len = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-        offset += 4;
-
-        if msg_len == 0 {
-            break;
-        }
-
-        // Handle continuation marker
-        let msg_len = if msg_len == -1 {
-            if offset + 4 > data.len() {
-                break;
-            }
-            let len = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-            offset += 4;
-            if len == 0 {
-                break;
-            }
-            len
-        } else {
-            msg_len
-        };
-
-        let msg_len = msg_len as usize;
-        if offset + msg_len > data.len() {
-            break;
-        }
-
-        let _metadata = &data[offset..offset + msg_len];
-        offset += msg_len;
-
-        // Pad to 8-byte boundary
-        let padding = (8 - (msg_len % 8)) % 8;
-        offset += padding;
-
-        // For now, just skip the body - full Arrow parsing is complex
-        // In production, use the arrow crate
-    }
-
-    // Return empty result - full parsing would require arrow crate
-    let _ = result;
-}
 
 #[cfg(test)]
 mod tests {

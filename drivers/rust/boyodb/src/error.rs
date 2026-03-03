@@ -19,6 +19,22 @@ pub enum Error {
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// Connection pool error.
+    #[error("Pool error: {0}")]
+    Pool(String),
+
+    /// Batch insert error.
+    #[error("Batch error: {0}")]
+    Batch(String),
+
+    /// Transaction error.
+    #[error("Transaction error: {0}")]
+    Transaction(String),
+
+    /// Arrow error.
+    #[error("Arrow error: {0}")]
+    Arrow(String),
+
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -30,4 +46,10 @@ pub enum Error {
     /// Base64 decode error.
     #[error("Base64 decode error: {0}")]
     Base64(#[from] base64::DecodeError),
+}
+
+impl From<arrow::error::ArrowError> for Error {
+    fn from(e: arrow::error::ArrowError) -> Self {
+        Error::Arrow(e.to_string())
+    }
 }

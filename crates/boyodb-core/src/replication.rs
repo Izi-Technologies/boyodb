@@ -383,6 +383,17 @@ pub struct ManifestEntry {
     /// Stable schema fingerprint to detect mismatched or corrupted segments
     #[serde(default)]
     pub schema_hash: Option<u64>,
+    // --- MVCC fields for transaction visibility ---
+    /// Transaction ID that created this segment (for MVCC visibility)
+    #[serde(default)]
+    pub created_txn: Option<u64>,
+    /// Transaction ID that deleted this segment (for MVCC visibility)
+    /// If set, this segment is deleted but retained for snapshot queries
+    #[serde(default)]
+    pub deleted_txn: Option<u64>,
+    /// Version when this segment was deleted (for MVCC visibility)
+    #[serde(default)]
+    pub deleted_version: Option<u64>,
 }
 
 impl ManifestEntry {
@@ -686,6 +697,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         }
     }
 

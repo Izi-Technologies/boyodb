@@ -5108,6 +5108,50 @@ where
             .await?;
             Ok(Response::ok_message("constraint dropped"))
         }
+        DdlCommand::RecoverToTimestamp { timestamp } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            // PITR recovery requires superuser privileges and proper backup infrastructure
+            let msg = format!(
+                "PITR to timestamp {} not yet implemented - requires backup infrastructure",
+                timestamp
+            );
+            Ok(Response::ok_message(&msg))
+        }
+        DdlCommand::RecoverToLsn { lsn } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let msg = format!(
+                "PITR to LSN {} not yet implemented - requires backup infrastructure",
+                lsn
+            );
+            Ok(Response::ok_message(&msg))
+        }
+        DdlCommand::CreateBackup { label } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let label_str = label.unwrap_or_else(|| "unlabeled".to_string());
+            let msg = format!(
+                "Backup '{}' not yet implemented - requires backup infrastructure",
+                label_str
+            );
+            Ok(Response::ok_message(&msg))
+        }
+        DdlCommand::ShowBackups => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message(
+                "No backups available - backup infrastructure not yet configured",
+            ))
+        }
+        DdlCommand::ShowWalStatus => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message("WAL archiving status: not configured"))
+        }
+        DdlCommand::DeleteBackup { backup_id } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let msg = format!(
+                "Backup '{}' deletion not yet implemented - requires backup infrastructure",
+                backup_id
+            );
+            Ok(Response::ok_message(&msg))
+        }
     }
 }
 
@@ -5532,6 +5576,31 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     // Create RecordBatch
     let batch = RecordBatch::try_new(insert_schema.clone(), arrays)
         .map_err(|e| ServerError::BadRequest(format!("failed to create record batch: {}", e)))?;
+
+    // Validate constraints before INSERT
+    let db_validate = db.clone();
+    let database_validate = database.clone();
+    let table_validate = table.clone();
+    let batch_validate = batch.clone();
+    let validation_result = blocking(move || {
+        db_validate
+            .validate_constraints(&database_validate, &table_validate, &batch_validate)
+            .map_err(|e| ServerError::Db(e.to_string()))
+    })
+    .await?;
+
+    // Check if validation passed
+    if !validation_result.valid {
+        let violations: Vec<String> = validation_result
+            .violations
+            .iter()
+            .map(|v| format!("{}: {}", v.constraint_name, v.message))
+            .collect();
+        return Err(ServerError::BadRequest(format!(
+            "Constraint violation(s): {}",
+            violations.join("; ")
+        )));
+    }
 
     // Convert to Arrow IPC
     let mut ipc_buffer = Vec::new();
@@ -6875,6 +6944,15 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 constraint_name,
             }
         }
+        // PITR and backup commands don't have database context
+        DdlCommand::RecoverToTimestamp { timestamp } => {
+            DdlCommand::RecoverToTimestamp { timestamp }
+        }
+        DdlCommand::RecoverToLsn { lsn } => DdlCommand::RecoverToLsn { lsn },
+        DdlCommand::CreateBackup { label } => DdlCommand::CreateBackup { label },
+        DdlCommand::ShowBackups => DdlCommand::ShowBackups,
+        DdlCommand::ShowWalStatus => DdlCommand::ShowWalStatus,
+        DdlCommand::DeleteBackup { backup_id } => DdlCommand::DeleteBackup { backup_id },
     }
 }
 

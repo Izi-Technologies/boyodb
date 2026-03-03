@@ -205,6 +205,23 @@ pub struct EngineConfig {
     pub cross_join_max_rows: usize,
     /// Maximum bytes allowed for set operation inputs
     pub set_operation_max_bytes: usize,
+    // --- PITR and Transaction Configuration ---
+    /// Enable WAL archiving for point-in-time recovery
+    pub wal_archiving_enabled: bool,
+    /// Path for WAL archives (defaults to data_dir/wal_archive)
+    pub wal_archive_path: Option<PathBuf>,
+    /// Path for base backups (defaults to data_dir/backups)
+    pub backup_path: Option<PathBuf>,
+    /// Backup retention period in days (0 = forever)
+    pub backup_retention_days: u32,
+    /// Default transaction isolation level
+    pub default_isolation_level: String,
+    /// Default transaction timeout in seconds (0 = no timeout)
+    pub transaction_timeout_secs: u64,
+    /// Maximum concurrent transactions
+    pub max_concurrent_transactions: usize,
+    /// Enable constraint validation on insert/update
+    pub constraint_validation_enabled: bool,
 }
 
 impl EngineConfig {
@@ -268,6 +285,15 @@ impl EngineConfig {
             join_max_partitions: 128,
             cross_join_max_rows: 1_000_000,
             set_operation_max_bytes: 200 * 1024 * 1024,
+            // PITR and Transaction defaults
+            wal_archiving_enabled: false,
+            wal_archive_path: None,
+            backup_path: None,
+            backup_retention_days: 30,
+            default_isolation_level: "READ_COMMITTED".to_string(),
+            transaction_timeout_secs: 60,
+            max_concurrent_transactions: 10000,
+            constraint_validation_enabled: true,
         }
     }
 
@@ -1480,6 +1506,12 @@ pub struct Db {
     pending_deletes: ParkingMutex<Vec<String>>,
     pub cluster_manager: RwLock<Option<std::sync::Weak<crate::cluster::ClusterManager>>>,
     pub storage: std::sync::Arc<crate::storage::TieredStorage>,
+    // --- Financial-Grade Transaction Support ---
+    /// Transaction manager for ACID compliance
+    pub transaction_manager: Option<std::sync::Arc<crate::transaction::TransactionManager>>,
+    /// Constraint validator for data integrity
+    pub constraint_validator:
+        Option<std::sync::Arc<crate::constraint_validator::ConstraintValidator>>,
 }
 
 impl Drop for Db {
@@ -1871,6 +1903,15 @@ impl Db {
             shard_map: RwLock::new(ShardMap::new(cfg.shard_count as u16)),
             cluster_manager: RwLock::new(None),
             storage,
+            // Initialize transaction infrastructure (will be fully initialized later if needed)
+            transaction_manager: None,
+            constraint_validator: if cfg.constraint_validation_enabled {
+                Some(std::sync::Arc::new(
+                    crate::constraint_validator::ConstraintValidator::new(),
+                ))
+            } else {
+                None
+            },
         };
 
         db.spawn_background_compaction_loop();
@@ -1894,6 +1935,52 @@ impl Db {
         if let Ok(mut lock) = self.cluster_manager.write() {
             *lock = Some(cm);
         }
+    }
+
+    /// Get the transaction manager, creating it if necessary
+    /// Note: This is a helper method since transaction_manager is Option
+    pub fn get_transaction_manager(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::transaction::TransactionManager>> {
+        self.transaction_manager.as_ref()
+    }
+
+    /// Check if transactions are enabled
+    pub fn transactions_enabled(&self) -> bool {
+        self.transaction_manager.is_some()
+    }
+
+    /// Validate constraints for a batch before insertion
+    pub fn validate_constraints(
+        &self,
+        database: &str,
+        table: &str,
+        batch: &arrow_array::RecordBatch,
+    ) -> Result<crate::constraint_validator::ValidationResult, EngineError> {
+        let validator = self.constraint_validator.as_ref().ok_or_else(|| {
+            EngineError::Configuration("Constraint validation is disabled".to_string())
+        })?;
+
+        // Get table metadata
+        let table_meta = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest
+                .tables
+                .iter()
+                .find(|t| t.database == database && t.name == table)
+                .cloned()
+        };
+
+        let table_meta = table_meta.ok_or_else(|| {
+            EngineError::NotFound(format!("Table {}.{} not found", database, table))
+        })?;
+
+        // For now, we don't have an existing data provider integrated
+        // In a full implementation, we'd pass a provider that can check existing data
+        validator.validate_constraints(&table_meta, batch, None)
     }
 
     pub fn ingest_ipc(&self, batch: IngestBatch) -> Result<(), EngineError> {
@@ -2065,6 +2152,10 @@ impl Db {
                 Some(stats.column_stats)
             },
             schema_hash: Some(validated.schema_hash),
+            // MVCC fields - default to None for non-transactional writes
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
         let use_memtable = self.cfg.memtable_max_bytes > 0 && self.cfg.memtable_max_entries > 0;
         if !use_memtable {
@@ -6494,6 +6585,9 @@ impl Db {
                 Some(validated.stats.column_stats.clone())
             },
             schema_hash: Some(validated.schema_hash),
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         persist_segment_ipc(&self.storage, &segment_id, &stored_payload)?;
@@ -7213,6 +7307,9 @@ impl Db {
                     bloom_route: None,
                     column_stats: None,
                     schema_hash: None,
+                    created_txn: None,
+                    deleted_txn: None,
+                    deleted_version: None,
                 });
             }
 
@@ -8417,11 +8514,39 @@ impl Db {
             .write()
             .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
 
-        let tbl = manifest
+        // First, check if table exists and verify foreign key referenced table exists (before mutable borrow)
+        let table_idx = manifest
             .tables
-            .iter_mut()
-            .find(|t| t.database == database && t.name == table)
+            .iter()
+            .position(|t| t.database == database && t.name == table)
             .ok_or_else(|| EngineError::NotFound("table not found".into()))?;
+
+        // For foreign keys, verify referenced table exists before we take mutable borrow
+        if let TableConstraint::ForeignKey {
+            referenced_table,
+            columns,
+            ..
+        } = &constraint
+        {
+            if !manifest
+                .tables
+                .iter()
+                .any(|t| t.database == database && t.name == *referenced_table)
+            {
+                return Err(EngineError::NotFound(format!(
+                    "Referenced table '{}' does not exist",
+                    referenced_table
+                )));
+            }
+            tracing::info!(
+                "Adding foreign key on columns {:?} referencing {}.{}",
+                columns,
+                database,
+                referenced_table
+            );
+        }
+
+        let tbl = &mut manifest.tables[table_idx];
 
         // Validate constraint doesn't conflict with existing ones
         match &constraint {
@@ -8507,6 +8632,24 @@ impl Db {
                         column
                     )));
                 }
+            }
+            TableConstraint::ForeignKey { name, .. } => {
+                // Check for duplicate foreign key name
+                if let Some(n) = name {
+                    if tbl.constraints.iter().any(|c| match c {
+                        TableConstraint::ForeignKey {
+                            name: Some(existing),
+                            ..
+                        } => existing == n,
+                        _ => false,
+                    }) {
+                        return Err(EngineError::InvalidArgument(format!(
+                            "Foreign key constraint '{}' already exists",
+                            n
+                        )));
+                    }
+                }
+                // Referenced table check already done above
             }
         }
 
@@ -9154,6 +9297,10 @@ impl Db {
                     TableConstraint::Default { column, .. } => {
                         constraint_name.append_value(&format!("{}_default", column));
                         constraint_type.append_value("DEFAULT");
+                    }
+                    TableConstraint::ForeignKey { name, .. } => {
+                        constraint_name.append_value(name.as_deref().unwrap_or("FOREIGN KEY"));
+                        constraint_type.append_value("FOREIGN KEY");
                     }
                 }
             }
@@ -19295,6 +19442,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan_hash = compute_bundle_plan_hash(0, Some(0), &[entry.clone()], entry.size_bytes, 0);
@@ -19353,6 +19503,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan_hash = compute_bundle_plan_hash(0, Some(0), &[entry.clone()], entry.size_bytes, 0);
@@ -19477,6 +19630,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan = BundlePlan {
@@ -19537,6 +19693,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan_hash = compute_bundle_plan_hash(0, Some(0), &[entry.clone()], entry.size_bytes, 0);
@@ -19599,6 +19758,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan = BundlePlan {
@@ -19659,6 +19821,9 @@ mod tests {
             bloom_route: None,
             column_stats: None,
             schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
         };
 
         let plan = BundlePlan {

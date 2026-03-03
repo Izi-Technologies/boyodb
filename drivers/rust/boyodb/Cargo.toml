@@ -1,12 +1,12 @@
 [package]
 name = "boyodb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["BoyoDB Team"]
-description = "Rust client driver for boyodb-server"
+description = "Native Rust client driver for boyodb-server with connection pooling and Arrow support"
 license = "Apache-2.0"
 repository = "https://github.com/loreste/boyodb"
-keywords = ["database", "columnar", "analytics", "time-series"]
+keywords = ["database", "columnar", "analytics", "time-series", "arrow"]
 categories = ["database"]
 
 [dependencies]
@@ -15,6 +15,20 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.21"
 thiserror = "1.0"
+tracing = "0.1"
+
+# Arrow for native data handling
+arrow = { version = "53", default-features = false, features = ["ipc"] }
+arrow-array = "53"
+arrow-schema = "53"
+arrow-ipc = "53"
+
+# Pin chrono to avoid version conflicts
+chrono = "0.4.38"
+
+# Connection pooling
+parking_lot = "0.12"
+async-trait = "0.1"
 
 # TLS dependencies (optional)
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12"] }
@@ -23,7 +37,8 @@ webpki-roots = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.0", optional = true }
 
 [features]
-default = []
+default = ["arrow-full"]
+arrow-full = []
 tls = ["rustls", "tokio-rustls", "webpki-roots", "rustls-pemfile"]
 
 [dev-dependencies]

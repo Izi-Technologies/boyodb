@@ -783,6 +783,31 @@ pub enum DdlCommand {
         table: String,
         constraint_name: String,
     },
+    // --- Point-in-Time Recovery Commands ---
+    /// RECOVER TO TIMESTAMP 'timestamp' - restore database to a specific point in time
+    RecoverToTimestamp {
+        /// Target timestamp (ISO 8601 format or Unix timestamp)
+        timestamp: String,
+    },
+    /// RECOVER TO LSN lsn_number - restore database to a specific log sequence number
+    RecoverToLsn {
+        /// Target log sequence number
+        lsn: u64,
+    },
+    /// CREATE BACKUP [label] - create a base backup for PITR
+    CreateBackup {
+        /// Optional label for the backup
+        label: Option<String>,
+    },
+    /// SHOW BACKUPS - list available backups
+    ShowBackups,
+    /// SHOW WAL STATUS - show WAL archiving status
+    ShowWalStatus,
+    /// DELETE BACKUP backup_id - remove a backup
+    DeleteBackup {
+        /// Backup ID to delete
+        backup_id: String,
+    },
 }
 
 /// Index type for CREATE INDEX
@@ -1973,6 +1998,42 @@ pub struct DeleteCommand {
     pub returning: Option<Vec<String>>,
 }
 
+/// Foreign key referential action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    /// No action - error if referenced row exists
+    NoAction,
+    /// Restrict - same as NoAction for now
+    Restrict,
+    /// Cascade - delete/update referencing rows
+    Cascade,
+    /// Set NULL - set referencing columns to NULL
+    SetNull,
+    /// Set DEFAULT - set referencing columns to their default values
+    SetDefault,
+}
+
+impl Default for ForeignKeyAction {
+    fn default() -> Self {
+        ForeignKeyAction::NoAction
+    }
+}
+
+impl std::str::FromStr for ForeignKeyAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().replace(' ', "_").as_str() {
+            "NO_ACTION" | "NOACTION" => Ok(ForeignKeyAction::NoAction),
+            "RESTRICT" => Ok(ForeignKeyAction::Restrict),
+            "CASCADE" => Ok(ForeignKeyAction::Cascade),
+            "SET_NULL" | "SETNULL" => Ok(ForeignKeyAction::SetNull),
+            "SET_DEFAULT" | "SETDEFAULT" => Ok(ForeignKeyAction::SetDefault),
+            _ => Err(format!("Unknown foreign key action: {}", s)),
+        }
+    }
+}
+
 /// Table constraint types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TableConstraint {
@@ -1992,6 +2053,21 @@ pub enum TableConstraint {
     NotNull { column: String },
     /// DEFAULT value constraint
     Default { column: String, value: String },
+    /// FOREIGN KEY constraint for referential integrity
+    ForeignKey {
+        /// Columns in this table that reference another table
+        columns: Vec<String>,
+        /// Name of the referenced table
+        referenced_table: String,
+        /// Columns in the referenced table
+        referenced_columns: Vec<String>,
+        /// Optional constraint name
+        name: Option<String>,
+        /// Action to take when referenced row is deleted
+        on_delete: ForeignKeyAction,
+        /// Action to take when referenced row is updated
+        on_update: ForeignKeyAction,
+    },
 }
 
 /// Column definition for CREATE TABLE
@@ -2017,12 +2093,51 @@ pub struct SequenceDef {
     pub cycle: bool,
 }
 
+/// Isolation level for transactions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SqlIsolationLevel {
+    /// Read Committed - see committed data only
+    ReadCommitted,
+    /// Repeatable Read - consistent snapshot from start
+    RepeatableRead,
+    /// Serializable - full isolation
+    Serializable,
+}
+
+impl std::str::FromStr for SqlIsolationLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().replace('-', " ").as_str() {
+            "READ COMMITTED" | "READCOMMITTED" => Ok(SqlIsolationLevel::ReadCommitted),
+            "REPEATABLE READ" | "REPEATABLEREAD" => Ok(SqlIsolationLevel::RepeatableRead),
+            "SERIALIZABLE" => Ok(SqlIsolationLevel::Serializable),
+            _ => Err(format!("Unknown isolation level: {}", s)),
+        }
+    }
+}
+
 /// Transaction control commands
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TransactionCommand {
-    Start,
+    /// BEGIN/START TRANSACTION
+    Start {
+        /// Optional isolation level
+        isolation_level: Option<SqlIsolationLevel>,
+        /// Whether this is a read-only transaction
+        read_only: bool,
+    },
+    /// COMMIT transaction
     Commit,
-    Rollback,
+    /// ROLLBACK transaction (optionally to a savepoint)
+    Rollback {
+        /// Savepoint name for partial rollback
+        savepoint: Option<String>,
+    },
+    /// Create a savepoint within a transaction
+    Savepoint { name: String },
+    /// Release (remove) a savepoint
+    ReleaseSavepoint { name: String },
 }
 
 /// Parsed SQL statement - either a query, DDL, Insert, Update, Delete, auth, or set operation
@@ -2141,10 +2256,17 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             ..
         } => parse_insert(table_name, columns, source, returning),
         Statement::StartTransaction { .. } => {
-            Ok(SqlStatement::Transaction(TransactionCommand::Start))
+            Ok(SqlStatement::Transaction(TransactionCommand::Start {
+                isolation_level: None,
+                read_only: false,
+            }))
         }
         Statement::Commit { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Commit)),
-        Statement::Rollback { .. } => Ok(SqlStatement::Transaction(TransactionCommand::Rollback)),
+        Statement::Rollback { savepoint, .. } => {
+            Ok(SqlStatement::Transaction(TransactionCommand::Rollback {
+                savepoint: savepoint.as_ref().map(|s| s.to_string()),
+            }))
+        }
         Statement::CreateDatabase { db_name, .. } => {
             Ok(SqlStatement::Ddl(DdlCommand::CreateDatabase {
                 name: db_name.to_string(),
