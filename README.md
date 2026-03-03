@@ -76,9 +76,12 @@ LIMIT 10;
 ### Core Engine
 - **Columnar Storage**: Apache Arrow-based columnar format for cache-efficient analytics
 - **Vectorized Execution**: SIMD-optimized query processing
+- **Cost-Based Optimizer**: Statistics-driven query planning with predicate pushdown
+- **ACID Transactions**: Full transaction support with MVCC and snapshot isolation
 - **Compression**: Zstd, LZ4, Snappy with dictionary and delta encoding
 - **Bloom Filters**: Probabilistic filtering for fast segment pruning
 - **Write-Ahead Log**: Durability with configurable fsync policies
+- **Point-in-Time Recovery**: Restore to any timestamp with WAL archiving
 
 ### SQL Support
 - Full DML: `SELECT`, `INSERT`, `UPDATE`, `DELETE`
@@ -114,7 +117,8 @@ LIMIT 10;
 - **Gossip Protocol**: SWIM-based node discovery and failure detection
 - **Leader Election**: Raft-lite with lease-based leadership
 - **Automatic Failover**: Sub-second leader election on failure
-- **Quorum Writes**: Configurable consistency levels
+- **Distributed Crash Recovery**: Cross-node recovery coordination with automatic detection
+- **Quorum Writes**: Configurable consistency levels with replication state tracking
 - **Read Replicas**: Scale reads horizontally
 
 ```bash
@@ -141,6 +145,15 @@ boyodb-server /data 0.0.0.0:8765 \
 - **Workload Isolation**: Resource groups with CPU/memory quotas
 - **Query Throttling**: Concurrent query limits per user/group
 - **Admission Control**: Query queue management
+
+### Financial-Grade Features
+- **ACID Transactions**: Full atomicity, consistency, isolation, durability
+- **MVCC**: Multi-version concurrency control for snapshot isolation
+- **Hierarchical Locking**: Row and table-level locks with deadlock detection
+- **Constraint Enforcement**: PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
+- **B-Tree Indexes**: Efficient range queries and point lookups
+- **Undo Logging**: Transaction rollback and savepoint support
+- **WAL with LSN**: Log sequence numbers for precise recovery
 
 ### Advanced Features
 - **GPU Acceleration**: Optional CUDA-based query execution with automatic CPU fallback
@@ -206,19 +219,26 @@ boyodb/
 │   │   ├── src/
 │   │   │   ├── engine.rs     # Main database engine
 │   │   │   ├── sql.rs        # SQL parser
+│   │   │   ├── optimizer_integration.rs  # Cost-based query optimizer
+│   │   │   ├── transaction.rs    # ACID transaction manager
+│   │   │   ├── mvcc.rs           # Multi-version concurrency control
+│   │   │   ├── lock_manager.rs   # Hierarchical locking
 │   │   │   ├── auth.rs       # Authentication/authorization
 │   │   │   ├── cluster/      # HA clustering
+│   │   │   │   ├── distributed_recovery.rs  # Crash recovery coordination
+│   │   │   │   ├── replication.rs  # Write replication & state
+│   │   │   │   ├── election.rs     # Leader election
+│   │   │   │   └── gossip.rs       # Node discovery
+│   │   │   ├── pitr.rs       # Point-in-time recovery
+│   │   │   ├── wal.rs        # Write-ahead log
 │   │   │   ├── compression.rs
 │   │   │   ├── execution.rs  # Query execution
-│   │   │   ├── high_availability.rs
-│   │   │   ├── resource_governance.rs
 │   │   │   └── ...
 │   │   └── include/
 │   │       └── boyodb.h      # C ABI header
 │   ├── boyodb-server/        # TCP/TLS server
 │   ├── boyodb-cli/           # Command-line interface
-│   ├── boyodb-bench/         # Benchmarking suite
-│   └── boyodb-ingestor/      # Bulk data ingestion tool
+│   └── boyodb-bench/         # Benchmarking suite
 ├── bindings/
 │   ├── go/                   # Go bindings (CGO)
 │   └── node/                 # Node.js bindings (NAPI)
@@ -312,6 +332,7 @@ BoyoDB is designed for high-performance analytics workloads:
 | Ingestion | 500K+ rows/sec |
 
 ### Optimizations
+- Cost-based query optimizer with statistics
 - O(1) manifest index for segment lookup
 - Parallel segment scanning with Rayon
 - Predicate pushdown to storage layer
@@ -319,6 +340,7 @@ BoyoDB is designed for high-performance analytics workloads:
 - LRU caches for segments, batches, schemas
 - Vectorized Arrow compute kernels
 - SIMD string comparisons
+- Automatic index selection for range queries
 
 ## Configuration
 
@@ -386,7 +408,11 @@ cd bindings/go && go build ./...
 - [x] Phase 17: Tooling (boyodb-local, import/export)
 - [x] Phase 18: Distributed query execution
 - [x] Phase 19: GPU acceleration (DataFusion integration)
-- [ ] Phase 20: Kubernetes operator
+- [x] Phase 20: ACID transactions with MVCC
+- [x] Phase 21: Cost-based query optimizer
+- [x] Phase 22: Distributed crash recovery
+- [x] Phase 23: Point-in-time recovery (PITR)
+- [ ] Phase 24: Kubernetes operator
 
 ## Contributing
 
