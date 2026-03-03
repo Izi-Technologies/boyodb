@@ -70,6 +70,13 @@ export interface IngestCSVOptions {
   delimiter?: string;
 }
 
+export interface TransactionOptions {
+  /** Isolation level (READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ, SERIALIZABLE) */
+  isolationLevel?: string;
+  /** Start a read-only transaction */
+  readOnly?: boolean;
+}
+
 export class Client {
   /**
    * Create a new boyodb client.
@@ -201,4 +208,42 @@ export class Client {
    * @param token - Auth token
    */
   setToken(token: string): void;
+
+  // Transaction Support
+
+  /**
+   * Start a new transaction.
+   * @param options - Transaction options
+   */
+  begin(options?: TransactionOptions): Promise<void>;
+
+  /**
+   * Commit the current transaction.
+   */
+  commit(): Promise<void>;
+
+  /**
+   * Rollback the current transaction or to a savepoint.
+   * @param savepoint - If provided, rollback to this savepoint
+   */
+  rollback(savepoint?: string): Promise<void>;
+
+  /**
+   * Create a savepoint.
+   * @param name - Savepoint name
+   */
+  savepoint(name: string): Promise<void>;
+
+  /**
+   * Release a savepoint.
+   * @param name - Savepoint name
+   */
+  releaseSavepoint(name: string): Promise<void>;
+
+  /**
+   * Execute a function within a transaction.
+   * @param fn - Async function to execute
+   * @param options - Transaction options
+   */
+  inTransaction<T>(fn: () => Promise<T>, options?: TransactionOptions): Promise<T>;
 }

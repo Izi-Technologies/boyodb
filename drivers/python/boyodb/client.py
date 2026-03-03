@@ -684,6 +684,134 @@ class Client:
         """Set the authentication token."""
         self._config.token = token
 
+    # Transaction Support
+
+    def begin(self, isolation_level: Optional[str] = None, read_only: bool = False) -> None:
+        """
+        Start a new transaction.
+
+        Args:
+            isolation_level: Optional isolation level. One of:
+                - "READ UNCOMMITTED"
+                - "READ COMMITTED"
+                - "REPEATABLE READ"
+                - "SERIALIZABLE"
+            read_only: If True, start a read-only transaction
+        """
+        if isolation_level:
+            sql = f"START TRANSACTION ISOLATION LEVEL {isolation_level}"
+            if read_only:
+                sql += " READ ONLY"
+        elif read_only:
+            sql = "START TRANSACTION READ ONLY"
+        else:
+            sql = "BEGIN"
+        self.exec(sql)
+
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        self.exec("COMMIT")
+
+    def rollback(self, savepoint: Optional[str] = None) -> None:
+        """
+        Rollback the current transaction or to a savepoint.
+
+        Args:
+            savepoint: If provided, rollback to this savepoint instead of
+                      rolling back the entire transaction
+        """
+        if savepoint:
+            self.exec(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        else:
+            self.exec("ROLLBACK")
+
+    def savepoint(self, name: str) -> None:
+        """
+        Create a savepoint with the given name.
+
+        Args:
+            name: Savepoint name
+        """
+        self.exec(f"SAVEPOINT {name}")
+
+    def release_savepoint(self, name: str) -> None:
+        """
+        Release a savepoint.
+
+        Args:
+            name: Savepoint name to release
+        """
+        self.exec(f"RELEASE SAVEPOINT {name}")
+
+    def transaction(self, isolation_level: Optional[str] = None, read_only: bool = False):
+        """
+        Context manager for transactions.
+
+        Usage:
+            with client.transaction():
+                client.exec("INSERT INTO ...")
+                client.exec("UPDATE ...")
+            # Automatically committed
+
+            with client.transaction() as tx:
+                client.exec("INSERT INTO ...")
+                if error:
+                    tx.rollback()  # Explicit rollback
+            # Automatically committed if not rolled back
+
+        Args:
+            isolation_level: Optional isolation level
+            read_only: If True, start a read-only transaction
+
+        Returns:
+            Transaction context manager
+        """
+        return TransactionContext(self, isolation_level, read_only)
+
+
+class TransactionContext:
+    """Context manager for database transactions."""
+
+    def __init__(self, client: Client, isolation_level: Optional[str], read_only: bool):
+        self._client = client
+        self._isolation_level = isolation_level
+        self._read_only = read_only
+        self._rolled_back = False
+
+    def __enter__(self) -> "TransactionContext":
+        self._client.begin(self._isolation_level, self._read_only)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if exc_type is not None:
+            # Exception occurred, rollback
+            try:
+                self._client.rollback()
+            except Exception:
+                pass
+            return False
+
+        if not self._rolled_back:
+            self._client.commit()
+        return False
+
+    def rollback(self) -> None:
+        """Explicitly rollback the transaction."""
+        self._client.rollback()
+        self._rolled_back = True
+
+    def savepoint(self, name: str) -> None:
+        """Create a savepoint."""
+        self._client.savepoint(name)
+
+    def rollback_to_savepoint(self, name: str) -> None:
+        """Rollback to a savepoint."""
+        self._client.rollback(name)
+
+    def release_savepoint(self, name: str) -> None:
+        """Release a savepoint."""
+        self._client.release_savepoint(name)
+
     def _parse_arrow_ipc(self, data: bytes) -> Dict[str, Any]:
         """
         Parse Arrow IPC stream format.

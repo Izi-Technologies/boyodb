@@ -873,3 +873,75 @@ func (c *Client) SetDatabase(database string) {
 func (c *Client) SetToken(token string) {
 	c.token = token
 }
+
+// Transaction Support
+
+// Begin starts a new transaction.
+func (c *Client) Begin() error {
+	return c.BeginWithOptions("", false)
+}
+
+// BeginWithOptions starts a new transaction with the specified isolation level.
+// isolationLevel can be: "READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"
+// If empty, the default isolation level is used.
+func (c *Client) BeginWithOptions(isolationLevel string, readOnly bool) error {
+	sql := "BEGIN"
+	if isolationLevel != "" {
+		sql = "START TRANSACTION ISOLATION LEVEL " + isolationLevel
+	}
+	if readOnly {
+		if isolationLevel != "" {
+			sql += " READ ONLY"
+		} else {
+			sql = "START TRANSACTION READ ONLY"
+		}
+	}
+	return c.Exec(sql)
+}
+
+// Commit commits the current transaction.
+func (c *Client) Commit() error {
+	return c.Exec("COMMIT")
+}
+
+// Rollback aborts the current transaction.
+func (c *Client) Rollback() error {
+	return c.Exec("ROLLBACK")
+}
+
+// Savepoint creates a savepoint with the given name.
+func (c *Client) Savepoint(name string) error {
+	return c.Exec("SAVEPOINT " + name)
+}
+
+// RollbackToSavepoint rolls back to the specified savepoint.
+func (c *Client) RollbackToSavepoint(name string) error {
+	return c.Exec("ROLLBACK TO SAVEPOINT " + name)
+}
+
+// ReleaseSavepoint releases the specified savepoint.
+func (c *Client) ReleaseSavepoint(name string) error {
+	return c.Exec("RELEASE SAVEPOINT " + name)
+}
+
+// InTransaction executes a function within a transaction.
+// If the function returns an error, the transaction is rolled back.
+// Otherwise, the transaction is committed.
+func (c *Client) InTransaction(fn func() error) error {
+	if err := c.Begin(); err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	if err := fn(); err != nil {
+		if rbErr := c.Rollback(); rbErr != nil {
+			return fmt.Errorf("rollback failed after error (%v): %w", err, rbErr)
+		}
+		return err
+	}
+
+	if err := c.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}

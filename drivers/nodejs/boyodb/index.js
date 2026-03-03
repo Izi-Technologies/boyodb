@@ -750,6 +750,91 @@ class Client {
     this.config.token = token;
   }
 
+  // Transaction Support
+
+  /**
+   * Start a new transaction.
+   * @param {Object} [options={}] - Transaction options
+   * @param {string} [options.isolationLevel] - Isolation level (READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ, SERIALIZABLE)
+   * @param {boolean} [options.readOnly=false] - Start a read-only transaction
+   * @returns {Promise<void>}
+   */
+  async begin(options = {}) {
+    let sql = 'BEGIN';
+    if (options.isolationLevel) {
+      sql = `START TRANSACTION ISOLATION LEVEL ${options.isolationLevel}`;
+      if (options.readOnly) {
+        sql += ' READ ONLY';
+      }
+    } else if (options.readOnly) {
+      sql = 'START TRANSACTION READ ONLY';
+    }
+    await this.exec(sql);
+  }
+
+  /**
+   * Commit the current transaction.
+   * @returns {Promise<void>}
+   */
+  async commit() {
+    await this.exec('COMMIT');
+  }
+
+  /**
+   * Rollback the current transaction or to a savepoint.
+   * @param {string} [savepoint] - If provided, rollback to this savepoint
+   * @returns {Promise<void>}
+   */
+  async rollback(savepoint = null) {
+    if (savepoint) {
+      await this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    } else {
+      await this.exec('ROLLBACK');
+    }
+  }
+
+  /**
+   * Create a savepoint.
+   * @param {string} name - Savepoint name
+   * @returns {Promise<void>}
+   */
+  async savepoint(name) {
+    await this.exec(`SAVEPOINT ${name}`);
+  }
+
+  /**
+   * Release a savepoint.
+   * @param {string} name - Savepoint name
+   * @returns {Promise<void>}
+   */
+  async releaseSavepoint(name) {
+    await this.exec(`RELEASE SAVEPOINT ${name}`);
+  }
+
+  /**
+   * Execute a function within a transaction.
+   * If the function throws, the transaction is rolled back.
+   * Otherwise, the transaction is committed.
+   * @param {Function} fn - Async function to execute within the transaction
+   * @param {Object} [options={}] - Transaction options
+   * @returns {Promise<*>} - Result of the function
+   */
+  async inTransaction(fn, options = {}) {
+    await this.begin(options);
+    try {
+      const result = await fn();
+      await this.commit();
+      return result;
+    } catch (err) {
+      try {
+        await this.rollback();
+      } catch (rollbackErr) {
+        // Ignore rollback errors
+      }
+      throw err;
+    }
+  }
+
   /**
   * Parse Arrow IPC stream format using apache-arrow.
    *
