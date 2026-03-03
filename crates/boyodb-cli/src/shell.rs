@@ -906,6 +906,179 @@ async fn async_fetch_wal_stats(
         .ok_or_else(|| anyhow!("wal_stats missing from response"))
 }
 
+/// Execute a SQL command and return the result as a string (for CLI commands)
+pub fn execute_sql_command(
+    host: Option<&str>,
+    token: Option<String>,
+    tls_config: Option<TlsConfig>,
+    auth: Option<(String, String)>,
+    sql: &str,
+) -> Result<String> {
+    let config = ShellConfig::load();
+    let config_tls_enabled = config.tls == Some(true);
+
+    let auto_user = if auth.is_some() { None } else { config.user };
+
+    let effective_host = host
+        .map(|s| s.to_string())
+        .or(config.host)
+        .unwrap_or_else(|| "localhost:8765".to_string());
+
+    let effective_token = token.or(config.token);
+    let effective_tls = if tls_config.is_some() {
+        tls_config
+    } else if config_tls_enabled {
+        Some(TlsConfig {
+            ca_path: config.ca_cert,
+            skip_verify: false,
+        })
+    } else {
+        None
+    };
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async_execute_sql_command(
+        &effective_host,
+        effective_token,
+        effective_tls,
+        auto_user,
+        auth,
+        sql,
+    ))
+}
+
+async fn async_execute_sql_command(
+    host: &str,
+    token: Option<String>,
+    tls_config: Option<TlsConfig>,
+    auto_user: Option<String>,
+    cli_auth: Option<(String, String)>,
+    sql: &str,
+) -> Result<String> {
+    let mut state = ShellState::new(host.to_string(), token, None, tls_config);
+
+    // Handle authentication
+    if let Some((username, password)) = cli_auth {
+        let resp = send_request(
+            &state,
+            Operation::Login {
+                username: username.clone(),
+                password,
+            },
+        )
+        .await?;
+        if resp.status != "ok" {
+            let msg = resp.message.unwrap_or_else(|| "login failed".into());
+            return Err(anyhow!("Login failed: {}", msg));
+        }
+        state.session_id = resp.session_id;
+        state.current_user = Some(username);
+    } else if let Some(username) = auto_user {
+        let password = rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
+        if password.is_empty() {
+            return Err(anyhow!("Password required"));
+        }
+        let resp = send_request(
+            &state,
+            Operation::Login {
+                username: username.clone(),
+                password,
+            },
+        )
+        .await?;
+        if resp.status != "ok" {
+            let msg = resp.message.unwrap_or_else(|| "login failed".into());
+            return Err(anyhow!("Login failed: {}", msg));
+        }
+        state.session_id = resp.session_id;
+        state.current_user = Some(username);
+    }
+
+    // Execute the SQL command
+    let resp = send_request(
+        &state,
+        Operation::Query {
+            sql: sql.to_string(),
+            database: None,
+            timeout_millis: state.timeout_millis,
+        },
+    )
+    .await?;
+
+    if resp.status != "ok" {
+        let msg = resp.message.unwrap_or_else(|| "query failed".into());
+        return Err(anyhow!("Query failed: {}", msg));
+    }
+
+    // Format the response
+    if let Some(ipc_base64) = resp.ipc_base64 {
+        // Decode and format IPC data
+        let ipc_data = general_purpose::STANDARD
+            .decode(&ipc_base64)
+            .map_err(|e| anyhow!("Failed to decode IPC data: {}", e))?;
+
+        // Try to format as table
+        match format_ipc_as_table_simple(&ipc_data) {
+            Ok(table) => Ok(table),
+            Err(_) => Ok(format!("Result: {} bytes of IPC data", ipc_data.len())),
+        }
+    } else if let Some(msg) = resp.message {
+        Ok(msg)
+    } else {
+        Ok("OK".to_string())
+    }
+}
+
+fn format_ipc_as_table_simple(ipc_data: &[u8]) -> Result<String> {
+    let cursor = Cursor::new(ipc_data);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| anyhow!("Failed to create IPC reader: {}", e))?;
+
+    let mut output = String::new();
+    let mut row_count = 0;
+
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| anyhow!("Failed to read batch: {}", e))?;
+
+        // Print header on first batch
+        if row_count == 0 {
+            let schema = batch.schema();
+            let header: Vec<String> = schema
+                .fields()
+                .iter()
+                .map(|f| f.name().to_string())
+                .collect();
+            output.push_str(&header.join("\t"));
+            output.push('\n');
+            output.push_str(
+                &header
+                    .iter()
+                    .map(|h| "-".repeat(h.len().max(8)))
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            );
+            output.push('\n');
+        }
+
+        // Print rows
+        for row_idx in 0..batch.num_rows() {
+            let mut row_values = Vec::new();
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                let value = arrow_cast::display::array_value_to_string(col, row_idx)
+                    .unwrap_or_else(|_| "NULL".to_string());
+                row_values.push(value);
+            }
+            output.push_str(&row_values.join("\t"));
+            output.push('\n');
+            row_count += 1;
+        }
+    }
+
+    output.push_str(&format!("\n({} rows)", row_count));
+    Ok(output)
+}
+
 async fn async_run_shell(
     host: &str,
     token: Option<String>,

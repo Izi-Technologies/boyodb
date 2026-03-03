@@ -35,6 +35,32 @@ struct LocalEngineArgs {
     cache_cold_segments: bool,
 }
 
+/// Common server connection arguments
+#[derive(Args, Clone, Debug)]
+struct ServerArgs {
+    /// Server address (host:port). Default: localhost:8765 or from ~/.boyodbrc
+    #[arg(short = 'H', long)]
+    host: Option<String>,
+    /// Authentication token (if server requires it)
+    #[arg(short, long)]
+    token: Option<String>,
+    /// Username for authentication (use with --password)
+    #[arg(short, long)]
+    user: Option<String>,
+    /// Password for authentication (use with --user)
+    #[arg(short = 'P', long)]
+    password: Option<String>,
+    /// Enable TLS connection
+    #[arg(long)]
+    tls: bool,
+    /// Path to CA certificate file for TLS verification
+    #[arg(long)]
+    tls_ca: Option<String>,
+    /// INSECURE: Skip TLS certificate verification (for testing only)
+    #[arg(long)]
+    tls_skip_verify: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Connect to a boyodb-server and start an interactive SQL shell
@@ -93,6 +119,40 @@ enum Commands {
         /// INSECURE: Skip TLS certificate verification (for testing only)
         #[arg(long)]
         tls_skip_verify: bool,
+    },
+    /// Get cluster status from a running boyodb-server
+    ClusterStatus {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Create a point-in-time backup on the server
+    CreateBackup {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Optional backup label
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List available backups on the server
+    ListBackups {
+        #[command(flatten)]
+        server: ServerArgs,
+    },
+    /// Recover database to a specific point in time
+    RecoverTo {
+        #[command(flatten)]
+        server: ServerArgs,
+        /// Target timestamp (ISO 8601 format, e.g., 2024-01-15T14:30:00)
+        #[arg(long, conflicts_with = "lsn")]
+        timestamp: Option<String>,
+        /// Target LSN (Log Sequence Number)
+        #[arg(long, conflicts_with = "timestamp")]
+        lsn: Option<u64>,
+    },
+    /// Show transaction status and active transactions
+    TxnStatus {
+        #[command(flatten)]
+        server: ServerArgs,
     },
     Ingest {
         data_dir: PathBuf,
@@ -278,6 +338,79 @@ fn main() -> Result<()> {
             };
             let stats = shell::fetch_wal_stats(host.as_deref(), token.clone(), tls_config, auth)?;
             println!("{}", serde_json::to_string_pretty(&stats)?);
+        }
+        Commands::ClusterStatus { server } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW CLUSTER STATUS",
+            )?;
+            println!("{}", result);
+        }
+        Commands::CreateBackup { server, label } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = match label {
+                Some(l) => format!("CREATE BACKUP '{}'", l),
+                None => "CREATE BACKUP".to_string(),
+            };
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+            )?;
+            println!("Backup created successfully");
+            println!("{}", result);
+        }
+        Commands::ListBackups { server } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW BACKUPS",
+            )?;
+            println!("{}", result);
+        }
+        Commands::RecoverTo {
+            server,
+            timestamp,
+            lsn,
+        } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let sql = if let Some(ts) = timestamp {
+                format!("RECOVER TO TIMESTAMP '{}'", ts)
+            } else if let Some(l) = lsn {
+                format!("RECOVER TO LSN {}", l)
+            } else {
+                return Err(anyhow!("Either --timestamp or --lsn must be specified"));
+            };
+            println!("Starting recovery...");
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                &sql,
+            )?;
+            println!("Recovery completed");
+            println!("{}", result);
+        }
+        Commands::TxnStatus { server } => {
+            let (tls_config, auth) = parse_server_args(server);
+            let result = shell::execute_sql_command(
+                server.host.as_deref(),
+                server.token.clone(),
+                tls_config,
+                auth,
+                "SHOW TRANSACTIONS",
+            )?;
+            println!("{}", result);
         }
         Commands::Ingest {
             data_dir,
@@ -531,6 +664,26 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_server_args(server: &ServerArgs) -> (Option<shell::TlsConfig>, Option<(String, String)>) {
+    let tls_config = if server.tls {
+        Some(shell::TlsConfig {
+            ca_path: server.tls_ca.clone(),
+            skip_verify: server.tls_skip_verify,
+        })
+    } else {
+        None
+    };
+    let auth = match (&server.user, &server.password) {
+        (Some(u), Some(p)) => Some((u.clone(), p.clone())),
+        (Some(u), None) => {
+            let pwd = rpassword::prompt_password("Password: ").unwrap_or_else(|_| String::new());
+            Some((u.clone(), pwd))
+        }
+        _ => None,
+    };
+    (tls_config, auth)
 }
 
 fn open(
