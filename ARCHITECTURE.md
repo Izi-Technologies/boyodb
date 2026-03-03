@@ -111,6 +111,10 @@ BoyoDB is organized into 17 feature phases, each adding enterprise capabilities:
 | 18 | `high_availability.rs` | Raft consensus, read replicas, failover |
 | 19 | `resource_governance.rs` | Memory pools, I/O scheduling, workload groups |
 | 20 | `tooling.rs` | Import/export, schema inference, CLI tools |
+| 21 | `transaction.rs`, `mvcc.rs` | ACID transactions, snapshot isolation |
+| 22 | `optimizer_integration.rs` | Cost-based query optimizer |
+| 23 | `cluster/distributed_recovery.rs` | Cross-node crash recovery |
+| 24 | `pitr.rs`, `wal_archive.rs` | Point-in-time recovery |
 
 ## Core Components
 
@@ -762,6 +766,85 @@ boyodb-server /data 0.0.0.0:8765 \
   --seed-nodes "replica:8766"
 ```
 
+## Financial-Grade Features
+
+BoyoDB includes enterprise features for financial and mission-critical workloads.
+
+### ACID Transactions
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Transaction Manager                         │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌──────────┐ │
+│  │  Active   │  │   Lock    │  │   Undo    │  │   MVCC   │ │
+│  │   Txns    │  │  Manager  │  │    Log    │  │ Snapshots│ │
+│  └───────────┘  └───────────┘  └───────────┘  └──────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Transaction Manager**: Coordinates BEGIN, COMMIT, ROLLBACK
+- **Lock Manager**: Hierarchical locking with deadlock detection
+- **Undo Log**: Enables rollback and savepoints
+- **MVCC**: Snapshot isolation with version visibility rules
+
+### Cost-Based Query Optimizer
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Query Optimizer                             │
+├─────────────────────────────────────────────────────────────┤
+│  ParsedQuery → LogicalPlan → PhysicalPlan → Execution       │
+│                                                              │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐               │
+│  │Statistics │  │   Cost    │  │  Index    │               │
+│  │ Collector │  │ Estimator │  │ Selection │               │
+│  └───────────┘  └───────────┘  └───────────┘               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Collects table and column statistics
+- Estimates query costs based on row counts and selectivity
+- Automatic index selection for range queries
+- Predicate pushdown optimization
+
+### Distributed Crash Recovery
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│              Distributed Recovery Manager                    │
+├─────────────────────────────────────────────────────────────┤
+│  Node States: Healthy → Suspected → Crashed → Recovering    │
+│                                                              │
+│  Recovery Actions:                                           │
+│  - RecoverFromLeader (small lag)                            │
+│  - RestoreFromBackup (large lag)                            │
+│  - FullRebuild (last resort)                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Automatic crash detection via heartbeat monitoring
+- Cross-node recovery coordination
+- Multiple recovery strategies based on WAL lag
+- Local crash recovery with persistent metadata
+
+### Point-in-Time Recovery (PITR)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    PITR System                               │
+├─────────────────────────────────────────────────────────────┤
+│  Base Backup ─────► WAL Archive ─────► Target Time          │
+│       │                   │                   │              │
+│  CREATE BACKUP      LSN Tracking      RECOVER TO            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Create base backups with `CREATE BACKUP`
+- WAL archiving with Log Sequence Numbers (LSN)
+- Recover to any timestamp or specific LSN
+- Supports local and S3 archive storage
+
 ## Key Differentiators
 
 | Aspect | BoyoDB |
@@ -773,3 +856,5 @@ boyodb-server /data 0.0.0.0:8765 \
 | Query Language | PostgreSQL-compatible SQL |
 | Data Lake | Native Delta Lake, Iceberg, Hudi support |
 | Resource Management | Built-in memory pools, I/O scheduling, workload groups |
+| Transactions | Full ACID with MVCC and snapshot isolation |
+| Recovery | Point-in-time recovery with WAL archiving |

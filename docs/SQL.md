@@ -7,12 +7,14 @@ Complete SQL reference for BoyoDB.
 - [Data Types](#data-types)
 - [DDL Statements](#ddl-statements)
 - [DML Statements](#dml-statements)
+- [Transaction Control](#transaction-control)
 - [Query Statements](#query-statements)
 - [Operators](#operators)
 - [Functions](#functions)
 - [Window Functions](#window-functions)
 - [Common Table Expressions](#common-table-expressions)
 - [Prepared Statements](#prepared-statements)
+- [Recovery Statements](#recovery-statements)
 
 ---
 
@@ -231,6 +233,91 @@ WHERE condition;
 DELETE FROM users WHERE status = 'inactive';
 DELETE FROM logs WHERE event_time < 1700000000;
 DELETE FROM temp_data WHERE processed = true;
+```
+
+---
+
+## Transaction Control
+
+BoyoDB supports full ACID transactions with multiple isolation levels.
+
+### BEGIN/START TRANSACTION
+
+```sql
+BEGIN;
+BEGIN TRANSACTION;
+START TRANSACTION;
+START TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+START TRANSACTION READ ONLY;
+```
+
+**Isolation Levels:**
+
+| Level | Description |
+|-------|-------------|
+| `READ UNCOMMITTED` | Allows dirty reads (not recommended) |
+| `READ COMMITTED` | Default; sees only committed data |
+| `REPEATABLE READ` | Snapshot at transaction start |
+| `SERIALIZABLE` | Full isolation, may abort on conflicts |
+
+**Examples:**
+```sql
+-- Default isolation
+BEGIN;
+INSERT INTO accounts (id, balance) VALUES (1, 1000);
+COMMIT;
+
+-- Serializable for financial operations
+START TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT;
+
+-- Read-only transaction
+START TRANSACTION READ ONLY;
+SELECT SUM(balance) FROM accounts;
+COMMIT;
+```
+
+### COMMIT
+
+```sql
+COMMIT;
+COMMIT TRANSACTION;
+```
+
+Commits all changes made in the current transaction.
+
+### ROLLBACK
+
+```sql
+ROLLBACK;
+ROLLBACK TRANSACTION;
+ROLLBACK TO SAVEPOINT savepoint_name;
+```
+
+Aborts the current transaction or rolls back to a savepoint.
+
+### SAVEPOINT
+
+```sql
+SAVEPOINT savepoint_name;
+RELEASE SAVEPOINT savepoint_name;
+ROLLBACK TO SAVEPOINT savepoint_name;
+```
+
+**Example:**
+```sql
+BEGIN;
+INSERT INTO orders (id, total) VALUES (1, 100);
+SAVEPOINT order_created;
+
+INSERT INTO order_items (order_id, product_id) VALUES (1, 999);
+-- Oops, product 999 doesn't exist
+ROLLBACK TO SAVEPOINT order_created;
+
+INSERT INTO order_items (order_id, product_id) VALUES (1, 42);
+COMMIT;
 ```
 
 ---
@@ -819,6 +906,59 @@ WITH, UNION, INTERSECT, EXCEPT, ALL, ANY, SOME,
 CASE, WHEN, THEN, ELSE, END, CAST, OVER, PARTITION, ROWS, RANGE,
 PREPARE, EXECUTE, DEALLOCATE, EXPLAIN, ANALYZE, DESCRIBE, SHOW,
 GRANT, REVOKE, TO, FOR, ROLE, USER, PASSWORD, SUPERUSER, ADMIN
+```
+
+---
+
+## Recovery Statements
+
+BoyoDB supports Point-in-Time Recovery (PITR) for disaster recovery.
+
+### CREATE BACKUP
+
+```sql
+CREATE BACKUP;
+CREATE BACKUP 'weekly-backup';
+```
+
+Creates a base backup with optional label.
+
+### SHOW BACKUPS
+
+```sql
+SHOW BACKUPS;
+```
+
+Lists all available backups with timestamps and LSN.
+
+### SHOW WAL STATUS
+
+```sql
+SHOW WAL STATUS;
+```
+
+Shows current WAL position and archiving status.
+
+### RECOVER
+
+```sql
+-- Recover to specific timestamp
+RECOVER TO TIMESTAMP '2024-01-15 14:30:00';
+
+-- Recover to specific LSN
+RECOVER TO LSN 12345678;
+```
+
+**Example Recovery Workflow:**
+```sql
+-- Check available backups
+SHOW BACKUPS;
+
+-- Check WAL status
+SHOW WAL STATUS;
+
+-- Recover to point before data corruption
+RECOVER TO TIMESTAMP '2024-01-15 14:30:00';
 ```
 
 ---

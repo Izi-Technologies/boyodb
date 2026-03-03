@@ -2,6 +2,18 @@
 
 To evolve BoyoDB into a general-purpose Big Data engine capable of Petabyte-scale analytics, we propose the following strategic enhancements.
 
+## 0. Financial-Grade Features
+**Status**: Implemented
+**Priority**: Critical
+
+*   **ACID Transactions**: Full atomicity, consistency, isolation, durability
+*   **MVCC**: Multi-version concurrency control with snapshot isolation
+*   **Cost-Based Optimizer**: Statistics-driven query planning
+*   **Distributed Crash Recovery**: Cross-node recovery coordination
+*   **Point-in-Time Recovery**: WAL archiving with timestamp-based restore
+*   **B-Tree Indexes**: Efficient range queries and point lookups
+*   **Constraint Enforcement**: PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
+
 ## 1. Distributed Query Engine (Sharding)
 **Status**: Implemented (Phase 2 Completed)
 **Priority**: High
