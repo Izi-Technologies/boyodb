@@ -15,7 +15,7 @@ COPY crates ./crates
 COPY bindings ./bindings
 
 # Build release binaries
-RUN cargo build --release -p boyodb-server -p boyodb-cli -p boyodb-ingestor
+RUN cargo build --release -p boyodb-server -p boyodb-cli
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -35,7 +35,6 @@ RUN mkdir -p /var/lib/boyodb/data /var/lib/boyodb/wal && \
 # Copy binaries from builder
 COPY --from=builder /app/target/release/boyodb-server /usr/local/bin/
 COPY --from=builder /app/target/release/boyodb-cli /usr/local/bin/
-COPY --from=builder /app/target/release/boyodb-ingestor /usr/local/bin/
 
 # Switch to non-root user
 USER boyodb
