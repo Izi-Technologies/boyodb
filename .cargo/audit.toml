@@ -11,9 +11,6 @@ ignore = [
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained (we use rustls-pemfile 2.x)
     "RUSTSEC-2025-0141",  # bincode unmaintained (we use bincode 1.x for internal serialization)
 
-    # Unsoundness issues that don't affect our use case
-    "RUSTSEC-2023-0086",  # lexical-core unsoundness (transitive dep from parquet, parsing only)
-
     # Issues that require upstream fixes (monitor and update when fixed)
     "RUSTSEC-2024-0358",  # object_store race condition (low risk for our use case)
 ]
