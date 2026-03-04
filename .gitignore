@@ -12,9 +12,6 @@ build/
 *.egg
 tmp/
 
-# AI assistant config
-.claude/
-
 # Arrow IPC test files
 *.ipc
 
