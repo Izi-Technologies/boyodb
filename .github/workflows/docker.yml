@@ -28,13 +28,12 @@ jobs:
 
       - name: Test image
         run: |
-          # Verify binaries exist in image
-          docker run --rm boyodb:test which boyodb-server
-          docker run --rm boyodb:test which boyodb-cli
+          # Verify binaries exist in image (use --entrypoint to override)
+          docker run --rm --entrypoint which boyodb:test boyodb-server
+          docker run --rm --entrypoint which boyodb:test boyodb-cli
 
-          # Start the container with explicit data directory
-          docker run -d --name boyodb-test -p 5555:5555 boyodb:test \
-            /var/lib/boyodb/data 0.0.0.0:5555
+          # Start the container (uses default CMD from Dockerfile)
+          docker run -d --name boyodb-test -p 5555:5555 boyodb:test
 
           # Wait for startup
           sleep 5
