@@ -7,10 +7,13 @@ A high-performance columnar database engine built in Rust for real-time analytic
 
 ## Why BoyoDB?
 
-- **Blazing Fast**: Vectorized query execution with SIMD optimizations via Apache Arrow
+- **Blazing Fast**: Vectorized query execution with SIMD and GPU acceleration
 - **Real-Time Analytics**: Sub-second queries on billions of rows
 - **Horizontally Scalable**: Built-in clustering with automatic failover
 - **Cloud-Native**: S3/object storage integration, tiered storage, data lake formats
+- **Multi-Region**: Cross-region replication with conflict resolution
+- **Self-Tuning**: Automatic index recommendations and adaptive query execution
+- **Multi-Tenant**: Per-tenant resource quotas and fair scheduling
 - **Production Ready**: RBAC, TLS, audit logging, resource governance
 - **Developer Friendly**: PostgreSQL-compatible CLI, multiple language drivers
 
@@ -290,6 +293,184 @@ Supported formats: CSV, JSON, Parquet, Arrow IPC
 - Connection pooling with idle timeout
 - Query admission control
 
+### Query Optimizer
+
+BoyoDB includes an advanced query optimizer with automatic tuning capabilities:
+
+#### Index Advisor
+
+Automatically analyzes query patterns and recommends optimal indexes:
+
+```sql
+-- View index recommendations
+SHOW INDEX RECOMMENDATIONS;
+
+-- Recommendations include:
+-- - Columns frequently used in WHERE clauses (equality, range, IN)
+-- - Join columns
+-- - ORDER BY and GROUP BY columns
+-- - Estimated impact score
+```
+
+The Index Advisor tracks access patterns and provides recommendations with estimated benefit scores based on query frequency and selectivity.
+
+#### Query Store
+
+Historical query analysis for performance tracking and regression detection:
+
+```sql
+-- Enable query store
+SET query_store = ON;
+
+-- View top queries by execution time
+SELECT * FROM system.query_store
+ORDER BY total_time_ms DESC
+LIMIT 10;
+
+-- Find queries with plan regressions
+SELECT * FROM system.query_store
+WHERE plan_changed = true
+  AND latest_time_ms > baseline_time_ms * 2;
+```
+
+Query Store captures:
+- Query fingerprints (normalized SQL)
+- Execution statistics (time, rows, I/O)
+- Plan snapshots for regression analysis
+- Historical trends
+
+#### Adaptive Query Execution
+
+Runtime query plan adjustment based on actual data statistics:
+
+```sql
+-- Enable adaptive execution
+SET adaptive_execution = ON;
+
+-- The optimizer will automatically:
+-- - Switch join algorithms based on actual row counts
+-- - Adjust parallelism based on data distribution
+-- - Resize memory budgets based on observed usage
+```
+
+Adaptive checkpoints monitor execution and trigger plan changes when:
+- Actual cardinality differs significantly from estimates
+- Memory pressure requires spilling strategy changes
+- Data skew suggests different partitioning
+
+#### Cost Model Tuning
+
+Calibrate the optimizer's cost model for your hardware:
+
+```sql
+-- Run calibration workload
+ANALYZE COST MODEL;
+
+-- View current cost parameters
+SHOW COST MODEL;
+
+-- Adjust specific parameters
+SET cpu_tuple_cost = 0.01;
+SET random_page_cost = 4.0;
+SET effective_cache_size = '4GB';
+```
+
+### Per-Tenant Resource Quotas
+
+Fair resource allocation for multi-tenant deployments:
+
+```sql
+-- Create tenant quota
+CREATE QUOTA tenant_acme
+  MAX_CPU_TIME_MS = 30000
+  MAX_MEMORY_MB = 4096
+  MAX_CONCURRENT_QUERIES = 10
+  MAX_QPM = 1000;
+
+-- Assign quota to user
+ALTER USER alice SET QUOTA tenant_acme;
+
+-- View tenant usage
+SELECT * FROM system.tenant_usage;
+```
+
+Quota enforcement includes:
+- CPU time limits per query and per minute
+- Memory allocation limits
+- Concurrent query limits
+- Queries per minute (QPM) rate limiting
+- Fair scheduling across tenants
+
+### Multi-Region Replication
+
+Cross-region data synchronization for global deployments:
+
+```bash
+# Primary region (US-East)
+boyodb-server /data 0.0.0.0:8765 \
+    --region us-east \
+    --region-mode primary \
+    --replicate-to us-west,eu-west
+
+# Secondary region (US-West)
+boyodb-server /data 0.0.0.0:8765 \
+    --region us-west \
+    --region-mode secondary \
+    --primary-region us-east
+```
+
+```sql
+-- Check replication status
+SHOW REGION STATUS;
+
+-- Configure conflict resolution
+SET conflict_resolution = 'last_writer_wins';  -- or 'region_priority'
+
+-- View replication lag
+SELECT * FROM system.region_replication;
+```
+
+**Conflict Resolution Strategies:**
+- `last_writer_wins` - Latest timestamp wins
+- `first_writer_wins` - First write preserved
+- `region_priority` - Priority-based (primary wins)
+- `custom` - User-defined resolution function
+
+### GPU Acceleration
+
+Hardware-accelerated analytics for compute-intensive queries:
+
+```sql
+-- Check GPU availability
+SHOW GPU STATUS;
+
+-- Enable GPU acceleration
+SET gpu_acceleration = ON;
+
+-- GPU-accelerated operations:
+-- - Aggregations (SUM, COUNT, AVG, MIN, MAX)
+-- - Filters with complex predicates
+-- - Hash joins
+-- - Vector similarity search
+```
+
+**Supported Platforms:**
+- NVIDIA CUDA (Linux, Windows)
+- Apple Metal (macOS)
+- Automatic CPU fallback when GPU unavailable
+
+**GPU Memory Management:**
+- Automatic memory pooling
+- Configurable memory limits
+- Spill-to-host for large datasets
+
+```bash
+# Configure GPU settings
+boyodb-server /data 0.0.0.0:8765 \
+    --gpu-memory-limit 8GB \
+    --gpu-min-batch-size 10000
+```
+
 ### Observability
 
 ```bash
@@ -307,8 +488,12 @@ EXPLAIN ANALYZE SELECT * FROM events WHERE user_id = 100;
 - Query throughput and latency histograms
 - Connection counts and pool utilization
 - Segment and cache statistics
-- Replication lag
-- Resource usage (memory, I/O)
+- Replication lag (local and cross-region)
+- Resource usage (memory, I/O, GPU)
+- Per-tenant quota usage
+- Query store statistics
+- Index advisor recommendations
+- Adaptive execution decisions
 
 ## Architecture
 
@@ -330,13 +515,23 @@ EXPLAIN ANALYZE SELECT * FROM events WHERE user_id = 100;
 │                    BoyoDB Server                            │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
 │  │   Parser    │──│  Optimizer  │──│  Executor   │         │
-│  │   (SQL)     │  │  (CBO)      │  │ (Vectorized)│         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
+│  │   (SQL)     │  │  (Adaptive) │  │ (Vectorized)│         │
+│  └─────────────┘  └──────┬──────┘  └──────┬──────┘         │
+│                          │                │                 │
+│                   ┌──────▼──────┐  ┌──────▼──────┐         │
+│                   │ Query Store │  │     GPU     │         │
+│                   │Index Advisor│  │  Executor   │         │
+│                   └─────────────┘  └─────────────┘         │
 │                                                             │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
 │  │    Auth     │  │   Cluster   │  │  Resource   │         │
 │  │  Manager    │  │   Manager   │  │  Governor   │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
+│  └─────────────┘  └─────────────┘  └──────┬──────┘         │
+│                          │                │                 │
+│                   ┌──────▼──────┐  ┌──────▼──────┐         │
+│                   │Multi-Region │  │   Tenant    │         │
+│                   │ Replication │  │   Quotas    │         │
+│                   └─────────────┘  └─────────────┘         │
 └─────────────────────────┬───────────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐

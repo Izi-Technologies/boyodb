@@ -657,6 +657,83 @@ Two-node mode features:
 SHOW CLUSTER STATUS;
 ```
 
+### Multi-Region Replication
+
+BoyoDB supports cross-region replication for global deployments:
+
+```bash
+# Primary region (US-East)
+boyodb-server /data 0.0.0.0:8765 \
+    --cluster \
+    --cluster-id global-app \
+    --region us-east \
+    --region-mode primary \
+    --replicate-to us-west,eu-west
+
+# Secondary region (US-West)
+boyodb-server /data 0.0.0.0:8765 \
+    --cluster \
+    --cluster-id global-app \
+    --region us-west \
+    --region-mode secondary \
+    --primary-region us-east
+
+# Secondary region (EU-West)
+boyodb-server /data 0.0.0.0:8765 \
+    --cluster \
+    --cluster-id global-app \
+    --region eu-west \
+    --region-mode secondary \
+    --primary-region us-east
+```
+
+#### Region Status and Monitoring
+
+```sql
+-- Check region status
+SHOW REGION STATUS;
+-- +----------+----------+-----------+--------+
+-- | region   | mode     | lag_ms    | status |
+-- +----------+----------+-----------+--------+
+-- | us-east  | primary  | 0         | active |
+-- | us-west  | secondary| 45        | active |
+-- | eu-west  | secondary| 120       | active |
+-- +----------+----------+-----------+--------+
+
+-- View replication details
+SELECT * FROM system.region_replication;
+```
+
+#### Conflict Resolution
+
+When concurrent writes occur in multiple regions:
+
+```sql
+-- Configure conflict resolution strategy
+SET conflict_resolution = 'last_writer_wins';
+
+-- Available strategies:
+-- 'last_writer_wins'  - Latest timestamp wins (default)
+-- 'first_writer_wins' - First write preserved
+-- 'region_priority'   - Primary region wins conflicts
+-- 'custom'            - User-defined resolution function
+
+-- View recent conflicts
+SELECT * FROM system.replication_conflicts
+ORDER BY detected_at DESC
+LIMIT 10;
+```
+
+#### Region Options
+
+| Option | Description |
+|--------|-------------|
+| `--region <name>` | Region identifier |
+| `--region-mode <mode>` | `primary` or `secondary` |
+| `--primary-region <name>` | Primary region to replicate from |
+| `--replicate-to <regions>` | Comma-separated target regions |
+| `--region-write-concern` | `local`, `majority`, or `all` |
+
 ```bash
 # From CLI
 boyodb-cli cluster-status --host localhost:8765
@@ -773,6 +850,61 @@ SHOW ROLES;
 | `DROP` | Drop tables/views |
 | `ALTER` | Alter tables |
 | `TRUNCATE` | Truncate tables |
+
+### Per-Tenant Resource Quotas
+
+For multi-tenant deployments, enforce resource limits per tenant:
+
+```sql
+-- Create a quota definition
+CREATE QUOTA enterprise_tier
+    MAX_CPU_TIME_MS = 60000       -- 60 seconds CPU per query
+    MAX_MEMORY_MB = 8192          -- 8GB memory per query
+    MAX_CONCURRENT_QUERIES = 20   -- 20 concurrent queries
+    MAX_QPM = 5000;               -- 5000 queries per minute
+
+CREATE QUOTA free_tier
+    MAX_CPU_TIME_MS = 5000
+    MAX_MEMORY_MB = 512
+    MAX_CONCURRENT_QUERIES = 2
+    MAX_QPM = 100;
+
+-- Assign quota to user
+ALTER USER alice SET QUOTA enterprise_tier;
+ALTER USER bob SET QUOTA free_tier;
+
+-- View quota definitions
+SHOW QUOTAS;
+
+-- View current usage per tenant
+SELECT tenant, cpu_used_ms, memory_used_mb,
+       concurrent_queries, queries_this_minute
+FROM system.tenant_usage;
+```
+
+#### Quota Enforcement
+
+When a quota is exceeded:
+
+| Limit | Behavior |
+|-------|----------|
+| `MAX_CPU_TIME_MS` | Query is cancelled after limit |
+| `MAX_MEMORY_MB` | Query fails with out-of-memory error |
+| `MAX_CONCURRENT_QUERIES` | New queries wait in queue |
+| `MAX_QPM` | New queries are rejected (429) |
+
+#### Fair Scheduling
+
+BoyoDB implements fair scheduling across tenants:
+
+```sql
+-- View scheduling statistics
+SELECT tenant, queries_executed, total_wait_ms, avg_wait_ms
+FROM system.tenant_scheduling
+ORDER BY queries_executed DESC;
+```
+
+This ensures no single tenant can monopolize cluster resources, even under heavy load.
 | `GRANT` | Grant privileges to others |
 | `CREATE_DB` | Create databases |
 | `CREATE_USER` | Create users |
@@ -892,6 +1024,137 @@ CREATE INDEX idx_email ON analytics.users (email) USING BLOOM;
 -- Composite index for common query patterns
 CREATE INDEX idx_user_time ON analytics.events (user_id, timestamp);
 ```
+
+### Automatic Index Recommendations
+
+BoyoDB includes an Index Advisor that analyzes query patterns and recommends optimal indexes:
+
+```sql
+-- View index recommendations
+SHOW INDEX RECOMMENDATIONS;
+
+-- Example output:
+-- +----------------+------------+--------+-----------+--------+
+-- | table          | columns    | type   | frequency | impact |
+-- +----------------+------------+--------+-----------+--------+
+-- | analytics.events | user_id  | HASH   | 1523      | 0.85   |
+-- | analytics.events | timestamp| BTREE  | 892       | 0.72   |
+-- +----------------+------------+--------+-----------+--------+
+
+-- Recommendations are based on:
+-- - Columns in WHERE clauses (equality, range, IN)
+-- - JOIN columns
+-- - ORDER BY and GROUP BY columns
+-- - Query frequency and estimated selectivity
+```
+
+### Query Store
+
+Enable query performance tracking for historical analysis:
+
+```sql
+-- Enable query store
+SET query_store = ON;
+
+-- View top queries by total execution time
+SELECT query_fingerprint, call_count, total_time_ms, avg_time_ms
+FROM system.query_store
+ORDER BY total_time_ms DESC
+LIMIT 10;
+
+-- Find slow queries
+SELECT query_fingerprint, avg_time_ms, rows_examined
+FROM system.query_store
+WHERE avg_time_ms > 1000
+ORDER BY avg_time_ms DESC;
+
+-- Detect plan regressions
+SELECT query_fingerprint, baseline_time_ms, latest_time_ms
+FROM system.query_store
+WHERE plan_changed = true
+  AND latest_time_ms > baseline_time_ms * 2;
+```
+
+### Adaptive Query Execution
+
+Enable runtime query plan optimization:
+
+```sql
+-- Enable adaptive execution
+SET adaptive_execution = ON;
+
+-- The optimizer automatically adjusts:
+-- - Join algorithms (hash vs. merge) based on actual row counts
+-- - Parallelism based on data distribution
+-- - Memory budgets based on observed usage
+-- - Partition strategies based on data skew
+
+-- View adaptive decisions for a query
+EXPLAIN ANALYZE SELECT ...;
+-- Output includes adaptive checkpoint decisions
+```
+
+### Cost Model Tuning
+
+Calibrate the query optimizer for your hardware:
+
+```sql
+-- Run automatic calibration
+ANALYZE COST MODEL;
+
+-- View current cost parameters
+SHOW COST MODEL;
+-- +---------------------+-------+
+-- | parameter           | value |
+-- +---------------------+-------+
+-- | cpu_tuple_cost      | 0.01  |
+-- | cpu_operator_cost   | 0.0025|
+-- | random_page_cost    | 4.0   |
+-- | seq_page_cost       | 1.0   |
+-- | effective_cache_size| 4GB   |
+-- +---------------------+-------+
+
+-- Manually adjust parameters
+SET cpu_tuple_cost = 0.015;
+SET random_page_cost = 3.0;
+SET effective_cache_size = '8GB';
+```
+
+### GPU Acceleration
+
+Enable hardware-accelerated query processing:
+
+```bash
+# Start server with GPU support
+boyodb-server /data 0.0.0.0:8765 \
+    --gpu-acceleration \
+    --gpu-memory-limit 8GB \
+    --gpu-min-batch-size 10000
+```
+
+```sql
+-- Check GPU status
+SHOW GPU STATUS;
+-- +--------+------------------+--------+-----------+
+-- | device | name             | memory | available |
+-- +--------+------------------+--------+-----------+
+-- | 0      | NVIDIA RTX 4090  | 24GB   | true      |
+-- +--------+------------------+--------+-----------+
+
+-- Enable/disable per session
+SET gpu_acceleration = ON;
+
+-- GPU-accelerated operations:
+-- - Aggregations (SUM, COUNT, AVG, MIN, MAX)
+-- - Filter evaluation
+-- - Hash joins
+-- - Vector similarity search
+```
+
+Supported platforms:
+- **NVIDIA CUDA**: Linux, Windows
+- **Apple Metal**: macOS (M1/M2/M3)
+- Automatic CPU fallback when GPU unavailable
 
 ### Caching Configuration
 
