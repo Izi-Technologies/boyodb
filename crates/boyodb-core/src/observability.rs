@@ -1137,6 +1137,25 @@ impl PrometheusExporter {
             .join(",")
     }
 
+    /// Sync metrics from query throttler/rate limiter
+    pub fn sync_from_throttler(&self, current: usize, max: usize, admitted: u64, rejected: u64) {
+        self.set_gauge("throttler_current_queries", current as f64);
+        self.set_gauge("throttler_max_queries", max as f64);
+        // Use set for counter since we're syncing absolute values
+        if let Some(entry) = self.counters.write().get_mut("throttler_admitted_total") {
+            entry.0 = admitted as f64;
+        }
+        if let Some(entry) = self.counters.write().get_mut("throttler_rejected_total") {
+            entry.0 = rejected as f64;
+        }
+    }
+
+    /// Sync connection pool metrics
+    pub fn sync_connections(&self, current: usize, max: usize) {
+        self.set_gauge("connections_current", current as f64);
+        self.set_gauge("connections_max", max as f64);
+    }
+
     /// Sync metrics from SystemTablesManager
     pub fn sync_from_system_tables(&self, system: &SystemTablesManager) {
         // Sync current metrics as gauges
@@ -1188,6 +1207,14 @@ impl Default for PrometheusExporter {
         exporter.register_gauge("databases_count", "Number of databases");
         exporter.register_gauge("parts_count", "Number of active parts");
         exporter.register_gauge("replication_lag_seconds", "Replication lag in seconds");
+
+        // Rate limiting metrics
+        exporter.register_gauge("throttler_current_queries", "Current concurrent queries");
+        exporter.register_gauge("throttler_max_queries", "Maximum concurrent queries");
+        exporter.register_counter("throttler_admitted_total", "Total admitted queries");
+        exporter.register_counter("throttler_rejected_total", "Total throttled queries");
+        exporter.register_gauge("connections_current", "Current active connections");
+        exporter.register_gauge("connections_max", "Maximum allowed connections");
 
         exporter.register_histogram(
             "query_duration_seconds",

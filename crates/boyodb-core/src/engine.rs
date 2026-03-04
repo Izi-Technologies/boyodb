@@ -1491,6 +1491,37 @@ impl Metrics {
 
         out
     }
+
+    /// Export metrics with connection stats appended
+    pub fn to_prometheus_with_connections(
+        &self,
+        conn_current: usize,
+        conn_max: usize,
+        queries_admitted: u64,
+        queries_rejected: u64,
+    ) -> String {
+        let mut out = self.to_prometheus();
+
+        // Connection metrics
+        out.push_str("# HELP boyodb_connections_current Current active connections\n");
+        out.push_str("# TYPE boyodb_connections_current gauge\n");
+        out.push_str(&format!("boyodb_connections_current {}\n", conn_current));
+
+        out.push_str("# HELP boyodb_connections_max Maximum allowed connections\n");
+        out.push_str("# TYPE boyodb_connections_max gauge\n");
+        out.push_str(&format!("boyodb_connections_max {}\n", conn_max));
+
+        // Rate limiting/throttler metrics
+        out.push_str("# HELP boyodb_throttler_admitted_total Total admitted queries\n");
+        out.push_str("# TYPE boyodb_throttler_admitted_total counter\n");
+        out.push_str(&format!("boyodb_throttler_admitted_total {}\n", queries_admitted));
+
+        out.push_str("# HELP boyodb_throttler_rejected_total Total rejected queries (rate limited)\n");
+        out.push_str("# TYPE boyodb_throttler_rejected_total counter\n");
+        out.push_str(&format!("boyodb_throttler_rejected_total {}\n", queries_rejected));
+
+        out
+    }
 }
 
 /// Tracks compaction state to prevent merge storms and thrashing
@@ -3933,6 +3964,22 @@ impl Db {
     /// Export metrics in Prometheus text format
     pub fn prometheus_metrics(&self) -> String {
         self.metrics.to_prometheus()
+    }
+
+    /// Export metrics with connection stats from the server layer
+    pub fn prometheus_metrics_with_connections(
+        &self,
+        conn_current: usize,
+        conn_max: usize,
+        queries_admitted: u64,
+        queries_rejected: u64,
+    ) -> String {
+        self.metrics.to_prometheus_with_connections(
+            conn_current,
+            conn_max,
+            queries_admitted,
+            queries_rejected,
+        )
     }
 
     /// Load segment with LRU caching and Arc for zero-copy sharing

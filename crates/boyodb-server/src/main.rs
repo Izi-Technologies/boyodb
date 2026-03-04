@@ -41,6 +41,61 @@ const DEFAULT_MAX_QUERY_LEN: usize = 32 * 1024;
 const DEFAULT_IO_TIMEOUT_MILLIS: u64 = 30_000; // 30 seconds - sufficient for batch ingestion
 const DEFAULT_SHARD_COUNT: usize = 4;
 
+/// Shared connection statistics for metrics reporting
+struct ConnectionStats {
+    /// Current active connections
+    current: std::sync::atomic::AtomicUsize,
+    /// Maximum allowed connections
+    max: usize,
+    /// Total queries admitted (not rate limited)
+    queries_admitted: std::sync::atomic::AtomicU64,
+    /// Total queries rejected (rate limited)
+    queries_rejected: std::sync::atomic::AtomicU64,
+}
+
+impl ConnectionStats {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            current: std::sync::atomic::AtomicUsize::new(0),
+            max: max_connections,
+            queries_admitted: std::sync::atomic::AtomicU64::new(0),
+            queries_rejected: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn connection_opened(&self) {
+        self.current.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn connection_closed(&self) {
+        self.current.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn query_admitted(&self) {
+        self.queries_admitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn query_rejected(&self) {
+        self.queries_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn current(&self) -> usize {
+        self.current.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn max(&self) -> usize {
+        self.max
+    }
+
+    fn queries_admitted(&self) -> u64 {
+        self.queries_admitted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn queries_rejected(&self) -> u64 {
+        self.queries_rejected.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -487,6 +542,10 @@ struct ServerConfig {
     max_connections: usize,
     worker_threads: usize,
     io_timeout: Duration,
+    /// Idle connection timeout in seconds (default: 300)
+    idle_timeout_secs: u64,
+    /// Maximum connection lifetime in seconds (default: 3600)
+    conn_max_lifetime_secs: u64,
     tls_acceptor: Option<TlsAcceptor>,
     log_requests: bool,
     client_auth: bool,
@@ -833,6 +892,8 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut max_connections: usize = 64;
     let mut worker_threads: usize = 8;
     let mut io_timeout_ms: u64 = DEFAULT_IO_TIMEOUT_MILLIS;
+    let mut idle_timeout_secs: u64 = 300; // 5 minutes
+    let mut conn_max_lifetime_secs: u64 = 3600; // 1 hour
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
     let mut tls_ca: Option<PathBuf> = None;
@@ -984,6 +1045,22 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                 if let Some(val) = args.get(i + 1) {
                     if let Ok(v) = val.parse::<u64>() {
                         io_timeout_ms = v.max(1);
+                    }
+                    i += 1;
+                }
+            }
+            "--idle-timeout" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        idle_timeout_secs = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--conn-max-lifetime" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        conn_max_lifetime_secs = v;
                     }
                     i += 1;
                 }
@@ -1240,6 +1317,8 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         max_connections: max_connections.max(1),
         worker_threads: worker_threads.max(1),
         io_timeout: Duration::from_millis(io_timeout_ms.max(1)),
+        idle_timeout_secs,
+        conn_max_lifetime_secs,
         tls_acceptor,
         log_requests,
         client_auth,
@@ -1601,10 +1680,10 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Rate limiter for authentication: 10 attempts per 60 seconds per IP
     let auth_rate_limiter = Arc::new(AuthRateLimiter::new(10, 60));
 
-    let cfg = Arc::new(cfg);
+    // Connection statistics for metrics
+    let connection_stats = Arc::new(ConnectionStats::new(cfg.max_connections));
 
-    // Track active connections for graceful shutdown
-    let active_connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cfg = Arc::new(cfg);
 
     // Set up shutdown signal handler
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -1721,6 +1800,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 let permit = match limiter.clone().try_acquire_owned() {
                     Ok(p) => p,
                     Err(_) => {
+                        connection_stats.query_rejected();
                         warn!(addr = %addr, "connection rejected: max connections reached");
                         continue;
                     }
@@ -1730,9 +1810,9 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 let auth = auth_manager.clone();
                 let cluster = cluster_manager.clone();
                 let prepared_cache = prepared_cache.clone();
-                let active = active_connections.clone();
+                let conn_stats = connection_stats.clone();
                 let rate_limiter = auth_rate_limiter.clone();
-                active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                conn_stats.connection_opened();
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(
@@ -1743,13 +1823,14 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                         cluster,
                         prepared_cache,
                         rate_limiter,
+                        conn_stats.clone(),
                         addr.ip(),
                     )
                     .await
                     {
                         debug!(addr = %addr, error = %e, "connection error");
                     }
-                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    conn_stats.connection_closed();
                     drop(permit);
                 });
             }
@@ -1761,7 +1842,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Wait for active connections to complete (with timeout)
-    let active_count = active_connections.load(std::sync::atomic::Ordering::SeqCst);
+    let active_count = connection_stats.current();
     if active_count > 0 {
         info!(
             active_connections = active_count,
@@ -1769,7 +1850,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         );
         let shutdown_timeout = Duration::from_secs(30);
         let start = std::time::Instant::now();
-        while active_connections.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        while connection_stats.current() > 0 {
             if start.elapsed() > shutdown_timeout {
                 warn!("shutdown timeout exceeded, forcing exit");
                 break;
@@ -1796,6 +1877,7 @@ async fn handle_conn(
     cluster_manager: Option<Arc<ClusterManager>>,
     prepared_cache: Arc<Mutex<PreparedStatementCache>>,
     rate_limiter: Arc<AuthRateLimiter>,
+    conn_stats: Arc<ConnectionStats>,
     peer_ip: IpAddr,
 ) -> Result<(), ServerError> {
     let mut stream: Box<dyn AsyncStream> = if let Some(acceptor) = cfg.tls_acceptor.clone() {
@@ -1980,7 +2062,8 @@ async fn handle_conn(
             }
         }
 
-        // Process the request
+        // Process the request - track query admission
+        conn_stats.query_admitted();
         match env.request {
             Request::ExecuteSubQuery {
                 plan_json,
@@ -2268,6 +2351,7 @@ async fn handle_conn(
                     cfg.wal_dir.clone(),
                     cfg.wal_max_bytes,
                     cfg.wal_max_segments,
+                    conn_stats.clone(),
                 )
                 .await;
 
@@ -2461,6 +2545,7 @@ async fn process_request(
     wal_dir: PathBuf,
     wal_max_bytes: u64,
     wal_max_segments: u64,
+    conn_stats: Arc<ConnectionStats>,
 ) -> Result<Response, ServerError> {
     // Helper to check privilege when auth is enabled
     let require_privilege =
@@ -3183,7 +3268,19 @@ async fn process_request(
         }
         Request::Metrics => {
             let db = db.clone();
-            let metrics_text = blocking(move || Ok(db.prometheus_metrics())).await?;
+            let conn_current = conn_stats.current();
+            let conn_max = conn_stats.max();
+            let queries_admitted = conn_stats.queries_admitted();
+            let queries_rejected = conn_stats.queries_rejected();
+            let metrics_text = blocking(move || {
+                Ok(db.prometheus_metrics_with_connections(
+                    conn_current,
+                    conn_max,
+                    queries_admitted,
+                    queries_rejected,
+                ))
+            })
+            .await?;
             Ok(Response {
                 metrics_text: Some(metrics_text),
                 ..Default::default()
