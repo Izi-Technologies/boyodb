@@ -94,28 +94,116 @@ start_node() {
     sleep 2
 }
 
-# Check if node is healthy
+# Check if node is healthy (uses Python for proper frame-based protocol)
 check_node_health() {
     local port=$1
+    local node_num=${2:-1}
     local max_attempts=10
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if echo '{"op":"health"}' | nc -w 2 localhost $port 2>/dev/null | grep -q "ok"; then
+        # Check if server process is still running
+        if [ -f "/tmp/boyodb_node${node_num}.pid" ]; then
+            if ! kill -0 $(cat "/tmp/boyodb_node${node_num}.pid") 2>/dev/null; then
+                log_warn "Server process died, waiting..."
+                sleep 1
+                attempt=$((attempt + 1))
+                continue
+            fi
+        fi
+
+        result=$(python3 -c "
+import socket
+import struct
+import json
+import sys
+
+try:
+    msg = json.dumps({'op': 'health'}).encode()
+    frame = struct.pack('>I', len(msg)) + msg
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(2)
+    s.connect(('127.0.0.1', $port))
+    s.sendall(frame)
+
+    length_data = s.recv(4)
+    if len(length_data) < 4:
+        print('FAIL:incomplete_length')
+        sys.exit(1)
+    length = struct.unpack('>I', length_data)[0]
+    response = json.loads(s.recv(length).decode())
+    s.close()
+
+    if response.get('status') == 'ok':
+        print('OK')
+        sys.exit(0)
+    print('FAIL:status=' + str(response.get('status')))
+    sys.exit(1)
+except Exception as e:
+    print('FAIL:' + str(e))
+    sys.exit(1)
+" 2>&1)
+
+        if [ "$result" = "OK" ]; then
             return 0
         fi
+        log_warn "Health check attempt $((attempt + 1)): $result"
         attempt=$((attempt + 1))
         sleep 1
     done
     return 1
 }
 
-# Execute a query on a node
+# Execute a query on a node (uses Python for proper frame-based protocol)
 execute_query() {
     local port=$1
     local sql=$2
 
-    echo "{\"op\":\"query\",\"sql\":\"$sql\"}" | nc -w 5 localhost $port 2>/dev/null
+    python3 -c "
+import socket
+import struct
+import json
+
+msg = json.dumps({'op': 'query', 'sql': '''$sql'''}).encode()
+frame = struct.pack('>I', len(msg)) + msg
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(('127.0.0.1', $port))
+s.sendall(frame)
+
+length_data = s.recv(4)
+length = struct.unpack('>I', length_data)[0]
+response = s.recv(length).decode()
+s.close()
+print(response)
+" 2>/dev/null
+}
+
+# Get cluster status from a node
+get_cluster_status() {
+    local port=$1
+
+    python3 -c "
+import socket
+import struct
+import json
+
+msg = json.dumps({'op': 'clusterstatus'}).encode()
+frame = struct.pack('>I', len(msg)) + msg
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(('127.0.0.1', $port))
+s.sendall(frame)
+
+length_data = s.recv(4)
+length = struct.unpack('>I', length_data)[0]
+response = s.recv(length).decode()
+s.close()
+print(response)
+" 2>/dev/null
 }
 
 # Main test sequence
@@ -133,7 +221,7 @@ main() {
 
     # Wait for Node 1 to be ready
     log_info "Waiting for Node 1 to be ready..."
-    if ! check_node_health $NODE1_PORT; then
+    if ! check_node_health $NODE1_PORT 1; then
         log_error "Node 1 failed to start"
         cat /tmp/boyodb_node1.log
         exit 1
@@ -145,7 +233,7 @@ main() {
 
     # Wait for Node 2 to be ready
     log_info "Waiting for Node 2 to be ready..."
-    if ! check_node_health $NODE2_PORT; then
+    if ! check_node_health $NODE2_PORT 2; then
         log_error "Node 2 failed to start"
         cat /tmp/boyodb_node2.log
         exit 1
@@ -184,7 +272,7 @@ main() {
 
     # Test 4: Check cluster status
     log_info "Test 4: Checking cluster status..."
-    result=$(echo '{"op":"cluster_status"}' | nc -w 5 localhost $NODE1_PORT 2>/dev/null)
+    result=$(get_cluster_status $NODE1_PORT)
     log_info "Cluster status: $result"
 
     # Test 5: Simulate failover by killing Node 1
@@ -200,7 +288,7 @@ main() {
 
     # Test 6: Check if Node 2 is still healthy after failover
     log_info "Test 6: Checking Node 2 health after failover..."
-    if check_node_health $NODE2_PORT; then
+    if check_node_health $NODE2_PORT 2; then
         log_info "Node 2 is still healthy after failover"
     else
         log_error "Node 2 is not healthy after failover"
@@ -215,7 +303,7 @@ main() {
 
     # Test 8: Check cluster status on Node 2
     log_info "Test 8: Checking cluster status on Node 2..."
-    result=$(echo '{"op":"cluster_status"}' | nc -w 5 localhost $NODE2_PORT 2>/dev/null)
+    result=$(get_cluster_status $NODE2_PORT)
     log_info "Cluster status on Node 2: $result"
 
     log_info "=== All cluster tests completed ==="

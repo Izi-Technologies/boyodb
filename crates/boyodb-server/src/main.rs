@@ -41,34 +41,197 @@ const DEFAULT_MAX_QUERY_LEN: usize = 32 * 1024;
 const DEFAULT_IO_TIMEOUT_MILLIS: u64 = 30_000; // 30 seconds - sufficient for batch ingestion
 const DEFAULT_SHARD_COUNT: usize = 4;
 
+/// Per-connection state information
+#[derive(Debug, Clone)]
+struct ConnectionInfo {
+    /// When the connection was established
+    created_at: std::time::Instant,
+    /// Last activity time (updated on each request)
+    last_active: std::time::Instant,
+    /// Remote peer address
+    peer_addr: std::net::SocketAddr,
+    /// Authenticated user (if any)
+    authenticated_user: Option<String>,
+}
+
+/// Tracks individual connections for monitoring and idle cleanup
+struct ConnectionTracker {
+    /// Map of connection ID to connection info
+    connections: std::sync::RwLock<HashMap<u64, ConnectionInfo>>,
+    /// Next connection ID
+    next_id: std::sync::atomic::AtomicU64,
+    /// Connections marked for closure (connection handler should check this)
+    marked_for_close: std::sync::RwLock<std::collections::HashSet<u64>>,
+}
+
+impl ConnectionTracker {
+    fn new() -> Self {
+        Self {
+            connections: std::sync::RwLock::new(HashMap::new()),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+            marked_for_close: std::sync::RwLock::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// Register a new connection, returns connection ID
+    fn register(&self, peer_addr: std::net::SocketAddr) -> u64 {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let now = std::time::Instant::now();
+        let info = ConnectionInfo {
+            created_at: now,
+            last_active: now,
+            peer_addr,
+            authenticated_user: None,
+        };
+        if let Ok(mut connections) = self.connections.write() {
+            connections.insert(id, info);
+        }
+        id
+    }
+
+    /// Unregister a connection
+    fn unregister(&self, conn_id: u64) {
+        if let Ok(mut connections) = self.connections.write() {
+            connections.remove(&conn_id);
+        }
+        if let Ok(mut marked) = self.marked_for_close.write() {
+            marked.remove(&conn_id);
+        }
+    }
+
+    /// Update last activity time for a connection
+    fn touch(&self, conn_id: u64) {
+        if let Ok(mut connections) = self.connections.write() {
+            if let Some(info) = connections.get_mut(&conn_id) {
+                info.last_active = std::time::Instant::now();
+            }
+        }
+    }
+
+    /// Set authenticated user for a connection
+    fn set_user(&self, conn_id: u64, user: String) {
+        if let Ok(mut connections) = self.connections.write() {
+            if let Some(info) = connections.get_mut(&conn_id) {
+                info.authenticated_user = Some(user);
+            }
+        }
+    }
+
+    /// Check if connection should be closed
+    fn should_close(&self, conn_id: u64) -> bool {
+        if let Ok(marked) = self.marked_for_close.read() {
+            marked.contains(&conn_id)
+        } else {
+            false
+        }
+    }
+
+    /// Mark connections for closure based on idle timeout and max lifetime
+    fn cleanup_idle(&self, idle_timeout: Duration, max_lifetime: Duration) -> Vec<u64> {
+        let now = std::time::Instant::now();
+        let mut to_close = Vec::new();
+
+        if let Ok(connections) = self.connections.read() {
+            for (&id, info) in connections.iter() {
+                let idle_duration = now.duration_since(info.last_active);
+                let lifetime = now.duration_since(info.created_at);
+
+                if idle_duration > idle_timeout {
+                    debug!(
+                        conn_id = id,
+                        idle_secs = idle_duration.as_secs(),
+                        "marking connection for closure: idle timeout"
+                    );
+                    to_close.push(id);
+                } else if lifetime > max_lifetime {
+                    debug!(
+                        conn_id = id,
+                        lifetime_secs = lifetime.as_secs(),
+                        "marking connection for closure: max lifetime exceeded"
+                    );
+                    to_close.push(id);
+                }
+            }
+        }
+
+        // Mark connections for closure
+        if !to_close.is_empty() {
+            if let Ok(mut marked) = self.marked_for_close.write() {
+                for &id in &to_close {
+                    marked.insert(id);
+                }
+            }
+        }
+
+        to_close
+    }
+
+    /// Get current connection count
+    fn count(&self) -> usize {
+        self.connections.read().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Get all connection info (for debugging/monitoring)
+    #[allow(dead_code)]
+    fn list_connections(&self) -> Vec<(u64, ConnectionInfo)> {
+        if let Ok(connections) = self.connections.read() {
+            connections.iter().map(|(&k, v)| (k, v.clone())).collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 /// Shared connection statistics for metrics reporting
 struct ConnectionStats {
-    /// Current active connections
-    current: std::sync::atomic::AtomicUsize,
     /// Maximum allowed connections
     max: usize,
     /// Total queries admitted (not rate limited)
     queries_admitted: std::sync::atomic::AtomicU64,
     /// Total queries rejected (rate limited)
     queries_rejected: std::sync::atomic::AtomicU64,
+    /// Connection tracker for per-connection state
+    tracker: ConnectionTracker,
 }
 
 impl ConnectionStats {
     fn new(max_connections: usize) -> Self {
         Self {
-            current: std::sync::atomic::AtomicUsize::new(0),
             max: max_connections,
             queries_admitted: std::sync::atomic::AtomicU64::new(0),
             queries_rejected: std::sync::atomic::AtomicU64::new(0),
+            tracker: ConnectionTracker::new(),
         }
     }
 
-    fn connection_opened(&self) {
-        self.current.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    /// Register a new connection, returns connection ID
+    fn connection_opened(&self, peer_addr: std::net::SocketAddr) -> u64 {
+        self.tracker.register(peer_addr)
     }
 
-    fn connection_closed(&self) {
-        self.current.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    /// Unregister a connection
+    fn connection_closed(&self, conn_id: u64) {
+        self.tracker.unregister(conn_id);
+    }
+
+    /// Update last activity time
+    fn touch(&self, conn_id: u64) {
+        self.tracker.touch(conn_id);
+    }
+
+    /// Set authenticated user
+    fn set_user(&self, conn_id: u64, user: String) {
+        self.tracker.set_user(conn_id, user);
+    }
+
+    /// Check if connection should close
+    fn should_close(&self, conn_id: u64) -> bool {
+        self.tracker.should_close(conn_id)
+    }
+
+    /// Run idle cleanup, returns number of connections marked for closure
+    fn cleanup_idle(&self, idle_timeout: Duration, max_lifetime: Duration) -> usize {
+        self.tracker.cleanup_idle(idle_timeout, max_lifetime).len()
     }
 
     fn query_admitted(&self) {
@@ -80,7 +243,7 @@ impl ConnectionStats {
     }
 
     fn current(&self) -> usize {
-        self.current.load(std::sync::atomic::Ordering::SeqCst)
+        self.tracker.count()
     }
 
     fn max(&self) -> usize {
@@ -1768,6 +1931,31 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Background task for idle connection cleanup (every 30 seconds)
+    {
+        let conn_stats_clone = connection_stats.clone();
+        let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
+        let max_lifetime = Duration::from_secs(cfg.conn_max_lifetime_secs);
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let marked = conn_stats_clone.cleanup_idle(idle_timeout, max_lifetime);
+                        if marked > 0 {
+                            debug!(marked_connections = marked, "idle connection cleanup");
+                        }
+                    }
+                    _ = shutdown_clone.notified() => {
+                        debug!("idle cleanup loop shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     if let Some(src) = cfg.replicate_from.clone() {
         let cfg_clone = cfg.clone();
         let db_clone = db.clone();
@@ -1812,7 +2000,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 let prepared_cache = prepared_cache.clone();
                 let conn_stats = connection_stats.clone();
                 let rate_limiter = auth_rate_limiter.clone();
-                conn_stats.connection_opened();
+                let conn_id = conn_stats.connection_opened(addr);
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(
@@ -1824,13 +2012,14 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                         prepared_cache,
                         rate_limiter,
                         conn_stats.clone(),
+                        conn_id,
                         addr.ip(),
                     )
                     .await
                     {
                         debug!(addr = %addr, error = %e, "connection error");
                     }
-                    conn_stats.connection_closed();
+                    conn_stats.connection_closed(conn_id);
                     drop(permit);
                 });
             }
@@ -1878,6 +2067,7 @@ async fn handle_conn(
     prepared_cache: Arc<Mutex<PreparedStatementCache>>,
     rate_limiter: Arc<AuthRateLimiter>,
     conn_stats: Arc<ConnectionStats>,
+    conn_id: u64,
     peer_ip: IpAddr,
 ) -> Result<(), ServerError> {
     let mut stream: Box<dyn AsyncStream> = if let Some(acceptor) = cfg.tls_acceptor.clone() {
@@ -1896,6 +2086,12 @@ async fn handle_conn(
     let mut authenticated_user: Option<String> = None;
 
     loop {
+        // Check if this connection has been marked for closure (idle timeout or max lifetime)
+        if conn_stats.should_close(conn_id) {
+            debug!(conn_id, "connection marked for closure, terminating");
+            return Ok(());
+        }
+
         let req_bytes = match read_frame(&mut stream, cfg.io_timeout, cfg.max_frame_len).await {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(()),
@@ -1910,6 +2106,9 @@ async fn handle_conn(
                 return Err(e);
             }
         };
+
+        // Update last activity time
+        conn_stats.touch(conn_id);
 
         let env: Envelope = match serde_json::from_slice(&req_bytes) {
             Ok(v) => v,
@@ -1979,6 +2178,7 @@ async fn handle_conn(
                                     "HTTP authentication successful"
                                 );
                                 authenticated_user = Some(username.clone());
+                                conn_stats.set_user(conn_id, username.clone());
                                 current_session = Some(session_id.clone());
                                 let mut resp = Response::ok_message("login successful");
                                 resp.session_id = Some(session_id);
@@ -2035,6 +2235,7 @@ async fn handle_conn(
                 if let Some(session_id) = session_to_validate {
                     match auth.validate_session(session_id) {
                         Ok(username) => {
+                            conn_stats.set_user(conn_id, username.clone());
                             authenticated_user = Some(username);
                             current_session = Some(session_id.clone());
                         }
