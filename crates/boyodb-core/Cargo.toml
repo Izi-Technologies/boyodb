@@ -57,9 +57,10 @@ hex = "0.4"                 # For hex encoding binary data
 tempfile = "3"              # For temporary files in JOIN operations
 hyperloglogplus = "0.4.1"
 object_store = { version = "0.13", features = ["aws"] }
-aws-config = "1.1"
-aws-sdk-s3 = "1.15"
-aws-credential-types = "1.1"
+# Pin AWS SDK versions compatible with Rust 1.85
+aws-config = "=1.5.17"
+aws-sdk-s3 = "=1.72.0"
+aws-credential-types = "=1.2.1"
 ordered-float = { version = "4.2", features = ["serde"] }   # For ordered floats in B-Tree keys
 xxhash-rust = { version = "0.8", features = ["xxh64"] }     # Fast hashing for checksums
 
