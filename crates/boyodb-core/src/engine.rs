@@ -8727,46 +8727,479 @@ impl Db {
 
     // ==================== Table Maintenance ====================
 
-    /// Analyze a table to collect statistics
+    /// Analyze a table to collect statistics for query optimization
+    /// Samples data to compute column statistics including min/max, distinct counts,
+    /// null counts, and histograms for cardinality estimation.
     pub fn analyze_table(&self, database: &str, table: &str) -> Result<(), EngineError> {
+        self.analyze_table_with_sample(database, table, 1.0) // Full scan by default
+    }
+
+    /// Analyze a table with a specified sample rate (0.0-1.0)
+    /// Lower sample rates are faster but less accurate
+    pub fn analyze_table_with_sample(
+        &self,
+        database: &str,
+        table: &str,
+        sample_rate: f64,
+    ) -> Result<(), EngineError> {
+        use arrow_array::{Array, ArrayRef};
+        use std::collections::HashSet;
+
+        let sample_rate = sample_rate.clamp(0.01, 1.0);
+        let start_time = std::time::Instant::now();
+
+        // Get segment entries for this table
+        let entries: Vec<crate::replication::ManifestEntry> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            // Verify table exists
+            let table_exists = manifest
+                .tables
+                .iter()
+                .any(|t| t.database == database && t.name == table);
+            if !table_exists {
+                return Err(EngineError::NotFound(format!(
+                    "table not found: {database}.{table}"
+                )));
+            }
+
+            manifest
+                .entries
+                .iter()
+                .filter(|e| e.database == database && e.table == table)
+                .cloned()
+                .collect()
+        };
+
+        let segment_count = entries.len();
+        if segment_count == 0 {
+            tracing::info!("ANALYZE {}.{}: no segments to analyze", database, table);
+            return Ok(());
+        }
+
+        // Determine which segments to sample
+        let segments_to_sample = if sample_rate < 1.0 {
+            let num_samples = ((segment_count as f64) * sample_rate).ceil() as usize;
+            let step = segment_count / num_samples.max(1);
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i % step.max(1) == 0)
+                .map(|(_, e)| e.clone())
+                .take(num_samples.max(1))
+                .collect::<Vec<_>>()
+        } else {
+            entries.clone()
+        };
+
+        tracing::info!(
+            "ANALYZE {}.{}: analyzing {}/{} segments (sample_rate={})",
+            database,
+            table,
+            segments_to_sample.len(),
+            segment_count,
+            sample_rate
+        );
+
+        // Column statistics accumulators using HashSet for distinct counts
+        // (HyperLogLog is overkill for most tables and adds complexity)
+        struct ColumnAccum {
+            null_count: u64,
+            non_null_count: u64,
+            min_i64: Option<i64>,
+            max_i64: Option<i64>,
+            min_f64: Option<f64>,
+            max_f64: Option<f64>,
+            min_str: Option<String>,
+            max_str: Option<String>,
+            total_str_len: u64,
+            distinct_values: std::collections::HashSet<String>,
+            is_numeric: bool,
+            is_string: bool,
+            histogram_values: Vec<f64>, // For building histogram
+        }
+
+        impl ColumnAccum {
+            fn new() -> Self {
+                ColumnAccum {
+                    null_count: 0,
+                    non_null_count: 0,
+                    min_i64: None,
+                    max_i64: None,
+                    min_f64: None,
+                    max_f64: None,
+                    min_str: None,
+                    max_str: None,
+                    total_str_len: 0,
+                    distinct_values: std::collections::HashSet::new(),
+                    is_numeric: false,
+                    is_string: false,
+                    histogram_values: Vec::new(),
+                }
+            }
+        }
+
+        let mut column_stats: std::collections::HashMap<String, ColumnAccum> =
+            std::collections::HashMap::new();
+        let mut total_rows: u64 = 0;
+        let mut total_bytes: u64 = 0;
+
+        // Process each sampled segment
+        for entry in &segments_to_sample {
+            total_bytes += entry.size_bytes;
+
+            // Load segment data
+            let payload = match self.load_segment_cached(entry) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("ANALYZE: failed to load segment {}: {}", entry.segment_id, e);
+                    continue;
+                }
+            };
+
+            let batches = match read_ipc_batches(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("ANALYZE: failed to read IPC {}: {}", entry.segment_id, e);
+                    continue;
+                }
+            };
+
+            for batch in batches {
+                total_rows += batch.num_rows() as u64;
+                let schema = batch.schema();
+
+                for (col_idx, field) in schema.fields().iter().enumerate() {
+                    let col_name = field.name().clone();
+                    let col_array = batch.column(col_idx);
+
+                    let accum = column_stats
+                        .entry(col_name.clone())
+                        .or_insert_with(ColumnAccum::new);
+
+                    // Count nulls
+                    let null_count = col_array.null_count() as u64;
+                    accum.null_count += null_count;
+                    accum.non_null_count += (col_array.len() as u64) - null_count;
+
+                    // Process based on data type - inline for type safety
+                    use arrow_array::*;
+                    match col_array.data_type() {
+                        arrow_schema::DataType::Int8 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Int8Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i) as i64;
+                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.histogram_values.push(v as f64);
+                                        accum.distinct_values.insert(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Int16 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Int16Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i) as i64;
+                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.histogram_values.push(v as f64);
+                                        accum.distinct_values.insert(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Int32 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Int32Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i) as i64;
+                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.histogram_values.push(v as f64);
+                                        accum.distinct_values.insert(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Int64 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Int64Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i);
+                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.histogram_values.push(v as f64);
+                                        accum.distinct_values.insert(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Float32 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Float32Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i) as f64;
+                                        if v.is_finite() {
+                                            accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
+                                            accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
+                                            accum.histogram_values.push(v);
+                                            accum.distinct_values.insert(format!("{:.6}", v));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Float64 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<Float64Array>() {
+                                accum.is_numeric = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i);
+                                        if v.is_finite() {
+                                            accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
+                                            accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
+                                            accum.histogram_values.push(v);
+                                            accum.distinct_values.insert(format!("{:.6}", v));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Utf8 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<StringArray>() {
+                                accum.is_string = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i);
+                                        accum.total_str_len += v.len() as u64;
+                                        accum.distinct_values.insert(v.to_string());
+                                        if accum.min_str.is_none() || v < accum.min_str.as_ref().unwrap().as_str() {
+                                            accum.min_str = Some(v.to_string());
+                                        }
+                                        if accum.max_str.is_none() || v > accum.max_str.as_ref().unwrap().as_str() {
+                                            accum.max_str = Some(v.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::LargeUtf8 => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<LargeStringArray>() {
+                                accum.is_string = true;
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i);
+                                        accum.total_str_len += v.len() as u64;
+                                        accum.distinct_values.insert(v.to_string());
+                                        if accum.min_str.is_none() || v < accum.min_str.as_ref().unwrap().as_str() {
+                                            accum.min_str = Some(v.to_string());
+                                        }
+                                        if accum.max_str.is_none() || v > accum.max_str.as_ref().unwrap().as_str() {
+                                            accum.max_str = Some(v.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        arrow_schema::DataType::Boolean => {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<BooleanArray>() {
+                                for i in 0..arr.len() {
+                                    if !arr.is_null(i) {
+                                        let v = arr.value(i);
+                                        accum.distinct_values.insert(v.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // For other types, just count as distinct
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build statistics metadata
+        let mut col_stats_meta: std::collections::HashMap<String, crate::replication::ColumnStatsMeta> =
+            std::collections::HashMap::new();
+
+        let column_count = column_stats.len();
+        for (col_name, accum) in column_stats {
+            let distinct_count = accum.distinct_values.len() as u64;
+
+            // Determine min/max values as JSON strings
+            let min_value = if let Some(v) = accum.min_i64 {
+                Some(v.to_string())
+            } else if let Some(v) = accum.min_f64 {
+                Some(v.to_string())
+            } else {
+                accum.min_str.clone()
+            };
+
+            let max_value = if let Some(v) = accum.max_i64 {
+                Some(v.to_string())
+            } else if let Some(v) = accum.max_f64 {
+                Some(v.to_string())
+            } else {
+                accum.max_str.clone()
+            };
+
+            let avg_length = if accum.is_string && accum.non_null_count > 0 {
+                Some(accum.total_str_len as f64 / accum.non_null_count as f64)
+            } else {
+                None
+            };
+
+            // Build histogram for numeric columns with enough data
+            let histogram = if accum.is_numeric && accum.histogram_values.len() >= 100 {
+                Some(Self::build_histogram(&mut accum.histogram_values.clone(), 64))
+            } else {
+                None
+            };
+
+            col_stats_meta.insert(
+                col_name,
+                crate::replication::ColumnStatsMeta {
+                    distinct_count,
+                    null_count: accum.null_count,
+                    non_null_count: accum.non_null_count,
+                    min_value,
+                    max_value,
+                    avg_length,
+                    histogram,
+                },
+            );
+        }
+
+        // Create TableStatsMeta
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Extrapolate row count if we sampled
+        let estimated_rows = if sample_rate < 1.0 {
+            (total_rows as f64 / sample_rate) as u64
+        } else {
+            total_rows
+        };
+
+        let stats_meta = crate::replication::TableStatsMeta {
+            database: database.to_string(),
+            table: table.to_string(),
+            row_count: estimated_rows,
+            size_bytes: entries.iter().map(|e| e.size_bytes).sum(),
+            segment_count: segment_count as u64,
+            columns: col_stats_meta,
+            last_updated: now_millis,
+            sample_rate,
+        };
+
+        // Store statistics in manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            // Remove existing stats for this table
+            manifest
+                .table_stats
+                .retain(|s| !(s.database == database && s.table == table));
+
+            // Add new stats
+            manifest.table_stats.push(stats_meta);
+            manifest.version += 1;
+
+            // Persist manifest
+            drop(manifest);
+        }
+        self.maybe_persist_manifest()?;
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(
+            "ANALYZE {}.{}: completed in {:?} - {} rows, {} columns, {} segments",
+            database,
+            table,
+            elapsed,
+            estimated_rows,
+            column_count,
+            segment_count
+        );
+
+        Ok(())
+    }
+
+    /// Build equi-height histogram from sorted values
+    fn build_histogram(values: &mut [f64], num_buckets: usize) -> crate::replication::HistogramMeta {
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = values.len();
+        let bucket_size = (n / num_buckets).max(1);
+        let actual_buckets = (n / bucket_size).min(num_buckets);
+
+        let mut boundaries = Vec::with_capacity(actual_buckets + 1);
+        let mut counts = Vec::with_capacity(actual_buckets);
+        let mut distinct_counts = Vec::with_capacity(actual_buckets);
+
+        for i in 0..actual_buckets {
+            let start = i * bucket_size;
+            let end = if i == actual_buckets - 1 {
+                n
+            } else {
+                (i + 1) * bucket_size
+            };
+
+            if i == 0 {
+                boundaries.push(values[start].to_string());
+            }
+            boundaries.push(values[end - 1].to_string());
+
+            counts.push((end - start) as u64);
+
+            // Count distinct in bucket (approximate)
+            let bucket_values: std::collections::HashSet<_> = values[start..end]
+                .iter()
+                .map(|v| format!("{:.6}", v))
+                .collect();
+            distinct_counts.push(bucket_values.len() as u64);
+        }
+
+        crate::replication::HistogramMeta {
+            num_buckets: actual_buckets,
+            boundaries,
+            counts,
+            distinct_counts,
+        }
+    }
+
+    /// Get table statistics from manifest (for query optimizer)
+    pub fn get_table_stats(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Option<crate::replication::TableStatsMeta>, EngineError> {
         let manifest = self
             .manifest
             .read()
             .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
 
-        // Verify table exists
-        let table_exists = manifest
-            .tables
+        Ok(manifest
+            .table_stats
             .iter()
-            .any(|t| t.database == database && t.name == table);
-        if !table_exists {
-            return Err(EngineError::NotFound(format!(
-                "table not found: {database}.{table}"
-            )));
-        }
-
-        // Count segments and total size for this table
-        let (segment_count, total_bytes): (usize, u64) = manifest
-            .entries
-            .iter()
-            .filter(|e| e.database == database && e.table == table)
-            .fold((0, 0), |(count, bytes), e| {
-                (count + 1, bytes + e.size_bytes)
-            });
-
-        tracing::info!(
-            "ANALYZE {}.{}: {} segments, {} bytes total",
-            database,
-            table,
-            segment_count,
-            total_bytes
-        );
-
-        // Note: Full implementation would:
-        // 1. Sample data to compute column statistics (min, max, distinct count, null count)
-        // 2. Build histograms for query optimization
-        // 3. Store statistics in manifest or separate stats file
-        Ok(())
+            .find(|s| s.database == database && s.table == table)
+            .cloned())
     }
 
     /// Vacuum a table to reclaim storage
@@ -20254,6 +20687,7 @@ mod tests {
             indexes: Vec::new(),
             sequences: Vec::new(),
             entries: Vec::new(),
+            table_stats: Vec::new(),
         };
         std::fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
 

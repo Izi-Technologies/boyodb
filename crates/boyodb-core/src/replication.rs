@@ -7,7 +7,8 @@ use std::collections::HashMap;
 /// - 0: Legacy format (pre-versioning)
 /// - 1: Added format_version field, bloom filters, compression support
 /// - 2: Binary format support (bincode) for 3x smaller files and 5x faster parsing
-pub const MANIFEST_FORMAT_VERSION: u32 = 2;
+/// - 3: Added table_stats for query optimization
+pub const MANIFEST_FORMAT_VERSION: u32 = 3;
 
 /// Magic bytes to identify binary manifest format
 pub const MANIFEST_BINARY_MAGIC: &[u8; 4] = b"BOYO";
@@ -560,6 +561,64 @@ impl ManifestEntry {
     }
 }
 
+/// Table-level statistics for query optimization
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TableStatsMeta {
+    /// Database name
+    pub database: String,
+    /// Table name
+    pub table: String,
+    /// Total row count (estimated)
+    pub row_count: u64,
+    /// Total size in bytes
+    pub size_bytes: u64,
+    /// Number of segments
+    pub segment_count: u64,
+    /// Column-level statistics
+    #[serde(default)]
+    pub columns: HashMap<String, ColumnStatsMeta>,
+    /// Timestamp when stats were last updated (unix millis)
+    pub last_updated: u64,
+    /// Sample rate used (0.0-1.0)
+    pub sample_rate: f64,
+}
+
+/// Column-level statistics for cardinality estimation
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ColumnStatsMeta {
+    /// Number of distinct values (approximate via HyperLogLog)
+    pub distinct_count: u64,
+    /// Number of null values
+    pub null_count: u64,
+    /// Total non-null values
+    pub non_null_count: u64,
+    /// Minimum value (JSON-encoded for flexibility)
+    #[serde(default)]
+    pub min_value: Option<String>,
+    /// Maximum value (JSON-encoded)
+    #[serde(default)]
+    pub max_value: Option<String>,
+    /// Average value length for strings
+    #[serde(default)]
+    pub avg_length: Option<f64>,
+    /// Histogram buckets for value distribution
+    #[serde(default)]
+    pub histogram: Option<HistogramMeta>,
+}
+
+/// Histogram for value distribution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistogramMeta {
+    /// Number of buckets
+    pub num_buckets: usize,
+    /// Bucket boundaries (JSON-encoded values)
+    pub boundaries: Vec<String>,
+    /// Count per bucket
+    pub counts: Vec<u64>,
+    /// Distinct count per bucket (approximate)
+    pub distinct_counts: Vec<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     /// Schema format version for backward compatibility. Defaults to 0 for legacy manifests.
@@ -580,6 +639,9 @@ pub struct Manifest {
     #[serde(default)]
     pub sequences: Vec<SequenceMeta>,
     pub entries: Vec<ManifestEntry>,
+    /// Table statistics for query optimization
+    #[serde(default)]
+    pub table_stats: Vec<TableStatsMeta>,
 }
 
 impl Default for Manifest {
@@ -600,6 +662,7 @@ impl Manifest {
             indexes: Vec::new(),
             sequences: Vec::new(),
             entries: Vec::new(),
+            table_stats: Vec::new(),
         }
     }
 
@@ -650,6 +713,7 @@ impl Manifest {
                 .filter(|e| e.version_added > version)
                 .cloned()
                 .collect(),
+            table_stats: self.table_stats.clone(),
         }
     }
 }
@@ -859,6 +923,7 @@ mod tests {
                 entry("b", SegmentTier::Warm, 20, 2),
                 entry("c", SegmentTier::Cold, 30, 3),
             ],
+            table_stats: Vec::new(),
         };
 
         let delta = manifest.delta_since(1);
@@ -886,6 +951,7 @@ mod tests {
                 entry("hot", SegmentTier::Hot, 30, 2),
                 entry("warm", SegmentTier::Warm, 40, 3),
             ],
+            table_stats: Vec::new(),
         };
 
         let planner = BundlePlanner::new();
@@ -919,6 +985,7 @@ mod tests {
             indexes: Vec::new(),
             sequences: Vec::new(),
             entries: vec![entry("x", SegmentTier::Hot, 5_000_000, 1)],
+            table_stats: Vec::new(),
         };
         let planner = BundlePlanner::new();
         let plan = planner.plan(
