@@ -50,9 +50,9 @@ ENV BOYODB_LOG_FORMAT=json
 EXPOSE 5555
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD boyodb-cli health --host 127.0.0.1:5555 || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD boyodb-cli info --host 127.0.0.1:5555 || exit 1
 
-# Default command
+# Default command: boyodb-server <data_dir> <bind_addr> [options]
 ENTRYPOINT ["boyodb-server"]
-CMD ["--data-dir", "/var/lib/boyodb/data", "--wal-dir", "/var/lib/boyodb/wal", "--bind", "0.0.0.0:5555"]
+CMD ["/var/lib/boyodb/data", "0.0.0.0:5555"]

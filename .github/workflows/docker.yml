@@ -22,21 +22,26 @@ jobs:
           context: .
           push: false
           load: true
-          tags: cdrdb:test
+          tags: boyodb:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Test image
         run: |
-          # Start the container
-          docker run -d --name cdrdb-test -p 5555:5555 cdrdb:test
+          # Verify binaries exist in image
+          docker run --rm boyodb:test which boyodb-server
+          docker run --rm boyodb:test which boyodb-cli
+
+          # Start the container with explicit data directory
+          docker run -d --name boyodb-test -p 5555:5555 boyodb:test \
+            /var/lib/boyodb/data 0.0.0.0:5555
 
           # Wait for startup
           sleep 5
 
           # Basic health check - test that server is responding
           for i in {1..10}; do
-            if docker exec cdrdb-test cdrdb-cli health --host 127.0.0.1:5555 2>/dev/null; then
+            if docker exec boyodb-test boyodb-cli info --host 127.0.0.1:5555 2>/dev/null; then
               echo "Health check passed!"
               break
             fi
@@ -44,14 +49,12 @@ jobs:
             sleep 2
           done
 
-          # Verify binaries exist
-          docker exec cdrdb-test which cdrdb-server
-          docker exec cdrdb-test which cdrdb-cli
-          docker exec cdrdb-test which cdr-ingestor
+          # Show container logs for debugging
+          docker logs boyodb-test
 
           # Cleanup
-          docker stop cdrdb-test
-          docker rm cdrdb-test
+          docker stop boyodb-test
+          docker rm boyodb-test
 
       - name: Login to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
