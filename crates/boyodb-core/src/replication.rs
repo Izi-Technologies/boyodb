@@ -134,8 +134,7 @@ impl Default for SequenceMeta {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveValue {
     Int64(i64),
     Int32(i32),
@@ -151,24 +150,209 @@ pub enum PrimitiveValue {
     Date32(i32),
 }
 
-// Custom deserializer to handle both old format {"type": "String", "value": "..."}
-// and new format {"String": "..."}
+// Custom serializer: use tagged enum for binary formats, untagged for JSON
+impl serde::Serialize for PrimitiveValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            // JSON: serialize as raw value (untagged) for compatibility
+            match self {
+                PrimitiveValue::Int64(v) => serializer.serialize_i64(*v),
+                PrimitiveValue::Int32(v) => serializer.serialize_i32(*v),
+                PrimitiveValue::UInt64(v) => serializer.serialize_u64(*v),
+                PrimitiveValue::UInt32(v) => serializer.serialize_u32(*v),
+                PrimitiveValue::Float64(v) => serializer.serialize_f64(*v),
+                PrimitiveValue::Float32(v) => serializer.serialize_f32(*v),
+                PrimitiveValue::String(v) => serializer.serialize_str(v),
+                PrimitiveValue::Boolean(v) => serializer.serialize_bool(*v),
+                PrimitiveValue::TimestampMicros(v) => serializer.serialize_i64(*v),
+                PrimitiveValue::Date32(v) => serializer.serialize_i32(*v),
+            }
+        } else {
+            // Binary: use standard enum serialization with discriminant
+            use serde::ser::SerializeStructVariant;
+            match self {
+                PrimitiveValue::Int64(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 0, "Int64", v)
+                }
+                PrimitiveValue::Int32(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 1, "Int32", v)
+                }
+                PrimitiveValue::UInt64(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 2, "UInt64", v)
+                }
+                PrimitiveValue::UInt32(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 3, "UInt32", v)
+                }
+                PrimitiveValue::Float64(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 4, "Float64", v)
+                }
+                PrimitiveValue::Float32(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 5, "Float32", v)
+                }
+                PrimitiveValue::String(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 6, "String", v)
+                }
+                PrimitiveValue::Boolean(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 7, "Boolean", v)
+                }
+                PrimitiveValue::TimestampMicros(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 8, "TimestampMicros", v)
+                }
+                PrimitiveValue::Date32(v) => {
+                    serializer.serialize_newtype_variant("PrimitiveValue", 9, "Date32", v)
+                }
+            }
+        }
+    }
+}
+
+// Custom deserializer to handle:
+// 1. Old format: {"type": "String", "value": "..."}
+// 2. Tagged format: {"String": "value"} or {"Int64": 123}
+// 3. Untagged format (raw values): 123, "foo", true, 3.14
+// 4. Binary format (bincode): uses enum variant index
 impl<'de> serde::Deserialize<'de> for PrimitiveValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::{self, MapAccess, Visitor};
+        use serde::de::{self, EnumAccess, MapAccess, VariantAccess, Visitor};
 
-        struct PrimitiveValueVisitor;
+        // For binary formats (bincode), use enum deserialization
+        if !deserializer.is_human_readable() {
+            struct BinaryVisitor;
 
-        impl<'de> Visitor<'de> for PrimitiveValueVisitor {
+            impl<'de> Visitor<'de> for BinaryVisitor {
+                type Value = PrimitiveValue;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("a PrimitiveValue enum")
+                }
+
+                fn visit_enum<A>(self, data: A) -> Result<PrimitiveValue, A::Error>
+                where
+                    A: EnumAccess<'de>,
+                {
+                    // Bincode uses variant index (0-9 for our enum)
+                    let (variant, access) = data.variant::<u32>()?;
+                    match variant {
+                        0 => Ok(PrimitiveValue::Int64(access.newtype_variant()?)),
+                        1 => Ok(PrimitiveValue::Int32(access.newtype_variant()?)),
+                        2 => Ok(PrimitiveValue::UInt64(access.newtype_variant()?)),
+                        3 => Ok(PrimitiveValue::UInt32(access.newtype_variant()?)),
+                        4 => Ok(PrimitiveValue::Float64(access.newtype_variant()?)),
+                        5 => Ok(PrimitiveValue::Float32(access.newtype_variant()?)),
+                        6 => Ok(PrimitiveValue::String(access.newtype_variant()?)),
+                        7 => Ok(PrimitiveValue::Boolean(access.newtype_variant()?)),
+                        8 => Ok(PrimitiveValue::TimestampMicros(access.newtype_variant()?)),
+                        9 => Ok(PrimitiveValue::Date32(access.newtype_variant()?)),
+                        _ => Err(de::Error::unknown_variant(
+                            &variant.to_string(),
+                            &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                        )),
+                    }
+                }
+            }
+
+            return deserializer.deserialize_enum(
+                "PrimitiveValue",
+                &[
+                    "Int64",
+                    "Int32",
+                    "UInt64",
+                    "UInt32",
+                    "Float64",
+                    "Float32",
+                    "String",
+                    "Boolean",
+                    "TimestampMicros",
+                    "Date32",
+                ],
+                BinaryVisitor,
+            );
+        }
+
+        // For human-readable formats (JSON), use flexible deserialization
+        struct JsonVisitor;
+
+        impl<'de> Visitor<'de> for JsonVisitor {
             type Value = PrimitiveValue;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a PrimitiveValue")
+                formatter.write_str("a PrimitiveValue (integer, float, string, boolean, or object)")
             }
 
+            // Handle raw integer values (untagged format)
+            fn visit_i64<E>(self, value: i64) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::Int64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::UInt64(value))
+            }
+
+            fn visit_i32<E>(self, value: i32) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::Int32(value))
+            }
+
+            fn visit_u32<E>(self, value: u32) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::UInt32(value))
+            }
+
+            // Handle raw float values (untagged format)
+            fn visit_f64<E>(self, value: f64) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::Float64(value))
+            }
+
+            fn visit_f32<E>(self, value: f32) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::Float32(value))
+            }
+
+            // Handle raw string values (untagged format)
+            fn visit_str<E>(self, value: &str) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::String(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::String(value))
+            }
+
+            // Handle raw boolean values (untagged format)
+            fn visit_bool<E>(self, value: bool) -> Result<PrimitiveValue, E>
+            where
+                E: de::Error,
+            {
+                Ok(PrimitiveValue::Boolean(value))
+            }
+
+            // Handle tagged object formats
             fn visit_map<M>(self, mut map: M) -> Result<PrimitiveValue, M::Error>
             where
                 M: MapAccess<'de>,
@@ -267,7 +451,7 @@ impl<'de> serde::Deserialize<'de> for PrimitiveValue {
             }
         }
 
-        deserializer.deserialize_map(PrimitiveValueVisitor)
+        deserializer.deserialize_any(JsonVisitor)
     }
 }
 
@@ -688,6 +872,12 @@ impl Manifest {
         if self.format_version == 1 {
             // No data transformation needed - binary format is just a different serialization
             self.format_version = 2;
+        }
+
+        // Migration from version 2 to 3: table_stats support
+        if self.format_version == 2 {
+            // No data transformation needed - table_stats has serde(default)
+            self.format_version = 3;
         }
 
         true

@@ -31,7 +31,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use arrow_array::{ArrayRef, Float64Array, Int64Array, RecordBatch, UInt64Array};
+use arrow_array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -756,13 +756,15 @@ pub enum GpuError {
     /// GPU not available
     NotAvailable(String),
     /// Out of GPU memory
-    OutOfMemory(u64),
+    OutOfMemory { requested: u64, available: u64 },
     /// Invalid column index
     InvalidColumn(usize),
     /// Type mismatch
     TypeMismatch(String),
     /// Unsupported data type
     UnsupportedDataType(String),
+    /// Unsupported operation
+    UnsupportedOperation(String),
     /// CUDA error
     CudaError(String),
     /// Arrow error
@@ -775,9 +777,10 @@ impl std::fmt::Display for GpuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GpuError::NotAvailable(msg) => write!(f, "GPU not available: {}", msg),
-            GpuError::OutOfMemory(bytes) => {
-                write!(f, "Out of GPU memory: {} bytes required", bytes)
+            GpuError::OutOfMemory { requested, available } => {
+                write!(f, "Out of GPU memory: {} bytes required, {} available", requested, available)
             }
+            GpuError::UnsupportedOperation(op) => write!(f, "Unsupported operation: {}", op),
             GpuError::InvalidColumn(idx) => write!(f, "Invalid column index: {}", idx),
             GpuError::TypeMismatch(msg) => write!(f, "Type mismatch: {}", msg),
             GpuError::UnsupportedDataType(dt) => write!(f, "Unsupported data type: {}", dt),
@@ -846,6 +849,421 @@ pub mod datafusion_integration {
             Ok(())
         }
     }
+}
+
+// ============================================================================
+// Metal Support (macOS)
+// ============================================================================
+
+/// Metal device information (macOS GPU)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetalDeviceInfo {
+    /// Device name
+    pub name: String,
+    /// Registry ID
+    pub registry_id: u64,
+    /// Is low power device
+    pub is_low_power: bool,
+    /// Is headless (no display)
+    pub is_headless: bool,
+    /// Recommended max working set size
+    pub recommended_max_working_set: u64,
+    /// Has unified memory
+    pub has_unified_memory: bool,
+    /// Max threads per threadgroup
+    pub max_threads_per_threadgroup: u32,
+}
+
+/// Metal GPU executor for macOS
+pub struct MetalExecutor {
+    /// Configuration
+    config: GpuConfig,
+    /// Available Metal devices
+    devices: Vec<MetalDeviceInfo>,
+    /// Current status
+    status: GpuStatus,
+    /// Statistics
+    stats: RwLock<GpuExecutionStats>,
+    /// Initialized
+    initialized: AtomicBool,
+}
+
+impl MetalExecutor {
+    pub fn new(config: GpuConfig) -> Self {
+        let (devices, status) = Self::detect_metal_devices();
+        Self {
+            config,
+            devices,
+            status,
+            stats: RwLock::new(GpuExecutionStats::default()),
+            initialized: AtomicBool::new(false),
+        }
+    }
+
+    fn detect_metal_devices() -> (Vec<MetalDeviceInfo>, GpuStatus) {
+        // Metal detection would require metal-rs crate
+        // For now, return simulated devices on macOS
+        #[cfg(target_os = "macos")]
+        {
+            // Simulate Metal device detection
+            let device = MetalDeviceInfo {
+                name: "Apple M-Series GPU".to_string(),
+                registry_id: 1,
+                is_low_power: false,
+                is_headless: false,
+                recommended_max_working_set: 8 * 1024 * 1024 * 1024, // 8GB
+                has_unified_memory: true,
+                max_threads_per_threadgroup: 1024,
+            };
+            (vec![device], GpuStatus::Available)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            (Vec::new(), GpuStatus::NotCompiled)
+        }
+    }
+
+    pub fn status(&self) -> GpuStatus {
+        self.status
+    }
+
+    pub fn devices(&self) -> &[MetalDeviceInfo] {
+        &self.devices
+    }
+
+    /// Check if Metal is available
+    pub fn is_available(&self) -> bool {
+        matches!(self.status, GpuStatus::Available) && !self.devices.is_empty()
+    }
+
+    /// Execute vectorized aggregation on Metal
+    pub fn aggregate_metal(
+        &self,
+        batches: &[RecordBatch],
+        agg_type: AggregationType,
+        column_idx: usize,
+    ) -> Result<AggregateResult, GpuError> {
+        if !self.is_available() || !self.config.enabled {
+            return Err(GpuError::NotAvailable("GPU not available".to_string()));
+        }
+
+        // Metal compute shader execution would go here
+        // For now, fall back to CPU
+        let mut stats = self.stats.write().unwrap();
+        stats.cpu_fallback_operations += 1;
+
+        // CPU implementation
+        cpu_aggregate(batches, agg_type, column_idx)
+    }
+}
+
+// ============================================================================
+// GPU Vectorized Operations
+// ============================================================================
+
+/// Vectorized operation types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    And,
+    Or,
+    Xor,
+    Not,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// GPU-accelerated vector operations
+pub struct GpuVectorOps {
+    executor: Arc<GpuExecutor>,
+}
+
+impl GpuVectorOps {
+    pub fn new(executor: Arc<GpuExecutor>) -> Self {
+        Self { executor }
+    }
+
+    /// Execute element-wise operation on two arrays
+    pub fn binary_op(
+        &self,
+        left: &ArrayRef,
+        right: &ArrayRef,
+        op: VectorOp,
+    ) -> Result<ArrayRef, GpuError> {
+        let data_size = (left.len() + right.len()) * 8; // Estimate
+
+        let decision = self.executor.should_use_gpu(GpuOperation::Math, data_size as u64);
+
+        if decision.use_gpu {
+            // GPU path (would use CUDA/Metal kernels)
+            self.gpu_binary_op(left, right, op)
+        } else {
+            // CPU fallback using Arrow compute
+            self.cpu_binary_op(left, right, op)
+        }
+    }
+
+    fn gpu_binary_op(
+        &self,
+        _left: &ArrayRef,
+        _right: &ArrayRef,
+        _op: VectorOp,
+    ) -> Result<ArrayRef, GpuError> {
+        // Placeholder for GPU implementation
+        Err(GpuError::NotAvailable("GPU not available".to_string()))
+    }
+
+    fn cpu_binary_op(
+        &self,
+        left: &ArrayRef,
+        right: &ArrayRef,
+        op: VectorOp,
+    ) -> Result<ArrayRef, GpuError> {
+        use arrow_array::cast::AsArray;
+
+        // Handle Int64 arrays
+        if let (Some(l), Some(r)) = (
+            left.as_any().downcast_ref::<Int64Array>(),
+            right.as_any().downcast_ref::<Int64Array>(),
+        ) {
+            let result: Int64Array = match op {
+                VectorOp::Add => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
+                        .collect()
+                }
+                VectorOp::Sub => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
+                        .collect()
+                }
+                VectorOp::Mul => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
+                        .collect()
+                }
+                VectorOp::Div => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0).map(|y| x / y)))
+                        .collect()
+                }
+                _ => return Err(GpuError::UnsupportedOperation(format!("{:?}", op))),
+            };
+            return Ok(Arc::new(result));
+        }
+
+        // Handle Float64 arrays
+        if let (Some(l), Some(r)) = (
+            left.as_any().downcast_ref::<Float64Array>(),
+            right.as_any().downcast_ref::<Float64Array>(),
+        ) {
+            let result: Float64Array = match op {
+                VectorOp::Add => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
+                        .collect()
+                }
+                VectorOp::Sub => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
+                        .collect()
+                }
+                VectorOp::Mul => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
+                        .collect()
+                }
+                VectorOp::Div => {
+                    l.iter().zip(r.iter())
+                        .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0.0).map(|y| x / y)))
+                        .collect()
+                }
+                _ => return Err(GpuError::UnsupportedOperation(format!("{:?}", op))),
+            };
+            return Ok(Arc::new(result));
+        }
+
+        Err(GpuError::UnsupportedDataType("Unsupported array type for vector ops".to_string()))
+    }
+
+    /// Execute unary operation on an array
+    pub fn unary_op(&self, arr: &ArrayRef, op: VectorOp) -> Result<ArrayRef, GpuError> {
+        if op != VectorOp::Not {
+            return Err(GpuError::UnsupportedOperation("Only NOT supported for unary".to_string()));
+        }
+
+        if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
+            let result: Int64Array = int_arr.iter()
+                .map(|v| v.map(|x| !x))
+                .collect();
+            return Ok(Arc::new(result));
+        }
+
+        Err(GpuError::UnsupportedDataType("Unsupported type for unary op".to_string()))
+    }
+}
+
+/// CPU fallback for aggregation
+fn cpu_aggregate(
+    batches: &[RecordBatch],
+    agg_type: AggregationType,
+    column_idx: usize,
+) -> Result<AggregateResult, GpuError> {
+    let mut sum = 0.0f64;
+    let mut count = 0i64;
+    let mut min = f64::MAX;
+    let mut max = f64::MIN;
+
+    for batch in batches {
+        let col = batch.column(column_idx);
+
+        if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let v = arr.value(i) as f64;
+                    sum += v;
+                    count += 1;
+                    min = min.min(v);
+                    max = max.max(v);
+                }
+            }
+        } else if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let v = arr.value(i);
+                    sum += v;
+                    count += 1;
+                    min = min.min(v);
+                    max = max.max(v);
+                }
+            }
+        }
+    }
+
+    Ok(match agg_type {
+        AggregationType::Sum => AggregateResult::Float(sum),
+        AggregationType::Count => AggregateResult::Int(count),
+        AggregationType::Avg => {
+            if count > 0 {
+                AggregateResult::Float(sum / count as f64)
+            } else {
+                AggregateResult::Float(0.0)
+            }
+        }
+        AggregationType::Min => AggregateResult::Float(min),
+        AggregationType::Max => AggregateResult::Float(max),
+    })
+}
+
+// ============================================================================
+// GPU Memory Pool
+// ============================================================================
+
+/// GPU memory allocation
+#[derive(Debug, Clone)]
+pub struct GpuMemoryAllocation {
+    pub id: u64,
+    pub size_bytes: u64,
+    pub device_id: u32,
+    pub allocated_at: std::time::Instant,
+}
+
+/// GPU memory pool for efficient allocation
+pub struct GpuMemoryPool {
+    /// Pool size
+    pool_size: u64,
+    /// Allocated memory
+    allocated: AtomicU64,
+    /// Allocations
+    allocations: RwLock<HashMap<u64, GpuMemoryAllocation>>,
+    /// Next allocation ID
+    next_id: AtomicU64,
+    /// Device ID
+    device_id: u32,
+}
+
+impl GpuMemoryPool {
+    pub fn new(device_id: u32, pool_size: u64) -> Self {
+        Self {
+            pool_size,
+            allocated: AtomicU64::new(0),
+            allocations: RwLock::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            device_id,
+        }
+    }
+
+    /// Allocate GPU memory
+    pub fn allocate(&self, size_bytes: u64) -> Result<GpuMemoryAllocation, GpuError> {
+        let current = self.allocated.load(Ordering::SeqCst);
+        if current + size_bytes > self.pool_size {
+            return Err(GpuError::OutOfMemory {
+                requested: size_bytes,
+                available: self.pool_size - current,
+            });
+        }
+
+        self.allocated.fetch_add(size_bytes, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+        let alloc = GpuMemoryAllocation {
+            id,
+            size_bytes,
+            device_id: self.device_id,
+            allocated_at: std::time::Instant::now(),
+        };
+
+        self.allocations.write().unwrap().insert(id, alloc.clone());
+        Ok(alloc)
+    }
+
+    /// Free GPU memory
+    pub fn free(&self, id: u64) -> bool {
+        let mut allocations = self.allocations.write().unwrap();
+        if let Some(alloc) = allocations.remove(&id) {
+            self.allocated.fetch_sub(alloc.size_bytes, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get current allocation
+    pub fn allocated(&self) -> u64 {
+        self.allocated.load(Ordering::SeqCst)
+    }
+
+    /// Get available memory
+    pub fn available(&self) -> u64 {
+        self.pool_size - self.allocated()
+    }
+
+    /// Get stats
+    pub fn stats(&self) -> GpuMemoryPoolStats {
+        let allocations = self.allocations.read().unwrap();
+        GpuMemoryPoolStats {
+            pool_size: self.pool_size,
+            allocated: self.allocated(),
+            available: self.available(),
+            allocation_count: allocations.len(),
+        }
+    }
+}
+
+/// GPU memory pool statistics
+#[derive(Debug, Clone)]
+pub struct GpuMemoryPoolStats {
+    pub pool_size: u64,
+    pub allocated: u64,
+    pub available: u64,
+    pub allocation_count: usize,
 }
 
 // ============================================================================

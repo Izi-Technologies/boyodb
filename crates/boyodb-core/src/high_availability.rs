@@ -1610,3 +1610,374 @@ mod tests {
         assert_eq!(selected.replica_id, "node2");
     }
 }
+
+// ============================================================================
+// Multi-Region Replication
+// ============================================================================
+
+/// Region configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionConfig {
+    /// Region identifier (e.g., "us-east-1", "eu-west-1")
+    pub region_id: String,
+    /// Human-readable name
+    pub display_name: String,
+    /// Primary datacenter in this region
+    pub primary_dc: String,
+    /// All datacenters in this region
+    pub datacenters: Vec<String>,
+    /// Latency to other regions (ms)
+    pub latencies: HashMap<String, f64>,
+    /// Is this the primary region?
+    pub is_primary: bool,
+    /// Replication mode for this region
+    pub replication_mode: RegionReplicationMode,
+    /// Write concern for this region
+    pub write_concern: RegionWriteConcern,
+}
+
+impl RegionConfig {
+    pub fn new(region_id: &str, display_name: &str) -> Self {
+        Self {
+            region_id: region_id.to_string(),
+            display_name: display_name.to_string(),
+            primary_dc: String::new(),
+            datacenters: Vec::new(),
+            latencies: HashMap::new(),
+            is_primary: false,
+            replication_mode: RegionReplicationMode::Async,
+            write_concern: RegionWriteConcern::Local,
+        }
+    }
+}
+
+/// Replication mode for a region
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionReplicationMode {
+    /// Synchronous - wait for ack before commit
+    Sync,
+    /// Semi-synchronous - wait for at least one remote ack
+    SemiSync,
+    /// Asynchronous - fire and forget
+    Async,
+    /// Cascading - replicate through another region
+    Cascading,
+}
+
+/// Write concern for cross-region writes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RegionWriteConcern {
+    /// Only wait for local region
+    Local,
+    /// Wait for majority of regions
+    Majority,
+    /// Wait for all regions
+    All,
+    /// Wait for specific number of regions
+    Regions(usize),
+}
+
+/// Conflict resolution strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictResolution {
+    /// Last writer wins (by timestamp)
+    LastWriterWins,
+    /// First writer wins
+    FirstWriterWins,
+    /// Higher region priority wins
+    RegionPriority,
+    /// Custom resolver (by callback)
+    Custom,
+}
+
+/// Conflict information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicationConflict {
+    pub conflict_id: String,
+    pub table: String,
+    pub key: String,
+    pub local_version: u64,
+    pub remote_version: u64,
+    pub local_region: String,
+    pub remote_region: String,
+    pub local_timestamp: u64,
+    pub remote_timestamp: u64,
+    pub resolved: bool,
+    pub resolution: Option<String>,
+}
+
+/// Region replication status
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegionReplicationStatus {
+    pub region_id: String,
+    pub state: RegionState,
+    pub lag_bytes: u64,
+    pub lag_seconds: f64,
+    pub last_sync: u64,
+    pub pending_changes: u64,
+    pub conflicts_total: u64,
+    pub conflicts_pending: u64,
+    pub bandwidth_bytes_sec: u64,
+}
+
+/// Region state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RegionState {
+    #[default]
+    Initializing,
+    Syncing,
+    Active,
+    Degraded,
+    Offline,
+    Draining,
+}
+
+/// Multi-region replication manager
+pub struct MultiRegionManager {
+    /// Local region ID
+    local_region: String,
+    /// Region configurations
+    regions: RwLock<HashMap<String, RegionConfig>>,
+    /// Region replication status
+    status: RwLock<HashMap<String, RegionReplicationStatus>>,
+    /// Pending conflicts
+    conflicts: RwLock<VecDeque<ReplicationConflict>>,
+    /// Conflict resolution strategy
+    resolution_strategy: ConflictResolution,
+    /// Global write concern
+    write_concern: RegionWriteConcern,
+    /// Replication lag threshold (seconds)
+    max_lag_seconds: f64,
+    /// Enabled
+    enabled: AtomicBool,
+}
+
+impl MultiRegionManager {
+    pub fn new(local_region: &str, resolution_strategy: ConflictResolution) -> Self {
+        Self {
+            local_region: local_region.to_string(),
+            regions: RwLock::new(HashMap::new()),
+            status: RwLock::new(HashMap::new()),
+            conflicts: RwLock::new(VecDeque::new()),
+            resolution_strategy,
+            write_concern: RegionWriteConcern::Local,
+            max_lag_seconds: 60.0,
+            enabled: AtomicBool::new(true),
+        }
+    }
+
+    /// Add a region
+    pub fn add_region(&self, config: RegionConfig) {
+        let region_id = config.region_id.clone();
+        self.regions.write().insert(region_id.clone(), config);
+        self.status.write().insert(region_id.clone(), RegionReplicationStatus {
+            region_id,
+            state: RegionState::Initializing,
+            ..Default::default()
+        });
+    }
+
+    /// Remove a region
+    pub fn remove_region(&self, region_id: &str) {
+        self.regions.write().remove(region_id);
+        self.status.write().remove(region_id);
+    }
+
+    /// Get local region
+    pub fn local_region(&self) -> &str {
+        &self.local_region
+    }
+
+    /// Check if region is primary
+    pub fn is_primary(&self) -> bool {
+        self.regions.read()
+            .get(&self.local_region)
+            .map(|r| r.is_primary)
+            .unwrap_or(false)
+    }
+
+    /// Get all regions
+    pub fn list_regions(&self) -> Vec<RegionConfig> {
+        self.regions.read().values().cloned().collect()
+    }
+
+    /// Get region status
+    pub fn get_status(&self, region_id: &str) -> Option<RegionReplicationStatus> {
+        self.status.read().get(region_id).cloned()
+    }
+
+    /// Update region status
+    pub fn update_status(&self, region_id: &str, status: RegionReplicationStatus) {
+        self.status.write().insert(region_id.to_string(), status);
+    }
+
+    /// Record a replication conflict
+    pub fn record_conflict(&self, conflict: ReplicationConflict) {
+        let mut conflicts = self.conflicts.write();
+        conflicts.push_back(conflict);
+        // Keep only recent conflicts
+        while conflicts.len() > 10000 {
+            conflicts.pop_front();
+        }
+    }
+
+    /// Get pending conflicts
+    pub fn pending_conflicts(&self) -> Vec<ReplicationConflict> {
+        self.conflicts.read()
+            .iter()
+            .filter(|c| !c.resolved)
+            .cloned()
+            .collect()
+    }
+
+    /// Resolve a conflict
+    pub fn resolve_conflict(&self, conflict_id: &str, resolution: &str) -> bool {
+        let mut conflicts = self.conflicts.write();
+        for conflict in conflicts.iter_mut() {
+            if conflict.conflict_id == conflict_id {
+                conflict.resolved = true;
+                conflict.resolution = Some(resolution.to_string());
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Auto-resolve conflicts based on strategy
+    pub fn auto_resolve_conflicts(&self) -> Vec<ReplicationConflict> {
+        let mut resolved = Vec::new();
+        let mut conflicts = self.conflicts.write();
+
+        for conflict in conflicts.iter_mut() {
+            if conflict.resolved {
+                continue;
+            }
+
+            let resolution = match self.resolution_strategy {
+                ConflictResolution::LastWriterWins => {
+                    if conflict.local_timestamp >= conflict.remote_timestamp {
+                        "local"
+                    } else {
+                        "remote"
+                    }
+                }
+                ConflictResolution::FirstWriterWins => {
+                    if conflict.local_timestamp <= conflict.remote_timestamp {
+                        "local"
+                    } else {
+                        "remote"
+                    }
+                }
+                ConflictResolution::RegionPriority => {
+                    // Primary region wins
+                    if self.is_primary() {
+                        "local"
+                    } else {
+                        "remote"
+                    }
+                }
+                ConflictResolution::Custom => {
+                    continue; // Skip auto-resolution
+                }
+            };
+
+            conflict.resolved = true;
+            conflict.resolution = Some(resolution.to_string());
+            resolved.push(conflict.clone());
+        }
+
+        resolved
+    }
+
+    /// Check if we can write (based on write concern)
+    pub fn can_write(&self) -> bool {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let status = self.status.read();
+        let active_regions: Vec<_> = status.values()
+            .filter(|s| matches!(s.state, RegionState::Active | RegionState::Degraded))
+            .collect();
+
+        match self.write_concern {
+            RegionWriteConcern::Local => true,
+            RegionWriteConcern::Majority => {
+                let total = status.len();
+                active_regions.len() > total / 2
+            }
+            RegionWriteConcern::All => active_regions.len() == status.len(),
+            RegionWriteConcern::Regions(n) => active_regions.len() >= n,
+        }
+    }
+
+    /// Get regions to replicate to (ordered by latency)
+    pub fn replication_targets(&self) -> Vec<String> {
+        let regions = self.regions.read();
+        let local = regions.get(&self.local_region);
+
+        if let Some(local) = local {
+            let mut targets: Vec<_> = regions.keys()
+                .filter(|r| *r != &self.local_region)
+                .cloned()
+                .collect();
+
+            // Sort by latency
+            targets.sort_by(|a, b| {
+                let lat_a = local.latencies.get(a).copied().unwrap_or(f64::MAX);
+                let lat_b = local.latencies.get(b).copied().unwrap_or(f64::MAX);
+                lat_a.partial_cmp(&lat_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            targets
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get global replication stats
+    pub fn global_stats(&self) -> MultiRegionStats {
+        let status = self.status.read();
+        let conflicts = self.conflicts.read();
+
+        let active_regions = status.values()
+            .filter(|s| matches!(s.state, RegionState::Active))
+            .count();
+
+        let total_lag_bytes: u64 = status.values().map(|s| s.lag_bytes).sum();
+        let max_lag_seconds = status.values()
+            .map(|s| s.lag_seconds)
+            .fold(0.0f64, |a, b| a.max(b));
+
+        let pending_conflicts = conflicts.iter().filter(|c| !c.resolved).count();
+
+        MultiRegionStats {
+            total_regions: status.len(),
+            active_regions,
+            total_lag_bytes,
+            max_lag_seconds,
+            pending_conflicts,
+            total_conflicts: conflicts.len(),
+        }
+    }
+
+    /// Enable/disable multi-region
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+}
+
+/// Multi-region statistics
+#[derive(Debug, Clone, Default)]
+pub struct MultiRegionStats {
+    pub total_regions: usize,
+    pub active_regions: usize,
+    pub total_lag_bytes: u64,
+    pub max_lag_seconds: f64,
+    pub pending_conflicts: usize,
+    pub total_conflicts: usize,
+}

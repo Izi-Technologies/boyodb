@@ -138,16 +138,28 @@ pub struct CostModelParams {
     pub cpu_tuple_cost: f64,
     /// Cost per operator invocation
     pub cpu_operator_cost: f64,
+    /// Cost per index tuple
+    pub cpu_index_tuple_cost: f64,
     /// Cost per page read from disk
     pub seq_page_cost: f64,
     /// Cost per random page read
     pub random_page_cost: f64,
     /// Cost per byte transferred over network
     pub network_byte_cost: f64,
+    /// Network latency factor
+    pub network_latency_factor: f64,
+    /// Network bandwidth factor
+    pub network_bandwidth_factor: f64,
     /// Page size in bytes
     pub page_size: u64,
     /// Effective cache size for cost estimation
     pub effective_cache_size: u64,
+    /// Work memory for sorts/hashes (bytes)
+    pub work_mem: u64,
+    /// Parallel query overhead factor
+    pub parallel_setup_cost: f64,
+    /// Parallel tuple transfer cost
+    pub parallel_tuple_cost: f64,
 }
 
 impl Default for CostModelParams {
@@ -155,11 +167,17 @@ impl Default for CostModelParams {
         Self {
             cpu_tuple_cost: 0.01,
             cpu_operator_cost: 0.0025,
+            cpu_index_tuple_cost: 0.005,
             seq_page_cost: 1.0,
             random_page_cost: 4.0,
             network_byte_cost: 0.001,
+            network_latency_factor: 0.1,
+            network_bandwidth_factor: 0.001,
             page_size: 8192,
             effective_cache_size: 4 * 1024 * 1024 * 1024, // 4GB
+            work_mem: 256 * 1024 * 1024, // 256MB
+            parallel_setup_cost: 1000.0,
+            parallel_tuple_cost: 0.1,
         }
     }
 }
@@ -2119,3 +2137,1586 @@ mod tests {
         assert!((total - 170.0).abs() < 0.01);
     }
 }
+
+// ============================================================================
+// Index Advisor - Automatic Index Recommendations
+// ============================================================================
+
+use std::collections::HashSet;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+
+/// Types of index recommendations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecommendedIndexType {
+    /// B-tree for range queries and sorting
+    BTree,
+    /// Hash for equality lookups
+    Hash,
+    /// Bloom filter for membership testing
+    BloomFilter,
+    /// Bitmap for low-cardinality columns
+    Bitmap,
+    /// Composite index on multiple columns
+    Composite(Vec<String>),
+}
+
+impl std::fmt::Display for RecommendedIndexType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecommendedIndexType::BTree => write!(f, "BTREE"),
+            RecommendedIndexType::Hash => write!(f, "HASH"),
+            RecommendedIndexType::BloomFilter => write!(f, "BLOOM"),
+            RecommendedIndexType::Bitmap => write!(f, "BITMAP"),
+            RecommendedIndexType::Composite(cols) => write!(f, "COMPOSITE({})", cols.join(", ")),
+        }
+    }
+}
+
+/// An index recommendation
+#[derive(Debug, Clone)]
+pub struct IndexRecommendation {
+    /// Database name
+    pub database: String,
+    /// Table name
+    pub table: String,
+    /// Column(s) to index
+    pub columns: Vec<String>,
+    /// Recommended index type
+    pub index_type: RecommendedIndexType,
+    /// Reason for recommendation
+    pub reason: String,
+    /// Estimated improvement (percentage reduction in query time)
+    pub estimated_improvement: f64,
+    /// Number of queries that would benefit
+    pub benefiting_queries: u64,
+    /// Priority score (higher = more important)
+    pub priority: f64,
+    /// SQL to create the index
+    pub create_sql: String,
+}
+
+/// Column access pattern tracking
+#[derive(Debug, Clone, Default)]
+pub struct ColumnAccessPattern {
+    /// Number of equality filters (WHERE col = value)
+    pub equality_count: u64,
+    /// Number of range filters (WHERE col > value, col BETWEEN, etc.)
+    pub range_count: u64,
+    /// Number of IN clause usages
+    pub in_clause_count: u64,
+    /// Number of JOIN conditions
+    pub join_count: u64,
+    /// Number of ORDER BY usages
+    pub order_by_count: u64,
+    /// Number of GROUP BY usages
+    pub group_by_count: u64,
+    /// Total query count involving this column
+    pub total_queries: u64,
+    /// Average selectivity when this column is filtered
+    pub avg_selectivity: f64,
+    /// Columns frequently used together in filters
+    pub co_occurring_columns: HashMap<String, u64>,
+}
+
+/// Table access pattern tracking
+#[derive(Debug, Clone, Default)]
+pub struct TableAccessPattern {
+    /// Column-level patterns
+    pub columns: HashMap<String, ColumnAccessPattern>,
+    /// Total queries on this table
+    pub total_queries: u64,
+    /// Full table scans
+    pub full_scans: u64,
+    /// Index scans
+    pub index_scans: u64,
+    /// Average rows returned per query
+    pub avg_rows_returned: f64,
+    /// Total execution time (ms)
+    pub total_execution_time_ms: u64,
+}
+
+/// Configuration for the index advisor
+#[derive(Debug, Clone)]
+pub struct IndexAdvisorConfig {
+    /// Minimum queries to consider a pattern significant
+    pub min_query_count: u64,
+    /// Minimum improvement percentage to recommend
+    pub min_improvement_pct: f64,
+    /// Maximum recommendations per table
+    pub max_recommendations_per_table: usize,
+    /// Consider cardinality threshold for hash vs btree
+    pub high_cardinality_threshold: f64,
+    /// Low cardinality threshold for bitmap indexes
+    pub low_cardinality_threshold: f64,
+    /// Retention period for access patterns
+    pub pattern_retention: Duration,
+}
+
+impl Default for IndexAdvisorConfig {
+    fn default() -> Self {
+        Self {
+            min_query_count: 10,
+            min_improvement_pct: 5.0,
+            max_recommendations_per_table: 5,
+            high_cardinality_threshold: 0.9,  // >90% unique values
+            low_cardinality_threshold: 0.01,  // <1% unique values
+            pattern_retention: Duration::from_secs(24 * 3600), // 24 hours
+        }
+    }
+}
+
+/// Index Advisor - analyzes query patterns and recommends indexes
+pub struct IndexAdvisor {
+    config: IndexAdvisorConfig,
+    /// Access patterns per database.table
+    patterns: RwLock<HashMap<String, TableAccessPattern>>,
+    /// Existing indexes
+    existing_indexes: RwLock<HashMap<String, Vec<ExistingIndex>>>,
+    /// Table statistics
+    table_stats: RwLock<HashMap<String, TableStats>>,
+    /// Last cleanup time
+    last_cleanup: RwLock<Instant>,
+}
+
+/// Information about an existing index
+#[derive(Debug, Clone)]
+pub struct ExistingIndex {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub index_type: String,
+}
+
+impl IndexAdvisor {
+    pub fn new(config: IndexAdvisorConfig) -> Self {
+        Self {
+            config,
+            patterns: RwLock::new(HashMap::new()),
+            existing_indexes: RwLock::new(HashMap::new()),
+            table_stats: RwLock::new(HashMap::new()),
+            last_cleanup: RwLock::new(Instant::now()),
+        }
+    }
+
+    /// Record a query's access patterns
+    pub fn record_query(
+        &self,
+        database: &str,
+        table: &str,
+        filter_columns: &[(String, FilterType)],
+        join_columns: &[String],
+        order_by_columns: &[String],
+        group_by_columns: &[String],
+        rows_scanned: u64,
+        rows_returned: u64,
+        execution_time_ms: u64,
+        used_index: bool,
+    ) {
+        let key = format!("{}.{}", database, table);
+        let mut patterns = self.patterns.write().unwrap();
+
+        let pattern = patterns.entry(key).or_insert_with(TableAccessPattern::default);
+        pattern.total_queries += 1;
+        pattern.total_execution_time_ms += execution_time_ms;
+
+        if used_index {
+            pattern.index_scans += 1;
+        } else {
+            pattern.full_scans += 1;
+        }
+
+        // Update average rows returned
+        let n = pattern.total_queries as f64;
+        pattern.avg_rows_returned =
+            (pattern.avg_rows_returned * (n - 1.0) + rows_returned as f64) / n;
+
+        // Track filter column patterns
+        for (col, filter_type) in filter_columns {
+            let col_pattern = pattern.columns.entry(col.clone())
+                .or_insert_with(ColumnAccessPattern::default);
+            col_pattern.total_queries += 1;
+
+            match filter_type {
+                FilterType::Equality => col_pattern.equality_count += 1,
+                FilterType::Range => col_pattern.range_count += 1,
+                FilterType::InClause => col_pattern.in_clause_count += 1,
+                FilterType::Like => {} // Less indexable
+            }
+
+            // Update selectivity estimate
+            if rows_scanned > 0 {
+                let selectivity = rows_returned as f64 / rows_scanned as f64;
+                let m = col_pattern.total_queries as f64;
+                col_pattern.avg_selectivity =
+                    (col_pattern.avg_selectivity * (m - 1.0) + selectivity) / m;
+            }
+
+            // Track co-occurring columns
+            for (other_col, _) in filter_columns {
+                if other_col != col {
+                    *col_pattern.co_occurring_columns.entry(other_col.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Track join columns
+        for col in join_columns {
+            let col_pattern = pattern.columns.entry(col.clone())
+                .or_insert_with(ColumnAccessPattern::default);
+            col_pattern.join_count += 1;
+            col_pattern.total_queries += 1;
+        }
+
+        // Track ORDER BY columns
+        for col in order_by_columns {
+            let col_pattern = pattern.columns.entry(col.clone())
+                .or_insert_with(ColumnAccessPattern::default);
+            col_pattern.order_by_count += 1;
+        }
+
+        // Track GROUP BY columns
+        for col in group_by_columns {
+            let col_pattern = pattern.columns.entry(col.clone())
+                .or_insert_with(ColumnAccessPattern::default);
+            col_pattern.group_by_count += 1;
+        }
+    }
+
+    /// Update table statistics
+    pub fn update_stats(&self, database: &str, table: &str, stats: TableStats) {
+        let key = format!("{}.{}", database, table);
+        self.table_stats.write().unwrap().insert(key, stats);
+    }
+
+    /// Register an existing index
+    pub fn register_index(&self, database: &str, table: &str, index: ExistingIndex) {
+        let key = format!("{}.{}", database, table);
+        self.existing_indexes.write().unwrap()
+            .entry(key)
+            .or_insert_with(Vec::new)
+            .push(index);
+    }
+
+    /// Generate index recommendations
+    pub fn recommend(&self) -> Vec<IndexRecommendation> {
+        let patterns = self.patterns.read().unwrap();
+        let existing = self.existing_indexes.read().unwrap();
+        let stats = self.table_stats.read().unwrap();
+
+        let mut recommendations = Vec::new();
+
+        for (table_key, pattern) in patterns.iter() {
+            if pattern.total_queries < self.config.min_query_count {
+                continue;
+            }
+
+            let parts: Vec<&str> = table_key.split('.').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let (database, table) = (parts[0], parts[1]);
+
+            let table_stats = stats.get(table_key);
+            let table_indexes = existing.get(table_key);
+
+            let mut table_recs = self.analyze_table(
+                database, table, pattern, table_stats, table_indexes
+            );
+
+            // Sort by priority and take top N
+            table_recs.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+            table_recs.truncate(self.config.max_recommendations_per_table);
+
+            recommendations.extend(table_recs);
+        }
+
+        // Sort all recommendations by priority
+        recommendations.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        recommendations
+    }
+
+    fn analyze_table(
+        &self,
+        database: &str,
+        table: &str,
+        pattern: &TableAccessPattern,
+        stats: Option<&TableStats>,
+        existing: Option<&Vec<ExistingIndex>>,
+    ) -> Vec<IndexRecommendation> {
+        let mut recs = Vec::new();
+        let existing_cols: HashSet<Vec<String>> = existing
+            .map(|indexes| indexes.iter().map(|i| i.columns.clone()).collect())
+            .unwrap_or_default();
+
+        for (col, col_pattern) in &pattern.columns {
+            if col_pattern.total_queries < self.config.min_query_count {
+                continue;
+            }
+
+            // Skip if index already exists on this column
+            if existing_cols.iter().any(|cols| cols.first() == Some(col)) {
+                continue;
+            }
+
+            // Determine cardinality ratio if stats available
+            let cardinality_ratio = stats
+                .and_then(|s| s.columns.get(col))
+                .map(|c| {
+                    if stats.unwrap().row_count > 0 {
+                        c.distinct_count as f64 / stats.unwrap().row_count as f64
+                    } else {
+                        0.5 // Default assumption
+                    }
+                })
+                .unwrap_or(0.5);
+
+            // Analyze and generate recommendations
+            if let Some(rec) = self.recommend_for_column(
+                database, table, col, col_pattern, cardinality_ratio, pattern
+            ) {
+                recs.push(rec);
+            }
+        }
+
+        // Check for composite index opportunities
+        if let Some(composite_rec) = self.recommend_composite_index(
+            database, table, pattern, &existing_cols
+        ) {
+            recs.push(composite_rec);
+        }
+
+        recs
+    }
+
+    fn recommend_for_column(
+        &self,
+        database: &str,
+        table: &str,
+        column: &str,
+        pattern: &ColumnAccessPattern,
+        cardinality_ratio: f64,
+        table_pattern: &TableAccessPattern,
+    ) -> Option<IndexRecommendation> {
+        let total = pattern.equality_count + pattern.range_count +
+                    pattern.in_clause_count + pattern.join_count;
+
+        if total == 0 {
+            return None;
+        }
+
+        // Determine best index type
+        let (index_type, reason) = if cardinality_ratio < self.config.low_cardinality_threshold {
+            // Low cardinality -> bitmap
+            (RecommendedIndexType::Bitmap,
+             format!("Low cardinality column ({:.1}% unique) with {} filter operations",
+                     cardinality_ratio * 100.0, total))
+        } else if pattern.equality_count > pattern.range_count * 2
+                  && cardinality_ratio > self.config.high_cardinality_threshold {
+            // High cardinality with mostly equality -> hash
+            (RecommendedIndexType::Hash,
+             format!("High cardinality ({:.1}% unique) with {} equality lookups",
+                     cardinality_ratio * 100.0, pattern.equality_count))
+        } else if pattern.in_clause_count > pattern.equality_count {
+            // Many IN clauses -> bloom filter
+            (RecommendedIndexType::BloomFilter,
+             format!("{} IN clause operations benefit from bloom filter",
+                     pattern.in_clause_count))
+        } else {
+            // Default to B-tree (works for range and equality)
+            (RecommendedIndexType::BTree,
+             format!("{} equality + {} range queries, {} ORDER BY uses",
+                     pattern.equality_count, pattern.range_count, pattern.order_by_count))
+        };
+
+        // Estimate improvement based on full scan ratio
+        let full_scan_ratio = table_pattern.full_scans as f64 /
+            table_pattern.total_queries.max(1) as f64;
+        let column_query_ratio = pattern.total_queries as f64 /
+            table_pattern.total_queries.max(1) as f64;
+
+        // Estimated improvement: assumes index can eliminate ~90% of scan time
+        // for queries on this column
+        let estimated_improvement = full_scan_ratio * column_query_ratio * 90.0
+            * (1.0 - pattern.avg_selectivity.min(1.0));
+
+        if estimated_improvement < self.config.min_improvement_pct {
+            return None;
+        }
+
+        // Calculate priority score
+        let priority = (pattern.total_queries as f64).log2() * estimated_improvement;
+
+        let index_name = format!("idx_{}_{}", table, column);
+        let create_sql = format!(
+            "CREATE INDEX {} ON {}.{} ({}) USING {};",
+            index_name, database, table, column, index_type
+        );
+
+        Some(IndexRecommendation {
+            database: database.to_string(),
+            table: table.to_string(),
+            columns: vec![column.to_string()],
+            index_type,
+            reason,
+            estimated_improvement,
+            benefiting_queries: pattern.total_queries,
+            priority,
+            create_sql,
+        })
+    }
+
+    fn recommend_composite_index(
+        &self,
+        database: &str,
+        table: &str,
+        pattern: &TableAccessPattern,
+        existing: &HashSet<Vec<String>>,
+    ) -> Option<IndexRecommendation> {
+        // Find columns that frequently appear together
+        let mut co_occurrence_scores: HashMap<(String, String), u64> = HashMap::new();
+
+        for (col, col_pattern) in &pattern.columns {
+            for (other_col, count) in &col_pattern.co_occurring_columns {
+                if col < other_col {
+                    *co_occurrence_scores.entry((col.clone(), other_col.clone())).or_insert(0) += count;
+                }
+            }
+        }
+
+        // Find best pair
+        let best_pair = co_occurrence_scores.iter()
+            .filter(|(_, count)| **count >= self.config.min_query_count)
+            .max_by_key(|(_, count)| *count)?;
+
+        let (col1, col2) = &best_pair.0;
+        let count = *best_pair.1;
+
+        // Check if composite index already exists
+        let cols = vec![col1.clone(), col2.clone()];
+        if existing.contains(&cols) {
+            return None;
+        }
+
+        // Determine column order based on selectivity
+        let col1_pattern = pattern.columns.get(col1)?;
+        let col2_pattern = pattern.columns.get(col2)?;
+
+        let (first, second) = if col1_pattern.avg_selectivity < col2_pattern.avg_selectivity {
+            (col1.clone(), col2.clone())
+        } else {
+            (col2.clone(), col1.clone())
+        };
+
+        let estimated_improvement = 15.0; // Conservative estimate for composite
+        let priority = (count as f64).log2() * estimated_improvement;
+
+        let index_name = format!("idx_{}_{}_{}", table, first, second);
+        let create_sql = format!(
+            "CREATE INDEX {} ON {}.{} ({}, {}) USING BTREE;",
+            index_name, database, table, first, second
+        );
+
+        Some(IndexRecommendation {
+            database: database.to_string(),
+            table: table.to_string(),
+            columns: vec![first.clone(), second.clone()],
+            index_type: RecommendedIndexType::Composite(vec![first, second]),
+            reason: format!("{} queries filter on both columns together", count),
+            estimated_improvement,
+            benefiting_queries: count,
+            priority,
+            create_sql,
+        })
+    }
+
+    /// Get summary statistics
+    pub fn stats(&self) -> IndexAdvisorStats {
+        let patterns = self.patterns.read().unwrap();
+
+        let mut total_tables = 0;
+        let mut total_queries = 0;
+        let mut total_full_scans = 0;
+
+        for pattern in patterns.values() {
+            total_tables += 1;
+            total_queries += pattern.total_queries;
+            total_full_scans += pattern.full_scans;
+        }
+
+        IndexAdvisorStats {
+            tracked_tables: total_tables,
+            total_queries,
+            full_scan_queries: total_full_scans,
+            full_scan_ratio: if total_queries > 0 {
+                total_full_scans as f64 / total_queries as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Clear old patterns
+    pub fn cleanup(&self) {
+        let mut last = self.last_cleanup.write().unwrap();
+        if last.elapsed() < Duration::from_secs(3600) {
+            return; // Only cleanup once per hour
+        }
+        *last = Instant::now();
+
+        // For now, just clear patterns older than retention
+        // In production, you'd track timestamps per pattern
+        let mut patterns = self.patterns.write().unwrap();
+        patterns.retain(|_, p| p.total_queries > self.config.min_query_count);
+    }
+}
+
+/// Filter type for tracking
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterType {
+    Equality,
+    Range,
+    InClause,
+    Like,
+}
+
+/// Index advisor statistics
+#[derive(Debug, Clone)]
+pub struct IndexAdvisorStats {
+    pub tracked_tables: usize,
+    pub total_queries: u64,
+    pub full_scan_queries: u64,
+    pub full_scan_ratio: f64,
+}
+
+// ============================================================================
+// Query Store - Historical Query Performance Analysis
+// ============================================================================
+
+use std::collections::VecDeque;
+
+/// Query fingerprint for grouping similar queries
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct QueryFingerprint {
+    /// Normalized SQL (parameters replaced with ?)
+    pub normalized_sql: String,
+    /// Database
+    pub database: String,
+}
+
+/// Execution statistics for a query
+#[derive(Debug, Clone, Default)]
+pub struct QueryExecutionStats {
+    /// Total executions
+    pub execution_count: u64,
+    /// Total execution time (microseconds)
+    pub total_time_us: u64,
+    /// Min execution time
+    pub min_time_us: u64,
+    /// Max execution time
+    pub max_time_us: u64,
+    /// Total rows returned
+    pub total_rows: u64,
+    /// Total rows scanned
+    pub total_rows_scanned: u64,
+    /// Number of times index was used
+    pub index_usage_count: u64,
+    /// Number of full scans
+    pub full_scan_count: u64,
+    /// Memory used (bytes)
+    pub total_memory_bytes: u64,
+    /// Last execution timestamp
+    pub last_execution: u64,
+    /// First seen timestamp
+    pub first_seen: u64,
+}
+
+impl QueryExecutionStats {
+    pub fn avg_time_us(&self) -> f64 {
+        if self.execution_count > 0 {
+            self.total_time_us as f64 / self.execution_count as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn avg_rows(&self) -> f64 {
+        if self.execution_count > 0 {
+            self.total_rows as f64 / self.execution_count as f64
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Query plan snapshot
+#[derive(Debug, Clone)]
+pub struct QueryPlanSnapshot {
+    /// Plan hash
+    pub plan_hash: u64,
+    /// Plan text (simplified)
+    pub plan_text: String,
+    /// Estimated cost
+    pub estimated_cost: f64,
+    /// Actual cost (if executed)
+    pub actual_cost: Option<f64>,
+    /// When this plan was first seen
+    pub first_seen: u64,
+    /// When this plan was last seen
+    pub last_seen: u64,
+    /// Execution count with this plan
+    pub execution_count: u64,
+}
+
+/// Stored query with all its metadata
+#[derive(Debug, Clone)]
+pub struct StoredQuery {
+    pub fingerprint: QueryFingerprint,
+    pub stats: QueryExecutionStats,
+    pub plans: Vec<QueryPlanSnapshot>,
+    /// Recent execution times for trend analysis
+    pub recent_times: VecDeque<(u64, u64)>, // (timestamp, time_us)
+}
+
+impl StoredQuery {
+    pub fn new(fingerprint: QueryFingerprint, timestamp: u64) -> Self {
+        Self {
+            fingerprint,
+            stats: QueryExecutionStats {
+                first_seen: timestamp,
+                last_execution: timestamp,
+                min_time_us: u64::MAX,
+                ..Default::default()
+            },
+            plans: Vec::new(),
+            recent_times: VecDeque::with_capacity(100),
+        }
+    }
+
+    pub fn record_execution(
+        &mut self,
+        time_us: u64,
+        rows: u64,
+        rows_scanned: u64,
+        used_index: bool,
+        memory_bytes: u64,
+        timestamp: u64,
+    ) {
+        self.stats.execution_count += 1;
+        self.stats.total_time_us += time_us;
+        self.stats.min_time_us = self.stats.min_time_us.min(time_us);
+        self.stats.max_time_us = self.stats.max_time_us.max(time_us);
+        self.stats.total_rows += rows;
+        self.stats.total_rows_scanned += rows_scanned;
+        self.stats.total_memory_bytes += memory_bytes;
+        self.stats.last_execution = timestamp;
+
+        if used_index {
+            self.stats.index_usage_count += 1;
+        } else {
+            self.stats.full_scan_count += 1;
+        }
+
+        // Keep recent times for trend analysis
+        self.recent_times.push_back((timestamp, time_us));
+        if self.recent_times.len() > 100 {
+            self.recent_times.pop_front();
+        }
+    }
+
+    /// Detect if query performance is regressing
+    pub fn detect_regression(&self, threshold_pct: f64) -> Option<f64> {
+        if self.recent_times.len() < 20 {
+            return None;
+        }
+
+        let mid = self.recent_times.len() / 2;
+        let first_half: f64 = self.recent_times.iter().take(mid)
+            .map(|(_, t)| *t as f64).sum::<f64>() / mid as f64;
+        let second_half: f64 = self.recent_times.iter().skip(mid)
+            .map(|(_, t)| *t as f64).sum::<f64>() / (self.recent_times.len() - mid) as f64;
+
+        if first_half > 0.0 {
+            let change_pct = ((second_half - first_half) / first_half) * 100.0;
+            if change_pct > threshold_pct {
+                return Some(change_pct);
+            }
+        }
+        None
+    }
+}
+
+/// Query Store configuration
+#[derive(Debug, Clone)]
+pub struct QueryStoreConfig {
+    /// Maximum queries to store
+    pub max_queries: usize,
+    /// Maximum plans per query
+    pub max_plans_per_query: usize,
+    /// Retention period in seconds
+    pub retention_secs: u64,
+    /// Capture threshold (minimum time to capture)
+    pub capture_threshold_us: u64,
+    /// Regression detection threshold (percentage)
+    pub regression_threshold_pct: f64,
+}
+
+impl Default for QueryStoreConfig {
+    fn default() -> Self {
+        Self {
+            max_queries: 10_000,
+            max_plans_per_query: 10,
+            retention_secs: 7 * 24 * 3600, // 7 days
+            capture_threshold_us: 1000, // 1ms
+            regression_threshold_pct: 50.0, // 50% slower
+        }
+    }
+}
+
+/// Query Store - stores historical query performance data
+pub struct QueryStore {
+    config: QueryStoreConfig,
+    queries: RwLock<HashMap<QueryFingerprint, StoredQuery>>,
+    /// Top queries by total time
+    top_by_time: RwLock<Vec<QueryFingerprint>>,
+    /// Queries with detected regressions
+    regressions: RwLock<Vec<(QueryFingerprint, f64)>>,
+}
+
+impl QueryStore {
+    pub fn new(config: QueryStoreConfig) -> Self {
+        Self {
+            config,
+            queries: RwLock::new(HashMap::new()),
+            top_by_time: RwLock::new(Vec::new()),
+            regressions: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Normalize SQL for fingerprinting (replace literals with ?)
+    pub fn normalize_sql(sql: &str) -> String {
+        let mut result = String::with_capacity(sql.len());
+        let mut in_string = false;
+        let mut in_number = false;
+        let mut string_char = ' ';
+
+        for c in sql.chars() {
+            if in_string {
+                if c == string_char {
+                    in_string = false;
+                    result.push('?');
+                }
+                continue;
+            }
+
+            if c == '\'' || c == '"' {
+                in_string = true;
+                string_char = c;
+                continue;
+            }
+
+            if c.is_ascii_digit() || (c == '.' && in_number) {
+                if !in_number {
+                    in_number = true;
+                    result.push('?');
+                }
+                continue;
+            } else {
+                in_number = false;
+            }
+
+            result.push(c);
+        }
+
+        // Normalize whitespace
+        result.split_whitespace().collect::<Vec<_>>().join(" ").to_uppercase()
+    }
+
+    /// Record a query execution
+    pub fn record(
+        &self,
+        sql: &str,
+        database: &str,
+        time_us: u64,
+        rows: u64,
+        rows_scanned: u64,
+        used_index: bool,
+        memory_bytes: u64,
+        plan_hash: Option<u64>,
+        plan_text: Option<&str>,
+    ) {
+        if time_us < self.config.capture_threshold_us {
+            return;
+        }
+
+        let fingerprint = QueryFingerprint {
+            normalized_sql: Self::normalize_sql(sql),
+            database: database.to_string(),
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut queries = self.queries.write().unwrap();
+
+        // Enforce size limit
+        if queries.len() >= self.config.max_queries && !queries.contains_key(&fingerprint) {
+            // Remove oldest query
+            if let Some(oldest) = queries.values()
+                .min_by_key(|q| q.stats.last_execution)
+                .map(|q| q.fingerprint.clone())
+            {
+                queries.remove(&oldest);
+            }
+        }
+
+        let query = queries.entry(fingerprint.clone())
+            .or_insert_with(|| StoredQuery::new(fingerprint.clone(), now));
+
+        query.record_execution(time_us, rows, rows_scanned, used_index, memory_bytes, now);
+
+        // Record plan if provided
+        if let (Some(hash), Some(text)) = (plan_hash, plan_text) {
+            if let Some(plan) = query.plans.iter_mut().find(|p| p.plan_hash == hash) {
+                plan.last_seen = now;
+                plan.execution_count += 1;
+            } else if query.plans.len() < self.config.max_plans_per_query {
+                query.plans.push(QueryPlanSnapshot {
+                    plan_hash: hash,
+                    plan_text: text.to_string(),
+                    estimated_cost: 0.0,
+                    actual_cost: Some(time_us as f64),
+                    first_seen: now,
+                    last_seen: now,
+                    execution_count: 1,
+                });
+            }
+        }
+    }
+
+    /// Get top queries by total time
+    pub fn top_by_total_time(&self, limit: usize) -> Vec<StoredQuery> {
+        let queries = self.queries.read().unwrap();
+        let mut sorted: Vec<_> = queries.values().cloned().collect();
+        sorted.sort_by(|a, b| b.stats.total_time_us.cmp(&a.stats.total_time_us));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    /// Get top queries by average time
+    pub fn top_by_avg_time(&self, limit: usize) -> Vec<StoredQuery> {
+        let queries = self.queries.read().unwrap();
+        let mut sorted: Vec<_> = queries.values().cloned().collect();
+        sorted.sort_by(|a, b| {
+            b.stats.avg_time_us().partial_cmp(&a.stats.avg_time_us())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sorted.truncate(limit);
+        sorted
+    }
+
+    /// Get queries with detected regressions
+    pub fn detect_regressions(&self) -> Vec<(StoredQuery, f64)> {
+        let queries = self.queries.read().unwrap();
+        queries.values()
+            .filter_map(|q| {
+                q.detect_regression(self.config.regression_threshold_pct)
+                    .map(|pct| (q.clone(), pct))
+            })
+            .collect()
+    }
+
+    /// Get query by fingerprint
+    pub fn get(&self, fingerprint: &QueryFingerprint) -> Option<StoredQuery> {
+        self.queries.read().unwrap().get(fingerprint).cloned()
+    }
+
+    /// Get summary statistics
+    pub fn summary(&self) -> QueryStoreSummary {
+        let queries = self.queries.read().unwrap();
+
+        let total_queries = queries.len();
+        let total_executions: u64 = queries.values().map(|q| q.stats.execution_count).sum();
+        let total_time_us: u64 = queries.values().map(|q| q.stats.total_time_us).sum();
+
+        QueryStoreSummary {
+            total_queries,
+            total_executions,
+            total_time_us,
+            avg_time_us: if total_executions > 0 {
+                total_time_us as f64 / total_executions as f64
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Cleanup old entries
+    pub fn cleanup(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let cutoff = now.saturating_sub(self.config.retention_secs);
+
+        let mut queries = self.queries.write().unwrap();
+        queries.retain(|_, q| q.stats.last_execution >= cutoff);
+    }
+}
+
+/// Query store summary
+#[derive(Debug, Clone)]
+pub struct QueryStoreSummary {
+    pub total_queries: usize,
+    pub total_executions: u64,
+    pub total_time_us: u64,
+    pub avg_time_us: f64,
+}
+
+// ============================================================================
+// Query Complexity Scoring
+// ============================================================================
+
+/// Query complexity factors
+#[derive(Debug, Clone, Default)]
+pub struct QueryComplexity {
+    /// Number of tables in the query
+    pub table_count: u32,
+    /// Number of joins
+    pub join_count: u32,
+    /// Number of subqueries
+    pub subquery_count: u32,
+    /// Number of aggregations
+    pub aggregation_count: u32,
+    /// Has DISTINCT
+    pub has_distinct: bool,
+    /// Has ORDER BY
+    pub has_order_by: bool,
+    /// Has GROUP BY
+    pub has_group_by: bool,
+    /// Has window functions
+    pub has_window_functions: bool,
+    /// Estimated rows to process
+    pub estimated_rows: u64,
+    /// Number of columns selected
+    pub column_count: u32,
+    /// Has UNION/INTERSECT/EXCEPT
+    pub has_set_operations: bool,
+    /// Has CTEs (WITH clause)
+    pub has_ctes: bool,
+}
+
+impl QueryComplexity {
+    /// Calculate complexity score (0-100)
+    pub fn score(&self) -> f64 {
+        let mut score = 0.0;
+
+        // Base score from structure
+        score += (self.table_count as f64 - 1.0).max(0.0) * 5.0; // Each join adds 5
+        score += self.join_count as f64 * 10.0;
+        score += self.subquery_count as f64 * 15.0;
+        score += self.aggregation_count as f64 * 5.0;
+
+        // Modifiers
+        if self.has_distinct { score += 10.0; }
+        if self.has_order_by { score += 5.0; }
+        if self.has_group_by { score += 10.0; }
+        if self.has_window_functions { score += 20.0; }
+        if self.has_set_operations { score += 15.0; }
+        if self.has_ctes { score += 10.0; }
+
+        // Data volume factor
+        let row_factor = (self.estimated_rows as f64).log10().max(0.0) * 5.0;
+        score += row_factor;
+
+        score.min(100.0)
+    }
+
+    /// Estimate resource cost
+    pub fn estimated_cost(&self) -> QueryResourceCost {
+        let score = self.score();
+
+        QueryResourceCost {
+            cpu_weight: 1.0 + score / 20.0,
+            memory_weight: 1.0 + (self.has_group_by as u32 + self.has_distinct as u32
+                                  + self.join_count) as f64 * 0.5,
+            io_weight: 1.0 + (self.estimated_rows as f64).log10().max(0.0) * 0.3,
+            overall_weight: 1.0 + score / 25.0,
+        }
+    }
+}
+
+/// Resource cost weights for a query
+#[derive(Debug, Clone)]
+pub struct QueryResourceCost {
+    pub cpu_weight: f64,
+    pub memory_weight: f64,
+    pub io_weight: f64,
+    pub overall_weight: f64,
+}
+
+/// Complexity-based query admission controller
+pub struct ComplexityBasedAdmission {
+    /// Maximum total complexity score of concurrent queries
+    pub max_concurrent_complexity: f64,
+    /// Current complexity
+    current_complexity: std::sync::atomic::AtomicU64,
+    /// Queries waiting
+    waiting_queries: std::sync::atomic::AtomicU64,
+}
+
+impl ComplexityBasedAdmission {
+    pub fn new(max_concurrent_complexity: f64) -> Self {
+        Self {
+            max_concurrent_complexity,
+            current_complexity: std::sync::atomic::AtomicU64::new(0),
+            waiting_queries: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Try to admit a query
+    pub fn try_admit(&self, complexity: &QueryComplexity) -> bool {
+        let score = complexity.score();
+        let score_bits = (score * 100.0) as u64; // Store as fixed point
+
+        let current = self.current_complexity.load(std::sync::atomic::Ordering::SeqCst);
+        let current_score = current as f64 / 100.0;
+
+        if current_score + score <= self.max_concurrent_complexity {
+            self.current_complexity.fetch_add(score_bits, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            self.waiting_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            false
+        }
+    }
+
+    /// Release admission for a completed query
+    pub fn release(&self, complexity: &QueryComplexity) {
+        let score_bits = (complexity.score() * 100.0) as u64;
+        self.current_complexity.fetch_sub(score_bits, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Get current stats
+    pub fn stats(&self) -> (f64, u64) {
+        let current = self.current_complexity.load(std::sync::atomic::Ordering::SeqCst) as f64 / 100.0;
+        let waiting = self.waiting_queries.load(std::sync::atomic::Ordering::SeqCst);
+        (current, waiting)
+    }
+}
+
+// ============================================================================
+// Cost Model Tuning
+// ============================================================================
+
+/// Cost model tuner with runtime adjustment
+pub struct CostModelTuner {
+    params: RwLock<CostModelParams>,
+    /// Observed actual vs estimated ratios for calibration
+    calibration_data: RwLock<VecDeque<(f64, f64)>>, // (estimated, actual)
+}
+
+impl CostModelTuner {
+    pub fn new(params: CostModelParams) -> Self {
+        Self {
+            params: RwLock::new(params),
+            calibration_data: RwLock::new(VecDeque::with_capacity(1000)),
+        }
+    }
+
+    /// Get current parameters
+    pub fn params(&self) -> CostModelParams {
+        self.params.read().unwrap().clone()
+    }
+
+    /// Update a specific parameter
+    pub fn set_param(&self, name: &str, value: f64) -> Result<(), String> {
+        let mut params = self.params.write().unwrap();
+        match name {
+            "seq_page_cost" => params.seq_page_cost = value,
+            "random_page_cost" => params.random_page_cost = value,
+            "cpu_tuple_cost" => params.cpu_tuple_cost = value,
+            "cpu_operator_cost" => params.cpu_operator_cost = value,
+            "cpu_index_tuple_cost" => params.cpu_index_tuple_cost = value,
+            "effective_cache_size" => params.effective_cache_size = value as u64,
+            "work_mem" => params.work_mem = value as u64,
+            "network_latency_factor" => params.network_latency_factor = value,
+            "network_bandwidth_factor" => params.network_bandwidth_factor = value,
+            "parallel_setup_cost" => params.parallel_setup_cost = value,
+            "parallel_tuple_cost" => params.parallel_tuple_cost = value,
+            _ => return Err(format!("Unknown parameter: {}", name)),
+        }
+        Ok(())
+    }
+
+    /// Record calibration data point
+    pub fn record_calibration(&self, estimated: f64, actual: f64) {
+        let mut data = self.calibration_data.write().unwrap();
+        data.push_back((estimated, actual));
+        if data.len() > 1000 {
+            data.pop_front();
+        }
+    }
+
+    /// Get calibration statistics
+    pub fn calibration_stats(&self) -> CostCalibrationStats {
+        let data = self.calibration_data.read().unwrap();
+
+        if data.is_empty() {
+            return CostCalibrationStats::default();
+        }
+
+        let mut total_ratio = 0.0;
+        let mut underestimates = 0u64;
+        let mut overestimates = 0u64;
+        let mut accurate = 0u64;
+
+        for (estimated, actual) in data.iter() {
+            if *estimated > 0.0 {
+                let ratio = actual / estimated;
+                total_ratio += ratio;
+
+                if ratio > 1.5 {
+                    underestimates += 1;
+                } else if ratio < 0.67 {
+                    overestimates += 1;
+                } else {
+                    accurate += 1;
+                }
+            }
+        }
+
+        CostCalibrationStats {
+            samples: data.len() as u64,
+            avg_ratio: total_ratio / data.len() as f64,
+            underestimate_count: underestimates,
+            overestimate_count: overestimates,
+            accurate_count: accurate,
+            accuracy_pct: accurate as f64 / data.len() as f64 * 100.0,
+        }
+    }
+
+    /// Auto-tune based on calibration data
+    pub fn auto_tune(&self) {
+        let stats = self.calibration_stats();
+
+        if stats.samples < 100 {
+            return; // Not enough data
+        }
+
+        let mut params = self.params.write().unwrap();
+
+        // If consistently underestimating, increase costs
+        if stats.avg_ratio > 1.3 {
+            params.cpu_tuple_cost *= 1.1;
+            params.seq_page_cost *= 1.1;
+        } else if stats.avg_ratio < 0.7 {
+            params.cpu_tuple_cost *= 0.9;
+            params.seq_page_cost *= 0.9;
+        }
+    }
+}
+
+/// Cost calibration statistics
+#[derive(Debug, Clone, Default)]
+pub struct CostCalibrationStats {
+    pub samples: u64,
+    pub avg_ratio: f64,
+    pub underestimate_count: u64,
+    pub overestimate_count: u64,
+    pub accurate_count: u64,
+    pub accuracy_pct: f64,
+}
+
+// ============================================================================
+// Adaptive Query Execution
+// ============================================================================
+
+/// Adaptive execution decision
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdaptiveDecision {
+    /// Continue with current plan
+    Continue,
+    /// Switch join strategy
+    SwitchJoinStrategy(JoinStrategy),
+    /// Increase parallelism
+    IncreaseParallelism(u32),
+    /// Decrease parallelism (memory pressure)
+    DecreaseParallelism(u32),
+    /// Enable spill to disk
+    EnableSpill,
+    /// Switch to hash aggregation
+    SwitchToHashAggregation,
+    /// Switch to sort aggregation
+    SwitchToSortAggregation,
+    /// Abort query (too expensive)
+    Abort(String),
+}
+
+/// Join strategy options
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinStrategy {
+    NestedLoop,
+    HashJoin,
+    SortMergeJoin,
+    BroadcastHashJoin,
+}
+
+/// Runtime statistics collected during execution
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeStats {
+    /// Actual rows processed so far
+    pub rows_processed: u64,
+    /// Estimated rows (from planner)
+    pub estimated_rows: u64,
+    /// Memory used (bytes)
+    pub memory_used: u64,
+    /// Memory limit (bytes)
+    pub memory_limit: u64,
+    /// Elapsed time (microseconds)
+    pub elapsed_us: u64,
+    /// Number of partitions/parallel tasks
+    pub parallelism: u32,
+    /// Build side size for hash join (rows)
+    pub build_side_rows: u64,
+    /// Probe side rows seen
+    pub probe_side_rows: u64,
+    /// Skew detected (ratio of max to avg partition size)
+    pub skew_ratio: f64,
+    /// Spill occurred
+    pub spilled: bool,
+}
+
+impl RuntimeStats {
+    /// Calculate cardinality estimation error ratio
+    pub fn estimation_error(&self) -> f64 {
+        if self.estimated_rows > 0 {
+            self.rows_processed as f64 / self.estimated_rows as f64
+        } else {
+            1.0
+        }
+    }
+
+    /// Check if memory pressure is high
+    pub fn memory_pressure(&self) -> f64 {
+        if self.memory_limit > 0 {
+            self.memory_used as f64 / self.memory_limit as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Check for data skew
+    pub fn has_significant_skew(&self) -> bool {
+        self.skew_ratio > 3.0
+    }
+}
+
+/// Adaptive execution checkpoint
+#[derive(Debug, Clone)]
+pub struct AdaptiveCheckpoint {
+    pub operator_id: String,
+    pub operator_type: String,
+    pub stats: RuntimeStats,
+    pub timestamp: u64,
+}
+
+/// Configuration for adaptive execution
+#[derive(Debug, Clone)]
+pub struct AdaptiveExecutionConfig {
+    pub enabled: bool,
+    pub check_interval_rows: u64,
+    pub cardinality_error_threshold: f64,
+    pub memory_pressure_threshold: f64,
+    pub skew_threshold: f64,
+    pub min_rows_for_adaptation: u64,
+    pub max_adaptations: u32,
+}
+
+impl Default for AdaptiveExecutionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            check_interval_rows: 10_000,
+            cardinality_error_threshold: 10.0,
+            memory_pressure_threshold: 0.8,
+            skew_threshold: 3.0,
+            min_rows_for_adaptation: 1000,
+            max_adaptations: 3,
+        }
+    }
+}
+
+/// Adaptive Query Executor
+pub struct AdaptiveExecutor {
+    config: AdaptiveExecutionConfig,
+    checkpoints: RwLock<Vec<AdaptiveCheckpoint>>,
+    decisions: RwLock<Vec<(AdaptiveCheckpoint, AdaptiveDecision)>>,
+    adaptation_count: std::sync::atomic::AtomicU32,
+}
+
+impl AdaptiveExecutor {
+    pub fn new(config: AdaptiveExecutionConfig) -> Self {
+        Self {
+            config,
+            checkpoints: RwLock::new(Vec::new()),
+            decisions: RwLock::new(Vec::new()),
+            adaptation_count: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    pub fn checkpoint(&self, checkpoint: AdaptiveCheckpoint) -> AdaptiveDecision {
+        if !self.config.enabled {
+            return AdaptiveDecision::Continue;
+        }
+
+        let count = self.adaptation_count.load(std::sync::atomic::Ordering::SeqCst);
+        if count >= self.config.max_adaptations {
+            self.checkpoints.write().unwrap().push(checkpoint);
+            return AdaptiveDecision::Continue;
+        }
+
+        if checkpoint.stats.rows_processed < self.config.min_rows_for_adaptation {
+            self.checkpoints.write().unwrap().push(checkpoint);
+            return AdaptiveDecision::Continue;
+        }
+
+        let decision = self.evaluate(&checkpoint);
+
+        if decision != AdaptiveDecision::Continue {
+            self.adaptation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.decisions.write().unwrap().push((checkpoint.clone(), decision.clone()));
+        }
+
+        self.checkpoints.write().unwrap().push(checkpoint);
+        decision
+    }
+
+    fn evaluate(&self, checkpoint: &AdaptiveCheckpoint) -> AdaptiveDecision {
+        let stats = &checkpoint.stats;
+
+        // Memory pressure check
+        if stats.memory_pressure() > self.config.memory_pressure_threshold {
+            if !stats.spilled {
+                return AdaptiveDecision::EnableSpill;
+            }
+            if stats.parallelism > 1 {
+                return AdaptiveDecision::DecreaseParallelism(stats.parallelism / 2);
+            }
+        }
+
+        // Cardinality check
+        let error = stats.estimation_error();
+        if error > self.config.cardinality_error_threshold {
+            if checkpoint.operator_type.contains("Join") && stats.build_side_rows > stats.estimated_rows * 10 {
+                return AdaptiveDecision::SwitchJoinStrategy(JoinStrategy::HashJoin);
+            }
+            if checkpoint.operator_type.contains("Aggregate") {
+                return AdaptiveDecision::SwitchToHashAggregation;
+            }
+        }
+
+        // Skew check
+        if stats.has_significant_skew() && stats.parallelism > 1 && checkpoint.operator_type.contains("Join") {
+            return AdaptiveDecision::SwitchJoinStrategy(JoinStrategy::BroadcastHashJoin);
+        }
+
+        AdaptiveDecision::Continue
+    }
+
+    pub fn summary(&self) -> AdaptiveExecutionSummary {
+        let checkpoints = self.checkpoints.read().unwrap();
+        let decisions = self.decisions.read().unwrap();
+        AdaptiveExecutionSummary {
+            total_checkpoints: checkpoints.len(),
+            adaptations_made: decisions.len(),
+            decisions: decisions.iter().map(|(_, d)| format!("{:?}", d)).collect(),
+        }
+    }
+
+    pub fn reset(&self) {
+        self.checkpoints.write().unwrap().clear();
+        self.decisions.write().unwrap().clear();
+        self.adaptation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AdaptiveExecutionSummary {
+    pub total_checkpoints: usize,
+    pub adaptations_made: usize,
+    pub decisions: Vec<String>,
+}
+
+// ============================================================================
+// Per-Tenant Resource Quotas
+// ============================================================================
+
+/// Tenant quota definition
+#[derive(Debug, Clone)]
+pub struct TenantQuota {
+    pub tenant_id: String,
+    pub max_concurrent_queries: u32,
+    pub max_memory_per_query: u64,
+    pub max_total_memory: u64,
+    pub max_cpu_time_us: u64,
+    pub max_iops: u64,
+    pub max_rows_per_query: u64,
+    pub max_query_time_secs: u64,
+    pub priority: u32,
+    pub enabled: bool,
+}
+
+impl Default for TenantQuota {
+    fn default() -> Self {
+        Self {
+            tenant_id: String::new(),
+            max_concurrent_queries: 10,
+            max_memory_per_query: 1024 * 1024 * 1024,
+            max_total_memory: 4 * 1024 * 1024 * 1024,
+            max_cpu_time_us: 60_000_000,
+            max_iops: 10_000,
+            max_rows_per_query: 10_000_000,
+            max_query_time_secs: 300,
+            priority: 5,
+            enabled: true,
+        }
+    }
+}
+
+/// Tenant usage tracking
+#[derive(Debug, Clone, Default)]
+pub struct TenantUsage {
+    pub concurrent_queries: u32,
+    pub memory_used: u64,
+    pub total_queries: u64,
+    pub throttled_queries: u64,
+    pub rejected_queries: u64,
+    pub total_cpu_time_us: u64,
+    pub total_rows: u64,
+}
+
+/// Tenant resource manager
+pub struct TenantResourceManager {
+    quotas: RwLock<HashMap<String, TenantQuota>>,
+    usage: RwLock<HashMap<String, TenantUsage>>,
+    default_quota: TenantQuota,
+}
+
+impl TenantResourceManager {
+    pub fn new(default_quota: TenantQuota) -> Self {
+        Self {
+            quotas: RwLock::new(HashMap::new()),
+            usage: RwLock::new(HashMap::new()),
+            default_quota,
+        }
+    }
+
+    pub fn set_quota(&self, tenant_id: &str, quota: TenantQuota) {
+        self.quotas.write().unwrap().insert(tenant_id.to_string(), quota);
+    }
+
+    pub fn get_quota(&self, tenant_id: &str) -> TenantQuota {
+        self.quotas.read().unwrap()
+            .get(tenant_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut q = self.default_quota.clone();
+                q.tenant_id = tenant_id.to_string();
+                q
+            })
+    }
+
+    pub fn try_acquire(&self, tenant_id: &str, memory_estimate: u64) -> Result<TenantQueryToken, TenantQuotaError> {
+        let quota = self.get_quota(tenant_id);
+
+        if !quota.enabled {
+            return Err(TenantQuotaError::TenantDisabled);
+        }
+
+        let mut usage = self.usage.write().unwrap();
+        let tenant_usage = usage.entry(tenant_id.to_string()).or_default();
+
+        if tenant_usage.concurrent_queries >= quota.max_concurrent_queries {
+            tenant_usage.throttled_queries += 1;
+            return Err(TenantQuotaError::ConcurrencyLimitExceeded {
+                current: tenant_usage.concurrent_queries,
+                limit: quota.max_concurrent_queries,
+            });
+        }
+
+        if tenant_usage.memory_used + memory_estimate > quota.max_total_memory {
+            tenant_usage.rejected_queries += 1;
+            return Err(TenantQuotaError::MemoryLimitExceeded {
+                current: tenant_usage.memory_used,
+                requested: memory_estimate,
+                limit: quota.max_total_memory,
+            });
+        }
+
+        tenant_usage.concurrent_queries += 1;
+        tenant_usage.memory_used += memory_estimate;
+        tenant_usage.total_queries += 1;
+
+        Ok(TenantQueryToken {
+            tenant_id: tenant_id.to_string(),
+            memory_reserved: memory_estimate,
+            start_time: Instant::now(),
+        })
+    }
+
+    pub fn release(&self, token: TenantQueryToken, rows_processed: u64, cpu_time_us: u64) {
+        let mut usage = self.usage.write().unwrap();
+        if let Some(tenant_usage) = usage.get_mut(&token.tenant_id) {
+            tenant_usage.concurrent_queries = tenant_usage.concurrent_queries.saturating_sub(1);
+            tenant_usage.memory_used = tenant_usage.memory_used.saturating_sub(token.memory_reserved);
+            tenant_usage.total_cpu_time_us += cpu_time_us;
+            tenant_usage.total_rows += rows_processed;
+        }
+    }
+
+    pub fn get_usage(&self, tenant_id: &str) -> TenantUsage {
+        self.usage.read().unwrap().get(tenant_id).cloned().unwrap_or_default()
+    }
+
+    pub fn all_stats(&self) -> Vec<(String, TenantQuota, TenantUsage)> {
+        let quotas = self.quotas.read().unwrap();
+        let usage = self.usage.read().unwrap();
+        quotas.iter().map(|(id, quota)| {
+            let u = usage.get(id).cloned().unwrap_or_default();
+            (id.clone(), quota.clone(), u)
+        }).collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct TenantQueryToken {
+    pub tenant_id: String,
+    pub memory_reserved: u64,
+    pub start_time: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub enum TenantQuotaError {
+    TenantDisabled,
+    ConcurrencyLimitExceeded { current: u32, limit: u32 },
+    MemoryLimitExceeded { current: u64, requested: u64, limit: u64 },
+}
+
+impl std::fmt::Display for TenantQuotaError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TenantDisabled => write!(f, "Tenant disabled"),
+            Self::ConcurrencyLimitExceeded { current, limit } => {
+                write!(f, "Concurrency limit: {} / {}", current, limit)
+            }
+            Self::MemoryLimitExceeded { current, requested, limit } => {
+                write!(f, "Memory limit: {} + {} > {}", current, requested, limit)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TenantQuotaError {}

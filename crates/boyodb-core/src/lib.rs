@@ -192,6 +192,9 @@ pub use high_availability::{
     HealthCheckResult, HealthMonitor, LeaderElection, LoadBalanceStrategy, LogEntry, LogEntryType,
     PendingWrite, QuorumWriter, ReadPreference, ReplicaInfo, ReplicaRole, ReplicaSelector,
     ReplicaState, VoteRequest, VoteResponse, WriteAck, WriteConsistency,
+    // Multi-Region Replication
+    ConflictResolution, MultiRegionManager, MultiRegionStats, RegionConfig, RegionReplicationMode,
+    RegionReplicationStatus, RegionState, RegionWriteConcern, ReplicationConflict,
 };
 
 // Resource Governance re-exports (Phase 16)
@@ -221,6 +224,12 @@ pub use tooling::{
 pub use gpu::{
     AggregateResult, AggregationType, FilterOp, FilterPredicate, GpuConfig, GpuDecision,
     GpuDeviceInfo, GpuError, GpuExecutionStats, GpuExecutor, GpuOperation, GpuStatus,
+    // Metal support (macOS)
+    MetalDeviceInfo, MetalExecutor,
+    // GPU Vector Operations
+    GpuVectorOps, VectorOp,
+    // GPU Memory Pool
+    GpuMemoryAllocation, GpuMemoryPool, GpuMemoryPoolStats,
 };
 
 // --- Financial-Grade ACID Transaction Support re-exports ---
@@ -262,3 +271,29 @@ pub use constraint_validator::{
 
 // Extended SQL types for financial features
 pub use sql::{ForeignKeyAction, SqlIsolationLevel, TableConstraint, TransactionCommand};
+
+// Optimizer and Index Advisor
+pub use optimizer::{
+    // Index Advisor
+    ColumnAccessPattern, ExistingIndex, FilterType, IndexAdvisor, IndexAdvisorConfig,
+    IndexAdvisorStats, IndexRecommendation, RecommendedIndexType, TableAccessPattern,
+    // Query Store
+    QueryFingerprint, QueryPlanSnapshot, QueryStore, QueryStoreConfig, QueryStoreSummary,
+    StoredQuery,
+    // Complexity Scoring
+    ComplexityBasedAdmission, QueryComplexity, QueryResourceCost,
+    // Cost Model Tuning
+    CostBasedOptimizer, CostCalibrationStats, CostModelTuner, QueryCost, StatValue,
+    // Adaptive Query Execution
+    AdaptiveCheckpoint, AdaptiveDecision, AdaptiveExecutionConfig, AdaptiveExecutionSummary,
+    AdaptiveExecutor, JoinStrategy, RuntimeStats,
+    // Per-Tenant Resource Quotas
+    TenantQuota, TenantQuotaError, TenantQueryToken, TenantResourceManager, TenantUsage,
+    // Aliased to avoid conflicts
+    CostModelParams as OptimizerCostParams,
+    ColumnStatistics as OptimizerColumnStats,
+    Histogram as OptimizerHistogram,
+    HistogramBucket as OptimizerHistogramBucket,
+    QueryExecutionStats as StoredQueryStats,
+    TableStats as OptimizerTableStats,
+};
