@@ -14284,10 +14284,51 @@ pub struct TableFieldSpec {
     pub encoding: Option<String>,
 }
 
+/// Aggregate expression with optional alias for result column naming
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AggregateExpr {
+    pub kind: AggKind,
+    pub alias: Option<String>,
+}
+
+impl AggregateExpr {
+    pub fn new(kind: AggKind) -> Self {
+        Self { kind, alias: None }
+    }
+
+    pub fn with_alias(kind: AggKind, alias: String) -> Self {
+        Self {
+            kind,
+            alias: Some(alias),
+        }
+    }
+
+    /// Get the output column name for this aggregate
+    pub fn output_name(&self) -> String {
+        if let Some(ref alias) = self.alias {
+            return alias.clone();
+        }
+        // Default names based on aggregate type
+        match &self.kind {
+            AggKind::CountStar => "count".to_string(),
+            AggKind::CountDistinct { column } => format!("count_distinct_{}", column),
+            AggKind::Sum { column } => format!("sum_{}", column),
+            AggKind::Avg { column } => format!("avg_{}", column),
+            AggKind::Min { column } => format!("min_{}", column),
+            AggKind::Max { column } => format!("max_{}", column),
+            AggKind::StddevSamp { column } => format!("stddev_samp_{}", column),
+            AggKind::StddevPop { column } => format!("stddev_pop_{}", column),
+            AggKind::VarianceSamp { column } => format!("var_samp_{}", column),
+            AggKind::VariancePop { column } => format!("var_pop_{}", column),
+            AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AggPlan {
     pub group_by: GroupBy,
-    pub aggs: Vec<AggKind>,
+    pub aggs: Vec<AggregateExpr>,
     pub having: Vec<HavingCondition>,
 }
 
@@ -14358,6 +14399,13 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
     }
 }
 
+fn agg_expr_from_sql(expr: crate::sql::AggregateExpr) -> AggregateExpr {
+    AggregateExpr {
+        kind: agg_kind_from_sql(expr.kind),
+        alias: expr.alias,
+    }
+}
+
 fn having_condition_from_sql(cond: crate::sql::HavingCondition) -> HavingCondition {
     HavingCondition {
         agg: agg_kind_from_sql(cond.agg),
@@ -14388,7 +14436,7 @@ fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
                     .collect(),
             ),
         },
-        aggs: plan.aggs.into_iter().map(agg_kind_from_sql).collect(),
+        aggs: plan.aggs.into_iter().map(agg_expr_from_sql).collect(),
         having: plan
             .having
             .into_iter()
@@ -17655,7 +17703,7 @@ impl Aggregator {
             state.count_star += num_rows as u64;
             // Accumulate aggregates directly without calling self.accumulate_aggs to avoid borrow issues
             for agg in &self.plan.aggs.clone() {
-                match agg {
+                match &agg.kind {
                     AggKind::CountStar => {}
                     AggKind::CountDistinct { column } | AggKind::ApproxCountDistinct { column } => {
                         if let Ok(col_idx) = batch.schema().index_of(column) {
@@ -17802,29 +17850,19 @@ impl Aggregator {
 
         // Add aggregate columns
         for agg in &self.plan.aggs {
-            let (name, dtype) = match agg {
-                AggKind::CountStar => ("count".to_string(), DataType::UInt64),
-                AggKind::CountDistinct { column } => {
-                    (format!("count_distinct_{}", column), DataType::UInt64)
-                }
-                AggKind::Sum { column } => (format!("sum_{}", column), DataType::Int64),
-                AggKind::Avg { column } => (format!("avg_{}", column), DataType::Float64),
-                AggKind::Min { column } => (format!("min_{}", column), DataType::Int64),
-                AggKind::Max { column } => (format!("max_{}", column), DataType::Int64),
-                AggKind::StddevSamp { column } => (format!("stddev_{}", column), DataType::Float64),
-                AggKind::StddevPop { column } => {
-                    (format!("stddev_pop_{}", column), DataType::Float64)
-                }
-                AggKind::VarianceSamp { column } => {
-                    (format!("variance_{}", column), DataType::Float64)
-                }
-                AggKind::VariancePop { column } => {
-                    (format!("var_pop_{}", column), DataType::Float64)
-                }
-                AggKind::ApproxCountDistinct { column } => (
-                    format!("approx_count_distinct_{}", column),
-                    DataType::UInt64,
-                ),
+            let name = agg.output_name();
+            let dtype = match &agg.kind {
+                AggKind::CountStar => DataType::UInt64,
+                AggKind::CountDistinct { .. } => DataType::UInt64,
+                AggKind::Sum { .. } => DataType::Int64,
+                AggKind::Avg { .. } => DataType::Float64,
+                AggKind::Min { .. } => DataType::Int64,
+                AggKind::Max { .. } => DataType::Int64,
+                AggKind::StddevSamp { .. } => DataType::Float64,
+                AggKind::StddevPop { .. } => DataType::Float64,
+                AggKind::VarianceSamp { .. } => DataType::Float64,
+                AggKind::VariancePop { .. } => DataType::Float64,
+                AggKind::ApproxCountDistinct { .. } => DataType::UInt64,
             };
             fields.push(Field::new(name, dtype, true));
         }
@@ -17840,7 +17878,7 @@ impl Aggregator {
         let mut columns: Vec<ArrayRef> = Vec::new();
 
         for agg in &self.plan.aggs {
-            let arr: ArrayRef = match agg {
+            let arr: ArrayRef = match &agg.kind {
                 AggKind::CountStar => Arc::new(UInt64Array::from(vec![state.count_star])),
                 AggKind::CountDistinct { column } => {
                     let count = state
@@ -17956,7 +17994,7 @@ impl Aggregator {
 
             // Add aggregate values
             for (i, agg) in self.plan.aggs.iter().enumerate() {
-                let value = match agg {
+                let value = match &agg.kind {
                     AggKind::CountStar => state.count_star as f64,
                     AggKind::CountDistinct { column } => state
                         .count_distinct_sets
@@ -18005,7 +18043,7 @@ impl Aggregator {
 
         // Add aggregate columns
         for (i, agg) in self.plan.aggs.iter().enumerate() {
-            let arr: ArrayRef = match agg {
+            let arr: ArrayRef = match &agg.kind {
                 AggKind::CountStar
                 | AggKind::CountDistinct { .. }
                 | AggKind::ApproxCountDistinct { .. } => Arc::new(UInt64Array::from(
@@ -18137,14 +18175,14 @@ fn compute_max(arr: &ArrayRef) -> Result<Option<f64>, EngineError> {
 /// Accumulate aggregations into state (standalone function to avoid borrow issues)
 fn accumulate_aggs_into(
     state: &mut AggState,
-    aggs: &[AggKind],
+    aggs: &[AggregateExpr],
     batch: &RecordBatch,
 ) -> Result<(), EngineError> {
     let num_rows = batch.num_rows();
     state.count_star += num_rows as u64;
 
     for agg in aggs {
-        match agg {
+        match &agg.kind {
             AggKind::CountStar => {
                 // Already counted above
             }
@@ -18216,11 +18254,11 @@ fn accumulate_aggs_into(
 /// Accumulate aggregation for a single row (used in GROUP BY)
 fn accumulate_single_row(
     state: &mut AggState,
-    agg: &AggKind,
+    agg: &AggregateExpr,
     batch: &RecordBatch,
     row: usize,
 ) -> Result<(), EngineError> {
-    match agg {
+    match &agg.kind {
         AggKind::CountStar => {
             // Already counted in outer loop
         }
@@ -18244,7 +18282,7 @@ fn accumulate_single_row(
                     let val = extract_f64(col, row);
                     if let Some(v) = val {
                         *state.sum_values.entry(column.clone()).or_insert(0.0) += v;
-                        if matches!(agg, AggKind::Avg { .. }) {
+                        if matches!(&agg.kind, AggKind::Avg { .. }) {
                             *state.avg_sums.entry(column.clone()).or_insert(0.0) += v;
                             *state.avg_counts.entry(column.clone()).or_insert(0) += 1;
                         }
@@ -18347,7 +18385,7 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
 
     // Add columns needed by aggregations
     for a in &agg.aggs {
-        match a {
+        match &a.kind {
             AggKind::CountStar => {}
             AggKind::CountDistinct { column }
             | AggKind::Sum { column }

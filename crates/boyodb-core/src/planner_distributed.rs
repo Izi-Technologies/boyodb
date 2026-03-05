@@ -9,7 +9,7 @@
 //! - Subquery distribution
 //! - Cost-based distribution decisions
 
-use crate::engine::{AggKind, AggPlan, GroupBy, PlanKind, QueryFilter};
+use crate::engine::{AggKind, AggPlan, AggregateExpr, GroupBy, PlanKind, QueryFilter};
 use crate::sql::{JoinType, SelectColumn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -522,103 +522,103 @@ fn distribute_aggregation(
     let mut partial_agg_specs = Vec::new();
     let mut global_aggs = Vec::new();
 
-    for agg_kind in &agg_plan.aggs {
-        match agg_kind {
+    for agg_expr in &agg_plan.aggs {
+        match &agg_expr.kind {
             AggKind::CountStar => {
                 // Local: COUNT(*) -> produces "count" column
-                local_aggs.push(AggKind::CountStar);
+                local_aggs.push(AggregateExpr::new(AggKind::CountStar));
                 // Global: SUM(count) -> final count
-                global_aggs.push(AggKind::Sum {
+                global_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: "count".into(),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec!["count".into()],
                     final_agg: FinalAggKind::CountOfCounts,
-                    output_column: "count".into(),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::CountDistinct { column } => {
                 // For COUNT(DISTINCT), we need to collect all values and deduplicate
                 // This is expensive - for now, fall back to approximate
-                local_aggs.push(AggKind::ApproxCountDistinct {
+                local_aggs.push(AggregateExpr::new(AggKind::ApproxCountDistinct {
                     column: column.clone(),
-                });
-                global_aggs.push(AggKind::Sum {
+                }));
+                global_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: format!("approx_count_distinct_{}", column),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("approx_count_distinct_{}", column)],
                     final_agg: FinalAggKind::HllUnion,
-                    output_column: format!("count_distinct_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::Sum { column } => {
                 // Local: SUM(col) -> produces "sum_{col}" column
-                local_aggs.push(AggKind::Sum {
+                local_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: column.clone(),
-                });
+                }));
                 // Global: SUM(sum_{col}) -> final sum
-                global_aggs.push(AggKind::Sum {
+                global_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: format!("sum_{}", column),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("sum_{}", column)],
                     final_agg: FinalAggKind::SumOfSums,
-                    output_column: format!("sum_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::Avg { column } => {
                 // AVG requires both SUM and COUNT for proper distributed computation
                 // Local: SUM(col) and COUNT(*)
-                local_aggs.push(AggKind::Sum {
+                local_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: column.clone(),
-                });
-                local_aggs.push(AggKind::CountStar);
+                }));
+                local_aggs.push(AggregateExpr::new(AggKind::CountStar));
                 // Global: AVG = SUM(sums) / SUM(counts)
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("sum_{}", column), "count".into()],
                     final_agg: FinalAggKind::AvgFromSumCount,
-                    output_column: format!("avg_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::Min { column } => {
                 // Local: MIN(col) -> produces "min_{col}"
-                local_aggs.push(AggKind::Min {
+                local_aggs.push(AggregateExpr::new(AggKind::Min {
                     column: column.clone(),
-                });
+                }));
                 // Global: MIN(min_{col}) -> final min
-                global_aggs.push(AggKind::Min {
+                global_aggs.push(AggregateExpr::new(AggKind::Min {
                     column: format!("min_{}", column),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("min_{}", column)],
                     final_agg: FinalAggKind::MinOfMins,
-                    output_column: format!("min_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::Max { column } => {
                 // Local: MAX(col) -> produces "max_{col}"
-                local_aggs.push(AggKind::Max {
+                local_aggs.push(AggregateExpr::new(AggKind::Max {
                     column: column.clone(),
-                });
+                }));
                 // Global: MAX(max_{col}) -> final max
-                global_aggs.push(AggKind::Max {
+                global_aggs.push(AggregateExpr::new(AggKind::Max {
                     column: format!("max_{}", column),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("max_{}", column)],
                     final_agg: FinalAggKind::MaxOfMaxes,
-                    output_column: format!("max_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::StddevSamp { column } | AggKind::StddevPop { column } => {
-                let is_pop = matches!(agg_kind, AggKind::StddevPop { .. });
+                let is_pop = matches!(&agg_expr.kind, AggKind::StddevPop { .. });
                 // Welford's parallel algorithm requires: count, sum, m2 (sum of squared differences)
                 // Local: compute partial stats
-                local_aggs.push(AggKind::Sum {
+                local_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: column.clone(),
-                });
-                local_aggs.push(AggKind::CountStar);
+                }));
+                local_aggs.push(AggregateExpr::new(AggKind::CountStar));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![
                         format!("sum_{}", column),
@@ -626,19 +626,15 @@ fn distribute_aggregation(
                         format!("sum_sq_{}", column), // sum of squares
                     ],
                     final_agg: FinalAggKind::StddevFromPartials { population: is_pop },
-                    output_column: if is_pop {
-                        format!("stddev_pop_{}", column)
-                    } else {
-                        format!("stddev_samp_{}", column)
-                    },
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::VarianceSamp { column } | AggKind::VariancePop { column } => {
-                let is_pop = matches!(agg_kind, AggKind::VariancePop { .. });
-                local_aggs.push(AggKind::Sum {
+                let is_pop = matches!(&agg_expr.kind, AggKind::VariancePop { .. });
+                local_aggs.push(AggregateExpr::new(AggKind::Sum {
                     column: column.clone(),
-                });
-                local_aggs.push(AggKind::CountStar);
+                }));
+                local_aggs.push(AggregateExpr::new(AggKind::CountStar));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![
                         format!("sum_{}", column),
@@ -646,22 +642,18 @@ fn distribute_aggregation(
                         format!("sum_sq_{}", column),
                     ],
                     final_agg: FinalAggKind::VarianceFromPartials { population: is_pop },
-                    output_column: if is_pop {
-                        format!("var_pop_{}", column)
-                    } else {
-                        format!("var_samp_{}", column)
-                    },
+                    output_column: agg_expr.output_name(),
                 });
             }
             AggKind::ApproxCountDistinct { column } => {
                 // HyperLogLog can be unioned across nodes
-                local_aggs.push(AggKind::ApproxCountDistinct {
+                local_aggs.push(AggregateExpr::new(AggKind::ApproxCountDistinct {
                     column: column.clone(),
-                });
+                }));
                 partial_agg_specs.push(PartialAggSpec {
                     source_columns: vec![format!("approx_count_distinct_{}", column)],
                     final_agg: FinalAggKind::HllUnion,
-                    output_column: format!("approx_count_distinct_{}", column),
+                    output_column: agg_expr.output_name(),
                 });
             }
         }
@@ -1029,7 +1021,7 @@ mod tests {
         }
     }
 
-    fn make_agg_plan(aggs: Vec<AggKind>) -> PlanKind {
+    fn make_agg_plan(aggs: Vec<AggregateExpr>) -> PlanKind {
         PlanKind::Simple {
             agg: Some(AggPlan {
                 group_by: GroupBy::None,
@@ -1057,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_distribute_count_star() {
-        let plan = make_agg_plan(vec![AggKind::CountStar]);
+        let plan = make_agg_plan(vec![AggregateExpr::new(AggKind::CountStar)]);
         let result = distribute_plan(&plan);
         assert!(result.is_some());
 
@@ -1075,9 +1067,9 @@ mod tests {
 
     #[test]
     fn test_distribute_avg() {
-        let plan = make_agg_plan(vec![AggKind::Avg {
+        let plan = make_agg_plan(vec![AggregateExpr::new(AggKind::Avg {
             column: "value".to_string(),
-        }]);
+        })]);
         let result = distribute_plan(&plan);
         assert!(result.is_some());
 

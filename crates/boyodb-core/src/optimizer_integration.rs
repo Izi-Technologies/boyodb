@@ -291,73 +291,80 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
 
     agg.aggs
         .iter()
-        .map(|agg_kind| match agg_kind {
-            AggKind::CountStar => AggregateExpr {
-                function: AggFunction::Count,
-                column: None,
-                distinct: false,
-                alias: Some("count".to_string()),
-            },
-            AggKind::CountDistinct { column } => AggregateExpr {
-                function: AggFunction::CountDistinct,
-                column: Some(column.clone()),
-                distinct: true,
-                alias: Some(format!("count_distinct_{}", column)),
-            },
-            AggKind::Sum { column } => AggregateExpr {
-                function: AggFunction::Sum,
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("sum_{}", column)),
-            },
-            AggKind::Avg { column } => AggregateExpr {
-                function: AggFunction::Avg,
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("avg_{}", column)),
-            },
-            AggKind::Min { column } => AggregateExpr {
-                function: AggFunction::Min,
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("min_{}", column)),
-            },
-            AggKind::Max { column } => AggregateExpr {
-                function: AggFunction::Max,
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("max_{}", column)),
-            },
-            AggKind::StddevSamp { column } => AggregateExpr {
-                function: AggFunction::Sum, // Use Sum as placeholder for unsupported
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("stddev_samp_{}", column)),
-            },
-            AggKind::StddevPop { column } => AggregateExpr {
-                function: AggFunction::Sum, // Use Sum as placeholder for unsupported
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("stddev_pop_{}", column)),
-            },
-            AggKind::VarianceSamp { column } => AggregateExpr {
-                function: AggFunction::Sum, // Use Sum as placeholder for unsupported
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("var_samp_{}", column)),
-            },
-            AggKind::VariancePop { column } => AggregateExpr {
-                function: AggFunction::Sum, // Use Sum as placeholder for unsupported
-                column: Some(column.clone()),
-                distinct: false,
-                alias: Some(format!("var_pop_{}", column)),
-            },
-            AggKind::ApproxCountDistinct { column } => AggregateExpr {
-                function: AggFunction::CountDistinct, // Approximate as distinct count
-                column: Some(column.clone()),
-                distinct: true,
-                alias: Some(format!("approx_count_distinct_{}", column)),
-            },
+        .map(|agg_expr| {
+            // Use the alias from the SQL expression if provided, otherwise use default
+            let get_alias = |default: String| -> Option<String> {
+                agg_expr.alias.clone().or(Some(default))
+            };
+
+            match &agg_expr.kind {
+                AggKind::CountStar => AggregateExpr {
+                    function: AggFunction::Count,
+                    column: None,
+                    distinct: false,
+                    alias: get_alias("count".to_string()),
+                },
+                AggKind::CountDistinct { column } => AggregateExpr {
+                    function: AggFunction::CountDistinct,
+                    column: Some(column.clone()),
+                    distinct: true,
+                    alias: get_alias(format!("count_distinct_{}", column)),
+                },
+                AggKind::Sum { column } => AggregateExpr {
+                    function: AggFunction::Sum,
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("sum_{}", column)),
+                },
+                AggKind::Avg { column } => AggregateExpr {
+                    function: AggFunction::Avg,
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("avg_{}", column)),
+                },
+                AggKind::Min { column } => AggregateExpr {
+                    function: AggFunction::Min,
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("min_{}", column)),
+                },
+                AggKind::Max { column } => AggregateExpr {
+                    function: AggFunction::Max,
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("max_{}", column)),
+                },
+                AggKind::StddevSamp { column } => AggregateExpr {
+                    function: AggFunction::Sum, // Use Sum as placeholder for unsupported
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("stddev_samp_{}", column)),
+                },
+                AggKind::StddevPop { column } => AggregateExpr {
+                    function: AggFunction::Sum, // Use Sum as placeholder for unsupported
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("stddev_pop_{}", column)),
+                },
+                AggKind::VarianceSamp { column } => AggregateExpr {
+                    function: AggFunction::Sum, // Use Sum as placeholder for unsupported
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("var_samp_{}", column)),
+                },
+                AggKind::VariancePop { column } => AggregateExpr {
+                    function: AggFunction::Sum, // Use Sum as placeholder for unsupported
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("var_pop_{}", column)),
+                },
+                AggKind::ApproxCountDistinct { column } => AggregateExpr {
+                    function: AggFunction::CountDistinct, // Approximate as distinct count
+                    column: Some(column.clone()),
+                    distinct: true,
+                    alias: get_alias(format!("approx_count_distinct_{}", column)),
+                },
+            }
         })
         .collect()
 }

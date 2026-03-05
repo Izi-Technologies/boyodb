@@ -212,6 +212,47 @@ pub enum AggKind {
     },
 }
 
+/// Aggregate with optional alias for result column naming
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateExpr {
+    pub kind: AggKind,
+    pub alias: Option<String>,
+}
+
+impl AggregateExpr {
+    pub fn new(kind: AggKind) -> Self {
+        Self { kind, alias: None }
+    }
+
+    pub fn with_alias(kind: AggKind, alias: String) -> Self {
+        Self {
+            kind,
+            alias: Some(alias),
+        }
+    }
+
+    /// Get the output column name for this aggregate
+    pub fn output_name(&self) -> String {
+        if let Some(ref alias) = self.alias {
+            return alias.clone();
+        }
+        // Default names based on aggregate type
+        match &self.kind {
+            AggKind::CountStar => "count".to_string(),
+            AggKind::CountDistinct { column } => format!("count_distinct_{}", column),
+            AggKind::Sum { column } => format!("sum_{}", column),
+            AggKind::Avg { column } => format!("avg_{}", column),
+            AggKind::Min { column } => format!("min_{}", column),
+            AggKind::Max { column } => format!("max_{}", column),
+            AggKind::StddevSamp { column } => format!("stddev_{}", column),
+            AggKind::StddevPop { column } => format!("stddev_pop_{}", column),
+            AggKind::VarianceSamp { column } => format!("variance_{}", column),
+            AggKind::VariancePop { column } => format!("var_pop_{}", column),
+            AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+        }
+    }
+}
+
 /// HAVING clause condition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HavingCondition {
@@ -235,7 +276,7 @@ pub enum HavingOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggPlan {
     pub group_by: GroupBy,
-    pub aggs: Vec<AggKind>,
+    pub aggs: Vec<AggregateExpr>,
     /// HAVING clause conditions (all must be satisfied - AND logic)
     pub having: Vec<HavingCondition>,
 }
@@ -2934,7 +2975,7 @@ fn parse_select_items(
                 }
                 Expr::Function(func) => {
                     if let Some(agg) = parse_aggregate_function(func)? {
-                        aggs.push(agg);
+                        aggs.push(AggregateExpr::new(agg));
                     } else {
                         return Err(EngineError::NotImplemented(format!(
                             "unsupported function: {}",
@@ -2977,7 +3018,7 @@ fn parse_select_items(
                 }
                 Expr::Function(func) => {
                     if let Some(agg) = parse_aggregate_function(func)? {
-                        aggs.push(agg);
+                        aggs.push(AggregateExpr::with_alias(agg, alias.value.clone()));
                     } else {
                         return Err(EngineError::NotImplemented(format!(
                             "unsupported function: {}",
