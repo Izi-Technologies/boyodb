@@ -8,21 +8,32 @@ use std::collections::HashMap;
 /// - 1: Added format_version field, bloom filters, compression support
 /// - 2: Binary format support (bincode) for 3x smaller files and 5x faster parsing
 /// - 3: Added table_stats for query optimization
-pub const MANIFEST_FORMAT_VERSION: u32 = 3;
+/// - 4: Added checksum wrapper for corruption detection (xxHash64)
+pub const MANIFEST_FORMAT_VERSION: u32 = 4;
 
 /// Magic bytes to identify binary manifest format
 pub const MANIFEST_BINARY_MAGIC: &[u8; 4] = b"BOYO";
 
-/// Serialize manifest to binary format (bincode)
-/// Format: MAGIC (4 bytes) + VERSION (4 bytes) + BINCODE_DATA
+/// Serialize manifest to binary format (bincode) with integrity checksum
+/// Format: MAGIC (4 bytes) + VERSION (4 bytes) + LENGTH (4 bytes) + CHECKSUM (8 bytes) + BINCODE_DATA
+///
+/// The checksum covers the BINCODE_DATA portion only, using xxHash64 for speed and collision resistance.
 pub fn serialize_manifest_binary(manifest: &Manifest) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::with_capacity(1024 * 1024); // Pre-allocate 1MB
-    buf.extend_from_slice(MANIFEST_BINARY_MAGIC);
-    buf.extend_from_slice(&MANIFEST_FORMAT_VERSION.to_le_bytes());
-
     let data =
         bincode::serialize(manifest).map_err(|e| format!("bincode serialize failed: {}", e))?;
+
+    // Compute xxHash64 checksum of the data
+    let checksum = xxhash_rust::xxh64::xxh64(&data, 0);
+    let data_len = data.len() as u32;
+
+    // Header: MAGIC (4) + VERSION (4) + LENGTH (4) + CHECKSUM (8) = 20 bytes
+    let mut buf = Vec::with_capacity(20 + data.len());
+    buf.extend_from_slice(MANIFEST_BINARY_MAGIC);
+    buf.extend_from_slice(&MANIFEST_FORMAT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&checksum.to_le_bytes());
     buf.extend_from_slice(&data);
+
     Ok(buf)
 }
 
@@ -66,7 +77,7 @@ impl ManifestV2 {
     }
 }
 
-/// Deserialize manifest from binary format
+/// Deserialize manifest from binary format with integrity verification
 pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
     if data.len() < 8 {
         return Err("manifest too small".into());
@@ -88,15 +99,54 @@ pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
 
     // Handle version-specific deserialization
     if version <= 2 {
-        // V2 and earlier don't have table_stats field
+        // V2 and earlier don't have table_stats field, no checksum
         let manifest_v2: ManifestV2 = bincode::deserialize(&data[8..])
             .map_err(|e| format!("bincode deserialize v2 failed: {}", e))?;
         return Ok(manifest_v2.to_current());
     }
 
-    // Current version (V3+)
-    let manifest: Manifest = bincode::deserialize(&data[8..])
-        .map_err(|e| format!("bincode deserialize failed: {}", e))?;
+    if version == 3 {
+        // V3 has table_stats but no checksum wrapper
+        let manifest: Manifest = bincode::deserialize(&data[8..])
+            .map_err(|e| format!("bincode deserialize v3 failed: {}", e))?;
+        return Ok(manifest);
+    }
+
+    // V4+: Has checksum wrapper
+    // Format: MAGIC (4) + VERSION (4) + LENGTH (4) + CHECKSUM (8) + DATA
+    if data.len() < 20 {
+        return Err("manifest v4 too small for header".into());
+    }
+
+    let data_len = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+    let expected_checksum = u64::from_le_bytes([
+        data[12], data[13], data[14], data[15],
+        data[16], data[17], data[18], data[19],
+    ]);
+
+    // Verify we have enough data
+    if data.len() < 20 + data_len {
+        return Err(format!(
+            "manifest truncated: expected {} bytes, got {}",
+            20 + data_len,
+            data.len()
+        ));
+    }
+
+    let payload = &data[20..20 + data_len];
+
+    // Verify checksum
+    let actual_checksum = xxhash_rust::xxh64::xxh64(payload, 0);
+    if actual_checksum != expected_checksum {
+        return Err(format!(
+            "manifest checksum mismatch: expected {:016x}, got {:016x} - CORRUPTION DETECTED",
+            expected_checksum, actual_checksum
+        ));
+    }
+
+    // Deserialize the verified payload
+    let manifest: Manifest = bincode::deserialize(payload)
+        .map_err(|e| format!("bincode deserialize v4 failed: {}", e))?;
 
     Ok(manifest)
 }

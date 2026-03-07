@@ -595,7 +595,8 @@ fn cleanup_old_segments(current_path: &Path, max_segments: u64) -> Result<(), En
     Ok(())
 }
 
-fn wal_paths_for_replay(current_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
+/// Get all WAL file paths in order for replay (oldest first)
+pub fn wal_paths_for_replay(current_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
     let parent = current_path
         .parent()
         .ok_or_else(|| EngineError::Internal("wal path missing parent".into()))?;
@@ -696,6 +697,65 @@ fn replay_wal_file_parallel(
     }
 
     Ok(entries)
+}
+
+/// Search a WAL file for a specific segment by ID
+/// Returns the ManifestEntry and payload if found
+pub fn search_wal_for_segment(
+    wal_path: &Path,
+    target_segment_id: &str,
+) -> Result<Option<(ManifestEntry, Vec<u8>)>, EngineError> {
+    if !wal_path.exists() {
+        return Ok(None);
+    }
+
+    let file = File::open(wal_path)
+        .map_err(|e| EngineError::Io(format!("open wal for search failed: {e}")))?;
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break, // Stop on read error
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut parts = line.splitn(2, ' ');
+        let len_str = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let rest = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        let len: usize = match len_str.parse() {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if rest.len() < len {
+            break; // Truncated record
+        }
+
+        let payload = &rest.as_bytes()[..len];
+        let rec: WalRecord = match serde_json::from_slice(payload) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if let WalRecord::Segment { entry, payload } = rec {
+            if entry.segment_id == target_segment_id {
+                return Ok(Some((entry, payload)));
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn cleanup_rotated_segments(current_path: &Path) -> Result<(), EngineError> {

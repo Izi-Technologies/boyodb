@@ -4,7 +4,7 @@ use crate::replication::{
 };
 use crate::sql::SelectExpr;
 use crate::sql::SqlValue;
-use crate::wal::Wal;
+use crate::wal::{search_wal_for_segment, Wal};
 use arrow::compute::kernels::aggregate;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
@@ -375,6 +375,20 @@ pub struct EngineConfig {
     /// When true, queries will continue with valid segments and log warnings
     /// When false, queries will fail if any segment is damaged
     pub skip_damaged_segments: bool,
+
+    // --- Data Integrity Configuration ---
+    /// Enable background data scrubbing (proactive corruption detection)
+    pub scrubbing_enabled: bool,
+    /// Interval between scrubbing scans in seconds (0 = disabled)
+    pub scrubbing_interval_secs: u64,
+    /// Maximum segments to scrub per scan (limits I/O impact)
+    pub scrubbing_batch_size: usize,
+    /// Try to recover damaged segments from WAL before removing them
+    pub wal_recovery_enabled: bool,
+    /// Automatically clean up orphaned segment files (files not in manifest)
+    pub orphan_cleanup_enabled: bool,
+    /// Minimum age in seconds before orphaned files are cleaned up (safety buffer)
+    pub orphan_cleanup_age_secs: u64,
 }
 
 impl EngineConfig {
@@ -449,6 +463,13 @@ impl EngineConfig {
             constraint_validation_enabled: true,
             transactions_enabled: false,
             skip_damaged_segments: true, // Default to true for resilience
+            // Data integrity defaults
+            scrubbing_enabled: true,           // Enable proactive corruption detection
+            scrubbing_interval_secs: 3600,     // Every hour
+            scrubbing_batch_size: 1000,        // 1000 segments per scan
+            wal_recovery_enabled: true,        // Try WAL recovery before deletion
+            orphan_cleanup_enabled: true,      // Clean up orphaned files
+            orphan_cleanup_age_secs: 86400,    // 24 hours safety buffer
         }
     }
 
@@ -2891,18 +2912,28 @@ impl Db {
             (entry, current_version, should_persist)
         };
 
-        if should_persist {
-            self.maybe_persist_manifest()?;
-        }
-
+        // CRITICAL: WAL must be synced BEFORE manifest is persisted.
+        // This ensures we can always recover from WAL if crash occurs after manifest update.
+        // Order: segment file -> WAL sync -> manifest persist
         {
             let mut wal = self
                 .wal
                 .lock()
                 .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
             wal.append_segment(&entry, &stored_payload)?;
-            wal.maybe_sync(self.cfg.wal_sync_bytes, self.cfg.wal_sync_interval_ms)?;
+
+            // Force sync WAL before manifest persist to ensure crash consistency
+            if should_persist {
+                wal.flush_sync()?;
+            } else {
+                wal.maybe_sync(self.cfg.wal_sync_bytes, self.cfg.wal_sync_interval_ms)?;
+            }
             wal.maybe_rotate(self.cfg.wal_max_bytes)?;
+        }
+
+        // Now safe to persist manifest - WAL has the data for recovery
+        if should_persist {
+            self.maybe_persist_manifest()?;
         }
 
         if use_memtable {
@@ -14270,18 +14301,22 @@ impl Db {
             // Check if file exists
             let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
             if path.exists() {
-                // Read and verify checksum
+                // Read and verify checksum (supports both xxHash64 and legacy CRC32)
                 match std::fs::read(&path) {
                     Ok(data) => {
-                        let actual_checksum = compute_checksum(&data);
-                        if actual_checksum != entry.checksum {
+                        // Try xxHash64 first, then CRC32 for backward compatibility
+                        let xxhash = compute_checksum(&data);
+                        let crc32 = compute_checksum_crc32(&data);
+
+                        // If neither matches, segment is corrupted
+                        if xxhash != entry.checksum && crc32 != entry.checksum {
                             corrupted.push(CorruptedSegment {
                                 segment_id: entry.segment_id.clone(),
                                 database: entry.database.clone(),
                                 table: entry.table.clone(),
                                 size_bytes: entry.size_bytes,
                                 expected_checksum: entry.checksum,
-                                actual_checksum,
+                                actual_checksum: xxhash, // Report xxHash64 as actual
                             });
                         }
                     }
@@ -14443,6 +14478,303 @@ impl Db {
             scan_interval_secs: 300,
             max_repairs_per_scan: 100,
         }
+    }
+
+    /// Try to recover a damaged segment from WAL
+    /// Returns Ok(true) if recovered, Ok(false) if not found in WAL, Err on failure
+    pub fn recover_segment_from_wal(&self, segment_id: &str) -> Result<bool, EngineError> {
+        let wal = self
+            .wal
+            .lock()
+            .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+
+        // Search WAL files for the segment
+        let wal_paths = crate::wal::wal_paths_for_replay(&self.cfg.wal_path)?;
+
+        for wal_path in wal_paths {
+            if let Some((entry, payload)) = search_wal_for_segment(&wal_path, segment_id)? {
+                // Verify checksum (try both xxHash64 and CRC32 for compatibility)
+                let xxhash = compute_checksum(&payload);
+                let crc32 = compute_checksum_crc32(&payload);
+
+                if xxhash != entry.checksum && crc32 != entry.checksum {
+                    tracing::warn!(
+                        "WAL recovery: checksum mismatch for segment {}, WAL data may be corrupt",
+                        segment_id
+                    );
+                    continue;
+                }
+
+                // Persist the segment to disk
+                persist_segment_ipc(&self.storage, segment_id, &payload)?;
+
+                tracing::info!(
+                    "WAL recovery: successfully recovered segment {} ({} bytes)",
+                    segment_id,
+                    payload.len()
+                );
+
+                return Ok(true);
+            }
+        }
+
+        drop(wal);
+        Ok(false)
+    }
+
+    /// Repair segments with WAL recovery attempt before deletion
+    /// Returns (recovered_ids, removed_ids)
+    pub fn repair_segments_with_recovery(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<(Vec<String>, Vec<String>), EngineError> {
+        let missing = self.find_missing_segments(database, table)?;
+        let corrupted = self.find_corrupted_segments(database, table)?;
+
+        if missing.is_empty() && corrupted.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut recovered_ids = Vec::new();
+        let mut removed_ids = Vec::new();
+
+        // Try to recover missing segments from WAL first
+        if self.cfg.wal_recovery_enabled {
+            for seg in &missing {
+                match self.recover_segment_from_wal(&seg.segment_id) {
+                    Ok(true) => {
+                        tracing::info!("Recovered missing segment {} from WAL", seg.segment_id);
+                        recovered_ids.push(seg.segment_id.clone());
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            "Segment {} not found in WAL, will be removed from manifest",
+                            seg.segment_id
+                        );
+                        removed_ids.push(seg.segment_id.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "WAL recovery failed for segment {}: {}, will be removed",
+                            seg.segment_id,
+                            e
+                        );
+                        removed_ids.push(seg.segment_id.clone());
+                    }
+                }
+            }
+
+            // Try to recover corrupted segments
+            for seg in &corrupted {
+                // First delete the corrupted file
+                let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("Failed to delete corrupted segment file {}: {}", seg.segment_id, e);
+                    }
+                }
+
+                // Then try WAL recovery
+                match self.recover_segment_from_wal(&seg.segment_id) {
+                    Ok(true) => {
+                        tracing::info!("Recovered corrupted segment {} from WAL", seg.segment_id);
+                        recovered_ids.push(seg.segment_id.clone());
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            "Segment {} not found in WAL, will be removed from manifest",
+                            seg.segment_id
+                        );
+                        removed_ids.push(seg.segment_id.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "WAL recovery failed for segment {}: {}, will be removed",
+                            seg.segment_id,
+                            e
+                        );
+                        removed_ids.push(seg.segment_id.clone());
+                    }
+                }
+            }
+        } else {
+            // WAL recovery disabled - just remove damaged segments
+            removed_ids.extend(missing.iter().map(|m| m.segment_id.clone()));
+            removed_ids.extend(corrupted.iter().map(|c| c.segment_id.clone()));
+
+            // Delete corrupted segment files
+            for seg in &corrupted {
+                let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+                if path.exists() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("Failed to delete corrupted segment file {}: {}", seg.segment_id, e);
+                    }
+                }
+            }
+        }
+
+        // Remove unrecoverable segments from manifest
+        if !removed_ids.is_empty() {
+            let remove_set: std::collections::HashSet<String> = removed_ids.iter().cloned().collect();
+
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+
+            // Rebuild index
+            let mut index = self.manifest_index.write().map_err(|_| {
+                EngineError::Internal("manifest_index lock poisoned".into())
+            })?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        Ok((recovered_ids, removed_ids))
+    }
+
+    /// Clean up orphaned segment files (files on disk not in manifest)
+    /// Only removes files older than orphan_cleanup_age_secs
+    pub fn cleanup_orphaned_files(&self) -> Result<Vec<String>, EngineError> {
+        if !self.cfg.orphan_cleanup_enabled {
+            return Ok(Vec::new());
+        }
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let manifest_segment_ids: std::collections::HashSet<String> = manifest
+            .entries
+            .iter()
+            .map(|e| e.segment_id.clone())
+            .collect();
+
+        drop(manifest);
+
+        let mut cleaned = Vec::new();
+        let min_age = std::time::Duration::from_secs(self.cfg.orphan_cleanup_age_secs);
+        let now = std::time::SystemTime::now();
+
+        if let Ok(entries) = std::fs::read_dir(&self.cfg.segments_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.extension().map_or(false, |ext| ext == "ipc") {
+                    continue;
+                }
+
+                if let Some(stem) = path.file_stem() {
+                    let segment_id = stem.to_string_lossy().to_string();
+                    if manifest_segment_ids.contains(&segment_id) {
+                        continue; // Not orphaned
+                    }
+
+                    // Check file age before removing
+                    let metadata = match std::fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+
+                    let modified = match metadata.modified() {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+
+                    let age = now.duration_since(modified).unwrap_or_default();
+                    if age < min_age {
+                        tracing::debug!(
+                            "Skipping orphaned file {} (age {:?} < min {:?})",
+                            segment_id,
+                            age,
+                            min_age
+                        );
+                        continue;
+                    }
+
+                    // Safe to remove
+                    match std::fs::remove_file(&path) {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Cleaned up orphaned segment file {} (age {:?})",
+                                segment_id,
+                                age
+                            );
+                            cleaned.push(segment_id);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to remove orphaned file {:?}: {}", path, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(cleaned)
+    }
+
+    /// Scrub segments: validate checksums for a batch of segments
+    /// Returns list of corrupted segment IDs found
+    pub fn scrub_segments(&self, batch_size: usize) -> Result<Vec<String>, EngineError> {
+        // Collect segment info (id and checksum) while holding lock, then release
+        let entries_to_scrub: Vec<(String, u64)> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            manifest
+                .entries
+                .iter()
+                .take(batch_size)
+                .map(|e| (e.segment_id.clone(), e.checksum))
+                .collect()
+        };
+
+        let mut corrupted = Vec::new();
+
+        for (segment_id, expected_checksum) in entries_to_scrub {
+            let path = self.cfg.segments_dir.join(format!("{}.ipc", segment_id));
+
+            if !path.exists() {
+                // Missing segment detected during scrub
+                tracing::warn!("Scrub: segment {} is missing", segment_id);
+                corrupted.push(segment_id);
+                continue;
+            }
+
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    // Try xxHash64 first, then CRC32 for backward compatibility
+                    let xxhash = compute_checksum(&data);
+                    let crc32 = compute_checksum_crc32(&data);
+
+                    if xxhash != expected_checksum && crc32 != expected_checksum {
+                        tracing::warn!(
+                            "Scrub: segment {} checksum mismatch (expected {:016x}, got xxh64={:016x} crc32={:016x})",
+                            segment_id,
+                            expected_checksum,
+                            xxhash,
+                            crc32
+                        );
+                        corrupted.push(segment_id);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Scrub: failed to read segment {}: {}", segment_id, e);
+                    corrupted.push(segment_id);
+                }
+            }
+        }
+
+        if !corrupted.is_empty() {
+            tracing::warn!("Scrub completed: found {} corrupted segments", corrupted.len());
+        }
+
+        Ok(corrupted)
     }
 
     /// Convenience method to ingest IPC data with database and table parameters.
@@ -15150,18 +15482,34 @@ fn get_version_value(array: &dyn arrow_array::Array, row_idx: usize) -> i64 {
     }
 }
 
+/// Verify segment checksum with backward compatibility.
+/// Tries xxHash64 first (new format), then CRC32 (legacy format).
+fn verify_segment_checksum(data: &[u8], expected: u64, segment_id: &str) -> Result<(), EngineError> {
+    // Try xxHash64 first (new format)
+    let xxhash = compute_checksum(data);
+    if xxhash == expected {
+        return Ok(());
+    }
+
+    // Fall back to CRC32 for backward compatibility with older segments
+    let crc32 = compute_checksum_crc32(data);
+    if crc32 == expected {
+        return Ok(());
+    }
+
+    // Neither matched - corruption detected
+    Err(EngineError::Io(format!(
+        "checksum mismatch for segment {} expected={:016x} actual_xxh64={:016x} actual_crc32={:016x} - CORRUPTION DETECTED",
+        segment_id, expected, xxhash, crc32
+    )))
+}
+
 fn load_segment(
     storage: &crate::storage::TieredStorage,
     entry: &ManifestEntry,
 ) -> Result<Vec<u8>, EngineError> {
     let data = storage.load_segment(entry)?;
-    let actual = compute_checksum(&data);
-    if actual != entry.checksum {
-        return Err(EngineError::Io(format!(
-            "checksum mismatch for segment {} expected={} actual={}",
-            entry.segment_id, entry.checksum, actual
-        )));
-    }
+    verify_segment_checksum(&data, entry.checksum, &entry.segment_id)?;
     decompress_payload(data, entry.compression.as_deref())
 }
 
@@ -15170,13 +15518,7 @@ fn load_segment_raw(
     entry: &ManifestEntry,
 ) -> Result<Vec<u8>, EngineError> {
     let data = storage.load_segment(entry)?;
-    let actual = compute_checksum(&data);
-    if actual != entry.checksum {
-        return Err(EngineError::Io(format!(
-            "checksum mismatch for segment {} expected={} actual={}",
-            entry.segment_id, entry.checksum, actual
-        )));
-    }
+    verify_segment_checksum(&data, entry.checksum, &entry.segment_id)?;
     Ok(data)
 }
 
@@ -17607,7 +17949,15 @@ pub fn is_valid_ident(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !s.is_empty()
 }
 
+/// Compute checksum for data integrity verification using xxHash64.
+/// xxHash64 provides better collision resistance than CRC32 while maintaining high speed.
 pub fn compute_checksum(data: &[u8]) -> u64 {
+    xxhash_rust::xxh64::xxh64(data, 0)
+}
+
+/// Legacy CRC32 checksum for backward compatibility with older segments.
+/// Used only for reading old segments; new segments use xxHash64.
+pub fn compute_checksum_crc32(data: &[u8]) -> u64 {
     let mut hasher = Crc32Hasher::new();
     hasher.update(data);
     hasher.finalize() as u64
@@ -22754,14 +23104,25 @@ pub fn start_auto_repair_task(
                 by_table.entry((database, table)).or_default().push(seg);
             }
 
-            // Repair each table's segments
+            // Repair each table's segments with WAL recovery attempt
+            let mut total_recovered = 0usize;
             let mut total_removed = 0usize;
             for ((database, table), _segments) in by_table {
-                match state_clone.db.repair_segments(Some(&database), Some(&table)) {
-                    Ok(removed) => {
+                match state_clone.db.repair_segments_with_recovery(Some(&database), Some(&table)) {
+                    Ok((recovered, removed)) => {
+                        if !recovered.is_empty() {
+                            tracing::info!(
+                                "auto-repair: recovered {} segments from WAL for {}.{}",
+                                recovered.len(),
+                                database,
+                                table
+                            );
+                            total_recovered += recovered.len();
+                        }
+
                         if !removed.is_empty() {
                             tracing::info!(
-                                "auto-repair: removed {} segments from {}.{}",
+                                "auto-repair: removed {} unrecoverable segments from {}.{}",
                                 removed.len(),
                                 database,
                                 table
@@ -22786,10 +23147,44 @@ pub fn start_auto_repair_task(
                 }
             }
 
-            // Update total repaired count
+            // Update total repaired count (recovered + removed = repaired)
             state_clone
                 .total_repaired
-                .fetch_add(total_removed as u64, Ordering::Relaxed);
+                .fetch_add((total_recovered + total_removed) as u64, Ordering::Relaxed);
+
+            // Run background scrubbing if enabled
+            if state_clone.db.cfg.scrubbing_enabled {
+                match state_clone.db.scrub_segments(state_clone.db.cfg.scrubbing_batch_size) {
+                    Ok(corrupted) => {
+                        if !corrupted.is_empty() {
+                            tracing::warn!(
+                                "Scrubbing detected {} corrupted segments, will repair on next scan",
+                                corrupted.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Scrubbing failed: {}", e);
+                    }
+                }
+            }
+
+            // Clean up orphaned files if enabled
+            if state_clone.db.cfg.orphan_cleanup_enabled {
+                match state_clone.db.cleanup_orphaned_files() {
+                    Ok(cleaned) => {
+                        if !cleaned.is_empty() {
+                            tracing::info!(
+                                "Cleaned up {} orphaned segment files",
+                                cleaned.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Orphan cleanup failed: {}", e);
+                    }
+                }
+            }
         }
     });
 
