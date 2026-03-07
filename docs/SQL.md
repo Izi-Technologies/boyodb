@@ -206,6 +206,58 @@ INSERT INTO files (id, content)
 VALUES (1, '0x48656c6c6f');
 ```
 
+### INSERT ... ON CONFLICT (Upsert)
+
+```sql
+-- PostgreSQL syntax: DO NOTHING
+INSERT INTO [database.]table_name (column1, column2, ...)
+VALUES (value1, value2, ...)
+ON CONFLICT (conflict_columns) DO NOTHING;
+
+-- PostgreSQL syntax: DO UPDATE
+INSERT INTO [database.]table_name (column1, column2, ...)
+VALUES (value1, value2, ...)
+ON CONFLICT (conflict_columns) DO UPDATE SET column = value;
+
+-- MySQL syntax
+INSERT INTO [database.]table_name (column1, column2, ...)
+VALUES (value1, value2, ...)
+ON DUPLICATE KEY UPDATE column = value;
+```
+
+**Examples:**
+```sql
+-- Insert or ignore if key exists
+INSERT INTO users (id, name, email)
+VALUES (1, 'John Doe', 'john@example.com')
+ON CONFLICT (id) DO NOTHING;
+
+-- Insert or update if key exists
+INSERT INTO users (id, name, email, login_count)
+VALUES (1, 'John Doe', 'john@example.com', 1)
+ON CONFLICT (id) DO UPDATE SET
+    login_count = EXCLUDED.login_count + 1,
+    last_login = NOW();
+
+-- MySQL-style upsert
+INSERT INTO counters (id, count)
+VALUES (1, 1)
+ON DUPLICATE KEY UPDATE count = count + 1;
+
+-- Multi-row upsert
+INSERT INTO inventory (product_id, quantity)
+VALUES
+    (100, 50),
+    (101, 30),
+    (102, 20)
+ON CONFLICT (product_id) DO UPDATE SET quantity = EXCLUDED.quantity;
+```
+
+**Notes:**
+- `EXCLUDED` refers to the values that would have been inserted
+- Conflict columns should have a PRIMARY KEY or UNIQUE constraint
+- Returns count of inserted and updated rows
+
 ### UPDATE
 
 ```sql
@@ -635,9 +687,114 @@ SELECT POWER(2, 10) AS result;
 ### Date/Time Functions
 
 ```sql
-NOW()               -- Current timestamp (microseconds)
-CURRENT_DATE        -- Current date
-CURRENT_TIMESTAMP   -- Current timestamp
+-- Current date/time
+NOW()                           -- Current timestamp (microseconds since epoch)
+CURRENT_DATE                    -- Current date (days since epoch)
+CURRENT_TIMESTAMP               -- Alias for NOW()
+
+-- Date extraction
+DATE(timestamp)                 -- Extract date from timestamp
+EXTRACT(field FROM timestamp)   -- Extract specific field
+
+-- Date arithmetic with INTERVAL
+timestamp + INTERVAL 'n unit'   -- Add interval to timestamp
+timestamp - INTERVAL 'n unit'   -- Subtract interval from timestamp
+DATE_ADD(timestamp, n, 'unit')  -- Add n units to timestamp
+DATE_SUB(timestamp, n, 'unit')  -- Subtract n units from timestamp
+DATEDIFF('unit', start, end)    -- Difference between timestamps
+
+-- Conversion
+TO_TIMESTAMP(epoch_seconds)     -- Convert Unix timestamp to timestamp
+FROM_UNIXTIME(epoch_seconds)    -- Alias for TO_TIMESTAMP
+TOSTRING(value)                 -- Convert any value to string
+```
+
+**EXTRACT Fields:**
+
+| Field | Description |
+|-------|-------------|
+| `YEAR` | Year (e.g., 2024) |
+| `MONTH` | Month (1-12) |
+| `DAY` | Day of month (1-31) |
+| `HOUR` | Hour (0-23) |
+| `MINUTE` | Minute (0-59) |
+| `SECOND` | Second (0-59) |
+| `MILLISECOND` | Milliseconds (0-999) |
+| `MICROSECOND` | Microseconds (0-999999) |
+| `DOW` / `DAYOFWEEK` | Day of week (0=Sunday) |
+| `DOY` / `DAYOFYEAR` | Day of year (1-366) |
+| `WEEK` | ISO week number (1-53) |
+| `QUARTER` | Quarter (1-4) |
+| `EPOCH` | Seconds since Unix epoch |
+
+**INTERVAL Units:**
+
+| Unit | Aliases |
+|------|---------|
+| `MICROSECOND` | `MICROSECONDS` |
+| `MILLISECOND` | `MILLISECONDS` |
+| `SECOND` | `SECONDS` |
+| `MINUTE` | `MINUTES` |
+| `HOUR` | `HOURS` |
+| `DAY` | `DAYS` |
+| `WEEK` | `WEEKS` |
+| `MONTH` | `MONTHS` (approximate: 30 days) |
+| `YEAR` | `YEARS` (approximate: 365 days) |
+
+**Examples:**
+```sql
+-- Current date and time
+SELECT NOW();
+SELECT CURRENT_DATE;
+SELECT CURRENT_TIMESTAMP;
+
+-- Extract date components
+SELECT EXTRACT(YEAR FROM created_at) as year FROM events;
+SELECT EXTRACT(HOUR FROM event_time) as hour, COUNT(*) FROM logs GROUP BY hour;
+SELECT EXTRACT(DOW FROM order_date) as day_of_week FROM orders;
+
+-- Date arithmetic with INTERVAL
+SELECT * FROM events WHERE event_time >= NOW() - INTERVAL '24 hours';
+SELECT * FROM logs WHERE created_at >= CURRENT_DATE - INTERVAL '7 days';
+SELECT * FROM orders WHERE order_date > NOW() - INTERVAL '1 month';
+
+-- Using DATE_ADD/DATE_SUB functions
+SELECT DATE_ADD(NOW(), 30, 'days') as due_date;
+SELECT DATE_SUB(created_at, 1, 'hour') as adjusted_time FROM events;
+
+-- Calculate time differences
+SELECT DATEDIFF('days', created_at, NOW()) as days_old FROM users;
+SELECT DATEDIFF('hours', start_time, end_time) as duration FROM sessions;
+
+-- Convert timestamps
+SELECT TO_TIMESTAMP(1700000000) as ts;
+SELECT FROM_UNIXTIME(epoch_seconds) FROM raw_data;
+
+-- Convert date to string
+SELECT TOSTRING(created_at) as date_string FROM events;
+SELECT TOSTRING(NOW()) as current_time;
+
+-- Filter by date
+SELECT * FROM orders WHERE DATE(created_at) = CURRENT_DATE;
+SELECT * FROM logs WHERE DATE(event_time) = DATE(NOW() - INTERVAL '1 day');
+
+-- Aggregate by time periods
+SELECT
+    DATE(event_time) as day,
+    COUNT(*) as event_count
+FROM events
+WHERE event_time >= NOW() - INTERVAL '30 days'
+GROUP BY DATE(event_time)
+ORDER BY day;
+
+-- Hourly breakdown
+SELECT
+    EXTRACT(HOUR FROM event_time) as hour,
+    COUNT(*) as total
+FROM events
+WHERE event_time >= NOW() - INTERVAL '24 hours'
+GROUP BY EXTRACT(HOUR FROM event_time)
+ORDER BY hour;
 ```
 
 ### Type Conversion
@@ -936,6 +1093,7 @@ SHOW GRANTS FOR username;
 SHOW SERVER INFO;              -- Server version and statistics
 SHOW MISSING SEGMENTS;         -- Find segments missing from disk
 SHOW MISSING SEGMENTS FROM database.table;  -- For specific table
+SHOW REPAIR STATUS;            -- Auto-repair background task status
 ```
 
 ### Server Information
