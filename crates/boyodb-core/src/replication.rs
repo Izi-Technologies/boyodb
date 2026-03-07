@@ -26,6 +26,46 @@ pub fn serialize_manifest_binary(manifest: &Manifest) -> Result<Vec<u8>, String>
     Ok(buf)
 }
 
+/// Version 2 manifest structure (without table_stats)
+/// Used for backward compatibility when reading old manifests
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestV2 {
+    #[serde(default)]
+    pub format_version: u32,
+    pub version: u64,
+    #[serde(default)]
+    pub databases: Vec<DatabaseMeta>,
+    #[serde(default)]
+    pub tables: Vec<TableMeta>,
+    #[serde(default)]
+    pub views: Vec<ViewMeta>,
+    #[serde(default)]
+    pub materialized_views: Vec<MaterializedViewMeta>,
+    #[serde(default)]
+    pub indexes: Vec<IndexMeta>,
+    #[serde(default)]
+    pub sequences: Vec<SequenceMeta>,
+    pub entries: Vec<ManifestEntry>,
+}
+
+impl ManifestV2 {
+    /// Convert V2 manifest to current version
+    fn to_current(self) -> Manifest {
+        Manifest {
+            format_version: MANIFEST_FORMAT_VERSION,
+            version: self.version,
+            databases: self.databases,
+            tables: self.tables,
+            views: self.views,
+            materialized_views: self.materialized_views,
+            indexes: self.indexes,
+            sequences: self.sequences,
+            entries: self.entries,
+            table_stats: Vec::new(), // V2 doesn't have table_stats
+        }
+    }
+}
+
 /// Deserialize manifest from binary format
 pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
     if data.len() < 8 {
@@ -46,7 +86,15 @@ pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
         ));
     }
 
-    // Deserialize with bincode
+    // Handle version-specific deserialization
+    if version <= 2 {
+        // V2 and earlier don't have table_stats field
+        let manifest_v2: ManifestV2 = bincode::deserialize(&data[8..])
+            .map_err(|e| format!("bincode deserialize v2 failed: {}", e))?;
+        return Ok(manifest_v2.to_current());
+    }
+
+    // Current version (V3+)
     let manifest: Manifest = bincode::deserialize(&data[8..])
         .map_err(|e| format!("bincode deserialize failed: {}", e))?;
 
