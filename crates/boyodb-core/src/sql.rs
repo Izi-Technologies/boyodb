@@ -1895,7 +1895,155 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         return parse_create_function(sql);
     }
 
+    // SHOW STREAMS
+    if upper_trimmed == "SHOW STREAMS" {
+        return Ok(Some(DdlCommand::ShowStreams));
+    }
+
+    // START STREAM name
+    if upper_trimmed.starts_with("START STREAM ") {
+        let name = upper_trimmed["START STREAM ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("START STREAM requires a stream name".into()));
+        }
+        return Ok(Some(DdlCommand::StartStream { name: name.to_string() }));
+    }
+
+    // STOP STREAM name
+    if upper_trimmed.starts_with("STOP STREAM ") {
+        let name = upper_trimmed["STOP STREAM ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("STOP STREAM requires a stream name".into()));
+        }
+        return Ok(Some(DdlCommand::StopStream { name: name.to_string() }));
+    }
+
+    // SHOW STREAM STATUS name
+    if upper_trimmed.starts_with("SHOW STREAM STATUS ") {
+        let name = upper_trimmed["SHOW STREAM STATUS ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("SHOW STREAM STATUS requires a stream name".into()));
+        }
+        return Ok(Some(DdlCommand::ShowStreamStatus { name: name.to_string() }));
+    }
+
+    // DROP STREAM [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP STREAM ") {
+        let rest = &upper_trimmed["DROP STREAM ".len()..];
+        let if_exists = rest.starts_with("IF EXISTS ");
+        let name_part = if if_exists {
+            &rest["IF EXISTS ".len()..]
+        } else {
+            rest
+        };
+        let name = name_part.trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("DROP STREAM requires a stream name".into()));
+        }
+        return Ok(Some(DdlCommand::DropStream {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // CREATE STREAM name FROM source INTO table [FORMAT format] [WITH (options)]
+    if upper_trimmed.starts_with("CREATE STREAM ") {
+        return parse_create_stream(sql);
+    }
+
     Ok(None)
+}
+
+/// Parse CREATE STREAM command
+/// Syntax: CREATE STREAM name FROM KAFKA|PULSAR 'config' INTO database.table [FORMAT json|csv]
+fn parse_create_stream(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Extract stream name (after CREATE STREAM, before FROM)
+    let after_create = &sql["CREATE STREAM ".len()..];
+    let from_pos = upper.find(" FROM ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE STREAM requires FROM clause".into())
+    })?;
+    let name = after_create[..from_pos - "CREATE STREAM ".len()].trim().to_string();
+
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument("CREATE STREAM requires a stream name".into()));
+    }
+
+    // Extract source type and config
+    let after_from = &sql[from_pos + " FROM ".len()..];
+    let upper_after_from = after_from.to_uppercase();
+
+    let (source_type, config_start) = if upper_after_from.starts_with("KAFKA ") {
+        (StreamSourceType::Kafka, "KAFKA ".len())
+    } else if upper_after_from.starts_with("PULSAR ") {
+        (StreamSourceType::Pulsar, "PULSAR ".len())
+    } else if upper_after_from.starts_with("KINESIS ") {
+        (StreamSourceType::Kinesis, "KINESIS ".len())
+    } else if upper_after_from.starts_with("FILE ") {
+        (StreamSourceType::File, "FILE ".len())
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "CREATE STREAM source must be KAFKA, PULSAR, KINESIS, or FILE".into(),
+        ));
+    };
+
+    let after_source = &after_from[config_start..];
+
+    // Extract config (quoted string)
+    let (source_config, after_config) = if after_source.starts_with('\'') || after_source.starts_with('"') {
+        let quote_char = after_source.chars().next().unwrap();
+        let end_quote = after_source[1..].find(quote_char).ok_or_else(|| {
+            EngineError::InvalidArgument("Unterminated config string".into())
+        })?;
+        let config = after_source[1..1 + end_quote].to_string();
+        let remaining = &after_source[2 + end_quote..];
+        (config, remaining)
+    } else {
+        // No quotes - take until whitespace
+        let end = after_source.find(char::is_whitespace).unwrap_or(after_source.len());
+        let config = after_source[..end].to_string();
+        let remaining = &after_source[end..];
+        (config, remaining)
+    };
+
+    let upper_after_config = after_config.to_uppercase();
+
+    // Extract target table (after INTO)
+    let into_pos = upper_after_config.find(" INTO ");
+    let target_table = if let Some(pos) = into_pos {
+        let after_into = &after_config[pos + " INTO ".len()..];
+        // Find end of table name (space, semicolon, or FORMAT)
+        let end = after_into
+            .to_uppercase()
+            .find(" FORMAT ")
+            .or_else(|| after_into.find(';'))
+            .or_else(|| after_into.find(char::is_whitespace))
+            .unwrap_or(after_into.len());
+        Some(after_into[..end].trim().to_string())
+    } else {
+        None
+    };
+
+    // Extract format (after FORMAT)
+    let format_pos = upper_after_config.find(" FORMAT ");
+    let format = if let Some(pos) = format_pos {
+        let after_format = &after_config[pos + " FORMAT ".len()..];
+        let end = after_format.find(char::is_whitespace)
+            .or_else(|| after_format.find(';'))
+            .unwrap_or(after_format.len());
+        Some(after_format[..end].trim().to_lowercase())
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::CreateStream {
+        name,
+        source_type,
+        source_config,
+        target_table,
+        format,
+    }))
 }
 
 /// Parse CREATE FUNCTION command
