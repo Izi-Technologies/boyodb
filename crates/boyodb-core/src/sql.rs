@@ -4722,11 +4722,22 @@ fn parse_group_by_column(expr: &Expr) -> Result<GroupByColumn, EngineError> {
         Expr::Identifier(ident) => match ident.value.to_lowercase().as_str() {
             "tenant_id" => Ok(GroupByColumn::TenantId),
             "route_id" => Ok(GroupByColumn::RouteId),
-            _ => Err(EngineError::InvalidArgument(format!(
-                "unsupported GROUP BY column: {}",
-                ident.value
-            ))),
+            _ => Ok(GroupByColumn::Named(ident.value.clone())),
         },
+        Expr::CompoundIdentifier(parts) => {
+            // Handle table.column syntax - use the last part as the column name
+            if let Some(last) = parts.last() {
+                match last.value.to_lowercase().as_str() {
+                    "tenant_id" => Ok(GroupByColumn::TenantId),
+                    "route_id" => Ok(GroupByColumn::RouteId),
+                    _ => Ok(GroupByColumn::Named(last.value.clone())),
+                }
+            } else {
+                Err(EngineError::InvalidArgument(
+                    "empty compound identifier in GROUP BY".into(),
+                ))
+            }
+        }
         _ => Err(EngineError::NotImplemented(
             "only simple column references supported in GROUP BY".into(),
         )),
@@ -4740,16 +4751,31 @@ fn parse_group_by(group_by: &GroupByExpr) -> Result<GroupBy, EngineError> {
                 return Ok(GroupBy::None);
             }
             if exprs.len() == 1 {
-                // Single column - use legacy types for backwards compatibility
+                // Single column - use legacy types for backwards compatibility if possible
                 match &exprs[0] {
                     Expr::Identifier(ident) => match ident.value.to_lowercase().as_str() {
                         "tenant_id" => Ok(GroupBy::Tenant),
                         "route_id" => Ok(GroupBy::Route),
-                        _ => Err(EngineError::InvalidArgument(format!(
-                            "unsupported GROUP BY column: {}",
-                            ident.value
-                        ))),
+                        _ => Ok(GroupBy::Columns(vec![GroupByColumn::Named(
+                            ident.value.clone(),
+                        )])),
                     },
+                    Expr::CompoundIdentifier(parts) => {
+                        // Handle table.column syntax
+                        if let Some(last) = parts.last() {
+                            match last.value.to_lowercase().as_str() {
+                                "tenant_id" => Ok(GroupBy::Tenant),
+                                "route_id" => Ok(GroupBy::Route),
+                                _ => Ok(GroupBy::Columns(vec![GroupByColumn::Named(
+                                    last.value.clone(),
+                                )])),
+                            }
+                        } else {
+                            Err(EngineError::InvalidArgument(
+                                "empty compound identifier in GROUP BY".into(),
+                            ))
+                        }
+                    }
                     _ => Err(EngineError::NotImplemented(
                         "only simple column references supported in GROUP BY".into(),
                     )),
