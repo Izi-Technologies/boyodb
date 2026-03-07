@@ -10,16 +10,17 @@ use tokio::runtime::Handle;
 #[derive(Debug, Clone)]
 pub struct TieredStorage {
     remote: Option<Arc<dyn ObjectStore>>,
-    runtime: Handle,
+    /// Runtime handle for async S3 operations. None for local-only storage.
+    runtime: Option<Handle>,
     local_root: PathBuf,
 }
 
 impl TieredStorage {
     pub fn new(cfg: &EngineConfig) -> Result<Self, EngineError> {
         // We capture the handle of the runtime creating the DB (should be a Tokio runtime)
-        let runtime = Handle::try_current().map_err(|_| {
+        let runtime = Some(Handle::try_current().map_err(|_| {
             EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into())
-        })?;
+        })?);
 
         let remote = if let (Some(bucket), Some(region)) = (&cfg.s3_bucket, &cfg.s3_region) {
             let mut builder = AmazonS3Builder::new()
@@ -105,9 +106,9 @@ impl TieredStorage {
         cfg: &EngineConfig,
         remote: Arc<dyn ObjectStore>,
     ) -> Result<Self, EngineError> {
-        let runtime = Handle::try_current().map_err(|_| {
+        let runtime = Some(Handle::try_current().map_err(|_| {
             EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into())
-        })?;
+        })?);
         Ok(Self {
             remote: Some(remote),
             runtime,
@@ -123,15 +124,9 @@ impl TieredStorage {
     /// This version doesn't require a tokio runtime but only supports local filesystem operations.
     /// Useful for background tasks or testing where S3 is not needed.
     pub fn new_local_only(local_root: PathBuf) -> Self {
-        // Create a temporary runtime handle for the struct (won't be used for local-only ops)
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .handle()
-            .clone();
         Self {
             remote: None,
-            runtime,
+            runtime: None,
             local_root,
         }
     }
@@ -150,13 +145,14 @@ impl TieredStorage {
             }
             SegmentTier::Cold => {
                 // Try S3 first, fall back to local if not configured
-                if let Some(remote) = self.remote.as_ref() {
+                if let (Some(remote), Some(runtime)) = (self.remote.as_ref(), self.runtime.as_ref())
+                {
                     let path = ObjPath::from(format!("{}.ipc", entry.segment_id));
 
                     // Block on async S3 fetch
                     // We use block_in_place to allow calling this safe sync wrapper from within an async context
                     tokio::task::block_in_place(move || {
-                        self.runtime.block_on(async {
+                        runtime.block_on(async {
                             let get_future = remote.get(&path);
                             let result: GetResult = get_future
                                 .await
@@ -187,12 +183,15 @@ impl TieredStorage {
         let remote = self.remote.as_ref().ok_or_else(|| {
             EngineError::Configuration("Cold tier accessed but no S3 configured".into())
         })?;
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            EngineError::Configuration("Cold tier requires tokio runtime".into())
+        })?;
         let path = ObjPath::from(format!("{}.ipc", segment_id));
         let data_vec = data.to_vec();
 
         // Use block_in_place to allow calling this safe sync wrapper from within an async context
         tokio::task::block_in_place(move || {
-            self.runtime.block_on(async {
+            runtime.block_on(async {
                 remote
                     .put(&path, data_vec.into())
                     .await
@@ -279,6 +278,9 @@ impl TieredStorage {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.runtime.spawn(future);
+        if let Some(runtime) = &self.runtime {
+            runtime.spawn(future);
+        }
+        // If no runtime, silently drop the task (local-only mode)
     }
 }

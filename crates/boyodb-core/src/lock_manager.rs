@@ -470,8 +470,9 @@ impl LockManager {
             // Try to acquire the lock
             match self.try_acquire(&target, txn_id, mode)? {
                 AcquireResult::Granted(handle) => {
-                    // Remove from waiters map
+                    // Remove from waiters map and deadlock detector
                     self.waiters.lock().remove(&txn_id);
+                    self.deadlock_detector.remove_waiter(txn_id);
                     return Ok(handle);
                 }
                 AcquireResult::MustWait(holders) => {
@@ -480,6 +481,7 @@ impl LockManager {
                         && self.deadlock_detector.would_create_cycle(txn_id, &holders)
                     {
                         self.waiters.lock().remove(&txn_id);
+                        self.deadlock_detector.remove_waiter(txn_id);
                         return Err(EngineError::Internal(format!(
                             "Deadlock detected: transaction {} would create a cycle",
                             txn_id
@@ -490,6 +492,7 @@ impl LockManager {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         self.waiters.lock().remove(&txn_id);
+                        self.deadlock_detector.remove_waiter(txn_id);
                         return Err(EngineError::Timeout(format!(
                             "Lock acquisition timed out after {:?}",
                             self.config.lock_timeout
