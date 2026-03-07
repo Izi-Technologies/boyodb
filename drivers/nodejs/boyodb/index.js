@@ -872,4 +872,11 @@ class Client {
   }
 }
 
-module.exports = { Client };
+const { PoolConfig, ConnectionPool, PooledClient } = require('./pool');
+
+module.exports = {
+  Client,
+  PoolConfig,
+  ConnectionPool,
+  PooledClient,
+};

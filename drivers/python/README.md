@@ -36,6 +36,63 @@ with Client("localhost:8765") as client:
     print(f"Count: {result[0]['count']}")
 ```
 
+## Connection Pooling (High Performance)
+
+For concurrent access and better performance, use the pooled client:
+
+```python
+from boyodb import PooledClient, PoolConfig
+
+# Configure connection pool
+config = PoolConfig(
+    host="localhost",
+    port=8765,
+    pool_size=20,        # Number of connections in pool
+    database="analytics",
+    query_timeout=60000,
+)
+
+# Create pooled client
+client = PooledClient(config)
+
+# Thread-safe concurrent queries
+result = client.query("SELECT COUNT(*) FROM events")
+print(result)
+
+# Multiple threads can use the same client
+import concurrent.futures
+
+def run_query(query_id):
+    result = client.query(f"SELECT * FROM events WHERE id = {query_id}")
+    return len(result)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [executor.submit(run_query, i) for i in range(100)]
+    for future in concurrent.futures.as_completed(futures):
+        print(f"Rows: {future.result()}")
+
+client.close()
+```
+
+### Pool Configuration
+
+```python
+from boyodb import PoolConfig
+
+config = PoolConfig(
+    host="localhost",
+    port=8765,
+    pool_size=20,              # Connections in pool
+    pool_timeout=30.0,         # Timeout waiting for connection
+    tls=True,                  # Enable TLS
+    ca_file="/path/to/ca.pem", # CA certificate
+    token="auth-token",        # Authentication token
+    database="mydb",           # Default database
+    query_timeout=60000,       # Query timeout (ms)
+    max_retries=3,             # Connection retries
+)
+```
+
 ## Configuration
 
 ```python

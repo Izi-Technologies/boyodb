@@ -4,6 +4,10 @@
   "description": "Node.js driver for boyodb-server",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": "./index.js",
+    "./pool": "./pool.js"
+  },
   "scripts": {
     "test": "node test.js"
   },

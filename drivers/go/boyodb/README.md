@@ -40,6 +40,79 @@ func main() {
 }
 ```
 
+## Connection Pooling (High Performance)
+
+For concurrent access and better performance, use the pooled client:
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "sync"
+    "time"
+
+    "github.com/loreste/boyodb/drivers/go/boyodb"
+)
+
+func main() {
+    // Configure connection pool
+    config := &boyodb.PoolConfig{
+        Host:         "localhost",
+        Port:         8765,
+        PoolSize:     20,
+        PoolTimeout:  30 * time.Second,
+        Database:     "analytics",
+        QueryTimeout: 60000,
+    }
+
+    // Create pooled client
+    client, err := boyodb.NewPooledClient(config)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    // Thread-safe concurrent queries
+    var wg sync.WaitGroup
+    for i := 0; i < 100; i++ {
+        wg.Add(1)
+        go func(id int) {
+            defer wg.Done()
+            result, err := client.Query(fmt.Sprintf("SELECT * FROM events WHERE id = %d", id))
+            if err != nil {
+                log.Printf("Query %d failed: %v", id, err)
+                return
+            }
+            log.Printf("Query %d: %d rows", id, result.RowCount())
+            result.Close()
+        }(i)
+    }
+    wg.Wait()
+}
+```
+
+### Pool Configuration
+
+```go
+config := &boyodb.PoolConfig{
+    Host:           "localhost",     // Server host
+    Port:           8765,            // Server port
+    PoolSize:       20,              // Connections in pool
+    PoolTimeout:    30 * time.Second,// Timeout for acquiring connection
+    TLS:            true,            // Enable TLS
+    CAFile:         "/path/to/ca.pem",
+    Token:          "auth-token",    // Authentication token
+    Database:       "mydb",          // Default database
+    QueryTimeout:   60000,           // Query timeout (ms)
+    ConnectTimeout: 10 * time.Second,
+    ReadTimeout:    30 * time.Second,
+    WriteTimeout:   10 * time.Second,
+    MaxRetries:     3,
+}
+```
+
 ## Configuration
 
 ```go
@@ -341,6 +414,30 @@ defer result.Close()
 - `Database string` - Database name
 - `Name string` - Table name
 - `SchemaJSON string` - Schema JSON (optional)
+
+### PooledClient
+
+- `NewPooledClient(config *PoolConfig) (*PooledClient, error)` - Create pooled client
+- `Query(sql string) (*Result, error)` - Execute query
+- `QueryContext(sql, database string, timeout uint32) (*Result, error)` - Execute with options
+- `Exec(sql string) error` - Execute statement
+- `ExecContext(sql, database string, timeout uint32) error` - Execute with options
+- `Login(username, password string) error` - Login
+- `Logout() error` - Logout
+- `Close() error` - Close pool
+- `SetDatabase(database string)` - Set default database
+
+### PoolConfig
+
+- `Host string` - Server host (default: localhost)
+- `Port int` - Server port (default: 8765)
+- `PoolSize int` - Number of connections (default: 10)
+- `PoolTimeout time.Duration` - Acquire timeout (default: 30s)
+- `TLS bool` - Enable TLS
+- `CAFile string` - CA certificate file
+- `Token string` - Authentication token
+- `Database string` - Default database
+- `QueryTimeout uint32` - Query timeout in ms
 
 ## TLS Support
 
