@@ -523,6 +523,10 @@ pub enum ScalarFunction {
     },
     ToTimestamp(Box<SelectExpr>),
     FromUnixtime(Box<SelectExpr>),
+    /// Extract date portion from timestamp
+    Date(Box<SelectExpr>),
+    /// Convert value to string representation
+    ToString(Box<SelectExpr>),
 
     // Type casting
     Cast {
@@ -1160,6 +1164,8 @@ pub enum DdlCommand {
     StopStream { name: String },
     /// SHOW STREAM STATUS name
     ShowStreamStatus { name: String },
+    /// SHOW REPAIR STATUS - Display auto-repair status and statistics
+    ShowRepairStatus,
 }
 
 /// Function parameter definition
@@ -1747,6 +1753,11 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
                 table: Some(table),
             }));
         }
+    }
+
+    // SHOW REPAIR STATUS - Display auto-repair status and statistics
+    if upper_trimmed == "SHOW REPAIR STATUS" {
+        return Ok(Some(DdlCommand::ShowRepairStatus));
     }
 
     // REPAIR ALL SEGMENTS - Repair all segments in all databases
@@ -3288,8 +3299,9 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             columns,
             source,
             returning,
+            on,
             ..
-        } => parse_insert(table_name, columns, source, returning),
+        } => parse_insert(table_name, columns, source, returning, on),
         Statement::StartTransaction { .. } => {
             Ok(SqlStatement::Transaction(TransactionCommand::Start {
                 isolation_level: None,
@@ -4856,7 +4868,10 @@ fn parse_insert(
     columns: &[Ident],
     source: &Option<Box<Query>>,
     returning: &Option<Vec<sqlparser::ast::SelectItem>>,
+    on: &Option<sqlparser::ast::OnInsert>,
 ) -> Result<SqlStatement, EngineError> {
+    use sqlparser::ast::{OnInsert, OnConflictAction as SqlOnConflictAction, ConflictTarget};
+
     let full_name = table_name.to_string();
     let (database, table) = parse_table_name(&full_name)?;
 
@@ -4900,12 +4915,76 @@ fn parse_insert(
     // Parse RETURNING clause
     let returning_cols = parse_returning_clause(returning)?;
 
+    // Parse ON CONFLICT / ON DUPLICATE KEY clause
+    let on_conflict = match on {
+        None => None,
+        Some(OnInsert::DuplicateKeyUpdate(assignments)) => {
+            // MySQL syntax: ON DUPLICATE KEY UPDATE
+            let parsed_assignments: Vec<(String, String)> = assignments
+                .iter()
+                .map(|a| {
+                    let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                    let value = a.value.to_string();
+                    (col, value)
+                })
+                .collect();
+            Some(OnConflict {
+                columns: None, // MySQL syntax doesn't specify conflict columns
+                action: OnConflictAction::DoUpdate {
+                    assignments: parsed_assignments,
+                    where_clause: None,
+                },
+            })
+        }
+        Some(OnInsert::OnConflict(conflict)) => {
+            // PostgreSQL syntax: ON CONFLICT
+            let columns = match &conflict.conflict_target {
+                None => None,
+                Some(ConflictTarget::Columns(cols)) => {
+                    Some(cols.iter().map(|c| c.value.clone()).collect())
+                }
+                Some(ConflictTarget::OnConstraint(name)) => {
+                    // For ON CONSTRAINT, store the constraint name
+                    Some(vec![format!("CONSTRAINT:{}", name)])
+                }
+            };
+
+            let action = match &conflict.action {
+                SqlOnConflictAction::DoNothing => OnConflictAction::DoNothing,
+                SqlOnConflictAction::DoUpdate(update) => {
+                    let assignments: Vec<(String, String)> = update
+                        .assignments
+                        .iter()
+                        .map(|a| {
+                            let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                            let value = a.value.to_string();
+                            (col, value)
+                        })
+                        .collect();
+                    let where_clause = update.selection.as_ref().map(|e| e.to_string());
+                    OnConflictAction::DoUpdate {
+                        assignments,
+                        where_clause,
+                    }
+                }
+            };
+
+            Some(OnConflict { columns, action })
+        }
+        Some(_) => {
+            // Handle any future OnInsert variants gracefully
+            return Err(EngineError::NotImplemented(
+                "Unsupported ON INSERT variant".into(),
+            ));
+        }
+    };
+
     Ok(SqlStatement::Insert(InsertCommand {
         database,
         table,
         columns: cols,
         values,
-        on_conflict: None,
+        on_conflict,
         returning: returning_cols,
     }))
 }
@@ -5140,6 +5219,27 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
         Expr::Function(func) => parse_function_expr(func),
 
         Expr::BinaryOp { left, op, right } => {
+            // Check for datetime +/- INTERVAL arithmetic
+            if let Expr::Interval(interval) = right.as_ref() {
+                let left_expr = parse_expr(left)?;
+                let (interval_value, unit) = parse_interval(interval)?;
+                return match op {
+                    BinaryOperator::Plus => Ok(SelectExpr::Function(ScalarFunction::DateAdd {
+                        expr: Box::new(left_expr),
+                        interval: interval_value,
+                        unit,
+                    })),
+                    BinaryOperator::Minus => Ok(SelectExpr::Function(ScalarFunction::DateSub {
+                        expr: Box::new(left_expr),
+                        interval: interval_value,
+                        unit,
+                    })),
+                    _ => Err(EngineError::InvalidArgument(format!(
+                        "unsupported operator with INTERVAL: {op}"
+                    ))),
+                };
+            }
+
             let left_expr = parse_expr(left)?;
             let right_expr = parse_expr(right)?;
             let op_str = match op {
@@ -5225,6 +5325,50 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
             "unsupported expression: {expr}"
         ))),
     }
+}
+
+/// Parse a sqlparser Interval struct into (value, unit)
+fn parse_interval(interval: &sqlparser::ast::Interval) -> Result<(i64, String), EngineError> {
+    // Extract the interval value expression
+    let value_str = interval.value.to_string();
+    // Remove quotes if present
+    let value_str = value_str.trim_matches('\'').trim_matches('"');
+
+    // Parse formats like "24 hours", "7 days", "1 month"
+    let parts: Vec<&str> = value_str.split_whitespace().collect();
+    if parts.len() >= 2 {
+        // Format: "24 hours" or "7 days"
+        let value = parts[0].parse::<i64>().map_err(|_| {
+            EngineError::InvalidArgument(format!("invalid interval value: {}", parts[0]))
+        })?;
+        let unit = parts[1].to_lowercase();
+        return Ok((value, unit));
+    } else if parts.len() == 1 {
+        // Try to parse as a number, use leading_field for unit
+        if let Ok(value) = parts[0].parse::<i64>() {
+            let unit = interval
+                .leading_field
+                .as_ref()
+                .map(|f| f.to_string().to_lowercase())
+                .unwrap_or_else(|| "day".to_string());
+            return Ok((value, unit));
+        }
+    }
+
+    // Try to extract from leading_field if value is just a number
+    if let Ok(value) = value_str.parse::<i64>() {
+        let unit = interval
+            .leading_field
+            .as_ref()
+            .map(|f| f.to_string().to_lowercase())
+            .unwrap_or_else(|| "day".to_string());
+        return Ok((value, unit));
+    }
+
+    Err(EngineError::InvalidArgument(format!(
+        "unable to parse interval: {}",
+        value_str
+    )))
 }
 
 /// Parse a function call into SelectExpr
@@ -5476,6 +5620,10 @@ fn parse_function_expr(func: &sqlparser::ast::Function) -> Result<SelectExpr, En
         "to_timestamp" => ScalarFunction::ToTimestamp(Box::new(get_arg(&args, 0, "TO_TIMESTAMP")?)),
         "from_unixtime" => {
             ScalarFunction::FromUnixtime(Box::new(get_arg(&args, 0, "FROM_UNIXTIME")?))
+        }
+        "date" => ScalarFunction::Date(Box::new(get_arg(&args, 0, "DATE")?)),
+        "tostring" | "to_string" | "tostr" => {
+            ScalarFunction::ToString(Box::new(get_arg(&args, 0, "TOSTRING")?))
         }
 
         // JSON functions

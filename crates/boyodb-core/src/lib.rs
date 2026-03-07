@@ -59,10 +59,11 @@ pub use auth::{
 };
 pub use engine::{
     apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
-    merge_cte_results, validate_identifier, ComputedValue, CteContext, Db, EngineConfig,
-    EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
-    QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
-    TableDescription, UdfRegistry, UserDefinedFunction, VacuumResult,
+    merge_cte_results, start_auto_repair_task, validate_identifier, AutoRepairConfig,
+    AutoRepairState, AutoRepairStats, ComputedValue, CteContext, Db, EngineConfig, EvalContext,
+    ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats, QueryRequest,
+    QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState, TableDescription,
+    UdfRegistry, UserDefinedFunction, VacuumResult,
 };
 pub use replication::{
     BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,
@@ -70,10 +71,10 @@ pub use replication::{
 pub use sql::{
     parse_ctes, parse_expr, parse_select_items_extended, parse_sql, AuthCommand, CteDefinition,
     DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand, GrantTargetType, GroupBy,
-    GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinType, LiteralValue, OrderByClause,
-    ParsedQuery, QueryFilter as SqlQueryFilter, ScalarFunction, SelectColumn, SelectExpr,
-    SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame, WindowFrameBound,
-    WindowFrameUnit, WindowFunction, WindowSpec,
+    GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinType, LiteralValue,
+    OnConflict, OnConflictAction, OrderByClause, ParsedQuery, QueryFilter as SqlQueryFilter,
+    ScalarFunction, SelectColumn, SelectExpr, SqlStatement, SqlValue, UpdateCommand, UserOptions,
+    WindowFrame, WindowFrameBound, WindowFrameUnit, WindowFunction, WindowSpec,
 };
 pub use types::{BoyodbStatus, OwnedBuffer};
 

@@ -10,8 +10,9 @@ use boyodb_core::planner_distributed::LocalPlan;
 use boyodb_core::TableMeta;
 use boyodb_core::{
     parse_sql, AuthCommand, AuthError, AuthManager, ClusterConfig, ClusterManager, Db, DdlCommand,
-    DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest, Privilege,
-    PrivilegeTarget, QueryRequest, SqlStatement, SqlValue, UpdateCommand,
+    DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest,
+    OnConflictAction, Privilege, PrivilegeTarget, QueryRequest, SqlStatement, SqlValue,
+    TableConstraint, UpdateCommand,
 };
 use boyodb_core::cluster::ReplicationState;
 use serde::{Deserialize, Serialize};
@@ -2017,6 +2018,24 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Start auto-repair background task
+    let auto_repair_state: Option<Arc<boyodb_core::AutoRepairState>> = {
+        let repair_log_path = cfg.data_dir.join("repair.log");
+        let auto_repair_config = boyodb_core::AutoRepairConfig {
+            enabled: true,
+            scan_interval_secs: 300, // 5 minutes
+            max_repairs_per_scan: 100,
+            repair_log_path: Some(repair_log_path),
+        };
+        let state = boyodb_core::start_auto_repair_task(db.clone(), auto_repair_config);
+        info!(
+            scan_interval_secs = 300,
+            max_repairs_per_scan = 100,
+            "Auto-repair background task started"
+        );
+        Some(state)
+    };
+
     let listener = TcpListener::bind(&cfg.bind_addr)
         .await
         .map_err(|e| format!("bind {} failed: {e}", cfg.bind_addr))?;
@@ -2243,6 +2262,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 let conn_stats = connection_stats.clone();
                 let rate_limiter = auth_rate_limiter.clone();
                 let conn_id = conn_stats.connection_opened(addr);
+                let repair_state = auto_repair_state.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(
@@ -2256,6 +2276,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                         conn_stats.clone(),
                         conn_id,
                         addr.ip(),
+                        repair_state,
                     )
                     .await
                     {
@@ -2311,6 +2332,7 @@ async fn handle_conn(
     conn_stats: Arc<ConnectionStats>,
     conn_id: u64,
     peer_ip: IpAddr,
+    auto_repair_state: Option<Arc<boyodb_core::AutoRepairState>>,
 ) -> Result<(), ServerError> {
     let mut stream: Box<dyn AsyncStream> = if let Some(acceptor) = cfg.tls_acceptor.clone() {
         Box::new(
@@ -2839,6 +2861,7 @@ async fn handle_conn(
                     cfg.wal_max_bytes,
                     cfg.wal_max_segments,
                     conn_stats.clone(),
+                    auto_repair_state.clone(),
                 )
                 .await;
 
@@ -3033,6 +3056,7 @@ async fn process_request(
     wal_max_bytes: u64,
     wal_max_segments: u64,
     conn_stats: Arc<ConnectionStats>,
+    auto_repair_state: Option<Arc<boyodb_core::AutoRepairState>>,
 ) -> Result<Response, ServerError> {
     // Helper to check privilege when auth is enabled
     let require_privilege =
@@ -3076,7 +3100,7 @@ async fn process_request(
                 SqlStatement::Ddl(ddl_cmd) => {
                     // Handle DDL commands - apply effective_db for unqualified table names
                     let adjusted_cmd = apply_default_database_to_ddl(ddl_cmd, effective_db);
-                    execute_ddl_command(&db, adjusted_cmd, &require_privilege).await
+                    execute_ddl_command(&db, adjusted_cmd, &require_privilege, &auto_repair_state).await
                 }
                 SqlStatement::Query(parsed) => {
                     // Determine effective databases for primary and join tables when a default is supplied
@@ -5033,6 +5057,7 @@ async fn execute_ddl_command<F>(
     db: &Arc<Db>,
     cmd: DdlCommand,
     require_privilege: &F,
+    auto_repair_state: &Option<Arc<boyodb_core::AutoRepairState>>,
 ) -> Result<Response, ServerError>
 where
     F: Fn(Privilege, PrivilegeTarget) -> Result<(), ServerError>,
@@ -6099,6 +6124,54 @@ where
 
             Ok(Response::ok_message(&report))
         }
+        DdlCommand::ShowRepairStatus => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            // Get repair stats from the auto-repair state if available
+            let stats = if let Some(ref state) = auto_repair_state {
+                state.get_stats()
+            } else {
+                // No auto-repair configured, get basic stats from db
+                let db = db.clone();
+                blocking(move || Ok::<_, ServerError>(db.get_repair_stats())).await?
+            };
+
+            let last_scan = stats
+                .last_scan_timestamp
+                .map(|ts| {
+                    // Format as human-readable time
+                    let duration =
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|now| now.as_secs().saturating_sub(ts))
+                            .unwrap_or(0);
+                    if duration < 60 {
+                        format!("{} seconds ago", duration)
+                    } else if duration < 3600 {
+                        format!("{} minutes ago", duration / 60)
+                    } else {
+                        format!("{} hours ago", duration / 3600)
+                    }
+                })
+                .unwrap_or_else(|| "never".to_string());
+
+            let report = format!(
+                "Auto-Repair Status:\n\
+                 ====================\n\
+                 Enabled: {}\n\
+                 Last Scan: {}\n\
+                 Total Repaired: {}\n\
+                 Pending Damaged: {}\n\
+                 Scan Interval: {} seconds\n\
+                 Max Repairs/Scan: {}",
+                stats.enabled,
+                last_scan,
+                stats.total_repaired,
+                stats.pending_count,
+                stats.scan_interval_secs,
+                stats.max_repairs_per_scan
+            );
+            Ok(Response::ok_message(&report))
+        }
         DdlCommand::CompactTable { database, table } => {
             require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
             let db = db.clone();
@@ -6393,7 +6466,7 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
         table,
         columns,
         values,
-        on_conflict: _on_conflict, // TODO: implement UPSERT logic
+        on_conflict,
         returning,
     } = cmd;
 
@@ -6805,6 +6878,359 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     let batch = RecordBatch::try_new(insert_schema.clone(), arrays)
         .map_err(|e| ServerError::BadRequest(format!("failed to create record batch: {}", e)))?;
 
+    // Handle UPSERT (ON CONFLICT) if specified
+    if let Some(ref conflict_clause) = on_conflict {
+        use boyodb_core::{OnConflictAction, TableConstraint};
+
+        // Get conflict target columns - from clause or derive from PK/unique constraints
+        let db_constraints = db.clone();
+        let database_for_constraints = database.clone();
+        let table_for_constraints = table.clone();
+        let constraints = blocking(move || {
+            db_constraints
+                .get_table_constraints(&database_for_constraints, &table_for_constraints)
+                .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        // Determine conflict columns: use specified columns or default to primary key
+        let conflict_columns: Vec<String> = conflict_clause
+            .columns
+            .clone()
+            .unwrap_or_else(|| {
+                // Find primary key columns as default conflict target
+                constraints
+                    .iter()
+                    .find_map(|c| {
+                        if let TableConstraint::PrimaryKey { columns, .. } = c {
+                            Some(columns.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default()
+            });
+
+        if conflict_columns.is_empty() {
+            return Err(ServerError::BadRequest(
+                "ON CONFLICT requires conflict target columns or a PRIMARY KEY constraint".into(),
+            ));
+        }
+
+        // Find column indices for conflict detection
+        let conflict_col_indices: Vec<usize> = conflict_columns
+            .iter()
+            .filter_map(|col| {
+                target_columns
+                    .iter()
+                    .position(|(name, _, _)| name.eq_ignore_ascii_case(col))
+            })
+            .collect();
+
+        if conflict_col_indices.len() != conflict_columns.len() {
+            return Err(ServerError::BadRequest(format!(
+                "ON CONFLICT columns {:?} must be included in INSERT column list",
+                conflict_columns
+            )));
+        }
+
+        // Build WHERE clause to check for existing rows with matching conflict keys
+        let mut rows_to_insert: Vec<usize> = Vec::new();
+        let mut rows_to_update: Vec<(usize, String)> = Vec::new(); // (row_index, where_clause)
+
+        for (row_idx, row) in values.iter().enumerate() {
+            // Build filter for this row's conflict key values
+            let mut where_parts: Vec<String> = Vec::new();
+            for (col_idx, col_name) in conflict_col_indices.iter().zip(conflict_columns.iter()) {
+                let value = &row[*col_idx];
+                let value_str = match value {
+                    SqlValue::Null => "NULL".to_string(),
+                    SqlValue::Integer(v) => v.to_string(),
+                    SqlValue::Float(v) => v.to_string(),
+                    SqlValue::String(s) => format!("'{}'", s.replace('\'', "''")),
+                    SqlValue::Boolean(b) => (if *b { "true" } else { "false" }).to_string(),
+                };
+                if matches!(value, SqlValue::Null) {
+                    where_parts.push(format!("{} IS NULL", col_name));
+                } else {
+                    where_parts.push(format!("{} = {}", col_name, value_str));
+                }
+            }
+            let where_clause = where_parts.join(" AND ");
+
+            // Check if row exists
+            let db_check = db.clone();
+            let check_query = format!(
+                "SELECT COUNT(*) FROM {}.{} WHERE {}",
+                database, table, where_clause
+            );
+            let exists = blocking(move || {
+                let result = db_check.query(QueryRequest {
+                    sql: check_query,
+                    timeout_millis: 30000,
+                    collect_stats: false,
+                    transaction_id: None,
+                });
+                match result {
+                    Ok(resp) => {
+                        // Parse IPC response to check count
+                        let ipc_data = &resp.records_ipc;
+                        if !ipc_data.is_empty() {
+                            let cursor = std::io::Cursor::new(ipc_data);
+                            if let Ok(reader) = StreamReader::try_new(cursor, None) {
+                                for batch_result in reader {
+                                    if let Ok(batch) = batch_result {
+                                        if batch.num_rows() > 0 {
+                                            // Get first value from count column
+                                            if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow_array::Int64Array>() {
+                                                return Ok::<bool, ServerError>(col.value(0) > 0);
+                                            }
+                                            if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow_array::UInt64Array>() {
+                                                return Ok(col.value(0) > 0);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(false)
+                    }
+                    Err(_) => Ok(false),
+                }
+            })
+            .await?;
+
+            if exists {
+                // Row exists - check action
+                match &conflict_clause.action {
+                    OnConflictAction::DoNothing => {
+                        // Skip this row
+                    }
+                    OnConflictAction::DoUpdate { assignments, .. } => {
+                        rows_to_update.push((row_idx, where_clause.clone()));
+                        // Store assignments for later update
+                        let _ = assignments; // Used below
+                    }
+                }
+            } else {
+                rows_to_insert.push(row_idx);
+            }
+        }
+
+        // Execute updates for conflicting rows
+        let mut updated_count = 0;
+        if !rows_to_update.is_empty() {
+            if let OnConflictAction::DoUpdate { assignments, .. } = &conflict_clause.action {
+                for (row_idx, where_clause) in &rows_to_update {
+                    // Build SqlValue assignments from string expressions
+                    let mut sql_assignments: Vec<(String, SqlValue)> = Vec::new();
+                    for (col_name, expr) in assignments {
+                        // Handle special EXCLUDED.column syntax
+                        let value = if expr.starts_with("EXCLUDED.") || expr.starts_with("excluded.") {
+                            // Extract column name from EXCLUDED.column
+                            let excluded_col = expr.split('.').nth(1).unwrap_or(col_name);
+                            // Find the value from the current row
+                            if let Some(col_idx) = target_columns
+                                .iter()
+                                .position(|(name, _, _)| name.eq_ignore_ascii_case(excluded_col))
+                            {
+                                values[*row_idx][col_idx].clone()
+                            } else {
+                                // Column not in insert list, treat as literal
+                                SqlValue::String(expr.clone())
+                            }
+                        } else {
+                            // Try to parse as literal value
+                            if expr.eq_ignore_ascii_case("NULL") {
+                                SqlValue::Null
+                            } else if let Ok(i) = expr.parse::<i64>() {
+                                SqlValue::Integer(i)
+                            } else if let Ok(f) = expr.parse::<f64>() {
+                                SqlValue::Float(f)
+                            } else if expr.eq_ignore_ascii_case("true") {
+                                SqlValue::Boolean(true)
+                            } else if expr.eq_ignore_ascii_case("false") {
+                                SqlValue::Boolean(false)
+                            } else {
+                                // Treat as string (strip quotes if present)
+                                let s = expr.trim_matches('\'').to_string();
+                                SqlValue::String(s)
+                            }
+                        };
+                        sql_assignments.push((col_name.clone(), value));
+                    }
+
+                    let db_update = db.clone();
+                    let database_update = database.clone();
+                    let table_update = table.clone();
+                    let where_clause_owned = where_clause.clone();
+                    let result = blocking(move || {
+                        db_update
+                            .update_rows(
+                                &database_update,
+                                &table_update,
+                                &sql_assignments,
+                                Some(&where_clause_owned),
+                            )
+                            .map_err(|e| ServerError::Db(e.to_string()))
+                    })
+                    .await?;
+                    updated_count += result;
+                }
+            }
+        }
+
+        // Now insert only the non-conflicting rows
+        if rows_to_insert.is_empty() {
+            // All rows were conflicts
+            return Ok(Response::ok_message(&format!(
+                "0 row(s) inserted, {} row(s) updated",
+                updated_count
+            )));
+        }
+
+        // Filter values to only include rows to insert
+        let filtered_values: Vec<Vec<SqlValue>> = rows_to_insert
+            .iter()
+            .map(|&idx| values[idx].clone())
+            .collect();
+
+        // Rebuild arrays for only the rows to insert
+        let num_rows = filtered_values.len();
+        let mut arrays: Vec<arrow_array::ArrayRef> = Vec::with_capacity(target_columns.len());
+
+        for (col_idx, (col_name, data_type, _nullable)) in target_columns.iter().enumerate() {
+            let array: arrow_array::ArrayRef = match data_type {
+                DataType::Int64 => {
+                    let mut builder = Int64Builder::with_capacity(num_rows);
+                    for row in &filtered_values {
+                        match &row[col_idx] {
+                            SqlValue::Integer(v) => builder.append_value(*v),
+                            SqlValue::Null => builder.append_null(),
+                            other => {
+                                return Err(ServerError::BadRequest(format!(
+                                    "expected integer for column '{}', got {:?}",
+                                    col_name, other
+                                )))
+                            }
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                DataType::Float64 => {
+                    let mut builder = Float64Builder::with_capacity(num_rows);
+                    for row in &filtered_values {
+                        match &row[col_idx] {
+                            SqlValue::Float(v) => builder.append_value(*v),
+                            SqlValue::Integer(v) => builder.append_value(*v as f64),
+                            SqlValue::Null => builder.append_null(),
+                            other => {
+                                return Err(ServerError::BadRequest(format!(
+                                    "expected float for column '{}', got {:?}",
+                                    col_name, other
+                                )))
+                            }
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                DataType::Utf8 => {
+                    let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
+                    for row in &filtered_values {
+                        match &row[col_idx] {
+                            SqlValue::String(v) => builder.append_value(v),
+                            SqlValue::Null => builder.append_null(),
+                            other => {
+                                return Err(ServerError::BadRequest(format!(
+                                    "expected string for column '{}', got {:?}",
+                                    col_name, other
+                                )))
+                            }
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                DataType::Boolean => {
+                    let mut builder = BooleanBuilder::with_capacity(num_rows);
+                    for row in &filtered_values {
+                        match &row[col_idx] {
+                            SqlValue::Boolean(v) => builder.append_value(*v),
+                            SqlValue::Null => builder.append_null(),
+                            other => {
+                                return Err(ServerError::BadRequest(format!(
+                                    "expected boolean for column '{}', got {:?}",
+                                    col_name, other
+                                )))
+                            }
+                        }
+                    }
+                    Arc::new(builder.finish())
+                }
+                _ => {
+                    // For other types, use the original batch column if possible
+                    // This is a simplified fallback - full support would rebuild each type
+                    return Err(ServerError::BadRequest(format!(
+                        "UPSERT with data type {:?} not yet fully supported",
+                        data_type
+                    )));
+                }
+            };
+            arrays.push(array);
+        }
+
+        // Build new batch for filtered rows
+        let fields: Vec<Field> = target_columns
+            .iter()
+            .map(|(name, dtype, nullable)| Field::new(name.as_str(), dtype.clone(), *nullable))
+            .collect();
+        let insert_schema = Arc::new(Schema::new(fields));
+
+        let batch = RecordBatch::try_new(insert_schema.clone(), arrays)
+            .map_err(|e| ServerError::BadRequest(format!("failed to create record batch: {}", e)))?;
+
+        // Convert to Arrow IPC
+        let mut ipc_buffer = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc_buffer, &insert_schema)
+                .map_err(|e| ServerError::Encode(format!("failed to create IPC writer: {}", e)))?;
+            writer
+                .write(&batch)
+                .map_err(|e| ServerError::Encode(format!("failed to write IPC: {}", e)))?;
+            writer
+                .finish()
+                .map_err(|e| ServerError::Encode(format!("failed to finish IPC: {}", e)))?;
+        }
+
+        // Generate watermark (current time in microseconds)
+        let watermark_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        // Ingest the filtered data
+        let db_ingest = db.clone();
+        let database_ingest = database.clone();
+        let table_ingest = table.clone();
+        blocking(move || {
+            db_ingest
+                .ingest_ipc(IngestBatch {
+                    payload_ipc: ipc_buffer,
+                    watermark_micros,
+                    shard_override: None,
+                    database: Some(database_ingest),
+                    table: Some(table_ingest),
+                })
+                .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        return Ok(Response::ok_message(&format!(
+            "{} row(s) inserted, {} row(s) updated",
+            num_rows, updated_count
+        )));
+    }
+
+    // Standard INSERT path (no ON CONFLICT)
     // Validate constraints before INSERT
     let db_validate = db.clone();
     let database_validate = database.clone();
@@ -8201,6 +8627,7 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             DdlCommand::RepairSegments { database: db, table }
         }
         DdlCommand::CheckManifest => DdlCommand::CheckManifest,
+        DdlCommand::ShowRepairStatus => DdlCommand::ShowRepairStatus,
         DdlCommand::CompactTable { database, table } => {
             let db = if database == "default" {
                 effective_db.to_string()

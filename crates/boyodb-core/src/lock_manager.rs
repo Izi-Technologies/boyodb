@@ -454,10 +454,24 @@ impl LockManager {
     ) -> Result<LockHandle, EngineError> {
         let deadline = Instant::now() + self.config.lock_timeout;
 
+        // Create condition variable for this transaction if needed
+        let condvar = {
+            let mut waiters = self.waiters.lock();
+            waiters
+                .entry(txn_id)
+                .or_insert_with(|| Arc::new(std::sync::Condvar::new()))
+                .clone()
+        };
+
+        // Create a mutex for the condition variable to use
+        let wait_mutex = std::sync::Mutex::new(false);
+
         loop {
             // Try to acquire the lock
             match self.try_acquire(&target, txn_id, mode)? {
                 AcquireResult::Granted(handle) => {
+                    // Remove from waiters map
+                    self.waiters.lock().remove(&txn_id);
                     return Ok(handle);
                 }
                 AcquireResult::MustWait(holders) => {
@@ -465,6 +479,7 @@ impl LockManager {
                     if self.config.deadlock_detection
                         && self.deadlock_detector.would_create_cycle(txn_id, &holders)
                     {
+                        self.waiters.lock().remove(&txn_id);
                         return Err(EngineError::Internal(format!(
                             "Deadlock detected: transaction {} would create a cycle",
                             txn_id
@@ -472,7 +487,9 @@ impl LockManager {
                     }
 
                     // Check timeout
-                    if Instant::now() >= deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        self.waiters.lock().remove(&txn_id);
                         return Err(EngineError::Timeout(format!(
                             "Lock acquisition timed out after {:?}",
                             self.config.lock_timeout
@@ -482,11 +499,24 @@ impl LockManager {
                     // Add to deadlock detector
                     self.deadlock_detector.add_wait(txn_id, &holders);
 
-                    // Wait a bit and retry
-                    std::thread::sleep(Duration::from_millis(1));
+                    // Use condition variable to wait efficiently instead of busy polling
+                    // Wait up to 10ms at a time to check for timeout and allow periodic retries
+                    let wait_time = remaining.min(Duration::from_millis(10));
+                    let guard = wait_mutex.lock().unwrap();
+                    let _ = condvar.wait_timeout(guard, wait_time);
                 }
             }
         }
+    }
+
+    /// Wake up a waiting transaction (called when a lock is released)
+    fn wake_waiters(&self, target: &LockTarget) {
+        // Wake up all waiters - they'll check if they can acquire the lock
+        let waiters = self.waiters.lock();
+        for condvar in waiters.values() {
+            condvar.notify_all();
+        }
+        drop(waiters);
     }
 
     fn try_acquire(
@@ -599,6 +629,8 @@ impl LockManager {
 
     /// Release a lock
     pub fn release(&self, handle: LockHandle) -> Result<(), EngineError> {
+        let target = handle.target.clone();
+
         match &handle.target {
             LockTarget::Table { .. } => {
                 let mut locks = self.table_locks.write();
@@ -634,6 +666,9 @@ impl LockManager {
 
         // Update deadlock detector
         self.deadlock_detector.remove_holder(handle.txn_id);
+
+        // Wake up any waiting transactions so they can try to acquire the lock
+        self.wake_waiters(&target);
 
         Ok(())
     }

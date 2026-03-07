@@ -3058,12 +3058,17 @@ impl Db {
         if entries.is_empty() {
             return Ok(0);
         }
-        let mut added = 0usize;
-        let (_current_version, should_persist) = {
+
+        // Phase 1: Quick manifest update (short write lock duration)
+        // Collect entries to add and their indices for index update
+        let (entries_to_index, should_persist) = {
             let mut manifest = self
                 .manifest
                 .write()
                 .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            let mut entries_to_index: Vec<(usize, ManifestEntry)> = Vec::new();
+
             for entry in &mut entries {
                 if manifest
                     .entries
@@ -3076,19 +3081,27 @@ impl Db {
                 entry.version_added = manifest.version;
                 let entry_index = manifest.entries.len();
                 manifest.entries.push(entry.clone());
-                {
-                    let mut index = self.manifest_index.write().map_err(|_| {
-                        EngineError::Internal("manifest index lock poisoned".into())
-                    })?;
-                    index.add_entry(entry_index, entry);
-                }
-                added += 1;
+                entries_to_index.push((entry_index, entry.clone()));
             }
+
             let current_version = manifest.version;
             let last_persisted = self.last_persisted_version.load(Ordering::Acquire);
             let should_persist = current_version >= last_persisted + 10;
-            (current_version, should_persist)
+            (entries_to_index, should_persist)
+            // Manifest write lock released here
         };
+
+        let added = entries_to_index.len();
+
+        // Phase 2: Index update (can overlap with reads, shorter critical section)
+        if !entries_to_index.is_empty() {
+            let mut index = self.manifest_index.write().map_err(|_| {
+                EngineError::Internal("manifest index lock poisoned".into())
+            })?;
+            for (entry_index, entry) in &entries_to_index {
+                index.add_entry(*entry_index, entry);
+            }
+        }
 
         if should_persist {
             self.maybe_persist_manifest()?;
@@ -3356,7 +3369,8 @@ impl Db {
                 table.as_deref().unwrap_or("unknown"),
             )
             .unwrap_or_default();
-        let index_list: Vec<IndexMeta> = manifest
+        // Use references to avoid cloning IndexMeta (manifest lock is held)
+        let index_list: Vec<&IndexMeta> = manifest
             .indexes
             .iter()
             .filter(|idx| {
@@ -3364,7 +3378,6 @@ impl Db {
                     && idx.table == table.as_deref().unwrap_or("unknown")
                     && idx.state == IndexState::Ready
             })
-            .cloned()
             .collect();
 
         let manifest_index = self
@@ -3820,7 +3833,8 @@ impl Db {
                 table.as_deref().unwrap_or("unknown"),
             )
             .unwrap_or_default();
-        let index_list: Vec<IndexMeta> = manifest
+        // Use references to avoid cloning IndexMeta (manifest lock is held)
+        let index_list: Vec<&IndexMeta> = manifest
             .indexes
             .iter()
             .filter(|idx| {
@@ -3828,7 +3842,6 @@ impl Db {
                     && idx.table == table.as_deref().unwrap_or("unknown")
                     && idx.state == IndexState::Ready
             })
-            .cloned()
             .collect();
 
         // OPTIMIZATION: Use manifest index for O(1) table lookup instead of O(n) linear scan
@@ -3853,8 +3866,8 @@ impl Db {
         // Track total segments for stats
         let total_segments = table_indices.len();
 
-        // Pre-allocate with expected capacity
-        let mut matching = Vec::with_capacity(table_indices.len());
+        // Pre-allocate with expected capacity - store indices to avoid cloning heavy ManifestEntry
+        let mut matching_indices = Vec::with_capacity(table_indices.len());
 
         // Apply remaining filters only to entries for this table
         for &idx in table_indices {
@@ -3935,9 +3948,16 @@ impl Db {
                 }
             }
 
-            matching.push(e.clone());
+            // Store index instead of cloning entire entry (saves memory for bloom filters, column_stats)
+            matching_indices.push(idx);
         }
         drop(manifest_index);
+
+        // Create references to matching entries (manifest lock is still held)
+        let matching: Vec<&ManifestEntry> = matching_indices
+            .iter()
+            .map(|&idx| &manifest.entries[idx])
+            .collect();
 
         if matching.is_empty() {
             return Err(EngineError::NotFound(format!(
@@ -4050,6 +4070,16 @@ impl Db {
                     usize::MAX
                 };
 
+                // Pre-create segment filter outside loop to avoid repeated cloning
+                let segment_filter = if offset_pushdown {
+                    let mut sf = filter.clone();
+                    sf.limit = None;
+                    sf.offset = None;
+                    Some(sf)
+                } else {
+                    None
+                };
+
                 for entry in &matching {
                     if estimated_rows >= limit || remaining_limit == 0 {
                         break;
@@ -4061,12 +4091,9 @@ impl Db {
                         None => continue, // Skip damaged segment
                     };
                     let original_size = payload.len() as u64;
-                    if offset_pushdown {
-                        let mut segment_filter = filter.clone();
-                        segment_filter.limit = None;
-                        segment_filter.offset = None;
+                    if let Some(ref seg_filter) = segment_filter {
                         let batches =
-                            filter_ipc_batches(read_ipc_batches(&payload)?, &segment_filter)?;
+                            filter_ipc_batches(read_ipc_batches(&payload)?, seg_filter)?;
                         if batches.is_empty() {
                             data_skipped_bytes += original_size;
                             continue;
@@ -8971,9 +8998,9 @@ impl Db {
         entry: &ManifestEntry,
         filter: &QueryFilter,
         schema_map: &HashMap<String, String>,
-        indexes: &[IndexMeta],
+        indexes: &[&IndexMeta],
     ) -> Result<bool, EngineError> {
-        for index in indexes {
+        for &index in indexes {
             if index.state != IndexState::Ready {
                 continue;
             }
@@ -14399,6 +14426,25 @@ impl Db {
         })
     }
 
+    /// Get current repair statistics (for SHOW REPAIR STATUS)
+    /// Note: This is a snapshot; actual stats are maintained by the auto-repair task
+    pub fn get_repair_stats(&self) -> AutoRepairStats {
+        // Get count of currently damaged segments
+        let pending_count = self
+            .find_damaged_segments(None, None)
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        AutoRepairStats {
+            enabled: false, // Will be set by server with actual auto-repair state
+            last_scan_timestamp: None,
+            total_repaired: 0,
+            pending_count,
+            scan_interval_secs: 300,
+            max_repairs_per_scan: 100,
+        }
+    }
+
     /// Convenience method to ingest IPC data with database and table parameters.
     pub fn ingest(
         &self,
@@ -14565,6 +14611,60 @@ pub struct ManifestCheckResult {
     pub corrupted_segments: Vec<CorruptedSegment>,
     pub orphaned_files: Vec<OrphanedFile>,
     pub manifest_version: u64,
+}
+
+/// Configuration for automatic background repair of corrupted segments
+#[derive(Debug, Clone)]
+pub struct AutoRepairConfig {
+    /// Enable automatic background repair
+    pub enabled: bool,
+    /// Interval between repair scans (seconds)
+    pub scan_interval_secs: u64,
+    /// Maximum segments to repair per scan
+    pub max_repairs_per_scan: usize,
+    /// Log repairs to this file (optional)
+    pub repair_log_path: Option<PathBuf>,
+}
+
+impl Default for AutoRepairConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scan_interval_secs: 300, // 5 minutes
+            max_repairs_per_scan: 100,
+            repair_log_path: None,
+        }
+    }
+}
+
+/// Statistics for auto-repair status reporting
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AutoRepairStats {
+    /// Whether auto-repair is enabled
+    pub enabled: bool,
+    /// Last scan timestamp (Unix timestamp in seconds)
+    pub last_scan_timestamp: Option<u64>,
+    /// Total segments repaired since server start
+    pub total_repaired: u64,
+    /// Number of pending/damaged segments found in last scan
+    pub pending_count: usize,
+    /// Scan interval in seconds
+    pub scan_interval_secs: u64,
+    /// Maximum repairs per scan
+    pub max_repairs_per_scan: usize,
+}
+
+impl Default for AutoRepairStats {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            last_scan_timestamp: None,
+            total_repaired: 0,
+            pending_count: 0,
+            scan_interval_secs: 300,
+            max_repairs_per_scan: 100,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -17151,6 +17251,184 @@ fn evaluate_scalar_function(
                 .unwrap_or(0);
             Ok(ComputedValue::Date(now))
         }
+        ScalarFunction::DateAdd { expr, interval, unit } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let micros = interval_to_micros(*interval, unit);
+            match val {
+                ComputedValue::Timestamp(ts) => Ok(ComputedValue::Timestamp(ts + micros)),
+                ComputedValue::Date(days) => {
+                    // Convert interval to days for date arithmetic
+                    let interval_days = (micros / (86400 * 1_000_000)) as i32;
+                    Ok(ComputedValue::Date(days + interval_days))
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::DateSub { expr, interval, unit } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let micros = interval_to_micros(*interval, unit);
+            match val {
+                ComputedValue::Timestamp(ts) => Ok(ComputedValue::Timestamp(ts - micros)),
+                ComputedValue::Date(days) => {
+                    let interval_days = (micros / (86400 * 1_000_000)) as i32;
+                    Ok(ComputedValue::Date(days - interval_days))
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::DateDiff { unit, start, end } => {
+            let start_val = evaluate_expr(start, ctx)?;
+            let end_val = evaluate_expr(end, ctx)?;
+
+            let (start_micros, end_micros) = match (&start_val, &end_val) {
+                (ComputedValue::Timestamp(s), ComputedValue::Timestamp(e)) => (*s, *e),
+                (ComputedValue::Date(s), ComputedValue::Date(e)) => {
+                    ((*s as i64) * 86400 * 1_000_000, (*e as i64) * 86400 * 1_000_000)
+                }
+                (ComputedValue::Null, _) | (_, ComputedValue::Null) => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+
+            let diff_micros = end_micros - start_micros;
+            let result = match unit.to_lowercase().as_str() {
+                "microsecond" | "microseconds" => diff_micros,
+                "millisecond" | "milliseconds" => diff_micros / 1_000,
+                "second" | "seconds" => diff_micros / 1_000_000,
+                "minute" | "minutes" => diff_micros / (60 * 1_000_000),
+                "hour" | "hours" => diff_micros / (3600 * 1_000_000),
+                "day" | "days" => diff_micros / (86400 * 1_000_000),
+                "week" | "weeks" => diff_micros / (7 * 86400 * 1_000_000),
+                _ => diff_micros / (86400 * 1_000_000), // Default to days
+            };
+            Ok(ComputedValue::Integer(result))
+        }
+        ScalarFunction::Date(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::Timestamp(ts) => {
+                    // Convert microseconds timestamp to days since epoch
+                    let days = (ts / (86400 * 1_000_000)) as i32;
+                    Ok(ComputedValue::Date(days))
+                }
+                ComputedValue::Date(d) => Ok(ComputedValue::Date(d)),
+                ComputedValue::String(s) => {
+                    // Try to parse date string YYYY-MM-DD
+                    if let Some(days) = parse_date_to_days(&s) {
+                        Ok(ComputedValue::Date(days))
+                    } else {
+                        Ok(ComputedValue::Null)
+                    }
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::Extract { field, expr } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let timestamp_micros = match val {
+                ComputedValue::Timestamp(ts) => ts,
+                ComputedValue::Date(days) => (days as i64) * 86400 * 1_000_000,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+
+            // Convert to seconds and compute datetime components
+            let total_secs = timestamp_micros / 1_000_000;
+            let micros_remainder = (timestamp_micros % 1_000_000) as i64;
+
+            // Days since epoch (1970-01-01)
+            let days_since_epoch = total_secs / 86400;
+            let secs_in_day = total_secs % 86400;
+
+            let hour = secs_in_day / 3600;
+            let minute = (secs_in_day % 3600) / 60;
+            let second = secs_in_day % 60;
+
+            // Calculate year, month, day from days since epoch
+            let (year, month, day) = days_to_ymd(days_since_epoch as i32);
+
+            let result = match field.to_lowercase().as_str() {
+                "year" => year as i64,
+                "month" => month as i64,
+                "day" => day as i64,
+                "hour" => hour,
+                "minute" => minute,
+                "second" => second,
+                "microsecond" => micros_remainder,
+                "millisecond" => micros_remainder / 1000,
+                "dow" | "dayofweek" => {
+                    // 0 = Sunday, 1 = Monday, etc. (epoch was Thursday = 4)
+                    ((days_since_epoch + 4) % 7) as i64
+                }
+                "doy" | "dayofyear" => {
+                    // Day of year (1-366)
+                    day_of_year(year, month as u32, day as u32) as i64
+                }
+                "week" => {
+                    // ISO week number
+                    iso_week_number(year, month as u32, day as u32) as i64
+                }
+                "quarter" => ((month - 1) / 3 + 1) as i64,
+                "epoch" => total_secs,
+                _ => return Ok(ComputedValue::Null),
+            };
+            Ok(ComputedValue::Integer(result))
+        }
+        ScalarFunction::ToTimestamp(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::Integer(i) => Ok(ComputedValue::Timestamp(i * 1_000_000)), // seconds to micros
+                ComputedValue::Float(f) => Ok(ComputedValue::Timestamp((f * 1_000_000.0) as i64)),
+                ComputedValue::String(s) => {
+                    // Try to parse as Unix timestamp
+                    if let Ok(ts) = s.parse::<i64>() {
+                        Ok(ComputedValue::Timestamp(ts * 1_000_000))
+                    } else {
+                        Ok(ComputedValue::Null)
+                    }
+                }
+                ComputedValue::Timestamp(ts) => Ok(ComputedValue::Timestamp(ts)),
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::FromUnixtime(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::Integer(i) => Ok(ComputedValue::Timestamp(i * 1_000_000)),
+                ComputedValue::Float(f) => Ok(ComputedValue::Timestamp((f * 1_000_000.0) as i64)),
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::ToString(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                ComputedValue::Timestamp(ts) => {
+                    // Format timestamp as ISO 8601 string
+                    let secs = ts / 1_000_000;
+                    let micros = (ts % 1_000_000) as u32;
+                    let days = secs / 86400;
+                    let time_secs = secs % 86400;
+                    let (year, month, day) = days_to_ymd(days as i32);
+                    let hour = time_secs / 3600;
+                    let minute = (time_secs % 3600) / 60;
+                    let second = time_secs % 60;
+                    Ok(ComputedValue::String(format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+                        year, month, day, hour, minute, second, micros
+                    )))
+                }
+                ComputedValue::Date(days) => {
+                    let (year, month, day) = days_to_ymd(days);
+                    Ok(ComputedValue::String(format!("{:04}-{:02}-{:02}", year, month, day)))
+                }
+                _ => Ok(ComputedValue::String(val.to_string_value())),
+            }
+        }
 
         // Default for unhandled functions
         _ => Ok(ComputedValue::Null),
@@ -17189,6 +17467,100 @@ fn evaluate_case_expr(
     } else {
         Ok(ComputedValue::Null)
     }
+}
+
+// --- Date/Time Helper Functions ---
+
+/// Convert interval value and unit to microseconds
+fn interval_to_micros(interval: i64, unit: &str) -> i64 {
+    match unit.to_lowercase().as_str() {
+        "microsecond" | "microseconds" => interval,
+        "millisecond" | "milliseconds" => interval * 1_000,
+        "second" | "seconds" => interval * 1_000_000,
+        "minute" | "minutes" => interval * 60 * 1_000_000,
+        "hour" | "hours" => interval * 3600 * 1_000_000,
+        "day" | "days" => interval * 86400 * 1_000_000,
+        "week" | "weeks" => interval * 7 * 86400 * 1_000_000,
+        "month" | "months" => interval * 30 * 86400 * 1_000_000, // Approximation
+        "year" | "years" => interval * 365 * 86400 * 1_000_000,  // Approximation
+        _ => interval * 86400 * 1_000_000, // Default to days
+    }
+}
+
+/// Parse a date string (YYYY-MM-DD) to days since Unix epoch
+fn parse_date_to_days(s: &str) -> Option<i32> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return None;
+    }
+
+    Some(ymd_to_days(year, month, day))
+}
+
+/// Convert days since Unix epoch to (year, month, day)
+fn days_to_ymd(days: i32) -> (i32, i32, i32) {
+    // Algorithm based on Howard Hinnant's date algorithms
+    // http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32; // day of era
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
+    let y = yoe as i32 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as i32, d as i32)
+}
+
+/// Convert (year, month, day) to days since Unix epoch
+fn ymd_to_days(year: i32, month: u32, day: u32) -> i32 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u32;
+    let m = month;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe as i32 - 719468
+}
+
+/// Calculate day of year (1-366)
+fn day_of_year(year: i32, month: u32, day: u32) -> u32 {
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let days_before_month = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let mut doy = days_before_month[(month - 1) as usize] + day;
+    if is_leap && month > 2 {
+        doy += 1;
+    }
+    doy
+}
+
+/// Calculate ISO week number
+fn iso_week_number(year: i32, month: u32, day: u32) -> u32 {
+    let days = ymd_to_days(year, month, day);
+    let dow = ((days + 4) % 7) as u32; // 0 = Sunday
+    let dow_monday = if dow == 0 { 6 } else { dow - 1 }; // Convert to 0 = Monday
+
+    // Find the Thursday of this week
+    let thursday = days + (3 - dow_monday as i32);
+    let (thu_year, _, _) = days_to_ymd(thursday);
+
+    // Find January 4th of that year (always in week 1)
+    let jan4 = ymd_to_days(thu_year, 1, 4);
+    let jan4_dow = ((jan4 + 4) % 7) as i32;
+    let jan4_monday = if jan4_dow == 0 { 6 } else { jan4_dow - 1 };
+    let week1_monday = jan4 - jan4_monday;
+
+    // Calculate week number
+    ((thursday - week1_monday) / 7 + 1) as u32
 }
 
 // --- RESTORED UTILITIES ---
@@ -18683,6 +19055,7 @@ pub fn entry_matches_string_filters<T>(_e: &T, _f: &QueryFilter) -> bool {
 /// Decodes IPC, applies filters, and re-encodes
 pub fn filter_ipc(ipc: &[u8], filter: &QueryFilter) -> Result<Vec<u8>, EngineError> {
     // If no filters to apply, return as-is for performance
+    // Note: We must copy here because the caller expects owned data
     if !has_row_filters(filter) {
         return Ok(ipc.to_vec());
     }
@@ -18690,14 +19063,15 @@ pub fn filter_ipc(ipc: &[u8], filter: &QueryFilter) -> Result<Vec<u8>, EngineErr
     // Decode IPC to record batches
     let batches = read_ipc_batches(ipc)?;
     if batches.is_empty() {
+        // Still need to return valid IPC even if empty
         return Ok(ipc.to_vec());
     }
 
-    // Apply filters
-    let filtered = filter_ipc_batches(batches.clone(), filter)?;
-
-    // Get schema from original batches to preserve it even if filtered is empty
+    // Get schema before moving batches
     let schema = batches[0].schema();
+
+    // Apply filters (no clone needed - pass ownership)
+    let filtered = filter_ipc_batches(batches, filter)?;
 
     // Re-encode to IPC (even if empty, we need valid IPC with schema)
     let mut buf = Vec::new();
@@ -22244,6 +22618,207 @@ pub fn cast_value(value: &ComputedValue, target_type: &str) -> Option<ComputedVa
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Shared state for the auto-repair background task
+pub struct AutoRepairState {
+    /// The database instance being monitored
+    db: Arc<Db>,
+    /// Configuration for auto-repair
+    config: AutoRepairConfig,
+    /// Last scan timestamp (Unix timestamp in seconds)
+    last_scan_timestamp: AtomicU64,
+    /// Total segments repaired since start
+    total_repaired: AtomicU64,
+    /// Pending damaged segment count from last scan
+    pending_count: std::sync::atomic::AtomicUsize,
+    /// Shutdown flag
+    shutdown: std::sync::atomic::AtomicBool,
+}
+
+impl AutoRepairState {
+    /// Create a new auto-repair state
+    pub fn new(db: Arc<Db>, config: AutoRepairConfig) -> Self {
+        Self {
+            db,
+            config,
+            last_scan_timestamp: AtomicU64::new(0),
+            total_repaired: AtomicU64::new(0),
+            pending_count: std::sync::atomic::AtomicUsize::new(0),
+            shutdown: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Get current repair statistics
+    pub fn get_stats(&self) -> AutoRepairStats {
+        AutoRepairStats {
+            enabled: self.config.enabled,
+            last_scan_timestamp: {
+                let ts = self.last_scan_timestamp.load(Ordering::Relaxed);
+                if ts > 0 {
+                    Some(ts)
+                } else {
+                    None
+                }
+            },
+            total_repaired: self.total_repaired.load(Ordering::Relaxed),
+            pending_count: self.pending_count.load(Ordering::Relaxed),
+            scan_interval_secs: self.config.scan_interval_secs,
+            max_repairs_per_scan: self.config.max_repairs_per_scan,
+        }
+    }
+
+    /// Signal shutdown
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Check if shutdown has been requested
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+/// Start the auto-repair background task
+///
+/// This function spawns a background thread that periodically scans for damaged
+/// segments and repairs them automatically.
+///
+/// Returns an Arc to the AutoRepairState which can be used to query statistics
+/// and control the task.
+pub fn start_auto_repair_task(
+    db: Arc<Db>,
+    config: AutoRepairConfig,
+) -> Arc<AutoRepairState> {
+    let state = Arc::new(AutoRepairState::new(db, config));
+    let state_clone = state.clone();
+
+    std::thread::spawn(move || {
+        let scan_interval = std::time::Duration::from_secs(state_clone.config.scan_interval_secs);
+
+        loop {
+            // Sleep first, allowing immediate shutdown
+            let sleep_start = std::time::Instant::now();
+            while sleep_start.elapsed() < scan_interval {
+                if state_clone.is_shutdown() {
+                    tracing::debug!("auto-repair task shutting down");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            if !state_clone.config.enabled {
+                continue;
+            }
+
+            // Find all damaged segments (missing + corrupted)
+            let damaged = match state_clone.db.find_damaged_segments(None, None) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("auto-repair scan failed: {}", e);
+                    continue;
+                }
+            };
+
+            // Update pending count
+            state_clone.pending_count.store(damaged.len(), Ordering::Relaxed);
+
+            // Update last scan timestamp
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            state_clone.last_scan_timestamp.store(now, Ordering::Relaxed);
+
+            if damaged.is_empty() {
+                continue;
+            }
+
+            // Limit repairs per scan
+            let to_repair_count = damaged.len().min(state_clone.config.max_repairs_per_scan);
+
+            tracing::info!(
+                "auto-repair: found {} damaged segments, repairing up to {}",
+                damaged.len(),
+                to_repair_count
+            );
+
+            // Group damaged segments by table for efficient batch repair
+            let mut by_table: HashMap<(String, String), Vec<&DamagedSegment>> = HashMap::new();
+            for seg in damaged.iter().take(to_repair_count) {
+                let (database, table) = match seg {
+                    DamagedSegment::Missing(m) => (m.database.clone(), m.table.clone()),
+                    DamagedSegment::Corrupted(c) => (c.database.clone(), c.table.clone()),
+                };
+                by_table.entry((database, table)).or_default().push(seg);
+            }
+
+            // Repair each table's segments
+            let mut total_removed = 0usize;
+            for ((database, table), _segments) in by_table {
+                match state_clone.db.repair_segments(Some(&database), Some(&table)) {
+                    Ok(removed) => {
+                        if !removed.is_empty() {
+                            tracing::info!(
+                                "auto-repair: removed {} segments from {}.{}",
+                                removed.len(),
+                                database,
+                                table
+                            );
+
+                            // Log to file if configured
+                            if let Some(ref path) = state_clone.config.repair_log_path {
+                                log_repair_to_file(path, &database, &table, &removed);
+                            }
+
+                            total_removed += removed.len();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto-repair failed for {}.{}: {}",
+                            database,
+                            table,
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Update total repaired count
+            state_clone
+                .total_repaired
+                .fetch_add(total_removed as u64, Ordering::Relaxed);
+        }
+    });
+
+    state
+}
+
+/// Log repair operations to a CSV file
+fn log_repair_to_file(path: &Path, database: &str, table: &str, removed: &[String]) {
+    use std::io::Write;
+
+    let file_result = OpenOptions::new().create(true).append(true).open(path);
+
+    match file_result {
+        Ok(mut file) => {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            for seg_id in removed {
+                if let Err(e) = writeln!(file, "{},{},{},{}", timestamp, database, table, seg_id) {
+                    tracing::warn!("failed to write repair log: {}", e);
+                    break;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("failed to open repair log file {:?}: {}", path, e);
+        }
     }
 }
 
