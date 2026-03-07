@@ -318,6 +318,59 @@ ANALYZE TABLE mydb.users;
 
 -- Deduplicate
 DEDUPLICATE mydb.events;
+
+-- Check for missing segments
+SHOW MISSING SEGMENTS;
+SHOW MISSING SEGMENTS FROM mydb.events;
+
+-- Repair missing segments
+REPAIR SEGMENTS mydb.events;
+
+-- Server info
+SHOW SERVER INFO;
+```
+
+---
+
+## User-Defined Functions
+
+```sql
+-- Create function
+CREATE FUNCTION double_val(x INT64)
+RETURNS INT64
+AS x * 2;
+
+-- Use function
+SELECT double_val(amount) FROM orders;
+
+-- List functions
+SHOW FUNCTIONS;
+
+-- Drop function
+DROP FUNCTION double_val;
+```
+
+---
+
+## Stream Connectors
+
+```sql
+-- Create Kafka stream
+CREATE STREAM events_stream
+FROM KAFKA 'bootstrap.servers=localhost:9092;topic=events'
+INTO analytics.events
+FORMAT json;
+
+-- Manage streams
+START STREAM events_stream;
+STOP STREAM events_stream;
+SHOW STREAM STATUS events_stream;
+
+-- List streams
+SHOW STREAMS;
+
+-- Drop stream
+DROP STREAM events_stream;
 ```
 
 ---

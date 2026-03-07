@@ -540,6 +540,68 @@ SELECT
     JSON_KEYS('{"a":1,"b":2}');                        -- ["a","b"]
 ```
 
+### User-Defined Functions
+
+Create custom scalar functions for data transformations:
+
+```sql
+-- Create a function
+CREATE FUNCTION calculate_tax(amount FLOAT64, rate FLOAT64)
+RETURNS FLOAT64
+AS amount * rate;
+
+-- Use the function
+SELECT product, price, calculate_tax(price, 0.08) as tax
+FROM products;
+
+-- List all functions
+SHOW FUNCTIONS;
+
+-- Drop a function
+DROP FUNCTION calculate_tax;
+```
+
+**Supported operations in function body:**
+- Arithmetic: `+`, `-`, `*`, `/`
+- String: `CONCAT()`, `UPPER()`, `LOWER()`
+- Null handling: `COALESCE()`, `NULLIF()`
+- Conditional: `IF(condition, then, else)`
+
+### Stream Connectors
+
+Ingest data from streaming platforms:
+
+```sql
+-- Create a Kafka stream
+CREATE STREAM user_events
+FROM KAFKA 'bootstrap.servers=kafka:9092;topic=events;group.id=boyodb'
+INTO analytics.events
+FORMAT json;
+
+-- Start consuming
+START STREAM user_events;
+
+-- Check status
+SHOW STREAM STATUS user_events;
+
+-- Stop stream
+STOP STREAM user_events;
+
+-- List all streams
+SHOW STREAMS;
+
+-- Remove stream
+DROP STREAM user_events;
+```
+
+**Supported sources:**
+- Kafka
+- Pulsar
+
+**Supported formats:**
+- JSON
+- CSV
+
 ### COPY (Bulk Data Loading)
 
 ```sql
@@ -1362,6 +1424,19 @@ boyodb-cli wal-stats --host localhost:8765
 
 # Run vacuum to reclaim space
 boyodb-cli shell -H localhost:8765 -c "VACUUM FULL mydb.large_table"
+```
+
+**Missing segments:**
+```sql
+-- Check server info
+SHOW SERVER INFO;
+
+-- Find missing segments
+SHOW MISSING SEGMENTS;
+SHOW MISSING SEGMENTS FROM mydb.events;
+
+-- Repair missing segments (removes from manifest)
+REPAIR SEGMENTS mydb.events;
 ```
 
 ### Logs

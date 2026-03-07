@@ -1016,6 +1016,173 @@ GRANT, REVOKE, TO, FOR, ROLE, USER, PASSWORD, SUPERUSER, ADMIN
 
 ---
 
+## User-Defined Functions
+
+BoyoDB supports user-defined scalar functions for custom data transformations.
+
+### CREATE FUNCTION
+
+```sql
+CREATE FUNCTION function_name(param1 type, param2 type, ...)
+RETURNS return_type
+AS expression;
+```
+
+**Examples:**
+
+```sql
+-- Simple calculation
+CREATE FUNCTION double_value(x INT64)
+RETURNS INT64
+AS x * 2;
+
+-- String manipulation
+CREATE FUNCTION full_name(first STRING, last STRING)
+RETURNS STRING
+AS CONCAT(first, ' ', last);
+
+-- Conditional logic
+CREATE FUNCTION discount_price(price FLOAT64, discount FLOAT64)
+RETURNS FLOAT64
+AS price * (1 - discount);
+
+-- With COALESCE for null handling
+CREATE FUNCTION safe_divide(a FLOAT64, b FLOAT64)
+RETURNS FLOAT64
+AS COALESCE(a / NULLIF(b, 0), 0);
+```
+
+### DROP FUNCTION
+
+```sql
+DROP FUNCTION function_name;
+DROP FUNCTION IF EXISTS function_name;
+```
+
+### SHOW FUNCTIONS
+
+```sql
+SHOW FUNCTIONS;
+```
+
+Lists all user-defined functions with their signatures and return types.
+
+### Using Functions
+
+```sql
+-- Use in SELECT
+SELECT id, double_value(amount) as doubled FROM orders;
+
+-- Use in WHERE
+SELECT * FROM products WHERE discount_price(price, 0.1) < 100;
+
+-- Combine with built-in functions
+SELECT full_name(first_name, last_name) as name FROM users;
+```
+
+---
+
+## Stream Connectors
+
+BoyoDB supports streaming data ingestion from Kafka and Pulsar.
+
+### CREATE STREAM
+
+```sql
+CREATE STREAM stream_name
+FROM KAFKA|PULSAR 'connection_config'
+INTO database.table
+[FORMAT json|csv];
+```
+
+**Examples:**
+
+```sql
+-- Kafka stream
+CREATE STREAM events_stream
+FROM KAFKA 'bootstrap.servers=localhost:9092;topic=events;group.id=boyodb'
+INTO analytics.events
+FORMAT json;
+
+-- Pulsar stream
+CREATE STREAM logs_stream
+FROM PULSAR 'service_url=pulsar://localhost:6650;topic=logs'
+INTO logging.entries
+FORMAT json;
+
+-- CSV format
+CREATE STREAM csv_stream
+FROM KAFKA 'bootstrap.servers=kafka:9092;topic=data'
+INTO mydb.records
+FORMAT csv;
+```
+
+### DROP STREAM
+
+```sql
+DROP STREAM stream_name;
+DROP STREAM IF EXISTS stream_name;
+```
+
+### SHOW STREAMS
+
+```sql
+SHOW STREAMS;
+```
+
+Lists all defined streams with their source, target table, and status.
+
+### START STREAM
+
+```sql
+START STREAM stream_name;
+```
+
+Starts consuming messages from the configured source.
+
+### STOP STREAM
+
+```sql
+STOP STREAM stream_name;
+```
+
+Stops consuming messages (can be resumed with START STREAM).
+
+### SHOW STREAM STATUS
+
+```sql
+SHOW STREAM STATUS stream_name;
+```
+
+Shows detailed status including:
+- Connection state
+- Messages consumed
+- Last message timestamp
+- Error count
+
+**Example workflow:**
+
+```sql
+-- Create and start a stream
+CREATE STREAM user_events
+FROM KAFKA 'bootstrap.servers=kafka:9092;topic=user-events;group.id=analytics'
+INTO analytics.user_events
+FORMAT json;
+
+START STREAM user_events;
+
+-- Check status
+SHOW STREAM STATUS user_events;
+
+-- Stop when needed
+STOP STREAM user_events;
+
+-- Remove stream definition
+DROP STREAM user_events;
+```
+
+---
+
 ## Recovery Statements
 
 BoyoDB supports Point-in-Time Recovery (PITR) for disaster recovery.
