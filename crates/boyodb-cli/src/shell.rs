@@ -3166,6 +3166,11 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
         || lower.starts_with("vacuum")
         || lower.starts_with("analyze")
         || lower.starts_with("with ")
+        || lower.starts_with("repair")
+        || lower.starts_with("check")
+        || lower.starts_with("compact")
+        || lower.starts_with("start")
+        || lower.starts_with("stop")
     {
         execute_sql(state, input).await?;
     } else if lower.starts_with("explain") {
