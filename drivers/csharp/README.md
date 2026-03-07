@@ -1,23 +1,31 @@
-# boyodb C# Driver
+# boyodb C#/.NET Driver
 
 A C#/.NET client library for connecting to boyodb-server.
+
+## Features
+
+- Connection pooling for concurrent access
+- Binary protocol with Arrow IPC support
+- TLS encryption with certificate verification
+- Async/await throughout
+- Full cancellation token support
 
 ## Installation
 
 ```bash
-dotnet add package Cboyodb
+dotnet add package Boyodb
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="Cboyodb" Version="0.1.0" />
+<PackageReference Include="Boyodb" Version="0.1.0" />
 ```
 
 ## Quick Start
 
 ```csharp
-using Cboyodb;
+using Boyodb;
 
 var client = new Client("localhost:8765");
 await client.ConnectAsync();
@@ -31,10 +39,67 @@ foreach (var row in result.Rows)
 client.Close();
 ```
 
+## Connection Pooling (High Performance)
+
+For concurrent access and better performance, use the pooled client:
+
+```csharp
+using Boyodb;
+
+// Configure connection pool
+var config = new PoolConfig
+{
+    Host = "localhost",
+    Port = 8765,
+    PoolSize = 20,
+    Database = "analytics",
+    QueryTimeout = 60000,
+};
+
+// Create pooled client
+var client = new PooledClient(config);
+await client.ConnectAsync();
+
+// Thread-safe concurrent queries
+var result = await client.QueryAsync("SELECT COUNT(*) FROM events");
+Console.WriteLine(result.Rows[0]["count"]);
+
+// Multiple concurrent queries
+var tasks = Enumerable.Range(0, 100).Select(async i =>
+{
+    var r = await client.QueryAsync($"SELECT * FROM events WHERE id = {i}");
+    return r.Rows.Count;
+});
+var results = await Task.WhenAll(tasks);
+
+client.Dispose();
+```
+
+### Pool Configuration
+
+```csharp
+var config = new PoolConfig
+{
+    Host = "localhost",              // Server host
+    Port = 8765,                     // Server port
+    PoolSize = 20,                   // Connections in pool
+    PoolTimeout = TimeSpan.FromSeconds(30), // Acquire timeout
+    Tls = true,                      // Enable TLS
+    CaFile = "/path/to/ca.pem",      // CA certificate
+    Token = "auth-token",            // Authentication token
+    Database = "mydb",               // Default database
+    QueryTimeout = 60000,            // Query timeout (ms)
+    ConnectTimeout = TimeSpan.FromSeconds(10),
+    ReadTimeout = TimeSpan.FromSeconds(30),
+    WriteTimeout = TimeSpan.FromSeconds(10),
+    MaxRetries = 3,
+};
+```
+
 ## Configuration
 
 ```csharp
-using Cboyodb;
+using Boyodb;
 
 var config = new Config
 {
@@ -69,7 +134,7 @@ client.Close();
 ## Prepared Statements
 
 ```csharp
-using Cboyodb;
+using Boyodb;
 
 var client = new Client("localhost:8765");
 await client.ConnectAsync();
@@ -204,7 +269,7 @@ client.Close();
 ## Error Handling
 
 ```csharp
-using Cboyodb;
+using Boyodb;
 
 try
 {
@@ -269,6 +334,29 @@ catch (AuthException e)
 - `RowCount` - Number of rows
 - `SegmentsScanned` - Segments scanned
 - `DataSkippedBytes` - Bytes skipped by pruning
+
+### PooledClient
+
+- `PooledClient(PoolConfig config)` - Create pooled client
+- `ConnectAsync(CancellationToken ct = default)` - Initialize pool
+- `QueryAsync(string sql, string? database = null, int? timeout = null, CancellationToken ct = default)` - Execute query
+- `ExecAsync(string sql, string? database = null, int? timeout = null, CancellationToken ct = default)` - Execute statement
+- `LoginAsync(string username, string password, CancellationToken ct = default)` - Login
+- `LogoutAsync(CancellationToken ct = default)` - Logout
+- `SetDatabase(string database)` - Set default database
+- `Dispose()` - Close pool
+
+### PoolConfig
+
+- `Host` - Server host (default: localhost)
+- `Port` - Server port (default: 8765)
+- `PoolSize` - Connections in pool (default: 10)
+- `PoolTimeout` - Acquire timeout (default: 30s)
+- `Tls` - Enable TLS
+- `CaFile` - CA certificate file
+- `Token` - Authentication token
+- `Database` - Default database
+- `QueryTimeout` - Query timeout in ms
 
 ## License
 
