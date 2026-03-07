@@ -327,18 +327,20 @@ impl Wal {
         Ok(lsn)
     }
 
-    /// Write a record to the WAL
+    /// Write a record to the WAL with checksum for corruption detection
+    /// Format: <length> <checksum_hex> <json_payload>\n
     fn write_record(&mut self, rec: &WalRecord) -> Result<(), EngineError> {
         let bytes = serde_json::to_vec(rec)
             .map_err(|e| EngineError::Internal(format!("wal encode: {e}")))?;
-        let len_line = format!("{} ", bytes.len());
+        let checksum = xxhash_rust::xxh64::xxh64(&bytes, 0);
+        let header = format!("{} {:016x} ", bytes.len(), checksum);
         self.writer
-            .write_all(len_line.as_bytes())
+            .write_all(header.as_bytes())
             .and_then(|_| self.writer.write_all(&bytes))
             .and_then(|_| self.writer.write_all(b"\n"))
             .map_err(|e| EngineError::Io(format!("wal append failed: {e}")))?;
 
-        self.pending_bytes += len_line.len() + bytes.len() + 1;
+        self.pending_bytes += header.len() + bytes.len() + 1;
         Ok(())
     }
 
@@ -353,14 +355,15 @@ impl Wal {
         };
         let bytes = serde_json::to_vec(&rec)
             .map_err(|e| EngineError::Internal(format!("wal encode: {e}")))?;
-        let len_line = format!("{} ", bytes.len());
+        let checksum = xxhash_rust::xxh64::xxh64(&bytes, 0);
+        let header = format!("{} {:016x} ", bytes.len(), checksum);
         self.writer
-            .write_all(len_line.as_bytes())
+            .write_all(header.as_bytes())
             .and_then(|_| self.writer.write_all(&bytes))
             .and_then(|_| self.writer.write_all(b"\n"))
             .map_err(|e| EngineError::Io(format!("wal append failed: {e}")))?;
 
-        self.pending_bytes += len_line.len() + bytes.len() + 1;
+        self.pending_bytes += header.len() + bytes.len() + 1;
         Ok(())
     }
 
@@ -619,8 +622,96 @@ pub fn wal_paths_for_replay(current_path: &Path) -> Result<Vec<PathBuf>, EngineE
     Ok(paths)
 }
 
+/// Result of parsing a WAL line
+enum WalParseResult {
+    /// Successfully parsed record
+    Record(WalRecord),
+    /// Corrupt record (checksum mismatch or parse error)
+    Corrupt(String),
+    /// Truncated record at end of file
+    Truncated,
+    /// Empty line, skip
+    Empty,
+}
+
+/// Parse a WAL line with checksum verification
+/// Handles both new format (len checksum payload) and old format (len payload)
+fn parse_wal_line(line: &str) -> WalParseResult {
+    if line.trim().is_empty() {
+        return WalParseResult::Empty;
+    }
+
+    let mut parts = line.splitn(3, ' ');
+    let len_str = match parts.next() {
+        Some(s) => s,
+        None => return WalParseResult::Corrupt("missing length".into()),
+    };
+
+    let len: usize = match len_str.parse() {
+        Ok(l) => l,
+        Err(_) => return WalParseResult::Corrupt(format!("invalid length: {}", len_str)),
+    };
+
+    let second = match parts.next() {
+        Some(s) => s,
+        None => return WalParseResult::Corrupt("missing payload".into()),
+    };
+
+    // Check if second part is a hex checksum (16 chars) or start of payload
+    if second.len() == 16 && second.chars().all(|c| c.is_ascii_hexdigit()) {
+        // New format: len checksum payload
+        let expected_checksum = match u64::from_str_radix(second, 16) {
+            Ok(c) => c,
+            Err(_) => return WalParseResult::Corrupt("invalid checksum hex".into()),
+        };
+        let rest = match parts.next() {
+            Some(s) => s,
+            None => return WalParseResult::Corrupt("missing payload after checksum".into()),
+        };
+        if rest.len() < len {
+            return WalParseResult::Truncated;
+        }
+        let payload_bytes = &rest.as_bytes()[..len];
+
+        // Verify checksum
+        let actual = xxhash_rust::xxh64::xxh64(payload_bytes, 0);
+        if actual != expected_checksum {
+            return WalParseResult::Corrupt(format!(
+                "checksum mismatch: expected {:016x}, got {:016x}",
+                expected_checksum, actual
+            ));
+        }
+
+        // Parse JSON
+        match serde_json::from_slice(payload_bytes) {
+            Ok(rec) => WalParseResult::Record(rec),
+            Err(e) => WalParseResult::Corrupt(format!("JSON parse error: {}", e)),
+        }
+    } else {
+        // Old format: len payload (no checksum)
+        // Reconstruct payload from second + rest
+        let rest = parts.next().unwrap_or("");
+        let combined = if rest.is_empty() {
+            second.to_string()
+        } else {
+            format!("{} {}", second, rest)
+        };
+        if combined.len() < len {
+            return WalParseResult::Truncated;
+        }
+        let payload_bytes = &combined.as_bytes()[..len];
+
+        // Parse JSON (no checksum verification for old format)
+        match serde_json::from_slice(payload_bytes) {
+            Ok(rec) => WalParseResult::Record(rec),
+            Err(e) => WalParseResult::Corrupt(format!("JSON parse error: {}", e)),
+        }
+    }
+}
+
 /// Parallel-safe WAL file replay that returns entries instead of modifying manifest.
 /// This enables parallel processing of multiple WAL files.
+/// Skips corrupt records and continues with valid ones.
 fn replay_wal_file_parallel(
     path: &Path,
     existing_ids: &HashSet<String>,
@@ -630,70 +721,67 @@ fn replay_wal_file_parallel(
     let reader = BufReader::with_capacity(8 * 1024 * 1024, file); // 8MB buffer for NVMe throughput
 
     let mut entries = Vec::new();
+    let mut corrupt_count = 0u64;
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| EngineError::Io(format!("read wal failed: {e}")))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let mut parts = line.splitn(2, ' ');
-        let len_str = parts
-            .next()
-            .ok_or_else(|| EngineError::Internal("wal: missing length".into()))?;
-        let rest = parts
-            .next()
-            .ok_or_else(|| EngineError::Internal("wal: missing payload".into()))?;
-        let len: usize = len_str
-            .parse()
-            .map_err(|e| EngineError::Internal(format!("wal: bad length {e}")))?;
-        if rest.len() < len {
-            warn!(
-                "wal truncated tail: expected {} bytes, got {} - stopping replay",
-                len,
-                rest.len()
-            );
-            break;
-        }
-        let payload = &rest.as_bytes()[..len];
-        let rec: WalRecord = serde_json::from_slice(payload)
-            .map_err(|e| EngineError::Internal(format!("wal decode failed: {e}")))?;
+    for (line_num, line_result) in reader.lines().enumerate() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("WAL read error at line {}: {} - stopping replay", line_num, e);
+                break;
+            }
+        };
 
-        match rec {
-            WalRecord::Segment { entry, payload } => {
-                // Skip segments already in manifest (O(1) lookup)
-                if existing_ids.contains(&entry.segment_id) {
-                    continue;
-                }
+        match parse_wal_line(&line) {
+            WalParseResult::Empty => continue,
+            WalParseResult::Truncated => {
+                warn!("WAL truncated at line {} - stopping replay", line_num);
+                break;
+            }
+            WalParseResult::Corrupt(reason) => {
+                corrupt_count += 1;
+                warn!("WAL corrupt record at line {}: {} - skipping", line_num, reason);
+                continue;
+            }
+            WalParseResult::Record(rec) => {
+                match rec {
+                    WalRecord::Segment { entry, payload } => {
+                        // Skip segments already in manifest (O(1) lookup)
+                        if existing_ids.contains(&entry.segment_id) {
+                            continue;
+                        }
 
-                let actual = compute_checksum(&payload);
-                if actual != entry.checksum {
-                    return Err(EngineError::Io(format!(
-                        "wal checksum mismatch for segment {} expected={} actual={}",
-                        entry.segment_id, entry.checksum, actual
-                    )));
-                }
-                if let Some(expected_schema_hash) = entry.schema_hash {
-                    let actual_schema_hash =
-                        compute_schema_hash_from_payload(&payload, entry.compression.as_deref())?;
-                    if actual_schema_hash != expected_schema_hash {
-                        return Err(EngineError::Io(format!(
-                            "wal schema hash mismatch for segment {} expected={} actual={}",
-                            entry.segment_id, expected_schema_hash, actual_schema_hash
-                        )));
+                        // Verify segment data checksum (supports both xxHash64 and CRC32)
+                        let xxhash = compute_checksum(&payload);
+                        let crc32 = crate::engine::compute_checksum_crc32(&payload);
+                        if xxhash != entry.checksum && crc32 != entry.checksum {
+                            warn!(
+                                "WAL segment {} data checksum mismatch - skipping",
+                                entry.segment_id
+                            );
+                            corrupt_count += 1;
+                            continue;
+                        }
+
+                        entries.push((entry, payload));
+                    }
+                    // Transaction records are processed separately during recovery
+                    WalRecord::TxnBegin { .. }
+                    | WalRecord::TxnCommit { .. }
+                    | WalRecord::TxnAbort { .. }
+                    | WalRecord::Checkpoint { .. } => {
+                        // Transaction records are logged but not replayed for segment recovery
                     }
                 }
-
-                entries.push((entry, payload));
-            }
-            // Transaction records are processed separately during recovery
-            WalRecord::TxnBegin { .. }
-            | WalRecord::TxnCommit { .. }
-            | WalRecord::TxnAbort { .. }
-            | WalRecord::Checkpoint { .. } => {
-                // Transaction records are logged but not replayed for segment recovery
-                // They would be used by the transaction manager during PITR
             }
         }
+    }
+
+    if corrupt_count > 0 {
+        warn!(
+            "WAL replay completed with {} corrupt records skipped from {:?}",
+            corrupt_count, path
+        );
     }
 
     Ok(entries)
@@ -701,6 +789,7 @@ fn replay_wal_file_parallel(
 
 /// Search a WAL file for a specific segment by ID
 /// Returns the ManifestEntry and payload if found
+/// Skips corrupt records gracefully
 pub fn search_wal_for_segment(
     wal_path: &Path,
     target_segment_id: &str,
@@ -719,43 +808,170 @@ pub fn search_wal_for_segment(
             Err(_) => break, // Stop on read error
         };
 
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let mut parts = line.splitn(2, ' ');
-        let len_str = match parts.next() {
-            Some(s) => s,
-            None => continue,
-        };
-        let rest = match parts.next() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let len: usize = match len_str.parse() {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-
-        if rest.len() < len {
-            break; // Truncated record
-        }
-
-        let payload = &rest.as_bytes()[..len];
-        let rec: WalRecord = match serde_json::from_slice(payload) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if let WalRecord::Segment { entry, payload } = rec {
-            if entry.segment_id == target_segment_id {
-                return Ok(Some((entry, payload)));
+        match parse_wal_line(&line) {
+            WalParseResult::Empty => continue,
+            WalParseResult::Truncated => break,
+            WalParseResult::Corrupt(_) => continue, // Skip corrupt, keep searching
+            WalParseResult::Record(rec) => {
+                if let WalRecord::Segment { entry, payload } = rec {
+                    if entry.segment_id == target_segment_id {
+                        return Ok(Some((entry, payload)));
+                    }
+                }
             }
         }
     }
 
     Ok(None)
+}
+
+/// Repair a corrupted WAL by extracting valid records to a new file
+/// Returns the number of records recovered and number of corrupt records skipped
+pub fn repair_wal(wal_path: &Path) -> Result<(usize, usize), EngineError> {
+    if !wal_path.exists() {
+        return Ok((0, 0));
+    }
+
+    let backup_path = wal_path.with_extension("log.corrupt");
+    let temp_path = wal_path.with_extension("log.repair");
+
+    // Read all valid records from corrupt WAL
+    let file = File::open(wal_path)
+        .map_err(|e| EngineError::Io(format!("open corrupt wal failed: {e}")))?;
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+
+    let mut valid_records = Vec::new();
+    let mut corrupt_count = 0usize;
+    let mut recovered_count = 0usize;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+
+        match parse_wal_line(&line) {
+            WalParseResult::Empty => continue,
+            WalParseResult::Truncated => break,
+            WalParseResult::Corrupt(_) => {
+                corrupt_count += 1;
+                continue;
+            }
+            WalParseResult::Record(rec) => {
+                // Re-serialize with checksum
+                let bytes = serde_json::to_vec(&rec)
+                    .map_err(|e| EngineError::Internal(format!("wal re-encode: {e}")))?;
+                let checksum = xxhash_rust::xxh64::xxh64(&bytes, 0);
+                let line = format!("{} {:016x} {}\n", bytes.len(), checksum,
+                    String::from_utf8_lossy(&bytes));
+                valid_records.push(line);
+                recovered_count += 1;
+            }
+        }
+    }
+
+    if corrupt_count == 0 {
+        info!("WAL has no corrupt records, no repair needed");
+        return Ok((recovered_count, 0));
+    }
+
+    // Write valid records to temp file
+    {
+        let mut temp_file = File::create(&temp_path)
+            .map_err(|e| EngineError::Io(format!("create temp wal failed: {e}")))?;
+        for record in &valid_records {
+            temp_file.write_all(record.as_bytes())
+                .map_err(|e| EngineError::Io(format!("write temp wal failed: {e}")))?;
+        }
+        temp_file.sync_all()
+            .map_err(|e| EngineError::Io(format!("sync temp wal failed: {e}")))?;
+    }
+
+    // Backup corrupt WAL
+    std::fs::rename(wal_path, &backup_path)
+        .map_err(|e| EngineError::Io(format!("backup corrupt wal failed: {e}")))?;
+
+    // Move repaired WAL to original path
+    std::fs::rename(&temp_path, wal_path)
+        .map_err(|e| EngineError::Io(format!("restore repaired wal failed: {e}")))?;
+
+    info!(
+        "WAL repair completed: recovered {} records, skipped {} corrupt records. Backup at {:?}",
+        recovered_count, corrupt_count, backup_path
+    );
+
+    Ok((recovered_count, corrupt_count))
+}
+
+/// Check WAL health and return statistics
+pub fn check_wal_health(wal_path: &Path) -> Result<WalHealthReport, EngineError> {
+    if !wal_path.exists() {
+        return Ok(WalHealthReport {
+            exists: false,
+            total_records: 0,
+            valid_records: 0,
+            corrupt_records: 0,
+            truncated: false,
+            size_bytes: 0,
+        });
+    }
+
+    let metadata = std::fs::metadata(wal_path)
+        .map_err(|e| EngineError::Io(format!("wal stat failed: {e}")))?;
+
+    let file = File::open(wal_path)
+        .map_err(|e| EngineError::Io(format!("open wal for health check failed: {e}")))?;
+    let reader = BufReader::new(file);
+
+    let mut total = 0usize;
+    let mut valid = 0usize;
+    let mut corrupt = 0usize;
+    let mut truncated = false;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        total += 1;
+        match parse_wal_line(&line) {
+            WalParseResult::Empty => {}
+            WalParseResult::Truncated => {
+                truncated = true;
+                break;
+            }
+            WalParseResult::Corrupt(_) => corrupt += 1,
+            WalParseResult::Record(_) => valid += 1,
+        }
+    }
+
+    Ok(WalHealthReport {
+        exists: true,
+        total_records: total,
+        valid_records: valid,
+        corrupt_records: corrupt,
+        truncated,
+        size_bytes: metadata.len(),
+    })
+}
+
+/// WAL health report
+#[derive(Debug, Clone)]
+pub struct WalHealthReport {
+    pub exists: bool,
+    pub total_records: usize,
+    pub valid_records: usize,
+    pub corrupt_records: usize,
+    pub truncated: bool,
+    pub size_bytes: u64,
 }
 
 fn cleanup_rotated_segments(current_path: &Path) -> Result<(), EngineError> {

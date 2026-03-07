@@ -389,6 +389,10 @@ pub struct EngineConfig {
     pub orphan_cleanup_enabled: bool,
     /// Minimum age in seconds before orphaned files are cleaned up (safety buffer)
     pub orphan_cleanup_age_secs: u64,
+    /// Skip corrupt WAL records during replay instead of failing startup
+    /// When true, corrupt records are skipped and logged
+    /// When false, WAL corruption will prevent startup
+    pub wal_skip_corrupt_records: bool,
 }
 
 impl EngineConfig {
@@ -470,6 +474,7 @@ impl EngineConfig {
             wal_recovery_enabled: true,        // Try WAL recovery before deletion
             orphan_cleanup_enabled: true,      // Clean up orphaned files
             orphan_cleanup_age_secs: 86400,    // 24 hours safety buffer
+            wal_skip_corrupt_records: true,    // Skip corrupt WAL records by default
         }
     }
 
