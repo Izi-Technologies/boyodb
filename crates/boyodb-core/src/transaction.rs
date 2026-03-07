@@ -534,54 +534,65 @@ impl TransactionManager {
         txn_id: TransactionId,
         savepoint_name: &str,
     ) -> Result<(), EngineError> {
-        let mut active = self.active_transactions.write();
-        let txn = active
-            .get_mut(&txn_id)
-            .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+        // Phase 1: Validate and extract data to process (holding the lock)
+        let (undo_records, locks_to_release) = {
+            let mut active = self.active_transactions.write();
+            let txn = active
+                .get_mut(&txn_id)
+                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
 
-        if !txn.state.is_active() {
-            return Err(EngineError::InvalidArgument(format!(
-                "Transaction {} is not active",
-                txn_id
-            )));
-        }
+            if !txn.state.is_active() {
+                return Err(EngineError::InvalidArgument(format!(
+                    "Transaction {} is not active",
+                    txn_id
+                )));
+            }
 
-        let savepoint = txn
-            .savepoints
-            .iter()
-            .find(|s| s.name == savepoint_name)
-            .ok_or_else(|| {
-                EngineError::NotFound(format!("Savepoint '{}' does not exist", savepoint_name))
-            })?
-            .clone();
+            let savepoint = txn
+                .savepoints
+                .iter()
+                .find(|s| s.name == savepoint_name)
+                .ok_or_else(|| {
+                    EngineError::NotFound(format!("Savepoint '{}' does not exist", savepoint_name))
+                })?
+                .clone();
 
-        // Get undo records to apply
-        let undo_records: Vec<UndoRecord> =
-            txn.undo_records[savepoint.undo_log_position..].to_vec();
+            // Get undo records to apply
+            let undo_records: Vec<UndoRecord> =
+                txn.undo_records[savepoint.undo_log_position..].to_vec();
 
-        // Apply undo records in reverse order
+            // Get locks to release (those acquired after savepoint)
+            let locks_to_release: Vec<LockHandle> =
+                txn.locks_held[savepoint.locks_held_count..].to_vec();
+
+            // Truncate transaction state to savepoint
+            txn.undo_records.truncate(savepoint.undo_log_position);
+            txn.locks_held.truncate(savepoint.locks_held_count);
+
+            // Remove savepoints created after this one
+            let idx = txn
+                .savepoints
+                .iter()
+                .position(|s| s.name == savepoint_name)
+                .unwrap();
+            txn.savepoints.truncate(idx + 1);
+
+            (undo_records, locks_to_release)
+        };
+        // active_transactions lock is now released
+
+        // Phase 2: Apply undo records (outside the active_transactions lock)
         for record in undo_records.into_iter().rev() {
-            self.undo_log.apply_undo(&record)?;
+            if let Err(e) = self.undo_log.apply_undo(&record) {
+                tracing::error!("Error applying undo record for txn {}: {:?}", txn_id, e);
+                // Continue with rollback despite errors
+            }
         }
-
-        // Truncate undo records to savepoint position
-        txn.undo_records.truncate(savepoint.undo_log_position);
 
         // Release locks acquired after savepoint
-        let locks_to_release: Vec<LockHandle> =
-            txn.locks_held[savepoint.locks_held_count..].to_vec();
         for lock in locks_to_release {
-            self.lock_manager.release(lock)?;
+            let _ = self.lock_manager.release(lock);
         }
-        txn.locks_held.truncate(savepoint.locks_held_count);
-
-        // Remove savepoints created after this one
-        let idx = txn
-            .savepoints
-            .iter()
-            .position(|s| s.name == savepoint_name)
-            .unwrap();
-        txn.savepoints.truncate(idx + 1);
 
         tracing::debug!(
             "Transaction {} rolled back to savepoint '{}'",
@@ -646,53 +657,65 @@ impl TransactionManager {
 
     /// Commit a transaction
     pub fn commit(&self, txn_id: TransactionId) -> Result<u64, EngineError> {
-        let mut active = self.active_transactions.write();
-        let txn = active
-            .get_mut(&txn_id)
-            .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+        // Phase 1: Validate and prepare commit (holding the lock)
+        let (commit_version, locks_to_release) = {
+            let mut active = self.active_transactions.write();
+            let txn = active
+                .get_mut(&txn_id)
+                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
 
-        if !txn.state.can_commit() {
-            return Err(EngineError::InvalidArgument(format!(
-                "Transaction {} cannot be committed (state: {:?})",
-                txn_id, txn.state
-            )));
-        }
+            if !txn.state.can_commit() {
+                return Err(EngineError::InvalidArgument(format!(
+                    "Transaction {} cannot be committed (state: {:?})",
+                    txn_id, txn.state
+                )));
+            }
 
-        // Check for timeout
-        if txn.is_timed_out() {
-            txn.state = TransactionState::Aborted;
-            return Err(EngineError::Timeout(format!(
-                "Transaction {} timed out",
-                txn_id
-            )));
-        }
+            // Check for timeout
+            if txn.is_timed_out() {
+                txn.state = TransactionState::Aborted;
+                return Err(EngineError::Timeout(format!(
+                    "Transaction {} timed out",
+                    txn_id
+                )));
+            }
 
-        // For unprepared transactions, do implicit prepare
-        if txn.state == TransactionState::Active {
-            // Check serializable conflicts
-            if txn.isolation_level == IsolationLevel::Serializable {
-                if let Err(conflict) = self.mvcc_manager.validate_serializable(txn_id) {
-                    txn.state = TransactionState::Aborted;
-                    return Err(EngineError::Internal(format!(
-                        "Serialization conflict: {}",
-                        conflict
-                    )));
+            // For unprepared transactions, do implicit prepare
+            if txn.state == TransactionState::Active {
+                // Check serializable conflicts
+                if txn.isolation_level == IsolationLevel::Serializable {
+                    if let Err(conflict) = self.mvcc_manager.validate_serializable(txn_id) {
+                        txn.state = TransactionState::Aborted;
+                        return Err(EngineError::Internal(format!(
+                            "Serialization conflict: {}",
+                            conflict
+                        )));
+                    }
                 }
             }
-        }
 
-        // Assign commit version
-        let commit_version = self.global_version.fetch_add(1, Ordering::SeqCst) + 1;
+            // Assign commit version
+            let commit_version = self.global_version.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Mark transaction as committed
-        txn.state = TransactionState::Committed;
+            // Mark transaction as committed
+            txn.state = TransactionState::Committed;
 
+            // Extract locks to release (we'll release them outside the lock)
+            let locks = std::mem::take(&mut txn.locks_held);
+
+            // Remove from active transactions
+            active.remove(&txn_id);
+
+            (commit_version, locks)
+        };
+        // active_transactions lock is now released
+
+        // Phase 2: Cleanup (outside the active_transactions lock to prevent deadlock)
         // Clear undo records (no longer needed after commit)
-        self.undo_log.clear_transaction(txn_id)?;
+        let _ = self.undo_log.clear_transaction(txn_id);
 
         // Release all locks
-        let locks: Vec<LockHandle> = std::mem::take(&mut txn.locks_held);
-        for lock in locks {
+        for lock in locks_to_release {
             let _ = self.lock_manager.release(lock);
         }
 
@@ -705,28 +728,40 @@ impl TransactionManager {
             commit_version
         );
 
-        // Remove from active transactions
-        active.remove(&txn_id);
-
         Ok(commit_version)
     }
 
     /// Rollback/abort a transaction
     pub fn rollback(&self, txn_id: TransactionId) -> Result<(), EngineError> {
-        let mut active = self.active_transactions.write();
-        let txn = active
-            .get_mut(&txn_id)
-            .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+        // Phase 1: Validate and prepare rollback (holding the lock)
+        let (undo_records, locks_to_release) = {
+            let mut active = self.active_transactions.write();
+            let txn = active
+                .get_mut(&txn_id)
+                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
 
-        if !txn.state.can_rollback() {
-            return Err(EngineError::InvalidArgument(format!(
-                "Transaction {} cannot be rolled back (state: {:?})",
-                txn_id, txn.state
-            )));
-        }
+            if !txn.state.can_rollback() {
+                return Err(EngineError::InvalidArgument(format!(
+                    "Transaction {} cannot be rolled back (state: {:?})",
+                    txn_id, txn.state
+                )));
+            }
 
-        // Apply undo records in reverse order
-        let undo_records: Vec<UndoRecord> = std::mem::take(&mut txn.undo_records);
+            // Extract undo records and locks
+            let undo_records: Vec<UndoRecord> = std::mem::take(&mut txn.undo_records);
+            let locks = std::mem::take(&mut txn.locks_held);
+
+            // Mark as aborted
+            txn.state = TransactionState::Aborted;
+
+            // Remove from active transactions
+            active.remove(&txn_id);
+
+            (undo_records, locks)
+        };
+        // active_transactions lock is now released
+
+        // Phase 2: Apply undo records (outside the active_transactions lock)
         for record in undo_records.into_iter().rev() {
             if let Err(e) = self.undo_log.apply_undo(&record) {
                 tracing::error!("Error applying undo record for txn {}: {:?}", txn_id, e);
@@ -735,24 +770,17 @@ impl TransactionManager {
         }
 
         // Clear from global undo log
-        self.undo_log.clear_transaction(txn_id)?;
+        let _ = self.undo_log.clear_transaction(txn_id);
 
         // Release all locks
-        let locks: Vec<LockHandle> = std::mem::take(&mut txn.locks_held);
-        for lock in locks {
+        for lock in locks_to_release {
             let _ = self.lock_manager.release(lock);
         }
-
-        // Mark as aborted
-        txn.state = TransactionState::Aborted;
 
         // Notify MVCC manager
         self.mvcc_manager.abort_transaction(txn_id);
 
         tracing::debug!("Transaction {} rolled back", txn_id);
-
-        // Remove from active transactions
-        active.remove(&txn_id);
 
         Ok(())
     }

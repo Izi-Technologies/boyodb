@@ -290,8 +290,12 @@ impl ClusterManager {
     }
 
     /// Update manifest version (call after successful writes).
+    /// Note: Acquires gossip and election locks sequentially (never simultaneously)
+    /// to prevent deadlock with handle_election_message_sync.
     pub fn set_manifest_version(&self, version: u64) {
+        // Acquire and release gossip lock first
         self.gossip.write().membership.set_manifest_version(version);
+        // Then acquire election lock (gossip lock is released)
         self.election.write().set_manifest_version(version);
     }
 
@@ -349,12 +353,15 @@ impl ClusterManager {
                 manifest_version,
             } => {
                 election.handle_leader_heartbeat(term, leader_id, lease_expires, manifest_version);
-                // Update gossip with leader info
+                // Release election lock before acquiring gossip lock to prevent deadlock
+                // Lock ordering: Always release election before acquiring gossip
+                let leader_id_clone = leader_id.clone();
                 drop(election);
-                let mut gossip = self.gossip.write();
-                gossip
+                // Now safe to acquire gossip lock
+                self.gossip
+                    .write()
                     .membership
-                    .set_leader(Some(leader_id.clone()), Some(lease_expires));
+                    .set_leader(Some(leader_id_clone), Some(lease_expires));
                 None
             }
 
@@ -363,6 +370,8 @@ impl ClusterManager {
                 ref leader_id,
             } => {
                 election.handle_step_down(term, leader_id);
+                // Release election lock before acquiring gossip lock to prevent deadlock
+                drop(election);
                 self.gossip.write().membership.set_leader(None, None);
                 None
             }

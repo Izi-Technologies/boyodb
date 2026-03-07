@@ -1858,7 +1858,259 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         ));
     }
 
+    // SHOW FUNCTIONS [LIKE pattern]
+    if upper_trimmed == "SHOW FUNCTIONS" {
+        return Ok(Some(DdlCommand::ShowFunctions { pattern: None }));
+    }
+    if upper_trimmed.starts_with("SHOW FUNCTIONS LIKE ") {
+        let pattern_part = &sql["SHOW FUNCTIONS LIKE ".len()..];
+        let pattern = pattern_part.trim().trim_end_matches(';')
+            .trim_matches('\'').trim_matches('"').to_string();
+        return Ok(Some(DdlCommand::ShowFunctions { pattern: Some(pattern) }));
+    }
+
+    // DROP FUNCTION [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP FUNCTION ") {
+        let rest = &upper_trimmed["DROP FUNCTION ".len()..];
+        let if_exists = rest.starts_with("IF EXISTS ");
+        let name_part = if if_exists {
+            &rest["IF EXISTS ".len()..]
+        } else {
+            rest
+        };
+        let name = name_part.trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "DROP FUNCTION requires a function name".into(),
+            ));
+        }
+        return Ok(Some(DdlCommand::DropFunction {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // CREATE [OR REPLACE] FUNCTION name(params) RETURNS type AS 'body' [LANGUAGE lang]
+    if upper_trimmed.starts_with("CREATE FUNCTION ") || upper_trimmed.starts_with("CREATE OR REPLACE FUNCTION ") {
+        return parse_create_function(sql);
+    }
+
     Ok(None)
+}
+
+/// Parse CREATE FUNCTION command
+/// Syntax: CREATE [OR REPLACE] FUNCTION name(param1 type1 [DEFAULT val1], ...) RETURNS type AS 'body' [LANGUAGE lang]
+fn parse_create_function(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let or_replace = upper.contains("OR REPLACE");
+
+    // Find the function name and parameters
+    let prefix = if or_replace {
+        "CREATE OR REPLACE FUNCTION "
+    } else {
+        "CREATE FUNCTION "
+    };
+    let prefix_upper = prefix.to_uppercase();
+
+    let start_idx = upper.find(&prefix_upper).ok_or_else(|| {
+        EngineError::InvalidArgument("Invalid CREATE FUNCTION syntax".into())
+    })? + prefix.len();
+
+    // Find the opening parenthesis for parameters
+    let paren_open = sql[start_idx..].find('(').ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE FUNCTION requires parameter list".into())
+    })? + start_idx;
+
+    let name = sql[start_idx..paren_open].trim().to_string();
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "CREATE FUNCTION requires a function name".into(),
+        ));
+    }
+
+    // Find the closing parenthesis
+    let paren_close = sql[paren_open..].find(')').ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE FUNCTION requires closing parenthesis".into())
+    })? + paren_open;
+
+    // Parse parameters
+    let params_str = &sql[paren_open + 1..paren_close];
+    let parameters = parse_function_parameters(params_str)?;
+
+    // Find RETURNS keyword
+    let after_params = &sql[paren_close + 1..];
+    let upper_after = after_params.to_uppercase();
+    let returns_pos = upper_after.find("RETURNS ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE FUNCTION requires RETURNS clause".into())
+    })?;
+
+    // Find AS keyword
+    let as_pos = upper_after.find(" AS ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE FUNCTION requires AS clause".into())
+    })?;
+
+    let return_type = after_params[returns_pos + 8..as_pos].trim().to_string();
+
+    // Extract body (quoted string)
+    let after_as = after_params[as_pos + 4..].trim();
+    let (body_str, remaining) = extract_function_body_string(after_as)?;
+
+    // Check for LANGUAGE clause
+    let upper_remaining = remaining.to_uppercase();
+    let language = if upper_remaining.trim_start().starts_with("LANGUAGE ") {
+        let lang_start = remaining.to_uppercase().find("LANGUAGE ").unwrap() + 9;
+        let lang_end = remaining[lang_start..].find(|c: char| c.is_whitespace() || c == ';')
+            .map(|i| i + lang_start)
+            .unwrap_or(remaining.len());
+        Some(remaining[lang_start..lang_end].trim().to_string())
+    } else {
+        None
+    };
+
+    // Determine body type based on content
+    let body = if body_str.to_uppercase().starts_with("SELECT ")
+        || body_str.to_uppercase().starts_with("WITH ")
+    {
+        FunctionBody::SqlQuery(body_str)
+    } else {
+        FunctionBody::SqlExpression(body_str)
+    };
+
+    Ok(Some(DdlCommand::CreateFunction {
+        name,
+        parameters,
+        return_type,
+        body,
+        or_replace,
+        language,
+    }))
+}
+
+/// Parse function parameters: name type [DEFAULT value], ...
+fn parse_function_parameters(params_str: &str) -> Result<Vec<FunctionParameter>, EngineError> {
+    let trimmed = params_str.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut parameters = Vec::new();
+    let mut current_param = String::new();
+    let mut in_quotes = false;
+    let mut paren_depth = 0;
+
+    for c in trimmed.chars() {
+        match c {
+            '\'' | '"' => {
+                in_quotes = !in_quotes;
+                current_param.push(c);
+            }
+            '(' => {
+                paren_depth += 1;
+                current_param.push(c);
+            }
+            ')' => {
+                paren_depth -= 1;
+                current_param.push(c);
+            }
+            ',' if !in_quotes && paren_depth == 0 => {
+                let param = parse_single_parameter(current_param.trim())?;
+                parameters.push(param);
+                current_param.clear();
+            }
+            _ => {
+                current_param.push(c);
+            }
+        }
+    }
+
+    // Don't forget the last parameter
+    if !current_param.trim().is_empty() {
+        let param = parse_single_parameter(current_param.trim())?;
+        parameters.push(param);
+    }
+
+    Ok(parameters)
+}
+
+/// Parse a single parameter: name type [DEFAULT value]
+fn parse_single_parameter(param_str: &str) -> Result<FunctionParameter, EngineError> {
+    let upper = param_str.to_uppercase();
+
+    // Check for DEFAULT keyword
+    let default_pos = upper.find(" DEFAULT ");
+    let (name_type_part, default_value) = if let Some(pos) = default_pos {
+        let default_val = param_str[pos + 9..].trim();
+        (&param_str[..pos], Some(default_val.to_string()))
+    } else {
+        (param_str, None)
+    };
+
+    // Split name and type
+    let parts: Vec<&str> = name_type_part.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err(EngineError::InvalidArgument(format!(
+            "Invalid parameter syntax: '{}'",
+            param_str
+        )));
+    }
+
+    let name = parts[0].to_string();
+    let data_type = parts[1..].join(" ");
+
+    Ok(FunctionParameter {
+        name,
+        data_type,
+        default_value,
+    })
+}
+
+/// Extract a quoted function body string and return (content, remaining)
+fn extract_function_body_string(s: &str) -> Result<(String, &str), EngineError> {
+    let trimmed = s.trim();
+    let quote_char = if trimmed.starts_with('\'') {
+        '\''
+    } else if trimmed.starts_with('"') {
+        '"'
+    } else if trimmed.starts_with("$$") {
+        // Dollar-quoted string
+        let end = trimmed[2..].find("$$").ok_or_else(|| {
+            EngineError::InvalidArgument("Unterminated $$ string".into())
+        })?;
+        let content = trimmed[2..2 + end].to_string();
+        let remaining = &trimmed[2 + end + 2..];
+        return Ok((content, remaining));
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "Function body must be a quoted string".into(),
+        ));
+    };
+
+    // Find the matching closing quote (handle escaped quotes)
+    let mut chars = trimmed[1..].chars().peekable();
+    let mut content = String::new();
+    let mut end_idx = 1;
+
+    while let Some(c) = chars.next() {
+        end_idx += c.len_utf8();
+        if c == quote_char {
+            // Check for escaped quote (doubled)
+            if chars.peek() == Some(&quote_char) {
+                content.push(quote_char);
+                chars.next();
+                end_idx += quote_char.len_utf8();
+            } else {
+                // End of string
+                let remaining = &trimmed[end_idx..];
+                return Ok((content, remaining));
+            }
+        } else {
+            content.push(c);
+        }
+    }
+
+    Err(EngineError::InvalidArgument(
+        "Unterminated quoted string".into(),
+    ))
 }
 
 /// Parse CREATE MATERIALIZED VIEW command

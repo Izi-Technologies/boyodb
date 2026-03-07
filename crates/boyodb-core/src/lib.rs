@@ -61,7 +61,8 @@ pub use engine::{
     apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
     merge_cte_results, validate_identifier, ComputedValue, CteContext, Db, EngineConfig,
     EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
-    QueryRequest, QueryResponse, TableDescription, VacuumResult,
+    QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
+    TableDescription, UdfRegistry, UserDefinedFunction, VacuumResult,
 };
 pub use replication::{
     BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,

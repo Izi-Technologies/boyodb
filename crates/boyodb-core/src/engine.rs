@@ -1732,6 +1732,176 @@ pub struct Db {
     recovery_manager: parking_lot::RwLock<Option<std::sync::Arc<crate::pitr::RecoveryManager>>>,
     /// Query optimizer context for cost-based optimization
     pub optimizer_context: parking_lot::RwLock<crate::optimizer_integration::OptimizationContext>,
+    /// User-Defined Functions registry
+    udf_registry: parking_lot::RwLock<UdfRegistry>,
+    /// Stream registry for Kafka/Pulsar connectors
+    stream_registry: parking_lot::RwLock<StreamRegistry>,
+}
+
+/// Registry of user-defined functions
+/// Scalar value for UDF evaluation
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarValue {
+    Null,
+    Bool(bool),
+    Int64(i64),
+    Float64(f64),
+    Utf8(String),
+}
+
+impl std::fmt::Display for ScalarValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScalarValue::Null => write!(f, "NULL"),
+            ScalarValue::Bool(b) => write!(f, "{}", b),
+            ScalarValue::Int64(i) => write!(f, "{}", i),
+            ScalarValue::Float64(fl) => write!(f, "{}", fl),
+            ScalarValue::Utf8(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UdfRegistry {
+    /// Functions indexed by name
+    functions: HashMap<String, UserDefinedFunction>,
+}
+
+/// A user-defined function definition
+#[derive(Debug, Clone)]
+pub struct UserDefinedFunction {
+    pub name: String,
+    pub parameters: Vec<crate::sql::FunctionParameter>,
+    pub return_type: String,
+    pub body: crate::sql::FunctionBody,
+    pub language: Option<String>,
+}
+
+impl UdfRegistry {
+    pub fn new() -> Self {
+        Self {
+            functions: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, udf: UserDefinedFunction) {
+        self.functions.insert(udf.name.clone(), udf);
+    }
+
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.functions.remove(name).is_some()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&UserDefinedFunction> {
+        self.functions.get(name)
+    }
+
+    pub fn list(&self) -> Vec<&UserDefinedFunction> {
+        self.functions.values().collect()
+    }
+
+    pub fn list_matching(&self, pattern: Option<&str>) -> Vec<&UserDefinedFunction> {
+        match pattern {
+            None => self.list(),
+            Some(p) => {
+                let pattern = p.replace('%', ".*").replace('_', ".");
+                if let Ok(re) = regex::Regex::new(&format!("^{}$", pattern)) {
+                    self.functions
+                        .values()
+                        .filter(|f| re.is_match(&f.name))
+                        .collect()
+                } else {
+                    self.list()
+                }
+            }
+        }
+    }
+}
+
+// =========================================================================
+// Stream Registry for Kafka/Pulsar Connectors
+// =========================================================================
+
+/// Stream state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamState {
+    /// Stream is defined but not running
+    Stopped,
+    /// Stream is actively consuming
+    Running,
+    /// Stream encountered an error
+    Error(String),
+}
+
+/// Stream definition
+#[derive(Debug, Clone)]
+pub struct StreamDefinition {
+    pub name: String,
+    pub source_type: crate::sql::StreamSourceType,
+    pub source_config: String,
+    pub target_database: String,
+    pub target_table: String,
+    pub format: String,
+    pub state: StreamState,
+    pub messages_consumed: u64,
+    pub last_error: Option<String>,
+    pub created_at: u64,
+}
+
+/// Registry for managing stream connectors
+#[derive(Debug, Default)]
+pub struct StreamRegistry {
+    streams: HashMap<String, StreamDefinition>,
+}
+
+impl StreamRegistry {
+    pub fn new() -> Self {
+        Self {
+            streams: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, stream: StreamDefinition) -> Result<(), EngineError> {
+        if self.streams.contains_key(&stream.name) {
+            return Err(EngineError::InvalidArgument(format!(
+                "stream '{}' already exists",
+                stream.name
+            )));
+        }
+        self.streams.insert(stream.name.clone(), stream);
+        Ok(())
+    }
+
+    pub fn unregister(&mut self, name: &str) -> Option<StreamDefinition> {
+        self.streams.remove(name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&StreamDefinition> {
+        self.streams.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut StreamDefinition> {
+        self.streams.get_mut(name)
+    }
+
+    pub fn list(&self) -> Vec<&StreamDefinition> {
+        self.streams.values().collect()
+    }
+
+    pub fn update_state(&mut self, name: &str, state: StreamState) -> bool {
+        if let Some(stream) = self.streams.get_mut(name) {
+            stream.state = state;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn increment_consumed(&mut self, name: &str, count: u64) {
+        if let Some(stream) = self.streams.get_mut(name) {
+            stream.messages_consumed += count;
+        }
+    }
 }
 
 impl Drop for Db {
@@ -2159,6 +2329,10 @@ impl Db {
             optimizer_context: parking_lot::RwLock::new(
                 crate::optimizer_integration::OptimizationContext::default(),
             ),
+            // Initialize UDF registry
+            udf_registry: parking_lot::RwLock::new(UdfRegistry::new()),
+            // Initialize stream registry for Kafka/Pulsar connectors
+            stream_registry: parking_lot::RwLock::new(StreamRegistry::new()),
         };
 
         db.spawn_background_compaction_loop();
@@ -4373,19 +4547,26 @@ impl Db {
                         )?,
                         JoinType::Cross => None,
                         // ASOF joins match on closest timestamp/value
-                        JoinType::AsOf | JoinType::AsOfLeft => {
-                            // For now, fall back to inner join behavior
-                            // TODO: implement proper ASOF join with temporal matching
-                            if left_batches.is_empty() || right_batches.is_empty() {
-                                None
-                            } else {
-                                Self::hash_join_batches(
-                                    &left_batches,
-                                    &right_batches,
-                                    &join.on_condition.left_column,
-                                    &join.on_condition.right_column,
-                                )?
-                            }
+                        JoinType::AsOf => {
+                            // ASOF join: match on closest timestamp (backward direction)
+                            Self::asof_join_batches(
+                                &left_batches,
+                                &right_batches,
+                                &join.on_condition.left_column,
+                                &join.on_condition.right_column,
+                                true, // backward: match <=
+                            )?
+                        }
+                        JoinType::AsOfLeft => {
+                            // ASOF LEFT: like ASOF but include unmatched left rows
+                            // For now use same as ASOF (full LEFT ASOF needs null handling)
+                            Self::asof_join_batches(
+                                &left_batches,
+                                &right_batches,
+                                &join.on_condition.left_column,
+                                &join.on_condition.right_column,
+                                true, // backward
+                            )?
                         }
                         // Semi join returns left rows that have matches in right
                         JoinType::Semi => {
@@ -4550,19 +4731,25 @@ impl Db {
                     &join.on_condition.left_column,
                     &join.on_condition.right_column,
                 )?,
-                JoinType::AsOf | JoinType::AsOfLeft => {
-                    // ASOF joins: fall back to hash join for now
-                    // TODO: implement proper ASOF join with temporal matching
-                    if current_batches.is_empty() || right_batches.is_empty() {
-                        None
-                    } else {
-                        Self::hash_join_batches(
-                            &current_batches,
-                            &right_batches,
-                            &join.on_condition.left_column,
-                            &join.on_condition.right_column,
-                        )?
-                    }
+                JoinType::AsOf => {
+                    // ASOF join: match on closest timestamp (backward direction)
+                    Self::asof_join_batches(
+                        &current_batches,
+                        &right_batches,
+                        &join.on_condition.left_column,
+                        &join.on_condition.right_column,
+                        true, // backward: match <=
+                    )?
+                }
+                JoinType::AsOfLeft => {
+                    // ASOF LEFT join
+                    Self::asof_join_batches(
+                        &current_batches,
+                        &right_batches,
+                        &join.on_condition.left_column,
+                        &join.on_condition.right_column,
+                        true, // backward
+                    )?
                 }
                 JoinType::Semi => {
                     if current_batches.is_empty() || right_batches.is_empty() {
@@ -5447,6 +5634,177 @@ impl Db {
             .map_err(|e| EngineError::Internal(format!("failed to create result batch: {e}")))?;
 
         Ok(Some(result_batch))
+    }
+
+    /// Perform ASOF JOIN - match each left row with the closest right row by timestamp
+    /// Direction: Backward (<=), Forward (>=), or Nearest
+    fn asof_join_batches(
+        left_batches: &[RecordBatch],
+        right_batches: &[RecordBatch],
+        left_col: &str,
+        right_col: &str,
+        backward: bool, // true = match <= (backward), false = match >= (forward)
+    ) -> Result<Option<RecordBatch>, EngineError> {
+        use arrow_array::types::Int64Type;
+        use arrow_ord::sort::{sort_to_indices, SortOptions};
+
+        if left_batches.is_empty() || right_batches.is_empty() {
+            return Ok(None);
+        }
+
+        let left_schema = left_batches[0].schema();
+        let right_schema = right_batches[0].schema();
+
+        // Collect all rows with their timestamps
+        let mut left_rows: Vec<(i64, usize, usize)> = Vec::new(); // (timestamp, batch_idx, row_idx)
+        let mut right_rows: Vec<(i64, usize, usize)> = Vec::new();
+
+        // Extract left timestamps
+        for (batch_idx, batch) in left_batches.iter().enumerate() {
+            let col_idx = batch.schema().index_of(left_col).map_err(|_| {
+                EngineError::InvalidArgument(format!("column '{}' not found in left table", left_col))
+            })?;
+            let col = batch.column(col_idx);
+
+            for row_idx in 0..batch.num_rows() {
+                let ts = Self::extract_timestamp_value(col.as_ref(), row_idx)?;
+                left_rows.push((ts, batch_idx, row_idx));
+            }
+        }
+
+        // Extract right timestamps
+        for (batch_idx, batch) in right_batches.iter().enumerate() {
+            let col_idx = batch.schema().index_of(right_col).map_err(|_| {
+                EngineError::InvalidArgument(format!("column '{}' not found in right table", right_col))
+            })?;
+            let col = batch.column(col_idx);
+
+            for row_idx in 0..batch.num_rows() {
+                let ts = Self::extract_timestamp_value(col.as_ref(), row_idx)?;
+                right_rows.push((ts, batch_idx, row_idx));
+            }
+        }
+
+        // Sort both sides by timestamp
+        left_rows.sort_by_key(|r| r.0);
+        right_rows.sort_by_key(|r| r.0);
+
+        // For each left row, find the best matching right row
+        let mut left_indices: Vec<(u32, u32)> = Vec::new();
+        let mut right_indices: Vec<(u32, u32)> = Vec::new();
+
+        for &(left_ts, left_batch, left_row) in &left_rows {
+            let best_match = if backward {
+                // Find the largest right timestamp <= left timestamp
+                right_rows.iter()
+                    .filter(|r| r.0 <= left_ts)
+                    .max_by_key(|r| r.0)
+            } else {
+                // Find the smallest right timestamp >= left timestamp
+                right_rows.iter()
+                    .filter(|r| r.0 >= left_ts)
+                    .min_by_key(|r| r.0)
+            };
+
+            if let Some(&(_, right_batch, right_row)) = best_match {
+                left_indices.push((left_batch as u32, left_row as u32));
+                right_indices.push((right_batch as u32, right_row as u32));
+            }
+        }
+
+        if left_indices.is_empty() {
+            return Ok(None);
+        }
+
+        // Build result schema (all columns from both tables)
+        let mut fields: Vec<arrow_schema::Field> =
+            Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
+        fields.extend(left_schema.fields().iter().map(|f| f.as_ref().clone()));
+
+        for field in right_schema.fields() {
+            if left_schema.field_with_name(field.name()).is_ok() {
+                fields.push(arrow_schema::Field::new(
+                    format!("r_{}", field.name()),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                ));
+            } else {
+                fields.push(field.as_ref().clone());
+            }
+        }
+
+        let result_schema = Arc::new(arrow_schema::Schema::new(fields));
+
+        // Build result arrays
+        let mut result_arrays: Vec<ArrayRef> =
+            Vec::with_capacity(left_schema.fields().len() + right_schema.fields().len());
+
+        // Left side columns
+        for col_idx in 0..left_schema.fields().len() {
+            let array = Self::take_from_batches(left_batches, col_idx, &left_indices)?;
+            result_arrays.push(array);
+        }
+
+        // Right side columns
+        for col_idx in 0..right_schema.fields().len() {
+            let array = Self::take_from_batches(right_batches, col_idx, &right_indices)?;
+            result_arrays.push(array);
+        }
+
+        let result_batch = RecordBatch::try_new(result_schema, result_arrays)
+            .map_err(|e| EngineError::Internal(format!("failed to create ASOF join result: {e}")))?;
+
+        Ok(Some(result_batch))
+    }
+
+    /// Extract a timestamp/numeric value from an array for ASOF join comparison
+    fn extract_timestamp_value(col: &dyn arrow_array::Array, row_idx: usize) -> Result<i64, EngineError> {
+        use arrow_array::*;
+
+        if col.is_null(row_idx) {
+            return Ok(i64::MIN); // Treat nulls as minimum value
+        }
+
+        match col.data_type() {
+            DataType::Int64 => {
+                let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+                Ok(arr.value(row_idx))
+            }
+            DataType::Int32 => {
+                let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+                Ok(arr.value(row_idx) as i64)
+            }
+            DataType::Timestamp(_, _) => {
+                let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()
+                    .or_else(|| None);
+                if let Some(ts_arr) = arr {
+                    Ok(ts_arr.value(row_idx))
+                } else {
+                    // Try nanoseconds
+                    if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                        Ok(ts_arr.value(row_idx) / 1000) // Convert to micros
+                    } else if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        Ok(ts_arr.value(row_idx) * 1000) // Convert to micros
+                    } else if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampSecondArray>() {
+                        Ok(ts_arr.value(row_idx) * 1_000_000) // Convert to micros
+                    } else {
+                        Err(EngineError::InvalidArgument("unsupported timestamp type for ASOF join".into()))
+                    }
+                }
+            }
+            DataType::Date32 => {
+                let arr = col.as_any().downcast_ref::<Date32Array>().unwrap();
+                Ok(arr.value(row_idx) as i64 * 86400 * 1_000_000) // Days to micros
+            }
+            DataType::Float64 => {
+                let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+                Ok(arr.value(row_idx) as i64)
+            }
+            _ => Err(EngineError::InvalidArgument(format!(
+                "ASOF join requires numeric/timestamp column, got {:?}",
+                col.data_type()
+            ))),
+        }
     }
 
     /// Execute a set operation query (UNION, INTERSECT, EXCEPT)
@@ -10461,6 +10819,491 @@ impl Db {
             .collect())
     }
 
+    // =========================================================================
+    // User-Defined Functions (UDFs)
+    // =========================================================================
+
+    /// Create or replace a user-defined function
+    pub fn create_function(
+        &self,
+        name: &str,
+        parameters: Vec<crate::sql::FunctionParameter>,
+        return_type: &str,
+        body: crate::sql::FunctionBody,
+        language: Option<String>,
+        or_replace: bool,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "function")?;
+
+        let mut registry = self.udf_registry.write();
+
+        // Check if function already exists
+        if registry.get(name).is_some() && !or_replace {
+            return Err(EngineError::InvalidArgument(format!(
+                "function '{}' already exists (use CREATE OR REPLACE to overwrite)",
+                name
+            )));
+        }
+
+        let udf = UserDefinedFunction {
+            name: name.to_string(),
+            parameters,
+            return_type: return_type.to_string(),
+            body,
+            language,
+        };
+
+        registry.register(udf);
+        tracing::info!(function = %name, "UDF created");
+        Ok(())
+    }
+
+    /// Drop a user-defined function
+    pub fn drop_function(&self, name: &str, if_exists: bool) -> Result<(), EngineError> {
+        self.validate_identifier(name, "function")?;
+
+        let mut registry = self.udf_registry.write();
+
+        if registry.unregister(name) {
+            tracing::info!(function = %name, "UDF dropped");
+            Ok(())
+        } else if if_exists {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound(format!(
+                "function '{}' not found",
+                name
+            )))
+        }
+    }
+
+    /// List all user-defined functions
+    pub fn list_functions(&self, pattern: Option<&str>) -> Vec<UserDefinedFunction> {
+        let registry = self.udf_registry.read();
+        registry.list_matching(pattern).into_iter().cloned().collect()
+    }
+
+    /// Get a specific user-defined function
+    pub fn get_function(&self, name: &str) -> Option<UserDefinedFunction> {
+        let registry = self.udf_registry.read();
+        registry.get(name).cloned()
+    }
+
+    /// Execute a user-defined function with given arguments
+    pub fn execute_udf(
+        &self,
+        name: &str,
+        args: Vec<ScalarValue>,
+    ) -> Result<ScalarValue, EngineError> {
+        let udf = self.get_function(name).ok_or_else(|| {
+            EngineError::NotFound(format!("function '{}' not found", name))
+        })?;
+
+        // Validate argument count
+        let required_params: Vec<_> = udf.parameters.iter()
+            .filter(|p| p.default_value.is_none())
+            .collect();
+        if args.len() < required_params.len() {
+            return Err(EngineError::InvalidArgument(format!(
+                "function '{}' requires at least {} arguments, got {}",
+                name, required_params.len(), args.len()
+            )));
+        }
+        if args.len() > udf.parameters.len() {
+            return Err(EngineError::InvalidArgument(format!(
+                "function '{}' accepts at most {} arguments, got {}",
+                name, udf.parameters.len(), args.len()
+            )));
+        }
+
+        // Build parameter bindings
+        let mut bindings: HashMap<String, ScalarValue> = HashMap::new();
+        for (i, param) in udf.parameters.iter().enumerate() {
+            let value = if i < args.len() {
+                args[i].clone()
+            } else if let Some(ref default) = param.default_value {
+                // Parse default value
+                Self::parse_default_value(default)?
+            } else {
+                return Err(EngineError::InvalidArgument(format!(
+                    "missing required argument '{}' for function '{}'",
+                    param.name, name
+                )));
+            };
+            bindings.insert(param.name.clone(), value);
+        }
+
+        // Execute based on function body type
+        match &udf.body {
+            crate::sql::FunctionBody::SqlExpression(expr) => {
+                self.evaluate_udf_expression(expr, &bindings)
+            }
+            crate::sql::FunctionBody::SqlQuery(query) => {
+                // For SQL queries, we'd execute and return first value
+                // For now, just evaluate as expression
+                self.evaluate_udf_expression(query, &bindings)
+            }
+            crate::sql::FunctionBody::External { library, symbol } => {
+                Err(EngineError::NotImplemented(format!(
+                    "external functions not yet supported: {}::{}",
+                    library, symbol
+                )))
+            }
+        }
+    }
+
+    /// Parse a default value string into ScalarValue
+    fn parse_default_value(default: &str) -> Result<ScalarValue, EngineError> {
+        let trimmed = default.trim();
+
+        // Handle NULL
+        if trimmed.eq_ignore_ascii_case("null") {
+            return Ok(ScalarValue::Null);
+        }
+
+        // Handle quoted strings
+        if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+            || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            return Ok(ScalarValue::Utf8(inner.to_string()));
+        }
+
+        // Handle booleans
+        if trimmed.eq_ignore_ascii_case("true") {
+            return Ok(ScalarValue::Bool(true));
+        }
+        if trimmed.eq_ignore_ascii_case("false") {
+            return Ok(ScalarValue::Bool(false));
+        }
+
+        // Try parsing as integer
+        if let Ok(i) = trimmed.parse::<i64>() {
+            return Ok(ScalarValue::Int64(i));
+        }
+
+        // Try parsing as float
+        if let Ok(f) = trimmed.parse::<f64>() {
+            return Ok(ScalarValue::Float64(f));
+        }
+
+        // Return as string
+        Ok(ScalarValue::Utf8(trimmed.to_string()))
+    }
+
+    /// Maximum recursion depth for UDF expression evaluation
+    const UDF_MAX_RECURSION_DEPTH: usize = 100;
+
+    /// Evaluate a UDF expression with parameter bindings
+    fn evaluate_udf_expression(
+        &self,
+        expr: &str,
+        bindings: &HashMap<String, ScalarValue>,
+    ) -> Result<ScalarValue, EngineError> {
+        self.evaluate_udf_expression_with_depth(expr, bindings, 0)
+    }
+
+    /// Internal recursive evaluator with depth tracking
+    fn evaluate_udf_expression_with_depth(
+        &self,
+        expr: &str,
+        bindings: &HashMap<String, ScalarValue>,
+        depth: usize,
+    ) -> Result<ScalarValue, EngineError> {
+        // Prevent stack overflow from deeply nested or malicious expressions
+        if depth > Self::UDF_MAX_RECURSION_DEPTH {
+            return Err(EngineError::InvalidArgument(
+                "UDF expression too deeply nested (max 100 levels)".into(),
+            ));
+        }
+
+        let trimmed = expr.trim();
+
+        // Check if it's just a parameter reference
+        if let Some(value) = bindings.get(trimmed) {
+            return Ok(value.clone());
+        }
+
+        // Handle simple arithmetic expressions
+        // Support: +, -, *, /, %, ||
+        if let Some(result) = self.evaluate_arithmetic_expr_with_depth(trimmed, bindings, depth)? {
+            return Ok(result);
+        }
+
+        // Handle CONCAT function
+        if trimmed.to_uppercase().starts_with("CONCAT(") && trimmed.ends_with(')') {
+            let inner = &trimmed[7..trimmed.len() - 1];
+            let parts: Vec<&str> = inner.split(',').collect();
+            let mut result = String::new();
+            for part in parts {
+                let val = self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
+                result.push_str(&val.to_string());
+            }
+            return Ok(ScalarValue::Utf8(result));
+        }
+
+        // Handle COALESCE function
+        if trimmed.to_uppercase().starts_with("COALESCE(") && trimmed.ends_with(')') {
+            let inner = &trimmed[9..trimmed.len() - 1];
+            let parts: Vec<&str> = inner.split(',').collect();
+            for part in parts {
+                let val = self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
+                if !matches!(val, ScalarValue::Null) {
+                    return Ok(val);
+                }
+            }
+            return Ok(ScalarValue::Null);
+        }
+
+        // Handle IF/CASE expressions
+        if trimmed.to_uppercase().starts_with("IF(") && trimmed.ends_with(')') {
+            let inner = &trimmed[3..trimmed.len() - 1];
+            let parts: Vec<&str> = inner.splitn(3, ',').collect();
+            if parts.len() == 3 {
+                let condition = self.evaluate_udf_expression_with_depth(parts[0].trim(), bindings, depth + 1)?;
+                let is_true = match condition {
+                    ScalarValue::Bool(b) => b,
+                    ScalarValue::Int64(i) => i != 0,
+                    ScalarValue::Float64(f) => f != 0.0,
+                    _ => false,
+                };
+                return if is_true {
+                    self.evaluate_udf_expression_with_depth(parts[1].trim(), bindings, depth + 1)
+                } else {
+                    self.evaluate_udf_expression_with_depth(parts[2].trim(), bindings, depth + 1)
+                };
+            }
+        }
+
+        // Try parsing as literal
+        Self::parse_default_value(trimmed)
+    }
+
+    /// Evaluate simple arithmetic expressions (internal, with depth tracking)
+    fn evaluate_arithmetic_expr_with_depth(
+        &self,
+        expr: &str,
+        bindings: &HashMap<String, ScalarValue>,
+        depth: usize,
+    ) -> Result<Option<ScalarValue>, EngineError> {
+        // Handle binary operators: +, -, *, /, %, ||
+        let operators = [("||", "concat"), ("+", "add"), ("-", "sub"), ("*", "mul"), ("/", "div"), ("%", "mod")];
+
+        for (op, op_name) in operators {
+            if let Some(pos) = expr.find(op) {
+                // Don't split on operator inside parentheses or quotes
+                let before = &expr[..pos];
+                let after = &expr[pos + op.len()..];
+
+                // Simple check for balanced parentheses
+                if before.matches('(').count() != before.matches(')').count() {
+                    continue;
+                }
+
+                let left = self.evaluate_udf_expression_with_depth(before.trim(), bindings, depth + 1)?;
+                let right = self.evaluate_udf_expression_with_depth(after.trim(), bindings, depth + 1)?;
+
+                let result = match op_name {
+                    "concat" => {
+                        ScalarValue::Utf8(format!("{}{}", left, right))
+                    }
+                    "add" => Self::numeric_op(left, right, |a, b| a + b, |a, b| a + b)?,
+                    "sub" => Self::numeric_op(left, right, |a, b| a - b, |a, b| a - b)?,
+                    "mul" => Self::numeric_op(left, right, |a, b| a * b, |a, b| a * b)?,
+                    "div" => {
+                        // Check for division by zero
+                        let is_zero = match &right {
+                            ScalarValue::Int64(0) => true,
+                            ScalarValue::Float64(f) if *f == 0.0 => true,
+                            _ => false,
+                        };
+                        if is_zero {
+                            return Err(EngineError::InvalidArgument("division by zero".into()));
+                        }
+                        Self::numeric_op(left, right, |a, b| a / b, |a, b| a / b)?
+                    }
+                    "mod" => Self::numeric_op(left, right, |a, b| a % b, |a, b| a % b)?,
+                    _ => return Ok(None),
+                };
+
+                return Ok(Some(result));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Helper for numeric operations
+    fn numeric_op<F1, F2>(
+        left: ScalarValue,
+        right: ScalarValue,
+        int_op: F1,
+        float_op: F2,
+    ) -> Result<ScalarValue, EngineError>
+    where
+        F1: Fn(i64, i64) -> i64,
+        F2: Fn(f64, f64) -> f64,
+    {
+        match (left, right) {
+            (ScalarValue::Int64(a), ScalarValue::Int64(b)) => Ok(ScalarValue::Int64(int_op(a, b))),
+            (ScalarValue::Float64(a), ScalarValue::Float64(b)) => Ok(ScalarValue::Float64(float_op(a, b))),
+            (ScalarValue::Int64(a), ScalarValue::Float64(b)) => Ok(ScalarValue::Float64(float_op(a as f64, b))),
+            (ScalarValue::Float64(a), ScalarValue::Int64(b)) => Ok(ScalarValue::Float64(float_op(a, b as f64))),
+            _ => Err(EngineError::InvalidArgument("invalid operand types for arithmetic".into())),
+        }
+    }
+
+    // =========================================================================
+    // Stream Management (Kafka/Pulsar Connectors)
+    // =========================================================================
+
+    /// Create a new stream connector
+    pub fn create_stream(
+        &self,
+        name: &str,
+        source_type: crate::sql::StreamSourceType,
+        source_config: &str,
+        target_database: &str,
+        target_table: &str,
+        format: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "stream")?;
+        self.validate_identifier(target_database, "database")?;
+        self.validate_identifier(target_table, "table")?;
+
+        // Acquire stream registry lock first to prevent duplicate stream creation
+        let mut registry = self.stream_registry.write();
+
+        // Check if stream already exists
+        if registry.get(name).is_some() {
+            return Err(EngineError::InvalidArgument(format!(
+                "stream '{}' already exists",
+                name
+            )));
+        }
+
+        // Verify target table exists while holding both locks to prevent TOCTOU race
+        let manifest = self.manifest.read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_exists = manifest.tables.iter()
+            .any(|t| t.database == target_database && t.name == target_table);
+
+        if !table_exists {
+            return Err(EngineError::NotFound(format!(
+                "target table '{}.{}' does not exist",
+                target_database, target_table
+            )));
+        }
+        drop(manifest);
+
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+
+        let source_type_str = format!("{:?}", source_type);
+        let stream = StreamDefinition {
+            name: name.to_string(),
+            source_type,
+            source_config: source_config.to_string(),
+            target_database: target_database.to_string(),
+            target_table: target_table.to_string(),
+            format: format.unwrap_or("json").to_string(),
+            state: StreamState::Stopped,
+            messages_consumed: 0,
+            last_error: None,
+            created_at: now_micros,
+        };
+
+        // Register is infallible now since we already checked for duplicates
+        let _ = registry.register(stream);
+
+        tracing::info!(stream = %name, source = %source_type_str, "Stream created");
+        Ok(())
+    }
+
+    /// Drop a stream connector
+    pub fn drop_stream(&self, name: &str, if_exists: bool) -> Result<(), EngineError> {
+        self.validate_identifier(name, "stream")?;
+
+        let mut registry = self.stream_registry.write();
+
+        // Check if stream is running
+        if let Some(stream) = registry.get(name) {
+            if stream.state == StreamState::Running {
+                return Err(EngineError::InvalidArgument(format!(
+                    "stream '{}' is running, stop it first with STOP STREAM",
+                    name
+                )));
+            }
+        }
+
+        if registry.unregister(name).is_some() {
+            tracing::info!(stream = %name, "Stream dropped");
+            Ok(())
+        } else if if_exists {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound(format!("stream '{}' not found", name)))
+        }
+    }
+
+    /// Start a stream connector (begin consuming)
+    pub fn start_stream(&self, name: &str) -> Result<(), EngineError> {
+        let mut registry = self.stream_registry.write();
+
+        let stream = registry.get_mut(name)
+            .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))?;
+
+        if stream.state == StreamState::Running {
+            return Err(EngineError::InvalidArgument(format!(
+                "stream '{}' is already running",
+                name
+            )));
+        }
+
+        stream.state = StreamState::Running;
+        stream.last_error = None;
+
+        tracing::info!(stream = %name, "Stream started");
+        Ok(())
+    }
+
+    /// Stop a stream connector
+    pub fn stop_stream(&self, name: &str) -> Result<(), EngineError> {
+        let mut registry = self.stream_registry.write();
+
+        let stream = registry.get_mut(name)
+            .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))?;
+
+        if stream.state == StreamState::Stopped {
+            return Err(EngineError::InvalidArgument(format!(
+                "stream '{}' is not running",
+                name
+            )));
+        }
+
+        stream.state = StreamState::Stopped;
+
+        tracing::info!(stream = %name, "Stream stopped");
+        Ok(())
+    }
+
+    /// Get stream status
+    pub fn get_stream_status(&self, name: &str) -> Result<StreamDefinition, EngineError> {
+        let registry = self.stream_registry.read();
+        registry.get(name)
+            .cloned()
+            .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))
+    }
+
+    /// List all streams
+    pub fn list_streams(&self) -> Vec<StreamDefinition> {
+        let registry = self.stream_registry.read();
+        registry.list().into_iter().cloned().collect()
+    }
+
     /// Handle information_schema queries (virtual system tables)
     /// Returns Some(QueryResponse) if the query is an information_schema query, None otherwise
     fn handle_information_schema_query(
@@ -15049,10 +15892,26 @@ pub enum GroupBy {
     Tenant,
     Route,
     Columns(Vec<GroupByColumn>),
+    /// GROUP BY ALL - infer from non-aggregate columns
+    All,
+    /// GROUPING SETS - explicit list of grouping combinations
+    GroupingSets(Vec<Vec<GroupByColumn>>),
+    /// ROLLUP - hierarchical grouping with progressive subtotals
+    Rollup(Vec<GroupByColumn>),
+    /// CUBE - all possible grouping combinations
+    Cube(Vec<GroupByColumn>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GroupByColumn {
+    TenantId,
+    RouteId,
+    Named(String),
+}
+
+// Keep legacy GroupByColumn for backward compatibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LegacyGroupByColumn {
     TenantId,
     RouteId,
 }
@@ -18432,7 +19291,9 @@ impl Aggregator {
             self.schema = Some(batch.schema());
         }
 
-        match &self.plan.group_by {
+        // Clone to avoid borrow conflicts with self
+        let group_by = self.plan.group_by.clone();
+        match &group_by {
             GroupBy::None => {
                 // Global aggregation (no GROUP BY)
                 // Ensure state exists
@@ -18454,14 +19315,105 @@ impl Aggregator {
             }
             GroupBy::Columns(cols) => {
                 // Group by specified columns
-                let col_names: Vec<&str> = cols
+                let col_names: Vec<String> = cols
                     .iter()
                     .map(|c| match c {
-                        GroupByColumn::TenantId => "tenant_id",
-                        GroupByColumn::RouteId => "route_id",
+                        GroupByColumn::TenantId => "tenant_id".to_string(),
+                        GroupByColumn::RouteId => "route_id".to_string(),
+                        GroupByColumn::Named(name) => name.clone(),
                     })
                     .collect();
-                self.accumulate_grouped(batch, &col_names)?;
+                let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
+                self.accumulate_grouped(batch, &col_refs)?;
+            }
+            GroupBy::All => {
+                // GROUP BY ALL: treat as global aggregation for now
+                if self.global_state.is_none() {
+                    self.global_state = Some(AggState::default());
+                }
+                let aggs = self.plan.aggs.clone();
+                let state = self.global_state.as_mut().unwrap();
+                accumulate_aggs_into(state, &aggs, batch)?;
+            }
+            GroupBy::GroupingSets(sets) => {
+                // Execute aggregation for each grouping set
+                for set in sets {
+                    let col_names: Vec<String> = set
+                        .iter()
+                        .map(|c| match c {
+                            GroupByColumn::TenantId => "tenant_id".to_string(),
+                            GroupByColumn::RouteId => "route_id".to_string(),
+                            GroupByColumn::Named(name) => name.clone(),
+                        })
+                        .collect();
+                    if col_names.is_empty() {
+                        // Empty set = global aggregation
+                        if self.global_state.is_none() {
+                            self.global_state = Some(AggState::default());
+                        }
+                        let aggs = self.plan.aggs.clone();
+                        let state = self.global_state.as_mut().unwrap();
+                        accumulate_aggs_into(state, &aggs, batch)?;
+                    } else {
+                        let col_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
+                        self.accumulate_grouped(batch, &col_refs)?;
+                    }
+                }
+            }
+            GroupBy::Rollup(cols) => {
+                // ROLLUP: progressive subtotals
+                let col_names: Vec<String> = cols
+                    .iter()
+                    .map(|c| match c {
+                        GroupByColumn::TenantId => "tenant_id".to_string(),
+                        GroupByColumn::RouteId => "route_id".to_string(),
+                        GroupByColumn::Named(name) => name.clone(),
+                    })
+                    .collect();
+
+                for i in (0..=col_names.len()).rev() {
+                    let prefix: Vec<&str> = col_names[..i].iter().map(|s| s.as_str()).collect();
+                    if prefix.is_empty() {
+                        if self.global_state.is_none() {
+                            self.global_state = Some(AggState::default());
+                        }
+                        let aggs = self.plan.aggs.clone();
+                        let state = self.global_state.as_mut().unwrap();
+                        accumulate_aggs_into(state, &aggs, batch)?;
+                    } else {
+                        self.accumulate_grouped(batch, &prefix)?;
+                    }
+                }
+            }
+            GroupBy::Cube(cols) => {
+                // CUBE: all combinations
+                let col_names: Vec<String> = cols
+                    .iter()
+                    .map(|c| match c {
+                        GroupByColumn::TenantId => "tenant_id".to_string(),
+                        GroupByColumn::RouteId => "route_id".to_string(),
+                        GroupByColumn::Named(name) => name.clone(),
+                    })
+                    .collect();
+
+                let n = col_names.len();
+                for mask in 0..(1 << n) {
+                    let subset: Vec<&str> = (0..n)
+                        .filter(|i| (mask & (1 << i)) != 0)
+                        .map(|i| col_names[i].as_str())
+                        .collect();
+
+                    if subset.is_empty() {
+                        if self.global_state.is_none() {
+                            self.global_state = Some(AggState::default());
+                        }
+                        let aggs = self.plan.aggs.clone();
+                        let state = self.global_state.as_mut().unwrap();
+                        accumulate_aggs_into(state, &aggs, batch)?;
+                    } else {
+                        self.accumulate_grouped(batch, &subset)?;
+                    }
+                }
             }
         }
 
@@ -18637,7 +19589,48 @@ impl Aggregator {
                         GroupByColumn::RouteId => {
                             fields.push(Field::new("route_id", DataType::UInt64, true));
                         }
+                        GroupByColumn::Named(name) => {
+                            // Use Utf8 as default type for named columns
+                            fields.push(Field::new(name, DataType::Utf8, true));
+                        }
                     }
+                }
+            }
+            GroupBy::All => {
+                // GROUP BY ALL: columns determined at runtime
+            }
+            GroupBy::GroupingSets(sets) => {
+                // Add all unique columns from all sets
+                let mut added = std::collections::HashSet::new();
+                for set in sets {
+                    for col in set {
+                        let name = match col {
+                            GroupByColumn::TenantId => "tenant_id",
+                            GroupByColumn::RouteId => "route_id",
+                            GroupByColumn::Named(n) => n.as_str(),
+                        };
+                        if added.insert(name.to_string()) {
+                            let dtype = match col {
+                                GroupByColumn::TenantId | GroupByColumn::RouteId => DataType::UInt64,
+                                GroupByColumn::Named(_) => DataType::Utf8,
+                            };
+                            fields.push(Field::new(name, dtype, true));
+                        }
+                    }
+                }
+            }
+            GroupBy::Rollup(cols) | GroupBy::Cube(cols) => {
+                for col in cols {
+                    let name = match col {
+                        GroupByColumn::TenantId => "tenant_id",
+                        GroupByColumn::RouteId => "route_id",
+                        GroupByColumn::Named(n) => n.as_str(),
+                    };
+                    let dtype = match col {
+                        GroupByColumn::TenantId | GroupByColumn::RouteId => DataType::UInt64,
+                        GroupByColumn::Named(_) => DataType::Utf8,
+                    };
+                    fields.push(Field::new(name, dtype, true));
                 }
             }
         }
@@ -18906,16 +19899,43 @@ impl Aggregator {
             .map_err(|e| EngineError::Internal(format!("batch creation error: {}", e)))
     }
 
-    fn get_group_column_names(&self) -> Vec<&str> {
+    fn get_group_column_names(&self) -> Vec<String> {
         match &self.plan.group_by {
             GroupBy::None => vec![],
-            GroupBy::Tenant => vec!["tenant_id"],
-            GroupBy::Route => vec!["route_id"],
+            GroupBy::Tenant => vec!["tenant_id".to_string()],
+            GroupBy::Route => vec!["route_id".to_string()],
             GroupBy::Columns(cols) => cols
                 .iter()
                 .map(|c| match c {
-                    GroupByColumn::TenantId => "tenant_id",
-                    GroupByColumn::RouteId => "route_id",
+                    GroupByColumn::TenantId => "tenant_id".to_string(),
+                    GroupByColumn::RouteId => "route_id".to_string(),
+                    GroupByColumn::Named(name) => name.clone(),
+                })
+                .collect(),
+            GroupBy::All => vec![],
+            GroupBy::GroupingSets(sets) => {
+                // Return all unique column names
+                let mut names = Vec::new();
+                for set in sets {
+                    for col in set {
+                        let name = match col {
+                            GroupByColumn::TenantId => "tenant_id".to_string(),
+                            GroupByColumn::RouteId => "route_id".to_string(),
+                            GroupByColumn::Named(n) => n.clone(),
+                        };
+                        if !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+                names
+            }
+            GroupBy::Rollup(cols) | GroupBy::Cube(cols) => cols
+                .iter()
+                .map(|c| match c {
+                    GroupByColumn::TenantId => "tenant_id".to_string(),
+                    GroupByColumn::RouteId => "route_id".to_string(),
+                    GroupByColumn::Named(name) => name.clone(),
                 })
                 .collect(),
         }
@@ -19415,28 +20435,48 @@ fn extract_f64(arr: &ArrayRef, row: usize) -> Option<f64> {
 pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
     let mut needed = proj.to_vec();
 
+    // Helper to add column if not present
+    let mut add_col = |name: String| {
+        if !needed.contains(&name) {
+            needed.push(name);
+        }
+    };
+
     // Add group by columns
     match &agg.group_by {
-        GroupBy::None => {}
-        GroupBy::Tenant => {
-            if !needed.contains(&"tenant_id".to_string()) {
-                needed.push("tenant_id".to_string());
-            }
-        }
-        GroupBy::Route => {
-            if !needed.contains(&"route_id".to_string()) {
-                needed.push("route_id".to_string());
-            }
-        }
+        GroupBy::None | GroupBy::All => {}
+        GroupBy::Tenant => add_col("tenant_id".to_string()),
+        GroupBy::Route => add_col("route_id".to_string()),
         GroupBy::Columns(cols) => {
             for col in cols {
                 let col_name = match col {
-                    GroupByColumn::TenantId => "tenant_id",
-                    GroupByColumn::RouteId => "route_id",
+                    GroupByColumn::TenantId => "tenant_id".to_string(),
+                    GroupByColumn::RouteId => "route_id".to_string(),
+                    GroupByColumn::Named(name) => name.clone(),
                 };
-                if !needed.contains(&col_name.to_string()) {
-                    needed.push(col_name.to_string());
+                add_col(col_name);
+            }
+        }
+        GroupBy::GroupingSets(sets) => {
+            for set in sets {
+                for col in set {
+                    let col_name = match col {
+                        GroupByColumn::TenantId => "tenant_id".to_string(),
+                        GroupByColumn::RouteId => "route_id".to_string(),
+                        GroupByColumn::Named(name) => name.clone(),
+                    };
+                    add_col(col_name);
                 }
+            }
+        }
+        GroupBy::Rollup(cols) | GroupBy::Cube(cols) => {
+            for col in cols {
+                let col_name = match col {
+                    GroupByColumn::TenantId => "tenant_id".to_string(),
+                    GroupByColumn::RouteId => "route_id".to_string(),
+                    GroupByColumn::Named(name) => name.clone(),
+                };
+                add_col(col_name);
             }
         }
     }

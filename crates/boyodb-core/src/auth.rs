@@ -16,7 +16,7 @@ use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -703,7 +703,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
         let content = serde_json::to_string_pretty(&*store)
             .map_err(|e| AuthError::Serialization(e.to_string()))?;
 
@@ -730,7 +730,8 @@ impl AuthManager {
         }
 
         // Also keep in memory buffer
-        if let Ok(mut log) = self.audit_log.write() {
+        {
+            let mut log = self.audit_log.write();
             log.push(entry);
             // Keep only last 10000 entries in memory
             if log.len() > 10000 {
@@ -741,26 +742,20 @@ impl AuthManager {
 
     /// Get recent audit log entries (from memory)
     pub fn get_audit_log(&self, limit: usize) -> Vec<AuditLogEntry> {
-        if let Ok(log) = self.audit_log.read() {
-            let start = log.len().saturating_sub(limit);
-            log[start..].to_vec()
-        } else {
-            Vec::new()
-        }
+        let log = self.audit_log.read();
+        let start = log.len().saturating_sub(limit);
+        log[start..].to_vec()
     }
 
     /// Get audit log entries filtered by event type
     pub fn get_audit_log_by_type(&self, event_type: &str, limit: usize) -> Vec<AuditLogEntry> {
-        if let Ok(log) = self.audit_log.read() {
-            log.iter()
-                .filter(|e| e.event_type == event_type)
-                .rev()
-                .take(limit)
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let log = self.audit_log.read();
+        log.iter()
+            .filter(|e| e.event_type == event_type)
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Validate password against policy
@@ -768,7 +763,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
         Self::validate_password_with_policy(&store.password_policy, password)
     }
 
@@ -787,7 +782,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if store.users.contains_key(username) {
             return Err(AuthError::UserAlreadyExists(username.to_string()));
@@ -837,7 +832,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if !store.users.contains_key(username) {
             return Err(AuthError::UserNotFound(username.to_string()));
@@ -849,7 +844,8 @@ impl AuthManager {
         self.persist()?;
 
         // Remove all sessions for this user
-        if let Ok(mut sessions) = self.sessions.write() {
+        {
+            let mut sessions = self.sessions.write();
             sessions.retain(|_, s| s.username != username);
         }
 
@@ -882,7 +878,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         // Extract policy values before mutable borrow
         let history_count = store.password_policy.history_count;
@@ -951,7 +947,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -989,7 +985,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1034,7 +1030,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1077,7 +1073,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         Ok(store
             .users
@@ -1099,7 +1095,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1122,7 +1118,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1144,7 +1140,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if store.roles.contains_key(name) {
             return Err(AuthError::RoleAlreadyExists(name.to_string()));
@@ -1184,7 +1180,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if !store.roles.contains_key(name) {
             return Err(AuthError::RoleNotFound(name.to_string()));
@@ -1226,7 +1222,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if !store.roles.contains_key(role) {
             return Err(AuthError::RoleNotFound(role.to_string()));
@@ -1275,7 +1271,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1313,7 +1309,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         Ok(store
             .roles
@@ -1345,7 +1341,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1412,7 +1408,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1458,7 +1454,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let role = store
             .roles
@@ -1524,7 +1520,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let role = store
             .roles
@@ -1577,7 +1573,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         // Extract policy values before mutable borrow
         let max_failed_attempts = store.password_policy.max_failed_attempts;
@@ -1688,7 +1684,8 @@ impl AuthManager {
             application_name: application_name.map(|s| s.to_string()),
         };
 
-        if let Ok(mut sessions) = self.sessions.write() {
+        {
+            let mut sessions = self.sessions.write();
             sessions.insert(session_id.clone(), session);
         }
 
@@ -1717,7 +1714,7 @@ impl AuthManager {
         let mut sessions = self
             .sessions
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let session = sessions
             .get_mut(session_id)
@@ -1737,7 +1734,7 @@ impl AuthManager {
         let mut sessions = self
             .sessions
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         if let Some(session) = sessions.remove(session_id) {
             self.audit(AuditLogEntry {
@@ -1760,9 +1757,8 @@ impl AuthManager {
 
     /// Clean up expired sessions
     pub fn cleanup_sessions(&self) {
-        if let Ok(mut sessions) = self.sessions.write() {
-            sessions.retain(|_, s| !s.is_expired());
-        }
+        let mut sessions = self.sessions.write();
+        sessions.retain(|_, s| !s.is_expired());
     }
 
     // ========== Authorization ==========
@@ -1777,7 +1773,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1840,15 +1836,12 @@ impl AuthManager {
 
     /// Check if authentication is required
     pub fn is_auth_required(&self) -> bool {
-        self.store.read().map(|s| s.require_auth).unwrap_or(false)
+        self.store.read().require_auth
     }
 
     /// Enable or disable authentication requirement
     pub fn set_auth_required(&self, required: bool) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+        let mut store = self.store.write();
         store.require_auth = required;
         drop(store);
         self.persist()
@@ -1856,22 +1849,19 @@ impl AuthManager {
 
     /// Get active sessions
     pub fn get_active_sessions(&self) -> Vec<SessionInfo> {
-        if let Ok(sessions) = self.sessions.read() {
-            sessions
-                .values()
-                .filter(|s| !s.is_expired())
-                .map(|s| SessionInfo {
-                    session_id: s.session_id[..8].to_string() + "...", // Partial ID for security
-                    username: s.username.clone(),
-                    created_at: s.created_at,
-                    last_activity: s.last_activity,
-                    client_ip: s.client_ip.clone(),
-                    application_name: s.application_name.clone(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let sessions = self.sessions.read();
+        sessions
+            .values()
+            .filter(|s| !s.is_expired())
+            .map(|s| SessionInfo {
+                session_id: s.session_id[..8].to_string() + "...", // Partial ID for security
+                username: s.username.clone(),
+                created_at: s.created_at,
+                last_activity: s.last_activity,
+                client_ip: s.client_ip.clone(),
+                application_name: s.application_name.clone(),
+            })
+            .collect()
     }
 
     /// Set default database for user
@@ -1884,7 +1874,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1911,7 +1901,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
 
         let user = store
             .users
@@ -1933,7 +1923,7 @@ impl AuthManager {
         let mut store = self
             .store
             .write()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
         store.password_policy = policy;
         drop(store);
         self.persist()
@@ -1944,7 +1934,7 @@ impl AuthManager {
         let store = self
             .store
             .read()
-            .map_err(|_| AuthError::Io("lock poisoned".into()))?;
+            ;
         Ok(store.password_policy.clone())
     }
 }
@@ -2160,7 +2150,8 @@ mod tests {
 
         // Create a session that's already expired
         let session_id = "testsession123";
-        if let Ok(mut sessions) = auth.sessions.write() {
+        {
+            let mut sessions = auth.sessions.write();
             sessions.insert(
                 session_id.to_string(),
                 Session {

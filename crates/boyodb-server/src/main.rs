@@ -6180,68 +6180,205 @@ where
             name,
             parameters,
             return_type,
-            body: _,
-            or_replace: _,
-            language: _,
+            body,
+            or_replace,
+            language,
         } => {
             require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
             let params_str: Vec<String> = parameters
                 .iter()
                 .map(|p| format!("{} {}", p.name, p.data_type))
                 .collect();
+            blocking(move || {
+                db.create_function(
+                    &name,
+                    parameters,
+                    &return_type,
+                    body,
+                    language,
+                    or_replace,
+                )
+                .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             Ok(Response::ok_message(&format!(
-                "CREATE FUNCTION {}({}) RETURNS {} - UDFs are parsed but not yet executed",
-                name,
-                params_str.join(", "),
-                return_type
+                "Function '{}' created with {} parameter(s)",
+                name_clone,
+                params_str.len()
             )))
         }
         DdlCommand::DropFunction { name, if_exists } => {
             require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
-            let msg = if if_exists {
-                format!("DROP FUNCTION IF EXISTS {} - acknowledged", name)
-            } else {
-                format!("DROP FUNCTION {} - acknowledged", name)
-            };
-            Ok(Response::ok_message(&msg))
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.drop_function(&name, if_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Function '{}' dropped", name_clone)))
         }
-        DdlCommand::ShowFunctions { pattern: _ } => {
-            Ok(Response::ok_message("No user-defined functions defined"))
+        DdlCommand::ShowFunctions { pattern } => {
+            let db = db.clone();
+            let functions = blocking(move || {
+                Ok::<_, ServerError>(db.list_functions(pattern.as_deref()))
+            })
+            .await?;
+            if functions.is_empty() {
+                Ok(Response::ok_message("No user-defined functions"))
+            } else {
+                let lines: Vec<String> = functions
+                    .iter()
+                    .map(|f| {
+                        let params: Vec<String> = f.parameters
+                            .iter()
+                            .map(|p| format!("{} {}", p.name, p.data_type))
+                            .collect();
+                        format!("{}({}) -> {}", f.name, params.join(", "), f.return_type)
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "User-defined functions ({}):\n{}",
+                    functions.len(),
+                    lines.join("\n")
+                )))
+            }
         }
         // Streaming (Kafka/Pulsar connectors)
         DdlCommand::CreateStream {
             name,
             source_type,
-            source_config: _,
-            target_table: _,
-            format: _,
+            source_config,
+            target_table,
+            format,
         } => {
             require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+
+            // Parse target table (database.table format)
+            let (target_db, target_tbl) = if let Some(target) = target_table {
+                if target.contains('.') {
+                    let parts: Vec<&str> = target.splitn(2, '.').collect();
+                    (parts[0].to_string(), parts[1].to_string())
+                } else {
+                    ("default".to_string(), target)
+                }
+            } else {
+                return Err(ServerError::BadRequest(
+                    "CREATE STREAM requires a target table (INTO clause)".into(),
+                ));
+            };
+
+            let target_db_clone = target_db.clone();
+            let target_tbl_clone = target_tbl.clone();
+
+            blocking(move || {
+                db.create_stream(
+                    &name,
+                    source_type,
+                    &source_config,
+                    &target_db,
+                    &target_tbl,
+                    format.as_deref(),
+                )
+                .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+
             Ok(Response::ok_message(&format!(
-                "CREATE STREAM {} FROM {:?} - Streaming is parsed but connector not yet implemented",
-                name, source_type
+                "Stream '{}' created (target: {}.{})",
+                name_clone, target_db_clone, target_tbl_clone
             )))
         }
         DdlCommand::DropStream { name, if_exists } => {
             require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
-            let msg = if if_exists {
-                format!("DROP STREAM IF EXISTS {} - acknowledged", name)
-            } else {
-                format!("DROP STREAM {} - acknowledged", name)
-            };
-            Ok(Response::ok_message(&msg))
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.drop_stream(&name, if_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Stream '{}' dropped", name_clone)))
         }
         DdlCommand::ShowStreams => {
-            Ok(Response::ok_message("No streams defined"))
+            let db = db.clone();
+            let streams = blocking(move || {
+                Ok::<_, ServerError>(db.list_streams())
+            })
+            .await?;
+
+            if streams.is_empty() {
+                Ok(Response::ok_message("No streams defined"))
+            } else {
+                let lines: Vec<String> = streams
+                    .iter()
+                    .map(|s| {
+                        let state = match &s.state {
+                            boyodb_core::StreamState::Stopped => "STOPPED",
+                            boyodb_core::StreamState::Running => "RUNNING",
+                            boyodb_core::StreamState::Error(e) => &format!("ERROR: {}", e),
+                        };
+                        format!(
+                            "{} | {:?} | {}.{} | {} | {} msgs",
+                            s.name, s.source_type, s.target_database, s.target_table,
+                            state, s.messages_consumed
+                        )
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Streams ({}):\n{}",
+                    streams.len(),
+                    lines.join("\n")
+                )))
+            }
         }
         DdlCommand::StartStream { name } => {
-            Ok(Response::ok_message(&format!("START STREAM {} - acknowledged (no-op)", name)))
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.start_stream(&name)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Stream '{}' started", name_clone)))
         }
         DdlCommand::StopStream { name } => {
-            Ok(Response::ok_message(&format!("STOP STREAM {} - acknowledged (no-op)", name)))
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.stop_stream(&name)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Stream '{}' stopped", name_clone)))
         }
         DdlCommand::ShowStreamStatus { name } => {
-            Ok(Response::ok_message(&format!("STREAM {} status: not running", name)))
+            let db = db.clone();
+            let status = blocking(move || {
+                db.get_stream_status(&name)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+
+            let state_str = match &status.state {
+                boyodb_core::StreamState::Stopped => "STOPPED".to_string(),
+                boyodb_core::StreamState::Running => "RUNNING".to_string(),
+                boyodb_core::StreamState::Error(e) => format!("ERROR: {}", e),
+            };
+
+            Ok(Response::ok_message(&format!(
+                "Stream: {}\nSource: {:?}\nConfig: {}\nTarget: {}.{}\nFormat: {}\nState: {}\nMessages consumed: {}\nLast error: {}",
+                status.name, status.source_type, status.source_config,
+                status.target_database, status.target_table, status.format,
+                state_str, status.messages_consumed,
+                status.last_error.as_deref().unwrap_or("none")
+            )))
         }
     }
 }
