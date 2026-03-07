@@ -1786,11 +1786,17 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }));
     }
 
-    // REPAIR SEGMENTS database.* or database.table - Remove missing and corrupted segments
+    // REPAIR SEGMENTS [FROM] database.* or database.table - Remove missing and corrupted segments
     if upper_trimmed.starts_with("REPAIR SEGMENTS ") {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
-        if tokens.len() >= 3 {
-            let table_name = tokens[2].trim_end_matches(';');
+        // Support both "REPAIR SEGMENTS db.table" and "REPAIR SEGMENTS FROM db.table"
+        let table_idx = if tokens.len() >= 4 && tokens[2].to_uppercase() == "FROM" {
+            3
+        } else {
+            2
+        };
+        if tokens.len() > table_idx {
+            let table_name = tokens[table_idx].trim_end_matches(';');
             // Check for wildcard: database.*
             if table_name.ends_with(".*") {
                 let db = table_name.trim_end_matches(".*");

@@ -545,6 +545,205 @@ func (c *PooledClient) SetDatabase(database string) {
 	c.config.Database = database
 }
 
+// Health checks if the server is healthy.
+func (c *PooledClient) Health() error {
+	return c.pool.Health()
+}
+
+// CreateDatabase creates a new database.
+func (c *PooledClient) CreateDatabase(name string) error {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op":   "createdatabase",
+		"name": name,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" {
+		return fmt.Errorf("create database failed: %s", resp.Message)
+	}
+	return nil
+}
+
+// CreateTable creates a new table in the specified database.
+func (c *PooledClient) CreateTable(database, table string) error {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op":       "createtable",
+		"database": database,
+		"table":    table,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" {
+		return fmt.Errorf("create table failed: %s", resp.Message)
+	}
+	return nil
+}
+
+// ListDatabases returns a list of all databases.
+func (c *PooledClient) ListDatabases() ([]string, error) {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op": "listdatabases",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("list databases failed: %s", resp.Message)
+	}
+	return resp.Databases, nil
+}
+
+// ListTables returns a list of all tables, optionally filtered by database.
+func (c *PooledClient) ListTables(database string) ([]TableInfo, error) {
+	req := map[string]interface{}{
+		"op": "listtables",
+	}
+	if database != "" {
+		req["database"] = database
+	}
+
+	resp, err := c.pool.sendRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("list tables failed: %s", resp.Message)
+	}
+	return resp.Tables, nil
+}
+
+// IngestCSV ingests CSV data into a table.
+func (c *PooledClient) IngestCSV(database, table string, csvData []byte, hasHeader bool, delimiter string) error {
+	req := map[string]interface{}{
+		"op":             "ingestcsv",
+		"database":       database,
+		"table":          table,
+		"payload_base64": base64.StdEncoding.EncodeToString(csvData),
+		"has_header":     hasHeader,
+	}
+	if delimiter != "" {
+		req["delimiter"] = delimiter
+	}
+
+	resp, err := c.pool.sendRequest(req)
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" {
+		return fmt.Errorf("ingest CSV failed: %s", resp.Message)
+	}
+	return nil
+}
+
+// IngestIPC ingests Arrow IPC data into a table.
+func (c *PooledClient) IngestIPC(database, table string, ipcData []byte) error {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op":             "ingestipc",
+		"database":       database,
+		"table":          table,
+		"payload_base64": base64.StdEncoding.EncodeToString(ipcData),
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" {
+		return fmt.Errorf("ingest IPC failed: %s", resp.Message)
+	}
+	return nil
+}
+
+// Explain returns the query execution plan.
+func (c *PooledClient) Explain(sql string) (string, error) {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op":  "explain",
+		"sql": sql,
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Status != "ok" {
+		return "", fmt.Errorf("explain failed: %s", resp.Message)
+	}
+	return string(resp.ExplainPlan), nil
+}
+
+// Metrics returns server metrics as JSON.
+func (c *PooledClient) Metrics() (string, error) {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op": "metrics",
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Status != "ok" {
+		return "", fmt.Errorf("metrics failed: %s", resp.Message)
+	}
+	return string(resp.Metrics), nil
+}
+
+// Transaction Support
+
+// Begin starts a new transaction.
+func (c *PooledClient) Begin() error {
+	return c.Exec("BEGIN")
+}
+
+// Commit commits the current transaction.
+func (c *PooledClient) Commit() error {
+	return c.Exec("COMMIT")
+}
+
+// Rollback aborts the current transaction.
+func (c *PooledClient) Rollback() error {
+	return c.Exec("ROLLBACK")
+}
+
+// InTransaction executes a function within a transaction.
+func (c *PooledClient) InTransaction(fn func() error) error {
+	if err := c.Begin(); err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	if err := fn(); err != nil {
+		if rbErr := c.Rollback(); rbErr != nil {
+			return fmt.Errorf("rollback failed after error (%v): %w", err, rbErr)
+		}
+		return err
+	}
+
+	if err := c.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// PoolStats returns statistics about the connection pool.
+func (c *PooledClient) PoolStats() PoolStats {
+	c.pool.mu.Lock()
+	defer c.pool.mu.Unlock()
+	return PoolStats{
+		PoolSize:   c.config.PoolSize,
+		Available:  len(c.pool.pool),
+		InUse:      c.config.PoolSize - len(c.pool.pool),
+		IsClosed:   c.pool.closed,
+	}
+}
+
+// PoolStats contains connection pool statistics.
+type PoolStats struct {
+	// PoolSize is the total number of connections
+	PoolSize int
+	// Available is the number of idle connections
+	Available int
+	// InUse is the number of connections currently in use
+	InUse int
+	// IsClosed indicates if the pool is closed
+	IsClosed bool
+}
+
 // helper function for base64 decoding
 func decodeBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)

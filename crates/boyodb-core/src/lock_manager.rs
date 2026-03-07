@@ -211,30 +211,47 @@ impl LockState {
 struct DeadlockDetector {
     /// Wait-for graph: txn -> set of txns it's waiting for
     wait_for: RwLock<HashMap<TransactionId, HashSet<TransactionId>>>,
+    /// Track when each transaction started waiting for cleanup of stale entries
+    wait_start_times: RwLock<HashMap<TransactionId, Instant>>,
 }
 
 impl DeadlockDetector {
     fn new() -> Self {
         DeadlockDetector {
             wait_for: RwLock::new(HashMap::new()),
+            wait_start_times: RwLock::new(HashMap::new()),
         }
     }
 
     /// Add a wait edge: waiter is waiting for holders
     fn add_wait(&self, waiter: TransactionId, holders: &[TransactionId]) {
-        let mut graph = self.wait_for.write();
-        let entry = graph.entry(waiter).or_insert_with(HashSet::new);
-        for holder in holders {
-            if *holder != waiter {
-                entry.insert(*holder);
+        // Use a single lock acquisition pattern to reduce race window
+        {
+            let mut graph = self.wait_for.write();
+            let entry = graph.entry(waiter).or_insert_with(HashSet::new);
+            for holder in holders {
+                if *holder != waiter {
+                    entry.insert(*holder);
+                }
             }
+        }
+        {
+            let mut times = self.wait_start_times.write();
+            times.entry(waiter).or_insert_with(Instant::now);
         }
     }
 
     /// Remove all wait edges for a transaction (when lock is granted or txn ends)
     fn remove_waiter(&self, txn_id: TransactionId) {
-        let mut graph = self.wait_for.write();
-        graph.remove(&txn_id);
+        // Remove from both maps atomically (same order always to avoid deadlock)
+        {
+            let mut graph = self.wait_for.write();
+            graph.remove(&txn_id);
+        }
+        {
+            let mut times = self.wait_start_times.write();
+            times.remove(&txn_id);
+        }
     }
 
     /// Remove a transaction from being waited on (when it releases locks)
@@ -242,6 +259,31 @@ impl DeadlockDetector {
         let mut graph = self.wait_for.write();
         for waiters in graph.values_mut() {
             waiters.remove(&txn_id);
+        }
+        // Also clean up empty entries to prevent memory growth
+        graph.retain(|_, v| !v.is_empty());
+    }
+
+    /// Cleanup stale wait entries older than the given duration
+    /// This handles orphaned entries from crashed/panicked transactions
+    fn cleanup_stale_waiters(&self, max_wait_duration: Duration) {
+        let now = Instant::now();
+        let stale_txns: Vec<TransactionId> = {
+            let times = self.wait_start_times.read();
+            times
+                .iter()
+                .filter(|(_, &start)| now.duration_since(start) > max_wait_duration)
+                .map(|(&txn_id, _)| txn_id)
+                .collect()
+        };
+
+        if !stale_txns.is_empty() {
+            let mut graph = self.wait_for.write();
+            let mut times = self.wait_start_times.write();
+            for txn_id in stale_txns {
+                graph.remove(&txn_id);
+                times.remove(&txn_id);
+            }
         }
     }
 
@@ -513,13 +555,47 @@ impl LockManager {
     }
 
     /// Wake up a waiting transaction (called when a lock is released)
-    fn wake_waiters(&self, target: &LockTarget) {
+    fn wake_waiters(&self, _target: &LockTarget) {
         // Wake up all waiters - they'll check if they can acquire the lock
         let waiters = self.waiters.lock();
         for condvar in waiters.values() {
             condvar.notify_all();
         }
         drop(waiters);
+
+        // Periodically clean up stale entries (every ~100 wakeups based on lock ID)
+        // This prevents memory growth from orphaned waiters
+        let lock_count = self.next_lock_id.load(Ordering::Relaxed);
+        if lock_count % 100 == 0 {
+            self.cleanup_stale_waiters();
+        }
+    }
+
+    /// Clean up orphaned waiter entries that may have been left behind
+    /// by transactions that crashed or panicked without proper cleanup
+    fn cleanup_stale_waiters(&self) {
+        // Clean up deadlock detector entries older than 2x the lock timeout
+        let max_wait = self.config.lock_timeout * 2;
+        self.deadlock_detector.cleanup_stale_waiters(max_wait);
+
+        // Clean up condvar entries for transactions that are no longer waiting
+        // by checking if they have any entries in the deadlock detector
+        let stale_condvar_txns: Vec<TransactionId> = {
+            let waiters = self.waiters.lock();
+            let detector_graph = self.deadlock_detector.wait_for.read();
+            waiters
+                .keys()
+                .filter(|txn_id| !detector_graph.contains_key(txn_id))
+                .cloned()
+                .collect()
+        };
+
+        if !stale_condvar_txns.is_empty() {
+            let mut waiters = self.waiters.lock();
+            for txn_id in stale_condvar_txns {
+                waiters.remove(&txn_id);
+            }
+        }
     }
 
     fn try_acquire(
@@ -689,9 +765,12 @@ impl LockManager {
             self.release(handle)?;
         }
 
-        // Clean up deadlock detector
+        // Clean up deadlock detector and waiters
         self.deadlock_detector.remove_waiter(txn_id);
         self.deadlock_detector.remove_holder(txn_id);
+
+        // Also clean up any orphaned condvar for this transaction
+        self.waiters.lock().remove(&txn_id);
 
         Ok(())
     }
