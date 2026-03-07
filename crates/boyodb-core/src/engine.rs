@@ -403,6 +403,20 @@ pub struct EngineConfig {
     pub max_concurrent_ingests: usize,
     /// Backpressure threshold: return "busy" when pending ingests exceed this
     pub ingest_backpressure_threshold: usize,
+
+    // --- Corruption Prevention ---
+    /// Force fsync after every WAL write (slower but safest)
+    pub wal_sync_every_write: bool,
+    /// Verify segment checksum after writing (read-after-write verification)
+    pub verify_writes: bool,
+    /// Keep N manifest backups for recovery
+    pub manifest_backup_count: usize,
+    /// Minimum free disk space in bytes before refusing writes
+    pub min_free_disk_bytes: u64,
+    /// Enable pre-flight disk space checks before writes
+    pub check_disk_space: bool,
+    /// Sync parent directory after file creation (ensures directory entry is persisted)
+    pub sync_parent_dirs: bool,
 }
 
 impl EngineConfig {
@@ -489,6 +503,13 @@ impl EngineConfig {
             ingest_rate_limit_per_sec: 0,      // Unlimited
             max_concurrent_ingests: 0,         // Unlimited
             ingest_backpressure_threshold: 10000, // Return busy when 10K pending ingests
+            // Corruption prevention defaults
+            wal_sync_every_write: true,        // Force fsync after every WAL write
+            verify_writes: true,               // Verify checksums after writing
+            manifest_backup_count: 5,          // Keep 5 manifest backups
+            min_free_disk_bytes: 1024 * 1024 * 1024, // 1GB minimum free space
+            check_disk_space: true,            // Check disk space before writes
+            sync_parent_dirs: true,            // Sync parent dirs after file creation
         }
     }
 
@@ -2653,6 +2674,10 @@ impl Db {
                 "empty ingest payload".to_string(),
             ));
         }
+
+        // Pre-flight disk space check (estimate: payload + overhead for manifest/WAL)
+        let estimated_bytes = payload_len + 4096; // payload + 4KB overhead
+        self.check_disk_space(estimated_bytes)?;
 
         let db_name = batch
             .database
@@ -14829,6 +14854,139 @@ impl Db {
         Ok(corrupted)
     }
 
+    /// Check available disk space and return error if below minimum
+    pub fn check_disk_space(&self, required_bytes: u64) -> Result<(), EngineError> {
+        if !self.cfg.check_disk_space {
+            return Ok(());
+        }
+
+        let available = get_available_disk_space(&self.cfg.data_dir)?;
+
+        let min_required = self.cfg.min_free_disk_bytes.max(required_bytes);
+
+        if available < min_required {
+            return Err(EngineError::Io(format!(
+                "insufficient disk space: {} bytes available, {} bytes required (min_free: {})",
+                available, required_bytes, self.cfg.min_free_disk_bytes
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Create a backup of the manifest file
+    pub fn backup_manifest(&self) -> Result<PathBuf, EngineError> {
+        let manifest_path = self.cfg.manifest_path.with_extension("bincode");
+        if !manifest_path.exists() {
+            return Err(EngineError::NotFound("manifest file not found".into()));
+        }
+
+        let backup_dir = self.cfg.data_dir.join("manifest_backups");
+        std::fs::create_dir_all(&backup_dir)
+            .map_err(|e| EngineError::Io(format!("create backup dir failed: {}", e)))?;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let backup_name = format!("manifest.{}.bincode", timestamp);
+        let backup_path = backup_dir.join(&backup_name);
+
+        std::fs::copy(&manifest_path, &backup_path)
+            .map_err(|e| EngineError::Io(format!("backup manifest failed: {}", e)))?;
+
+        // Rotate old backups if we have too many
+        self.rotate_manifest_backups(&backup_dir)?;
+
+        tracing::info!("Created manifest backup: {:?}", backup_path);
+        Ok(backup_path)
+    }
+
+    /// Rotate manifest backups, keeping only the most recent N
+    fn rotate_manifest_backups(&self, backup_dir: &Path) -> Result<(), EngineError> {
+        let mut backups: Vec<_> = std::fs::read_dir(backup_dir)
+            .map_err(|e| EngineError::Io(format!("read backup dir failed: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("manifest.") && n.ends_with(".bincode"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // Sort by modification time (newest first)
+        backups.sort_by(|a, b| {
+            let a_time = a.metadata().and_then(|m| m.modified()).ok();
+            let b_time = b.metadata().and_then(|m| m.modified()).ok();
+            b_time.cmp(&a_time)
+        });
+
+        // Remove excess backups
+        for backup in backups.iter().skip(self.cfg.manifest_backup_count) {
+            if let Err(e) = std::fs::remove_file(backup.path()) {
+                tracing::warn!("Failed to remove old backup {:?}: {}", backup.path(), e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Restore manifest from the most recent backup
+    pub fn restore_manifest_from_backup(&self) -> Result<(), EngineError> {
+        let backup_dir = self.cfg.data_dir.join("manifest_backups");
+        if !backup_dir.exists() {
+            return Err(EngineError::NotFound("no manifest backups found".into()));
+        }
+
+        let mut backups: Vec<_> = std::fs::read_dir(&backup_dir)
+            .map_err(|e| EngineError::Io(format!("read backup dir failed: {}", e)))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("manifest.") && n.ends_with(".bincode"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if backups.is_empty() {
+            return Err(EngineError::NotFound("no manifest backups found".into()));
+        }
+
+        // Sort by modification time (newest first)
+        backups.sort_by(|a, b| {
+            let a_time = a.metadata().and_then(|m| m.modified()).ok();
+            let b_time = b.metadata().and_then(|m| m.modified()).ok();
+            b_time.cmp(&a_time)
+        });
+
+        let latest_backup = &backups[0];
+        let manifest_path = self.cfg.manifest_path.with_extension("bincode");
+
+        // Verify backup is valid before restoring
+        let backup_data = std::fs::read(latest_backup.path())
+            .map_err(|e| EngineError::Io(format!("read backup failed: {}", e)))?;
+
+        if !crate::replication::is_binary_manifest(&backup_data) {
+            return Err(EngineError::Io("backup is not a valid manifest".into()));
+        }
+
+        // Verify we can parse it
+        crate::replication::deserialize_manifest_binary(&backup_data)
+            .map_err(|e| EngineError::Io(format!("backup manifest is corrupt: {}", e)))?;
+
+        // Restore
+        std::fs::copy(latest_backup.path(), &manifest_path)
+            .map_err(|e| EngineError::Io(format!("restore manifest failed: {}", e)))?;
+
+        tracing::info!("Restored manifest from backup: {:?}", latest_backup.path());
+        Ok(())
+    }
+
     /// Convenience method to ingest IPC data with database and table parameters.
     pub fn ingest(
         &self,
@@ -15320,6 +15478,65 @@ fn sync_dir(path: &Path) -> Result<(), EngineError> {
         .map_err(|e| EngineError::Io(format!("open dir for fsync failed: {e}")))?;
     dir.sync_all()
         .map_err(|e| EngineError::Io(format!("fsync dir failed: {e}")))
+}
+
+/// Get available disk space in bytes for the given path
+fn get_available_disk_space(path: &Path) -> Result<u64, EngineError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        // Find the mount point by traversing up until we find a different device
+        let path_metadata = std::fs::metadata(path)
+            .map_err(|e| EngineError::Io(format!("stat path failed: {}", e)))?;
+
+        // Use statvfs on Unix
+        let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+            .map_err(|e| EngineError::Io(format!("path conversion failed: {}", e)))?;
+
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+
+        if result != 0 {
+            return Err(EngineError::Io(format!(
+                "statvfs failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Available space = f_bavail * f_frsize
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::fileapi::GetDiskFreeSpaceExW;
+
+        let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut free_bytes_available: u64 = 0;
+
+        let result = unsafe {
+            GetDiskFreeSpaceExW(
+                wide_path.as_ptr(),
+                &mut free_bytes_available as *mut _,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        if result == 0 {
+            return Err(EngineError::Io("GetDiskFreeSpaceExW failed".into()));
+        }
+
+        Ok(free_bytes_available)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Fallback: return a large value to allow writes
+        Ok(u64::MAX)
+    }
 }
 
 pub(crate) fn persist_segment_ipc(

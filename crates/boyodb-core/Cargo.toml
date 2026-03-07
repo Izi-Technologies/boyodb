@@ -62,6 +62,7 @@ aws-sdk-s3 = "1.15"
 aws-credential-types = "1.1"
 ordered-float = { version = "4.2", features = ["serde"] }   # For ordered floats in B-Tree keys
 xxhash-rust = { version = "0.8", features = ["xxh64"] }     # Fast hashing for checksums
+libc = "0.2"                                                 # For disk space checking (statvfs)
 
 [features]
 default = []

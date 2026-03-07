@@ -203,12 +203,26 @@ impl TieredStorage {
     }
 
     /// Persist to LOCAL store only (Hot/Warm). Tiering manager handles S3 upload.
+    /// Includes write verification to detect silent data corruption.
     pub fn persist_segment_local(&self, segment_id: &str, data: &[u8]) -> Result<(), EngineError> {
+        self.persist_segment_local_with_verify(segment_id, data, true)
+    }
+
+    /// Persist segment with optional write verification
+    pub fn persist_segment_local_with_verify(
+        &self,
+        segment_id: &str,
+        data: &[u8],
+        verify: bool,
+    ) -> Result<(), EngineError> {
         use std::fs::{self, OpenOptions};
         use std::io::Write;
 
         let path = self.local_root.join(format!("{}.ipc", segment_id));
         let tmp_path = path.with_extension("tmp");
+
+        // Compute expected checksum before write
+        let expected_checksum = crate::engine::compute_checksum(data);
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -229,6 +243,22 @@ impl TieredStorage {
 
             file.sync_all()
                 .map_err(|e| EngineError::Io(format!("fsync segment tmp failed: {}", e)))?;
+        }
+
+        // Write verification: read back and verify checksum before rename
+        if verify {
+            let written_data = fs::read(&tmp_path)
+                .map_err(|e| EngineError::Io(format!("read-back verification failed: {}", e)))?;
+
+            let actual_checksum = crate::engine::compute_checksum(&written_data);
+            if actual_checksum != expected_checksum {
+                // Delete corrupt temp file
+                let _ = fs::remove_file(&tmp_path);
+                return Err(EngineError::Io(format!(
+                    "write verification failed for segment {}: checksum mismatch (expected {:016x}, got {:016x})",
+                    segment_id, expected_checksum, actual_checksum
+                )));
+            }
         }
 
         fs::rename(&tmp_path, &path)

@@ -1314,6 +1314,7 @@ dependencies = [
  "hex",
  "hostname",
  "hyperloglogplus",
+ "libc",
  "libm",
  "lru",
  "lz4_flex",

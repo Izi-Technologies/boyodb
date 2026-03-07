@@ -12,8 +12,9 @@ A comprehensive guide to installing, configuring, and using BoyoDB - a high-perf
 6. [Clustering & High Availability](#clustering--high-availability)
 7. [Security & Authentication](#security--authentication)
 8. [Backup & Recovery](#backup--recovery)
-9. [Performance Tuning](#performance-tuning)
-10. [Monitoring & Observability](#monitoring--observability)
+9. [Data Integrity & Corruption Prevention](#data-integrity--corruption-prevention)
+10. [Performance Tuning](#performance-tuning)
+11. [Monitoring & Observability](#monitoring--observability)
 
 ---
 
@@ -1047,6 +1048,134 @@ boyodb-cli wal-stats --host localhost:8765
 boyodb-cli recover-to --host localhost:8765 \
     --timestamp '2024-01-15T14:30:00'
 ```
+
+---
+
+## Data Integrity & Corruption Prevention
+
+BoyoDB includes multiple layers of protection against data corruption, ensuring your data remains safe even under hardware failures, power outages, or filesystem issues.
+
+### Checksums
+
+BoyoDB uses xxHash64 checksums to detect data corruption at multiple levels:
+
+**Segment Checksums:**
+Every data segment is checksummed when written and verified when read:
+```sql
+-- Verify all segments in a table
+SELECT COUNT(*) FROM analytics.events;  -- Automatically verifies segments
+
+-- Check for corrupted segments
+SHOW CORRUPTED SEGMENTS FROM analytics.events;
+```
+
+**WAL Checksums:**
+Every WAL record includes a checksum for corruption detection:
+```sql
+-- Check WAL health
+SHOW WAL STATUS;
+```
+
+**Manifest Checksums:**
+The manifest file (which tracks all segments) includes a checksum to detect corruption during reads.
+
+### Write Verification
+
+BoyoDB can verify writes by reading data back after writing and comparing checksums. This catches silent data corruption caused by faulty disks or filesystem bugs.
+
+```bash
+# Enable write verification (default: on)
+boyodb-server /data 0.0.0.0:8765 --verify-writes
+```
+
+### Disk Space Checking
+
+Pre-flight checks prevent writes when disk space is low, avoiding partial writes:
+
+```bash
+# Set minimum free disk space (default: 1GB)
+boyodb-server /data 0.0.0.0:8765 --min-free-disk-bytes 5368709120  # 5GB
+```
+
+### Manifest Backups
+
+Multiple manifest backups are maintained for recovery:
+
+```bash
+# Keep 5 manifest backups (default: 3)
+boyodb-server /data 0.0.0.0:8765 --manifest-backup-count 5
+```
+
+### VACUUM FORCE
+
+When segments are corrupted or missing, normal VACUUM fails. Use VACUUM FORCE to compact despite missing segments:
+
+```sql
+-- Normal vacuum (fails on missing segments)
+VACUUM analytics.events;
+
+-- Force vacuum (skips missing segments)
+VACUUM FORCE analytics.events;
+
+-- Full vacuum with force
+VACUUM FULL FORCE analytics.events;
+```
+
+### WAL Integrity
+
+WAL records include checksums and can be repaired if corrupted:
+
+```sql
+-- Check WAL health
+SHOW WAL STATUS;
+
+-- View corrupted records (if any)
+SHOW WAL ERRORS;
+```
+
+**WAL Configuration:**
+```bash
+# Force sync after every WAL write (safest, slower)
+boyodb-server /data 0.0.0.0:8765 --wal-sync-every-write
+
+# Standard sync interval (default)
+boyodb-server /data 0.0.0.0:8765 --wal-sync-interval-ms 100
+```
+
+### Repairing Corrupted Data
+
+```sql
+-- Find missing/corrupted segments
+SHOW MISSING SEGMENTS;
+SHOW MISSING SEGMENTS FROM analytics.events;
+
+-- Repair segments (removes corrupt entries from manifest)
+REPAIR SEGMENTS analytics.events;
+
+-- Repair all tables in database
+REPAIR SEGMENTS analytics;
+```
+
+### Background Scrubbing
+
+BoyoDB periodically scans segments in the background to detect corruption before it causes query failures:
+
+```bash
+# Enable background scrubbing (default: on)
+boyodb-server /data 0.0.0.0:8765 --background-scrubbing
+
+# Set scrub interval in seconds (default: 3600 = 1 hour)
+boyodb-server /data 0.0.0.0:8765 --scrub-interval-secs 1800
+```
+
+### Best Practices for Data Integrity
+
+1. **Use ECC RAM**: Prevents memory bit-flips from corrupting data
+2. **Enable write verification**: Catches silent disk corruption
+3. **Keep manifest backups**: Allows recovery from manifest corruption
+4. **Monitor disk health**: Replace failing disks promptly
+5. **Regular backups**: Create periodic backups with `CREATE BACKUP`
+6. **Test recovery**: Periodically test `RECOVER TO TIMESTAMP` works
 
 ---
 

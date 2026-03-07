@@ -1023,6 +1023,8 @@ Compact table segments to reduce segment count and reclaim space.
 ```sql
 VACUUM [database.]table_name;
 VACUUM FULL [database.]table_name;
+VACUUM FORCE [database.]table_name;
+VACUUM FULL FORCE [database.]table_name;
 ```
 
 **Modes:**
@@ -1031,6 +1033,8 @@ VACUUM FULL [database.]table_name;
 |------|-------------|
 | `VACUUM` | Rewrites fragmented segments (< 50% of target size) |
 | `VACUUM FULL` | Merges ALL segments into optimally-sized chunks |
+| `VACUUM FORCE` | Skips missing/corrupted segments during compaction |
+| `VACUUM FULL FORCE` | Full compaction, skipping any damaged segments |
 
 **Examples:**
 
@@ -1040,7 +1044,15 @@ VACUUM analytics.events;
 
 -- Full vacuum (merge all segments, slower but thorough)
 VACUUM FULL analytics.events;
+
+-- Force vacuum when segments are missing/corrupted
+VACUUM FORCE analytics.events;
+
+-- Full vacuum that skips damaged segments
+VACUUM FULL FORCE analytics.events;
 ```
+
+**Note:** Use `VACUUM FORCE` when normal VACUUM fails due to missing or corrupted segments. This mode removes damaged segment references from the manifest while compacting the remaining healthy segments.
 
 **Returns:**
 ```
