@@ -14332,7 +14332,7 @@ impl Db {
             }
         }
 
-        // Remove from manifest
+        // Remove from manifest and rebuild index
         {
             let mut manifest = self
                 .manifest
@@ -14341,16 +14341,12 @@ impl Db {
             manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
-        }
 
-        // Also update the manifest index
-        {
+            // Rebuild the entire index since entry indices have changed
             let mut index = self.manifest_index.write().map_err(|_| {
                 EngineError::Internal("manifest_index lock poisoned".into())
             })?;
-            for seg_id in &removed_ids {
-                index.segment_ids.remove(seg_id);
-            }
+            *index = ManifestIndex::build(&manifest.entries);
         }
 
         Ok(removed_ids)
