@@ -60,6 +60,10 @@ pub fn parsed_query_to_logical_plan(query: &ParsedQuery) -> Result<LogicalPlan, 
             JoinType::Right => OptimizerJoinType::Right,
             JoinType::FullOuter => OptimizerJoinType::Full,
             JoinType::Cross => OptimizerJoinType::Cross,
+            // Map new join types to closest optimizer equivalent
+            JoinType::AsOf | JoinType::AsOfLeft => OptimizerJoinType::Left,
+            JoinType::Semi => OptimizerJoinType::Semi,
+            JoinType::Anti => OptimizerJoinType::Anti,
         };
 
         let condition = JoinCondition::None; // Simplified - would parse ON clause
@@ -93,6 +97,29 @@ pub fn parsed_query_to_logical_plan(query: &ParsedQuery) -> Result<LogicalPlan, 
                 .map(|c| match c {
                     crate::sql::GroupByColumn::TenantId => "tenant_id".to_string(),
                     crate::sql::GroupByColumn::RouteId => "route_id".to_string(),
+                    crate::sql::GroupByColumn::Named(name) => name.clone(),
+                })
+                .collect(),
+            // Advanced GROUP BY features
+            crate::sql::GroupBy::All => vec![], // GROUP BY ALL handled at SQL layer
+            crate::sql::GroupBy::GroupingSets(sets) => sets
+                .first()
+                .map(|s| {
+                    s.iter()
+                        .map(|c| match c {
+                            crate::sql::GroupByColumn::TenantId => "tenant_id".to_string(),
+                            crate::sql::GroupByColumn::RouteId => "route_id".to_string(),
+                            crate::sql::GroupByColumn::Named(name) => name.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            crate::sql::GroupBy::Rollup(cols) | crate::sql::GroupBy::Cube(cols) => cols
+                .iter()
+                .map(|c| match c {
+                    crate::sql::GroupByColumn::TenantId => "tenant_id".to_string(),
+                    crate::sql::GroupByColumn::RouteId => "route_id".to_string(),
+                    crate::sql::GroupByColumn::Named(name) => name.clone(),
                 })
                 .collect(),
         };
