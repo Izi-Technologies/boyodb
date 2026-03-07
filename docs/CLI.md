@@ -291,6 +291,123 @@ Fetch WAL stats from a running server (superuser only).
 boyodb-cli wal-stats --host <HOST:PORT> [--token <TOKEN>] [--user <USER> --password <PASS>] [--tls] [--tls-ca <FILE>] [--tls-skip-verify]
 ```
 
+#### import
+
+Import data from a file into a table.
+
+```bash
+boyodb-cli import [OPTIONS] --table <TABLE> --input <FILE>
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--host <HOST>` | Server address | `localhost:8765` |
+| `--table <TABLE>` | Target table (database.table format) | Required |
+| `--input <FILE>` | Input file path | Required |
+| `--format <FMT>` | Input format (csv, json) | Auto-detect |
+| `--header` | CSV has header row | `true` |
+| `--batch-size <N>` | Rows per batch | `1000` |
+| `--progress` | Show progress during import | `false` |
+
+**Examples:**
+
+```bash
+# Import CSV with default settings
+boyodb-cli import --host localhost:8765 --table analytics.events --input data.csv
+
+# Import JSON with custom batch size
+boyodb-cli import --host localhost:8765 --table analytics.events --input data.json --batch-size 5000
+
+# Import with progress indicator
+boyodb-cli import --host localhost:8765 --table analytics.events --input large_file.csv --progress
+```
+
+**Output:**
+```
+Import completed: 50000 rows in 2.45s (20408 rows/sec, 50 batches)
+```
+
+#### repair
+
+Verify and repair database integrity.
+
+```bash
+boyodb-cli repair <DATA_DIR> [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--verify-only` | Check for issues without making changes | `false` |
+| `--remove-orphaned` | Remove orphaned segment files | `false` |
+| `--remove-missing` | Remove manifest entries for missing files | `false` |
+| `--rebuild-manifest` | Rebuild manifest from segment files | `false` |
+| `--verify-checksums` | Verify segment file checksums | `false` |
+
+**Examples:**
+
+```bash
+# Check database integrity without making changes
+boyodb-cli repair /var/lib/boyodb --verify-only
+
+# Remove orphaned segments (files not in manifest)
+boyodb-cli repair /var/lib/boyodb --remove-orphaned
+
+# Remove missing segments from manifest
+boyodb-cli repair /var/lib/boyodb --remove-missing
+
+# Full integrity check with checksum verification
+boyodb-cli repair /var/lib/boyodb --verify-only --verify-checksums
+```
+
+**Output:**
+```
+Database Repair Report
+======================
+Data directory: /var/lib/boyodb
+Databases found: 3
+Tables found: 12
+Segments in manifest: 1500
+Segment files on disk: 1498
+
+Issues found:
+  - 2 segments missing from disk
+  - 0 orphaned segment files
+
+Verification complete. Use --remove-missing to fix missing segments.
+```
+
+#### metrics
+
+Show server metrics.
+
+```bash
+boyodb-cli metrics --host <HOST:PORT> [--format <FORMAT>]
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--format` | Output format (table, json) | `table` |
+
+**Example:**
+
+```bash
+boyodb-cli metrics --host localhost:8765 --format json
+```
+
+#### info
+
+Show server information.
+
+```bash
+boyodb-cli info --host <HOST:PORT>
+```
+
 ---
 
 ## Interactive Shell

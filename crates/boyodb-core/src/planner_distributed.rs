@@ -656,6 +656,17 @@ fn distribute_aggregation(
                     output_column: agg_expr.output_name(),
                 });
             }
+            // MEDIAN, PERCENTILE, ARRAY_AGG, STRING_AGG require all values
+            // and cannot be efficiently distributed - fall back to single node
+            AggKind::Median { .. }
+            | AggKind::PercentileCont { .. }
+            | AggKind::PercentileDisc { .. }
+            | AggKind::ArrayAgg { .. }
+            | AggKind::StringAgg { .. } => {
+                // These aggregates cannot be distributed efficiently
+                // Return None to fall back to single-node execution
+                return None;
+            }
         }
     }
 

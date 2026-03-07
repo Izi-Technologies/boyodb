@@ -371,6 +371,10 @@ pub struct EngineConfig {
     pub constraint_validation_enabled: bool,
     /// Enable transaction support (ACID transactions, MVCC)
     pub transactions_enabled: bool,
+    /// Skip damaged segments (missing or checksum mismatch) during queries
+    /// When true, queries will continue with valid segments and log warnings
+    /// When false, queries will fail if any segment is damaged
+    pub skip_damaged_segments: bool,
 }
 
 impl EngineConfig {
@@ -444,7 +448,13 @@ impl EngineConfig {
             max_concurrent_transactions: 10000,
             constraint_validation_enabled: true,
             transactions_enabled: false,
+            skip_damaged_segments: true, // Default to true for resilience
         }
+    }
+
+    pub fn with_skip_damaged_segments(mut self, skip: bool) -> Self {
+        self.skip_damaged_segments = skip;
+        self
     }
 
     pub fn with_transactions_enabled(mut self, enabled: bool) -> Self {
@@ -1399,6 +1409,8 @@ pub struct Metrics {
     pub batch_cache_misses: AtomicU64,
     pub schema_cache_hits: AtomicU64,
     pub schema_cache_misses: AtomicU64,
+    /// Segments skipped due to being damaged (missing or checksum mismatch)
+    pub skipped_segments: AtomicU64,
 }
 
 impl Metrics {
@@ -1489,6 +1501,13 @@ impl Metrics {
             self.schema_cache_misses.load(Ordering::Relaxed)
         ));
 
+        out.push_str("# HELP boyodb_skipped_segments Segments skipped due to damage\n");
+        out.push_str("# TYPE boyodb_skipped_segments counter\n");
+        out.push_str(&format!(
+            "boyodb_skipped_segments {}\n",
+            self.skipped_segments.load(Ordering::Relaxed)
+        ));
+
         out
     }
 
@@ -1499,6 +1518,8 @@ impl Metrics {
         conn_max: usize,
         queries_admitted: u64,
         queries_rejected: u64,
+        queries_active: usize,
+        queries_max: usize,
     ) -> String {
         let mut out = self.to_prometheus();
 
@@ -1519,6 +1540,15 @@ impl Metrics {
         out.push_str("# HELP boyodb_throttler_rejected_total Total rejected queries (rate limited)\n");
         out.push_str("# TYPE boyodb_throttler_rejected_total counter\n");
         out.push_str(&format!("boyodb_throttler_rejected_total {}\n", queries_rejected));
+
+        // Active query concurrency metrics
+        out.push_str("# HELP boyodb_queries_active Currently executing queries\n");
+        out.push_str("# TYPE boyodb_queries_active gauge\n");
+        out.push_str(&format!("boyodb_queries_active {}\n", queries_active));
+
+        out.push_str("# HELP boyodb_queries_max Maximum concurrent queries allowed\n");
+        out.push_str("# TYPE boyodb_queries_max gauge\n");
+        out.push_str(&format!("boyodb_queries_max {}\n", queries_max));
 
         out
     }
@@ -3288,7 +3318,11 @@ impl Db {
                 break;
             }
             check_timeout()?;
-            let payload = self.load_segment_cached(entry)?;
+            // Use try_load to skip damaged segments
+            let payload = match self.try_load_segment_cached(entry)? {
+                Some(p) => p,
+                None => continue, // Skip damaged segment
+            };
             let original_size = payload.len() as u64;
 
             let mut segment_filter = filter.clone();
@@ -3334,7 +3368,11 @@ impl Db {
                     break;
                 }
                 check_timeout()?;
-                let payload = self.load_segment_cached(entry)?;
+                // Use try_load to skip damaged segments
+                let payload = match self.try_load_segment_cached(entry)? {
+                    Some(p) => p,
+                    None => continue, // Skip damaged segment
+                };
                 let original_size = payload.len() as u64;
 
                 let mut segment_filter = filter.clone();
@@ -3795,8 +3833,10 @@ impl Db {
                         if collected_rows_ref.load(Ordering::Relaxed) >= limit as u64 {
                             return None;
                         }
-                        let payload = match this.load_segment_cached(entry) {
-                            Ok(p) => p,
+                        // Use try_load to skip damaged segments
+                        let payload = match this.try_load_segment_cached(entry) {
+                            Ok(Some(p)) => p,
+                            Ok(None) => return None, // Skip damaged segment
                             Err(e) => return Some(Err(e)),
                         };
                         let filtered = match filter_ipc(&payload, filter_ref) {
@@ -3841,7 +3881,11 @@ impl Db {
                         break;
                     }
                     check_timeout()?;
-                    let payload = self.load_segment_cached(entry)?;
+                    // Use try_load to skip damaged segments
+                    let payload = match self.try_load_segment_cached(entry)? {
+                        Some(p) => p,
+                        None => continue, // Skip damaged segment
+                    };
                     let original_size = payload.len() as u64;
                     if offset_pushdown {
                         let mut segment_filter = filter.clone();
@@ -3973,12 +4017,16 @@ impl Db {
         conn_max: usize,
         queries_admitted: u64,
         queries_rejected: u64,
+        queries_active: usize,
+        queries_max: usize,
     ) -> String {
         self.metrics.to_prometheus_with_connections(
             conn_current,
             conn_max,
             queries_admitted,
             queries_rejected,
+            queries_active,
+            queries_max,
         )
     }
 
@@ -4006,6 +4054,29 @@ impl Db {
         let payload = load_segment(&self.storage, entry)?;
         let arc_payload = cache.insert(entry.segment_id.clone(), payload);
         Ok(arc_payload)
+    }
+
+    /// Try to load segment, returning None if damaged and skip_damaged_segments is enabled
+    /// Returns Ok(Some(payload)) on success, Ok(None) if skipped, Err if skip is disabled
+    fn try_load_segment_cached(
+        &self,
+        entry: &ManifestEntry,
+    ) -> Result<Option<Arc<Vec<u8>>>, EngineError> {
+        match self.load_segment_cached(entry) {
+            Ok(payload) => Ok(Some(payload)),
+            Err(e) if self.cfg.skip_damaged_segments => {
+                tracing::warn!(
+                    "Skipping damaged segment {} ({}.{}): {}",
+                    entry.segment_id,
+                    entry.database,
+                    entry.table,
+                    e
+                );
+                self.metrics.skipped_segments.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn load_segment_batches_cached(
@@ -7227,6 +7298,59 @@ impl Db {
         }
 
         Ok(None)
+    }
+
+    /// Get the total number of segments in the manifest
+    pub fn segment_count(&self) -> usize {
+        self.manifest
+            .read()
+            .map(|m| m.entries.len())
+            .unwrap_or(0)
+    }
+
+    /// Compact all tables in the database
+    /// Returns the number of tables that were compacted
+    pub fn compact_all(&self) -> Result<usize, EngineError> {
+        if !self.cfg.enable_compaction {
+            return Ok(0);
+        }
+
+        // Get list of all unique database.table pairs
+        let tables: Vec<(String, String)> = {
+            let manifest = self.manifest.read().map_err(|_| {
+                EngineError::Internal("manifest lock poisoned".into())
+            })?;
+
+            let mut tables = std::collections::HashSet::new();
+            for entry in &manifest.entries {
+                tables.insert((entry.database.clone(), entry.table.clone()));
+            }
+            tables.into_iter().collect()
+        };
+
+        let mut compacted = 0;
+        for (database, table) in tables {
+            // Try to compact each table, continue on error
+            match self.compact_table(&database, &table) {
+                Ok(Some(_)) => {
+                    compacted += 1;
+                    tracing::debug!(database = %database, table = %table, "compacted table");
+                }
+                Ok(None) => {
+                    // No compaction needed for this table
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        database = %database,
+                        table = %table,
+                        error = %e,
+                        "failed to compact table"
+                    );
+                }
+            }
+        }
+
+        Ok(compacted)
     }
 
     fn compact_entries(
@@ -12276,16 +12400,34 @@ impl Db {
         cfg.auto_compact_interval_secs = 0;
 
         std::thread::spawn(move || {
+            // Create a Tokio runtime for the background thread
+            // This is needed because TieredStorage requires a Tokio runtime handle
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to create tokio runtime for compaction loop");
+                    return;
+                }
+            };
+
             let interval = std::time::Duration::from_secs(interval_secs);
-            match Db::open(cfg) {
-                Ok(db) => loop {
-                    std::thread::sleep(interval);
-                    if let Err(e) = db.run_background_compaction() {
-                        tracing::warn!(error = %e, "background compaction loop failed");
-                    }
-                },
+
+            // Open the Db within the runtime context
+            let db = match rt.block_on(async { Db::open(cfg) }) {
+                Ok(db) => db,
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to start background compaction loop");
+                    return;
+                }
+            };
+
+            loop {
+                std::thread::sleep(interval);
+                if let Err(e) = db.run_background_compaction() {
+                    tracing::warn!(error = %e, "background compaction loop failed");
                 }
             }
         });
@@ -12804,23 +12946,34 @@ impl Db {
 
     pub fn health_check(&self) -> Result<(), EngineError> {
         // Lightweight health check: ensure manifest is readable and segments dir exists.
+        // Note: We no longer fail on missing/corrupted segments - queries will skip them.
         let manifest = load_manifest(&self.cfg.manifest_path)?;
         if !self.cfg.segments_dir.exists() {
             return Err(EngineError::Internal(
                 "segments directory missing".to_string(),
             ));
         }
-        for entry in manifest.entries {
+        // Just log missing segments as warnings, don't fail the health check
+        // This allows the server to start and queries to proceed (skipping bad segments)
+        let mut missing_count = 0;
+        for entry in &manifest.entries {
             let path = self
                 .cfg
                 .segments_dir
                 .join(format!("{}.ipc", entry.segment_id));
             if !path.exists() {
-                return Err(EngineError::Internal(format!(
-                    "segment missing on disk: {}",
-                    entry.segment_id
-                )));
+                missing_count += 1;
+                tracing::warn!(
+                    "Segment missing on disk: {} (table: {}.{})",
+                    entry.segment_id, entry.database, entry.table
+                );
             }
+        }
+        if missing_count > 0 {
+            tracing::warn!(
+                "{} segments missing from disk. Run CHECK MANIFEST for details, REPAIR ALL SEGMENTS to fix.",
+                missing_count
+            );
         }
         Ok(())
     }
@@ -12975,6 +13128,249 @@ impl Db {
             .unwrap_or(0)
     }
 
+    /// Get server information including version and statistics
+    pub fn get_server_info(&self) -> Result<ServerInfo, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        Ok(ServerInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            database_count: manifest.databases.len(),
+            table_count: manifest.tables.len(),
+            segment_count: manifest.entries.len(),
+            manifest_version: manifest.version,
+            wal_lsn: self.wal_lsn(),
+        })
+    }
+
+    /// Find segments that are in the manifest but missing from disk
+    pub fn find_missing_segments(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<MissingSegment>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut missing = Vec::new();
+        for entry in &manifest.entries {
+            // Filter by database/table if specified
+            if let Some(db) = database {
+                if entry.database != db {
+                    continue;
+                }
+            }
+            if let Some(tbl) = table {
+                if entry.table != tbl {
+                    continue;
+                }
+            }
+
+            // Check if file exists
+            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+            if !path.exists() {
+                missing.push(MissingSegment {
+                    segment_id: entry.segment_id.clone(),
+                    database: entry.database.clone(),
+                    table: entry.table.clone(),
+                    size_bytes: entry.size_bytes,
+                });
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Find segments that exist on disk but have checksum mismatches
+    pub fn find_corrupted_segments(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<CorruptedSegment>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut corrupted = Vec::new();
+        for entry in &manifest.entries {
+            // Filter by database/table if specified
+            if let Some(db) = database {
+                if entry.database != db {
+                    continue;
+                }
+            }
+            if let Some(tbl) = table {
+                if entry.table != tbl {
+                    continue;
+                }
+            }
+
+            // Check if file exists
+            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+            if path.exists() {
+                // Read and verify checksum
+                match std::fs::read(&path) {
+                    Ok(data) => {
+                        let actual_checksum = compute_checksum(&data);
+                        if actual_checksum != entry.checksum {
+                            corrupted.push(CorruptedSegment {
+                                segment_id: entry.segment_id.clone(),
+                                database: entry.database.clone(),
+                                table: entry.table.clone(),
+                                size_bytes: entry.size_bytes,
+                                expected_checksum: entry.checksum,
+                                actual_checksum,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        // If we can't read it, treat it as corrupted with checksum 0
+                        corrupted.push(CorruptedSegment {
+                            segment_id: entry.segment_id.clone(),
+                            database: entry.database.clone(),
+                            table: entry.table.clone(),
+                            size_bytes: entry.size_bytes,
+                            expected_checksum: entry.checksum,
+                            actual_checksum: 0,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(corrupted)
+    }
+
+    /// Find all damaged segments (both missing and corrupted)
+    pub fn find_damaged_segments(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<DamagedSegment>, EngineError> {
+        let missing = self.find_missing_segments(database, table)?;
+        let corrupted = self.find_corrupted_segments(database, table)?;
+
+        let mut damaged: Vec<DamagedSegment> = missing
+            .into_iter()
+            .map(DamagedSegment::Missing)
+            .collect();
+        damaged.extend(corrupted.into_iter().map(DamagedSegment::Corrupted));
+
+        Ok(damaged)
+    }
+
+    /// Repair segments by removing missing and corrupted segment entries from the manifest
+    /// Also deletes corrupted segment files from disk
+    ///
+    /// - database=None, table=None: repair all segments in all databases
+    /// - database=Some(db), table=None: repair all segments in a specific database
+    /// - database=Some(db), table=Some(tbl): repair segments for a specific table
+    pub fn repair_segments(
+        &self,
+        database: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<String>, EngineError> {
+        let missing = self.find_missing_segments(database, table)?;
+        let corrupted = self.find_corrupted_segments(database, table)?;
+
+        if missing.is_empty() && corrupted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect all segment IDs to remove
+        let mut removed_ids: Vec<String> = missing.iter().map(|m| m.segment_id.clone()).collect();
+        removed_ids.extend(corrupted.iter().map(|c| c.segment_id.clone()));
+
+        let remove_set: std::collections::HashSet<String> =
+            removed_ids.iter().cloned().collect();
+
+        // Delete corrupted segment files from disk
+        for seg in &corrupted {
+            let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+            if path.exists() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        "Failed to delete corrupted segment file {}: {}",
+                        seg.segment_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Remove from manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        }
+
+        // Also update the manifest index
+        {
+            let mut index = self.manifest_index.write().map_err(|_| {
+                EngineError::Internal("manifest_index lock poisoned".into())
+            })?;
+            for seg_id in &removed_ids {
+                index.segment_ids.remove(seg_id);
+            }
+        }
+
+        Ok(removed_ids)
+    }
+
+    /// Check manifest integrity and return a summary of issues
+    pub fn check_manifest(&self) -> Result<ManifestCheckResult, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let missing = self.find_missing_segments(None, None)?;
+        let corrupted = self.find_corrupted_segments(None, None)?;
+
+        // Find orphaned files (files on disk not in manifest)
+        let mut orphaned_files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.cfg.segments_dir) {
+            let manifest_segment_ids: std::collections::HashSet<String> = manifest
+                .entries
+                .iter()
+                .map(|e| e.segment_id.clone())
+                .collect();
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "ipc") {
+                    if let Some(stem) = path.file_stem() {
+                        let segment_id = stem.to_string_lossy().to_string();
+                        if !manifest_segment_ids.contains(&segment_id) {
+                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            orphaned_files.push(OrphanedFile {
+                                path: path.to_string_lossy().to_string(),
+                                size_bytes: size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ManifestCheckResult {
+            total_segments: manifest.entries.len(),
+            total_databases: manifest.databases.len(),
+            total_tables: manifest.tables.len(),
+            missing_segments: missing,
+            corrupted_segments: corrupted,
+            orphaned_files,
+            manifest_version: manifest.version,
+        })
+    }
+
     /// Convenience method to ingest IPC data with database and table parameters.
     pub fn ingest(
         &self,
@@ -13084,6 +13480,63 @@ pub struct TableDescription {
     pub watermark_max: Option<u64>,
     pub event_time_min: Option<u64>,
     pub event_time_max: Option<u64>,
+}
+
+/// Server information and statistics
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerInfo {
+    pub version: String,
+    pub database_count: usize,
+    pub table_count: usize,
+    pub segment_count: usize,
+    pub manifest_version: u64,
+    pub wal_lsn: u64,
+}
+
+/// Information about a missing segment (in manifest but not on disk)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MissingSegment {
+    pub segment_id: String,
+    pub database: String,
+    pub table: String,
+    pub size_bytes: u64,
+}
+
+/// Information about a corrupted segment (checksum mismatch)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CorruptedSegment {
+    pub segment_id: String,
+    pub database: String,
+    pub table: String,
+    pub size_bytes: u64,
+    pub expected_checksum: u64,
+    pub actual_checksum: u64,
+}
+
+/// Combined damaged segment info (either missing or corrupted)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum DamagedSegment {
+    Missing(MissingSegment),
+    Corrupted(CorruptedSegment),
+}
+
+/// File on disk that is not referenced in the manifest
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrphanedFile {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// Result of checking manifest integrity
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ManifestCheckResult {
+    pub total_segments: usize,
+    pub total_databases: usize,
+    pub total_tables: usize,
+    pub missing_segments: Vec<MissingSegment>,
+    pub corrupted_segments: Vec<CorruptedSegment>,
+    pub orphaned_files: Vec<OrphanedFile>,
+    pub manifest_version: u64,
 }
 
 #[allow(dead_code)]
@@ -14321,6 +14774,15 @@ impl AggregateExpr {
             AggKind::VarianceSamp { column } => format!("var_samp_{}", column),
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+            AggKind::Median { column } => format!("median_{}", column),
+            AggKind::PercentileCont { column, percentile } => {
+                format!("percentile_cont_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::PercentileDisc { column, percentile } => {
+                format!("percentile_disc_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::ArrayAgg { column, .. } => format!("array_agg_{}", column),
+            AggKind::StringAgg { column, .. } => format!("string_agg_{}", column),
         }
     }
 }
@@ -14345,6 +14807,11 @@ pub enum AggKind {
     VarianceSamp { column: String },
     VariancePop { column: String },
     ApproxCountDistinct { column: String },
+    Median { column: String },
+    PercentileCont { column: String, percentile: f64 },
+    PercentileDisc { column: String, percentile: f64 },
+    ArrayAgg { column: String, distinct: bool },
+    StringAgg { column: String, delimiter: String, distinct: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -14395,6 +14862,19 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
         crate::sql::AggKind::VariancePop { column } => AggKind::VariancePop { column },
         crate::sql::AggKind::ApproxCountDistinct { column } => {
             AggKind::ApproxCountDistinct { column }
+        }
+        crate::sql::AggKind::Median { column } => AggKind::Median { column },
+        crate::sql::AggKind::PercentileCont { column, percentile } => {
+            AggKind::PercentileCont { column, percentile }
+        }
+        crate::sql::AggKind::PercentileDisc { column, percentile } => {
+            AggKind::PercentileDisc { column, percentile }
+        }
+        crate::sql::AggKind::ArrayAgg { column, distinct } => {
+            AggKind::ArrayAgg { column, distinct }
+        }
+        crate::sql::AggKind::StringAgg { column, delimiter, distinct } => {
+            AggKind::StringAgg { column, delimiter, distinct }
         }
     }
 }
@@ -15294,6 +15774,96 @@ fn evaluate_scalar_function(
                 }
             }
             Ok(ComputedValue::Null)
+        }
+
+        // Regex functions
+        ScalarFunction::RegexpReplace { expr, pattern, replacement, flags } => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::String(s) => {
+                    let case_insensitive = flags.as_ref().map(|f| f.contains('i')).unwrap_or(false);
+                    let global = flags.as_ref().map(|f| f.contains('g')).unwrap_or(true);
+
+                    let re = if case_insensitive {
+                        regex::RegexBuilder::new(pattern)
+                            .case_insensitive(true)
+                            .build()
+                    } else {
+                        regex::Regex::new(pattern)
+                    };
+
+                    match re {
+                        Ok(re) => {
+                            let result = if global {
+                                re.replace_all(&s, replacement.as_str()).to_string()
+                            } else {
+                                re.replace(&s, replacement.as_str()).to_string()
+                            };
+                            Ok(ComputedValue::String(result))
+                        }
+                        Err(e) => Err(EngineError::InvalidArgument(
+                            format!("Invalid regex pattern: {}", e),
+                        )),
+                    }
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::RegexpMatch { expr, pattern, flags } => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::String(s) => {
+                    let case_insensitive = flags.as_ref().map(|f| f.contains('i')).unwrap_or(false);
+
+                    let re = if case_insensitive {
+                        regex::RegexBuilder::new(pattern)
+                            .case_insensitive(true)
+                            .build()
+                    } else {
+                        regex::Regex::new(pattern)
+                    };
+
+                    match re {
+                        Ok(re) => {
+                            // Return true/false as integer (1/0) for SQL compatibility
+                            let matches = re.is_match(&s);
+                            Ok(ComputedValue::Integer(if matches { 1 } else { 0 }))
+                        }
+                        Err(e) => Err(EngineError::InvalidArgument(
+                            format!("Invalid regex pattern: {}", e),
+                        )),
+                    }
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::RegexpExtract { expr, pattern, group_index } => {
+            let val = evaluate_expr(expr, ctx)?;
+            match val {
+                ComputedValue::String(s) => {
+                    match regex::Regex::new(pattern) {
+                        Ok(re) => {
+                            if let Some(caps) = re.captures(&s) {
+                                let idx = group_index.unwrap_or(0) as usize;
+                                if let Some(m) = caps.get(idx) {
+                                    Ok(ComputedValue::String(m.as_str().to_string()))
+                                } else {
+                                    Ok(ComputedValue::Null)
+                                }
+                            } else {
+                                Ok(ComputedValue::Null)
+                            }
+                        }
+                        Err(e) => Err(EngineError::InvalidArgument(
+                            format!("Invalid regex pattern: {}", e),
+                        )),
+                    }
+                }
+                ComputedValue::Null => Ok(ComputedValue::Null),
+                _ => Ok(ComputedValue::Null),
+            }
         }
 
         // Math functions
@@ -17598,6 +18168,12 @@ struct AggState {
     /// For AVG: sum and count per column
     avg_sums: HashMap<String, f64>,
     avg_counts: HashMap<String, u64>,
+    /// For MEDIAN/PERCENTILE: collect all values per column
+    percentile_values: HashMap<String, Vec<f64>>,
+    /// For ARRAY_AGG: collect all values per column as strings
+    array_agg_values: HashMap<String, Vec<String>>,
+    /// For STRING_AGG: collect all string values per column
+    string_agg_values: HashMap<String, Vec<String>>,
 }
 
 impl Aggregator {
@@ -17863,6 +18439,11 @@ impl Aggregator {
                 AggKind::VarianceSamp { .. } => DataType::Float64,
                 AggKind::VariancePop { .. } => DataType::Float64,
                 AggKind::ApproxCountDistinct { .. } => DataType::UInt64,
+                AggKind::Median { .. } => DataType::Float64,
+                AggKind::PercentileCont { .. } => DataType::Float64,
+                AggKind::PercentileDisc { .. } => DataType::Float64,
+                AggKind::ArrayAgg { .. } => DataType::Utf8, // Store as JSON string for now
+                AggKind::StringAgg { .. } => DataType::Utf8,
             };
             fields.push(Field::new(name, dtype, true));
         }
@@ -17930,7 +18511,53 @@ impl Aggregator {
                         .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
                 }
-                _ => {
+                AggKind::Median { column } => {
+                    let result = if let Some(values) = state.percentile_values.get(column) {
+                        let mut sorted = values.clone();
+                        compute_percentile(&mut sorted, 0.5, true)
+                    } else {
+                        0.0
+                    };
+                    Arc::new(Float64Array::from(vec![result]))
+                }
+                AggKind::PercentileCont { column, percentile } => {
+                    let result = if let Some(values) = state.percentile_values.get(column) {
+                        let mut sorted = values.clone();
+                        compute_percentile(&mut sorted, *percentile, true)
+                    } else {
+                        0.0
+                    };
+                    Arc::new(Float64Array::from(vec![result]))
+                }
+                AggKind::PercentileDisc { column, percentile } => {
+                    let result = if let Some(values) = state.percentile_values.get(column) {
+                        let mut sorted = values.clone();
+                        compute_percentile(&mut sorted, *percentile, false)
+                    } else {
+                        0.0
+                    };
+                    Arc::new(Float64Array::from(vec![result]))
+                }
+                AggKind::ArrayAgg { column, .. } => {
+                    let json = if let Some(values) = state.array_agg_values.get(column) {
+                        serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+                    } else {
+                        "[]".to_string()
+                    };
+                    Arc::new(StringArray::from(vec![json]))
+                }
+                AggKind::StringAgg { column, delimiter, .. } => {
+                    let result = if let Some(values) = state.string_agg_values.get(column) {
+                        values.join(delimiter)
+                    } else {
+                        String::new()
+                    };
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::StddevSamp { .. }
+                | AggKind::StddevPop { .. }
+                | AggKind::VarianceSamp { .. }
+                | AggKind::VariancePop { .. } => {
                     // Not implemented - return NULL
                     Arc::new(Float64Array::from(vec![None::<f64>]))
                 }
@@ -18242,13 +18869,226 @@ fn accumulate_aggs_into(
                     }
                 }
             }
-            _ => {
-                // StddevSamp, StddevPop, VarianceSamp, VariancePop
+            AggKind::StddevSamp { .. }
+            | AggKind::StddevPop { .. }
+            | AggKind::VarianceSamp { .. }
+            | AggKind::VariancePop { .. } => {
                 // Not yet implemented - would need two-pass or online algorithms
+            }
+            AggKind::Median { column } | AggKind::PercentileCont { column, .. } | AggKind::PercentileDisc { column, .. } => {
+                // Collect all values for percentile computation
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let values = state
+                        .percentile_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_numeric_values(col, values);
+                }
+            }
+            AggKind::ArrayAgg { column, distinct } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let values = state
+                        .array_agg_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_string_values(col, values, *distinct);
+                }
+            }
+            AggKind::StringAgg { column, distinct, .. } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let values = state
+                        .string_agg_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_string_values(col, values, *distinct);
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Collect numeric values from an array column into a Vec
+fn collect_numeric_values(col: &ArrayRef, values: &mut Vec<f64>) {
+    use arrow_array::*;
+
+    match col.data_type() {
+        DataType::Int8 => {
+            let arr = col.as_any().downcast_ref::<Int8Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::Int16 => {
+            let arr = col.as_any().downcast_ref::<Int16Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::Int32 => {
+            let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::Int64 => {
+            let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::UInt8 => {
+            let arr = col.as_any().downcast_ref::<UInt8Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::UInt16 => {
+            let arr = col.as_any().downcast_ref::<UInt16Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::UInt32 => {
+            let arr = col.as_any().downcast_ref::<UInt32Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::UInt64 => {
+            let arr = col.as_any().downcast_ref::<UInt64Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::Float32 => {
+            let arr = col.as_any().downcast_ref::<Float32Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i) as f64);
+                }
+            }
+        }
+        DataType::Float64 => {
+            let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    values.push(arr.value(i));
+                }
+            }
+        }
+        _ => {} // Unsupported type
+    }
+}
+
+/// Collect string values from an array column into a Vec
+fn collect_string_values(col: &ArrayRef, values: &mut Vec<String>, distinct: bool) {
+    use arrow_array::*;
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<String> = if distinct {
+        values.iter().cloned().collect()
+    } else {
+        HashSet::new()
+    };
+
+    match col.data_type() {
+        DataType::Utf8 => {
+            let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let s = arr.value(i).to_string();
+                    if distinct {
+                        if !seen.contains(&s) {
+                            seen.insert(s.clone());
+                            values.push(s);
+                        }
+                    } else {
+                        values.push(s);
+                    }
+                }
+            }
+        }
+        DataType::LargeUtf8 => {
+            let arr = col.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let s = arr.value(i).to_string();
+                    if distinct {
+                        if !seen.contains(&s) {
+                            seen.insert(s.clone());
+                            values.push(s);
+                        }
+                    } else {
+                        values.push(s);
+                    }
+                }
+            }
+        }
+        _ => {
+            // For non-string types, convert to string representation
+            for i in 0..col.len() {
+                if !col.is_null(i) {
+                    let s = format!("{:?}", col);
+                    if distinct {
+                        if !seen.contains(&s) {
+                            seen.insert(s.clone());
+                            values.push(s);
+                        }
+                    } else {
+                        values.push(s);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute percentile from sorted values
+fn compute_percentile(values: &mut [f64], percentile: f64, continuous: bool) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = values.len();
+    let idx = percentile * (n - 1) as f64;
+
+    if continuous {
+        // Interpolate between adjacent values
+        let lower_idx = idx.floor() as usize;
+        let upper_idx = idx.ceil() as usize;
+        let frac = idx - lower_idx as f64;
+
+        if lower_idx == upper_idx || upper_idx >= n {
+            values[lower_idx.min(n - 1)]
+        } else {
+            values[lower_idx] * (1.0 - frac) + values[upper_idx] * frac
+        }
+    } else {
+        // Return the nearest value
+        values[idx.round() as usize]
+    }
 }
 
 /// Accumulate aggregation for a single row (used in GROUP BY)
@@ -18396,7 +19236,12 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
             | AggKind::StddevPop { column }
             | AggKind::VarianceSamp { column }
             | AggKind::VariancePop { column }
-            | AggKind::ApproxCountDistinct { column } => {
+            | AggKind::ApproxCountDistinct { column }
+            | AggKind::Median { column }
+            | AggKind::PercentileCont { column, .. }
+            | AggKind::PercentileDisc { column, .. }
+            | AggKind::ArrayAgg { column, .. }
+            | AggKind::StringAgg { column, .. } => {
                 if !needed.contains(column) {
                     needed.push(column.clone());
                 }

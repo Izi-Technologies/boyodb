@@ -107,7 +107,7 @@ REFRESH MATERIALIZED VIEW daily_stats;
 - DML: `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `UPSERT`
 - DDL: `CREATE/DROP/ALTER` for databases, tables, indexes, views
 - Joins: `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS`
-- Aggregations: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`, `VARIANCE`
+- Aggregations: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`, `VARIANCE`, `MEDIAN`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `ARRAY_AGG`, `STRING_AGG`
 - Window Functions: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`
 - CTEs (Common Table Expressions)
 - Subqueries (scalar, IN, EXISTS, correlated)
@@ -243,6 +243,17 @@ RECOVER TO TIMESTAMP '2024-01-15T14:30:00';
 RECOVER TO LSN 1234567890;
 ```
 
+**Automatic Scheduled Backups:**
+
+```bash
+# Enable automatic backups every 6 hours, keep last 10
+boyodb-server /data 0.0.0.0:8765 \
+    --backup-interval 6 \
+    --backup-max-count 10
+```
+
+Automatic backups are labeled `auto-YYYYMMDD-HHMMSS` and old backups are automatically pruned when the limit is reached.
+
 ### Data Import/Export
 
 ```sql
@@ -261,11 +272,13 @@ WITH (FORMAT JSON);
 ```
 
 ```bash
-# CLI import
+# CLI import with batching for high performance
 boyodb-cli import --host localhost:8765 \
     --table mydb.events \
     --input data.csv \
-    --format csv
+    --format csv \
+    --batch-size 5000 \
+    --progress
 
 # CLI export
 boyodb-cli export --host localhost:8765 \
@@ -275,6 +288,10 @@ boyodb-cli export --host localhost:8765 \
 ```
 
 Supported formats: CSV, JSON, Parquet, Arrow IPC
+
+Import options:
+- `--batch-size <rows>` - Rows per batch (default: 1000)
+- `--progress` - Show import progress
 
 ### Storage Engine
 
@@ -641,7 +658,7 @@ boyodb-server <data_dir> [bind_addr] [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--max-connections` | 64 | Maximum concurrent connections |
-| `--workers` | CPU cores | Worker threads |
+| `--workers` | CPU cores | Worker threads (auto-detected) |
 | `--idle-timeout` | 300 | Idle connection timeout (seconds) |
 | `--wal-max-bytes` | 256MB | Maximum WAL file size |
 | `--query-cache-bytes` | 64MB | Query result cache size |
@@ -653,6 +670,11 @@ boyodb-server <data_dir> [bind_addr] [options]
 | `--gossip-addr` | - | Gossip protocol address |
 | `--seed-nodes` | - | Initial cluster seed nodes |
 | `--two-node-mode` | - | Enable two-node HA mode |
+| `--compact-on-start` | - | Compact segments on startup if threshold exceeded |
+| `--compact-on-start-threshold` | 10000 | Segment count threshold for startup compaction |
+| `--backup-interval` | 0 | Automatic backup interval in hours (0=disabled) |
+| `--backup-max-count` | 0 | Max automatic backups to retain (0=unlimited) |
+| `--backup-dir` | data_dir/backups | Directory for backup storage |
 
 ### Configuration File (~/.boyodbrc)
 

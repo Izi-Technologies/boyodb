@@ -253,6 +253,12 @@ enum Commands {
         /// CSV has header row
         #[arg(long, default_value = "true")]
         header: bool,
+        /// Batch size for inserts (default: 1000 rows per batch)
+        #[arg(long, default_value = "1000")]
+        batch_size: usize,
+        /// Show progress during import
+        #[arg(long)]
+        progress: bool,
     },
     /// Show server metrics
     Metrics {
@@ -376,6 +382,31 @@ enum Commands {
     /// Compact all eligible tables in the database
     CompactAll {
         data_dir: PathBuf,
+        #[command(flatten)]
+        engine: LocalEngineArgs,
+    },
+    /// Repair and verify database integrity
+    ///
+    /// Scan manifest and verify all referenced segments exist,
+    /// detect corrupted segments, and optionally repair issues.
+    Repair {
+        /// Data directory path
+        data_dir: PathBuf,
+        /// Just verify, don't make any changes
+        #[arg(long)]
+        verify_only: bool,
+        /// Remove orphaned segment files not in manifest
+        #[arg(long)]
+        remove_orphaned: bool,
+        /// Remove missing segment entries from manifest
+        #[arg(long)]
+        remove_missing: bool,
+        /// Rebuild manifest from segments on disk
+        #[arg(long)]
+        rebuild_manifest: bool,
+        /// Verify checksums of all segments
+        #[arg(long)]
+        verify_checksums: bool,
         #[command(flatten)]
         engine: LocalEngineArgs,
     },
@@ -672,6 +703,8 @@ fn main() -> Result<()> {
             input,
             format,
             header,
+            batch_size,
+            progress,
         } => {
             let (tls_config, auth) = parse_server_args(server);
 
@@ -684,50 +717,102 @@ fn main() -> Result<()> {
                     .to_string()
             });
 
-            let data = std::fs::read_to_string(input)?;
+            let data = std::fs::read_to_string(&input)?;
             let parts: Vec<&str> = table.split('.').collect();
             if parts.len() != 2 {
                 return Err(anyhow!("Table must be in database.table format"));
             }
             let (db, tbl) = (parts[0], parts[1]);
 
+            let start_time = std::time::Instant::now();
+            let mut total_rows = 0usize;
+            let mut batch_count = 0usize;
+
             match fmt.as_str() {
                 "csv" => {
-                    let sql = format!(
-                        "INSERT INTO {}.{} FORMAT CSV {} DATA '{}'",
-                        db,
-                        tbl,
-                        if *header { "HEADER" } else { "" },
-                        data.replace('\'', "''")
-                    );
-                    shell::execute_sql_command(
-                        server.host.as_deref(),
-                        server.token.clone(),
-                        tls_config,
-                        auth,
-                        &sql,
-                    )?;
+                    // For CSV, we can batch by splitting the data into chunks
+                    let lines: Vec<&str> = data.lines().collect();
+                    let header_line = if *header && !lines.is_empty() {
+                        Some(lines[0])
+                    } else {
+                        None
+                    };
+                    let data_start = if *header { 1 } else { 0 };
+                    let data_lines = &lines[data_start..];
+                    total_rows = data_lines.len();
+
+                    // Process in batches
+                    for chunk in data_lines.chunks(*batch_size) {
+                        let mut batch_data = String::new();
+                        if let Some(hdr) = header_line {
+                            batch_data.push_str(hdr);
+                            batch_data.push('\n');
+                        }
+                        for line in chunk {
+                            batch_data.push_str(line);
+                            batch_data.push('\n');
+                        }
+                        let sql = format!(
+                            "INSERT INTO {}.{} FORMAT CSV {} DATA '{}'",
+                            db,
+                            tbl,
+                            if *header { "HEADER" } else { "" },
+                            batch_data.replace('\'', "''")
+                        );
+                        shell::execute_sql_command(
+                            server.host.as_deref(),
+                            server.token.clone(),
+                            tls_config.clone(),
+                            auth.clone(),
+                            &sql,
+                        )?;
+                        batch_count += 1;
+                        if *progress {
+                            let processed = batch_count * batch_size.min(&chunk.len());
+                            eprint!("\rImported {} / {} rows ({} batches)...",
+                                processed.min(total_rows), total_rows, batch_count);
+                        }
+                    }
                 }
                 "json" => {
-                    // Parse JSON and insert row by row
+                    // Parse JSON and batch multiple rows into single INSERT
                     let rows: Vec<serde_json::Value> = serde_json::from_str(&data)?;
-                    for row in rows {
-                        if let Some(obj) = row.as_object() {
-                            let cols: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
-                            let vals: Vec<String> = obj
-                                .values()
-                                .map(|v| match v {
-                                    serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                                    serde_json::Value::Null => "NULL".to_string(),
-                                    other => other.to_string(),
+                    total_rows = rows.len();
+
+                    if rows.is_empty() {
+                        println!("No rows to import");
+                        return Ok(());
+                    }
+
+                    // Get column names from first row
+                    let first_obj = rows[0].as_object()
+                        .ok_or_else(|| anyhow!("JSON must be an array of objects"))?;
+                    let columns: Vec<&str> = first_obj.keys().map(|s| s.as_str()).collect();
+                    let col_list = columns.join(", ");
+
+                    // Process in batches
+                    for chunk in rows.chunks(*batch_size) {
+                        let values_list: Vec<String> = chunk.iter()
+                            .filter_map(|row| {
+                                row.as_object().map(|obj| {
+                                    let vals: Vec<String> = columns.iter()
+                                        .map(|col| {
+                                            match obj.get(*col) {
+                                                Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
+                                                Some(serde_json::Value::Null) | None => "NULL".to_string(),
+                                                Some(other) => other.to_string(),
+                                            }
+                                        })
+                                        .collect();
+                                    format!("({})", vals.join(", "))
                                 })
-                                .collect();
+                            })
+                            .collect();
+
+                        if !values_list.is_empty() {
                             let sql = format!(
-                                "INSERT INTO {}.{} ({}) VALUES ({})",
-                                db,
-                                tbl,
-                                cols.join(", "),
-                                vals.join(", ")
+                                "INSERT INTO {}.{} ({}) VALUES {}",
+                                db, tbl, col_list, values_list.join(", ")
                             );
                             shell::execute_sql_command(
                                 server.host.as_deref(),
@@ -736,12 +821,31 @@ fn main() -> Result<()> {
                                 auth.clone(),
                                 &sql,
                             )?;
+                            batch_count += 1;
+                            if *progress {
+                                let processed = batch_count * batch_size;
+                                eprint!("\rImported {} / {} rows ({} batches)...",
+                                    processed.min(total_rows), total_rows, batch_count);
+                            }
                         }
                     }
                 }
                 _ => return Err(anyhow!("Unsupported format: {}", fmt)),
             }
-            println!("Import completed");
+
+            if *progress {
+                eprintln!(); // New line after progress
+            }
+            let elapsed = start_time.elapsed();
+            let rows_per_sec = if elapsed.as_secs_f64() > 0.0 {
+                total_rows as f64 / elapsed.as_secs_f64()
+            } else {
+                total_rows as f64
+            };
+            println!(
+                "Import completed: {} rows in {:.2}s ({:.0} rows/sec, {} batches)",
+                total_rows, elapsed.as_secs_f64(), rows_per_sec, batch_count
+            );
         }
         Commands::Metrics { server, format } => {
             let (tls_config, auth) = parse_server_args(server);
@@ -1016,6 +1120,25 @@ fn main() -> Result<()> {
             println!("Compaction completed:");
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
+        Commands::Repair {
+            data_dir,
+            verify_only,
+            remove_orphaned,
+            remove_missing,
+            rebuild_manifest,
+            verify_checksums,
+            engine,
+        } => {
+            run_repair(
+                data_dir,
+                *verify_only,
+                *remove_orphaned,
+                *remove_missing,
+                *rebuild_manifest,
+                *verify_checksums,
+                engine,
+            )?;
+        }
     }
 
     Ok(())
@@ -1168,4 +1291,166 @@ impl Drop for BufferGuard {
             boyodb_core::ffi::boyodb_free_buffer(&mut self.buf);
         }
     }
+}
+
+/// Run repair operations on a database
+fn run_repair(
+    data_dir: &PathBuf,
+    verify_only: bool,
+    remove_orphaned: bool,
+    remove_missing: bool,
+    rebuild_manifest: bool,
+    verify_checksums: bool,
+    engine: &LocalEngineArgs,
+) -> Result<()> {
+    use boyodb_core::{Db, EngineConfig};
+    use std::collections::HashSet;
+
+    println!("BoyoDB Repair Tool");
+    println!("==================");
+    println!("Data directory: {}", data_dir.display());
+    println!();
+
+    // Build engine config
+    let mut cfg = EngineConfig::new(data_dir.clone(), 1);
+    cfg.skip_damaged_segments = true; // Don't fail on damaged segments during repair
+    if let Some(ref warm) = engine.tier_warm_compression {
+        cfg = cfg.with_tier_warm_compression(Some(warm.clone()));
+    }
+    if let Some(ref cold) = engine.tier_cold_compression {
+        cfg = cfg.with_tier_cold_compression(Some(cold.clone()));
+    }
+    cfg = cfg
+        .with_cache_hot_segments(engine.cache_hot_segments)
+        .with_cache_warm_segments(engine.cache_warm_segments)
+        .with_cache_cold_segments(engine.cache_cold_segments);
+
+    // Open database
+    let db = Db::open(cfg).map_err(|e| anyhow!("Failed to open database: {}", e))?;
+
+    // Run manifest check
+    println!("Checking manifest integrity...");
+    let check_result = db
+        .check_manifest()
+        .map_err(|e| anyhow!("Failed to check manifest: {}", e))?;
+
+    println!("  Total segments: {}", check_result.total_segments);
+    println!("  Total databases: {}", check_result.total_databases);
+    println!("  Total tables: {}", check_result.total_tables);
+    println!("  Manifest version: {}", check_result.manifest_version);
+    println!();
+
+    // Report missing segments
+    if !check_result.missing_segments.is_empty() {
+        println!(
+            "Missing segments ({}):",
+            check_result.missing_segments.len()
+        );
+        for seg in &check_result.missing_segments {
+            println!(
+                "  - {} ({}.{}) - {} bytes",
+                seg.segment_id, seg.database, seg.table, seg.size_bytes
+            );
+        }
+        println!();
+    } else {
+        println!("No missing segments found.");
+    }
+
+    // Report corrupted segments (if checksum verification requested)
+    if verify_checksums && !check_result.corrupted_segments.is_empty() {
+        println!(
+            "Corrupted segments ({}):",
+            check_result.corrupted_segments.len()
+        );
+        for seg in &check_result.corrupted_segments {
+            println!(
+                "  - {} ({}.{}) - expected checksum {:016x}, got {:016x}",
+                seg.segment_id, seg.database, seg.table, seg.expected_checksum, seg.actual_checksum
+            );
+        }
+        println!();
+    } else if verify_checksums {
+        println!("No corrupted segments found (checksums verified).");
+    }
+
+    // Report orphaned files
+    if !check_result.orphaned_files.is_empty() {
+        println!("Orphaned files ({}):", check_result.orphaned_files.len());
+        for file in &check_result.orphaned_files {
+            println!("  - {} - {} bytes", file.path, file.size_bytes);
+        }
+        println!();
+    } else {
+        println!("No orphaned files found.");
+    }
+
+    // If verify only, stop here
+    if verify_only {
+        println!();
+        println!("Verification complete (no changes made).");
+        return Ok(());
+    }
+
+    // Perform repairs
+    let mut repairs_made = 0;
+
+    // Remove missing segment entries from manifest
+    if remove_missing && !check_result.missing_segments.is_empty() {
+        println!();
+        println!("Removing missing segment entries from manifest...");
+        let tables: HashSet<(String, String)> = check_result
+            .missing_segments
+            .iter()
+            .map(|s| (s.database.clone(), s.table.clone()))
+            .collect();
+
+        for (database, table) in tables {
+            match db.repair_segments(Some(database.as_str()), Some(table.as_str())) {
+                Ok(removed) => {
+                    if !removed.is_empty() {
+                        println!("  Removed {} segments from {}.{}", removed.len(), database, table);
+                        repairs_made += removed.len();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  Failed to repair {}.{}: {}", database, table, e);
+                }
+            }
+        }
+    }
+
+    // Remove orphaned files
+    if remove_orphaned && !check_result.orphaned_files.is_empty() {
+        println!();
+        println!("Removing orphaned files...");
+        for file in &check_result.orphaned_files {
+            let path = std::path::Path::new(&file.path);
+            match std::fs::remove_file(path) {
+                Ok(()) => {
+                    println!("  Removed: {}", file.path);
+                    repairs_made += 1;
+                }
+                Err(e) => {
+                    eprintln!("  Failed to remove {}: {}", file.path, e);
+                }
+            }
+        }
+    }
+
+    // Rebuild manifest (not implemented yet - complex operation)
+    if rebuild_manifest {
+        println!();
+        println!("Manifest rebuild is not yet implemented.");
+        println!("This would scan all .ipc files and rebuild the manifest from scratch.");
+    }
+
+    println!();
+    if repairs_made > 0 {
+        println!("Repair complete. {} items repaired.", repairs_made);
+    } else {
+        println!("Repair complete. No changes were necessary.");
+    }
+
+    Ok(())
 }

@@ -210,6 +210,31 @@ pub enum AggKind {
     ApproxCountDistinct {
         column: String,
     },
+    /// MEDIAN - 50th percentile (equivalent to PERCENTILE_CONT(0.5))
+    Median {
+        column: String,
+    },
+    /// PERCENTILE_CONT - continuous percentile (interpolated)
+    PercentileCont {
+        column: String,
+        percentile: f64,
+    },
+    /// PERCENTILE_DISC - discrete percentile (actual value from data)
+    PercentileDisc {
+        column: String,
+        percentile: f64,
+    },
+    /// ARRAY_AGG - collect values into array
+    ArrayAgg {
+        column: String,
+        distinct: bool,
+    },
+    /// STRING_AGG / GROUP_CONCAT - concatenate strings with delimiter
+    StringAgg {
+        column: String,
+        delimiter: String,
+        distinct: bool,
+    },
 }
 
 /// Aggregate with optional alias for result column naming
@@ -249,6 +274,15 @@ impl AggregateExpr {
             AggKind::VarianceSamp { column } => format!("variance_{}", column),
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+            AggKind::Median { column } => format!("median_{}", column),
+            AggKind::PercentileCont { column, percentile } => {
+                format!("percentile_cont_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::PercentileDisc { column, percentile } => {
+                format!("percentile_disc_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::ArrayAgg { column, .. } => format!("array_agg_{}", column),
+            AggKind::StringAgg { column, .. } => format!("string_agg_{}", column),
         }
     }
 }
@@ -352,6 +386,24 @@ pub enum ScalarFunction {
     },
     Reverse(Box<SelectExpr>),
     Coalesce(Vec<SelectExpr>),
+
+    // Regex functions
+    RegexpReplace {
+        expr: Box<SelectExpr>,
+        pattern: String,
+        replacement: String,
+        flags: Option<String>,
+    },
+    RegexpMatch {
+        expr: Box<SelectExpr>,
+        pattern: String,
+        flags: Option<String>,
+    },
+    RegexpExtract {
+        expr: Box<SelectExpr>,
+        pattern: String,
+        group_index: Option<i64>,
+    },
 
     // Math functions
     Abs(Box<SelectExpr>),
@@ -849,6 +901,51 @@ pub enum DdlCommand {
         /// Backup ID to delete
         backup_id: String,
     },
+    /// SHOW SERVER INFO - Display server version and status
+    ShowServerInfo,
+    /// SHOW MISSING SEGMENTS [FROM database.table] - Find segments missing from disk
+    ShowMissingSegments {
+        database: Option<String>,
+        table: Option<String>,
+    },
+    /// SHOW CORRUPTED SEGMENTS [FROM database.table] - Find segments with checksum mismatches
+    ShowCorruptedSegments {
+        database: Option<String>,
+        table: Option<String>,
+    },
+    /// SHOW DAMAGED SEGMENTS [FROM database.table] - Find all damaged segments (missing + corrupted)
+    ShowDamagedSegments {
+        database: Option<String>,
+        table: Option<String>,
+    },
+    /// REPAIR SEGMENTS database.table | database.* | ALL - Remove missing and corrupted segments from manifest
+    RepairSegments {
+        /// None = all databases, Some = specific database
+        database: Option<String>,
+        /// None = all tables in database(s), Some = specific table
+        table: Option<String>,
+    },
+    /// CHECK MANIFEST - Verify manifest integrity and report issues
+    CheckManifest,
+    /// COMPACT TABLE database.table - Manually trigger compaction on a table
+    CompactTable {
+        database: String,
+        table: String,
+    },
+    /// COMPACT ALL - Manually trigger compaction on all tables
+    CompactAll,
+    /// BEGIN [TRANSACTION] - Start a new transaction
+    BeginTransaction,
+    /// COMMIT [TRANSACTION] - Commit the current transaction
+    CommitTransaction,
+    /// ROLLBACK [TRANSACTION] - Rollback the current transaction
+    RollbackTransaction,
+    /// SAVEPOINT name - Create a savepoint within a transaction
+    Savepoint { name: String },
+    /// RELEASE SAVEPOINT name - Release a savepoint
+    ReleaseSavepoint { name: String },
+    /// ROLLBACK TO SAVEPOINT name - Rollback to a savepoint
+    RollbackToSavepoint { name: String },
 }
 
 /// Index type for CREATE INDEX
@@ -1339,6 +1436,177 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             .parse()
             .map_err(|_| EngineError::InvalidArgument("Invalid LSN value".into()))?;
         return Ok(Some(DdlCommand::RecoverToLsn { lsn }));
+    }
+
+    // SHOW SERVER INFO - Display server version and status
+    if upper_trimmed == "SHOW SERVER INFO" {
+        return Ok(Some(DdlCommand::ShowServerInfo));
+    }
+
+    // SHOW MISSING SEGMENTS [FROM database.table] - Find segments missing from disk
+    if upper_trimmed == "SHOW MISSING SEGMENTS" {
+        return Ok(Some(DdlCommand::ShowMissingSegments {
+            database: None,
+            table: None,
+        }));
+    }
+    if upper_trimmed.starts_with("SHOW MISSING SEGMENTS FROM ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 5 {
+            let table_name = tokens[4].trim_end_matches(';');
+            let (database, table) = parse_table_name(table_name)?;
+            return Ok(Some(DdlCommand::ShowMissingSegments {
+                database: Some(database),
+                table: Some(table),
+            }));
+        }
+    }
+
+    // SHOW CORRUPTED SEGMENTS [FROM database.table] - Find segments with checksum mismatches
+    if upper_trimmed == "SHOW CORRUPTED SEGMENTS" {
+        return Ok(Some(DdlCommand::ShowCorruptedSegments {
+            database: None,
+            table: None,
+        }));
+    }
+    if upper_trimmed.starts_with("SHOW CORRUPTED SEGMENTS FROM ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 5 {
+            let table_name = tokens[4].trim_end_matches(';');
+            let (database, table) = parse_table_name(table_name)?;
+            return Ok(Some(DdlCommand::ShowCorruptedSegments {
+                database: Some(database),
+                table: Some(table),
+            }));
+        }
+    }
+
+    // SHOW DAMAGED SEGMENTS [FROM database.table] - Find all damaged segments (missing + corrupted)
+    if upper_trimmed == "SHOW DAMAGED SEGMENTS" {
+        return Ok(Some(DdlCommand::ShowDamagedSegments {
+            database: None,
+            table: None,
+        }));
+    }
+    if upper_trimmed.starts_with("SHOW DAMAGED SEGMENTS FROM ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 5 {
+            let table_name = tokens[4].trim_end_matches(';');
+            let (database, table) = parse_table_name(table_name)?;
+            return Ok(Some(DdlCommand::ShowDamagedSegments {
+                database: Some(database),
+                table: Some(table),
+            }));
+        }
+    }
+
+    // REPAIR ALL SEGMENTS - Repair all segments in all databases
+    if upper_trimmed == "REPAIR ALL SEGMENTS" {
+        return Ok(Some(DdlCommand::RepairSegments {
+            database: None,
+            table: None,
+        }));
+    }
+
+    // REPAIR SEGMENTS database.* or database.table - Remove missing and corrupted segments
+    if upper_trimmed.starts_with("REPAIR SEGMENTS ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 3 {
+            let table_name = tokens[2].trim_end_matches(';');
+            // Check for wildcard: database.*
+            if table_name.ends_with(".*") {
+                let db = table_name.trim_end_matches(".*");
+                let db = db.trim_matches('"').trim_matches('`');
+                return Ok(Some(DdlCommand::RepairSegments {
+                    database: Some(db.to_string()),
+                    table: None,
+                }));
+            }
+            let (database, table) = parse_table_name(table_name)?;
+            return Ok(Some(DdlCommand::RepairSegments {
+                database: Some(database),
+                table: Some(table),
+            }));
+        }
+        return Err(EngineError::InvalidArgument(
+            "REPAIR SEGMENTS requires database.table, database.*, or use REPAIR ALL SEGMENTS".into(),
+        ));
+    }
+
+    // CHECK MANIFEST - Verify manifest integrity
+    if upper_trimmed == "CHECK MANIFEST" {
+        return Ok(Some(DdlCommand::CheckManifest));
+    }
+
+    // COMPACT ALL - Compact all tables
+    if upper_trimmed == "COMPACT ALL" {
+        return Ok(Some(DdlCommand::CompactAll));
+    }
+
+    // COMPACT TABLE database.table - Manually trigger compaction
+    if upper_trimmed.starts_with("COMPACT TABLE ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 3 {
+            let table_name = tokens[2].trim_end_matches(';');
+            let (database, table) = parse_table_name(table_name)?;
+            return Ok(Some(DdlCommand::CompactTable { database, table }));
+        }
+        return Err(EngineError::InvalidArgument(
+            "COMPACT TABLE requires database.table".into(),
+        ));
+    }
+
+    // BEGIN [TRANSACTION] - Start a transaction
+    if upper_trimmed == "BEGIN" || upper_trimmed == "BEGIN TRANSACTION" || upper_trimmed == "START TRANSACTION" {
+        return Ok(Some(DdlCommand::BeginTransaction));
+    }
+
+    // COMMIT [TRANSACTION] - Commit a transaction
+    if upper_trimmed == "COMMIT" || upper_trimmed == "COMMIT TRANSACTION" || upper_trimmed == "END" || upper_trimmed == "END TRANSACTION" {
+        return Ok(Some(DdlCommand::CommitTransaction));
+    }
+
+    // ROLLBACK [TRANSACTION] - Rollback a transaction
+    if upper_trimmed == "ROLLBACK" || upper_trimmed == "ROLLBACK TRANSACTION" || upper_trimmed == "ABORT" {
+        return Ok(Some(DdlCommand::RollbackTransaction));
+    }
+
+    // SAVEPOINT name - Create a savepoint
+    if upper_trimmed.starts_with("SAVEPOINT ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 2 {
+            let name = tokens[1].trim_end_matches(';').to_string();
+            return Ok(Some(DdlCommand::Savepoint { name }));
+        }
+        return Err(EngineError::InvalidArgument(
+            "SAVEPOINT requires a name".into(),
+        ));
+    }
+
+    // RELEASE SAVEPOINT name - Release a savepoint
+    if upper_trimmed.starts_with("RELEASE SAVEPOINT ") || upper_trimmed.starts_with("RELEASE ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        let name_idx = if upper_trimmed.starts_with("RELEASE SAVEPOINT ") { 2 } else { 1 };
+        if tokens.len() > name_idx {
+            let name = tokens[name_idx].trim_end_matches(';').to_string();
+            return Ok(Some(DdlCommand::ReleaseSavepoint { name }));
+        }
+        return Err(EngineError::InvalidArgument(
+            "RELEASE requires a savepoint name".into(),
+        ));
+    }
+
+    // ROLLBACK TO [SAVEPOINT] name - Rollback to a savepoint
+    if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ") || upper_trimmed.starts_with("ROLLBACK TO ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        let name_idx = if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ") { 3 } else { 2 };
+        if tokens.len() > name_idx {
+            let name = tokens[name_idx].trim_end_matches(';').to_string();
+            return Ok(Some(DdlCommand::RollbackToSavepoint { name }));
+        }
+        return Err(EngineError::InvalidArgument(
+            "ROLLBACK TO requires a savepoint name".into(),
+        ));
     }
 
     Ok(None)
@@ -3131,6 +3399,53 @@ fn parse_aggregate_function(
             let col = extract_function_column(func)?;
             Ok(Some(AggKind::VariancePop { column: col }))
         }
+        "median" => {
+            let col = extract_function_column(func)?;
+            Ok(Some(AggKind::Median { column: col }))
+        }
+        "percentile_cont" => {
+            // PERCENTILE_CONT(percentile) WITHIN GROUP (ORDER BY column)
+            // For now, support simplified form: PERCENTILE_CONT(column, percentile)
+            if func.args.len() < 2 {
+                return Err(EngineError::InvalidArgument(
+                    "PERCENTILE_CONT requires column and percentile arguments".into(),
+                ));
+            }
+            let col = extract_function_column(func)?;
+            let percentile = extract_function_percentile(func, 1)?;
+            Ok(Some(AggKind::PercentileCont { column: col, percentile }))
+        }
+        "percentile_disc" => {
+            if func.args.len() < 2 {
+                return Err(EngineError::InvalidArgument(
+                    "PERCENTILE_DISC requires column and percentile arguments".into(),
+                ));
+            }
+            let col = extract_function_column(func)?;
+            let percentile = extract_function_percentile(func, 1)?;
+            Ok(Some(AggKind::PercentileDisc { column: col, percentile }))
+        }
+        "array_agg" => {
+            let col = extract_function_column(func)?;
+            Ok(Some(AggKind::ArrayAgg {
+                column: col,
+                distinct: func.distinct,
+            }))
+        }
+        "string_agg" | "group_concat" | "listagg" => {
+            let col = extract_function_column(func)?;
+            // Extract delimiter if provided (default to comma)
+            let delimiter = if func.args.len() >= 2 {
+                extract_function_string_arg(func, 1).unwrap_or_else(|_| ",".to_string())
+            } else {
+                ",".to_string()
+            };
+            Ok(Some(AggKind::StringAgg {
+                column: col,
+                delimiter,
+                distinct: func.distinct,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -3150,6 +3465,57 @@ fn extract_function_column(func: &sqlparser::ast::Function) -> Result<String, En
         FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Ok("*".to_string()),
         _ => Err(EngineError::NotImplemented(
             "only simple column references supported in aggregate functions".into(),
+        )),
+    }
+}
+
+/// Extract a percentile value (0.0 to 1.0) from function argument at given index
+fn extract_function_percentile(
+    func: &sqlparser::ast::Function,
+    arg_index: usize,
+) -> Result<f64, EngineError> {
+    if func.args.len() <= arg_index {
+        return Err(EngineError::InvalidArgument(
+            "percentile argument required".into(),
+        ));
+    }
+
+    match &func.args[arg_index] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(n, _)))) => {
+            let percentile: f64 = n.parse().map_err(|_| {
+                EngineError::InvalidArgument(format!("invalid percentile value: {}", n))
+            })?;
+            if !(0.0..=1.0).contains(&percentile) {
+                return Err(EngineError::InvalidArgument(
+                    "percentile must be between 0.0 and 1.0".into(),
+                ));
+            }
+            Ok(percentile)
+        }
+        _ => Err(EngineError::InvalidArgument(
+            "percentile must be a numeric literal between 0.0 and 1.0".into(),
+        )),
+    }
+}
+
+/// Extract a string argument from function at given index
+fn extract_function_string_arg(
+    func: &sqlparser::ast::Function,
+    arg_index: usize,
+) -> Result<String, EngineError> {
+    if func.args.len() <= arg_index {
+        return Err(EngineError::InvalidArgument("string argument required".into()));
+    }
+
+    match &func.args[arg_index] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(s)))) => {
+            Ok(s.clone())
+        }
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::DoubleQuotedString(s)))) => {
+            Ok(s.clone())
+        }
+        _ => Err(EngineError::InvalidArgument(
+            "expected string literal argument".into(),
         )),
     }
 }
@@ -4308,6 +4674,52 @@ fn parse_function_expr(func: &sqlparser::ast::Function) -> Result<SelectExpr, En
         }
         "reverse" => ScalarFunction::Reverse(Box::new(get_arg(&args, 0, "REVERSE")?)),
         "coalesce" => ScalarFunction::Coalesce(args),
+
+        // Regex functions
+        "regexp_replace" => {
+            let expr = get_arg(&args, 0, "REGEXP_REPLACE")?;
+            let pattern = get_string_arg(&args, 1, "REGEXP_REPLACE")?;
+            let replacement = get_string_arg(&args, 2, "REGEXP_REPLACE")?;
+            let flags = if args.len() > 3 {
+                Some(get_string_arg(&args, 3, "REGEXP_REPLACE")?)
+            } else {
+                None
+            };
+            ScalarFunction::RegexpReplace {
+                expr: Box::new(expr),
+                pattern,
+                replacement,
+                flags,
+            }
+        }
+        "regexp_match" | "regexp_matches" => {
+            let expr = get_arg(&args, 0, "REGEXP_MATCH")?;
+            let pattern = get_string_arg(&args, 1, "REGEXP_MATCH")?;
+            let flags = if args.len() > 2 {
+                Some(get_string_arg(&args, 2, "REGEXP_MATCH")?)
+            } else {
+                None
+            };
+            ScalarFunction::RegexpMatch {
+                expr: Box::new(expr),
+                pattern,
+                flags,
+            }
+        }
+        "regexp_extract" | "regexp_substr" => {
+            let expr = get_arg(&args, 0, "REGEXP_EXTRACT")?;
+            let pattern = get_string_arg(&args, 1, "REGEXP_EXTRACT")?;
+            let group_index = if args.len() > 2 {
+                Some(get_int_arg(&args, 2, "REGEXP_EXTRACT")?)
+            } else {
+                None
+            };
+            ScalarFunction::RegexpExtract {
+                expr: Box::new(expr),
+                pattern,
+                group_index,
+            }
+        }
 
         // Math functions
         "abs" => ScalarFunction::Abs(Box::new(get_arg(&args, 0, "ABS")?)),
@@ -5569,6 +5981,137 @@ mod tests {
                 assert!(cmd.returning.is_none());
             }
             _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_server_info() {
+        let sql = "SHOW SERVER INFO";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowServerInfo) => {}
+            _ => panic!("expected ShowServerInfo"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_missing_segments() {
+        // Without FROM clause
+        let sql = "SHOW MISSING SEGMENTS";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowMissingSegments { database, table }) => {
+                assert!(database.is_none());
+                assert!(table.is_none());
+            }
+            _ => panic!("expected ShowMissingSegments"),
+        }
+
+        // With FROM clause
+        let sql = "SHOW MISSING SEGMENTS FROM mydb.mytable";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowMissingSegments { database, table }) => {
+                assert_eq!(database, Some("mydb".to_string()));
+                assert_eq!(table, Some("mytable".to_string()));
+            }
+            _ => panic!("expected ShowMissingSegments"),
+        }
+    }
+
+    #[test]
+    fn test_parse_repair_segments() {
+        // Specific table
+        let sql = "REPAIR SEGMENTS mydb.mytable";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::RepairSegments { database, table }) => {
+                assert_eq!(database, Some("mydb".to_string()));
+                assert_eq!(table, Some("mytable".to_string()));
+            }
+            _ => panic!("expected RepairSegments"),
+        }
+
+        // All tables in database (wildcard)
+        let sql = "REPAIR SEGMENTS mydb.*";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::RepairSegments { database, table }) => {
+                assert_eq!(database, Some("mydb".to_string()));
+                assert!(table.is_none());
+            }
+            _ => panic!("expected RepairSegments with wildcard"),
+        }
+
+        // All segments (REPAIR ALL SEGMENTS)
+        let sql = "REPAIR ALL SEGMENTS";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::RepairSegments { database, table }) => {
+                assert!(database.is_none());
+                assert!(table.is_none());
+            }
+            _ => panic!("expected RepairSegments for all"),
+        }
+    }
+
+    #[test]
+    fn test_parse_check_manifest() {
+        let sql = "CHECK MANIFEST";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::CheckManifest) => {}
+            _ => panic!("expected CheckManifest"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_corrupted_segments() {
+        // Without FROM clause
+        let sql = "SHOW CORRUPTED SEGMENTS";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowCorruptedSegments { database, table }) => {
+                assert!(database.is_none());
+                assert!(table.is_none());
+            }
+            _ => panic!("expected ShowCorruptedSegments"),
+        }
+
+        // With FROM clause
+        let sql = "SHOW CORRUPTED SEGMENTS FROM mydb.mytable";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowCorruptedSegments { database, table }) => {
+                assert_eq!(database, Some("mydb".to_string()));
+                assert_eq!(table, Some("mytable".to_string()));
+            }
+            _ => panic!("expected ShowCorruptedSegments"),
+        }
+    }
+
+    #[test]
+    fn test_parse_show_damaged_segments() {
+        // Without FROM clause
+        let sql = "SHOW DAMAGED SEGMENTS";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowDamagedSegments { database, table }) => {
+                assert!(database.is_none());
+                assert!(table.is_none());
+            }
+            _ => panic!("expected ShowDamagedSegments"),
+        }
+
+        // With FROM clause
+        let sql = "SHOW DAMAGED SEGMENTS FROM mydb.mytable";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::ShowDamagedSegments { database, table }) => {
+                assert_eq!(database, Some("mydb".to_string()));
+                assert_eq!(table, Some("mytable".to_string()));
+            }
+            _ => panic!("expected ShowDamagedSegments"),
         }
     }
 }

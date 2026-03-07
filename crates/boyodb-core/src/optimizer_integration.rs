@@ -364,6 +364,36 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
                     distinct: true,
                     alias: get_alias(format!("approx_count_distinct_{}", column)),
                 },
+                AggKind::Median { column } => AggregateExpr {
+                    function: AggFunction::Avg, // Use Avg as placeholder - actual impl in engine
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("median_{}", column)),
+                },
+                AggKind::PercentileCont { column, percentile } => AggregateExpr {
+                    function: AggFunction::Avg, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("percentile_cont_{}_{}", (*percentile * 100.0) as i32, column)),
+                },
+                AggKind::PercentileDisc { column, percentile } => AggregateExpr {
+                    function: AggFunction::Avg, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("percentile_disc_{}_{}", (*percentile * 100.0) as i32, column)),
+                },
+                AggKind::ArrayAgg { column, distinct } => AggregateExpr {
+                    function: AggFunction::Sum, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: *distinct,
+                    alias: get_alias(format!("array_agg_{}", column)),
+                },
+                AggKind::StringAgg { column, distinct, .. } => AggregateExpr {
+                    function: AggFunction::Sum, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: *distinct,
+                    alias: get_alias(format!("string_agg_{}", column)),
+                },
             }
         })
         .collect()
@@ -415,6 +445,27 @@ fn select_expr_to_project_expr(expr: &SelectExpr) -> ProjectExpr {
                 crate::sql::AggKind::VariancePop { column } => format!("VAR_POP({})", column),
                 crate::sql::AggKind::ApproxCountDistinct { column } => {
                     format!("APPROX_COUNT_DISTINCT({})", column)
+                }
+                crate::sql::AggKind::Median { column } => format!("MEDIAN({})", column),
+                crate::sql::AggKind::PercentileCont { column, percentile } => {
+                    format!("PERCENTILE_CONT({}, {})", column, percentile)
+                }
+                crate::sql::AggKind::PercentileDisc { column, percentile } => {
+                    format!("PERCENTILE_DISC({}, {})", column, percentile)
+                }
+                crate::sql::AggKind::ArrayAgg { column, distinct } => {
+                    if *distinct {
+                        format!("ARRAY_AGG(DISTINCT {})", column)
+                    } else {
+                        format!("ARRAY_AGG({})", column)
+                    }
+                }
+                crate::sql::AggKind::StringAgg { column, delimiter, distinct } => {
+                    if *distinct {
+                        format!("STRING_AGG(DISTINCT {}, '{}')", column, delimiter)
+                    } else {
+                        format!("STRING_AGG({}, '{}')", column, delimiter)
+                    }
                 }
             };
             ProjectExpr::Column(name)

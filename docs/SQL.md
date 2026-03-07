@@ -539,6 +539,19 @@ SUM(column)           -- Sum of values
 AVG(column)           -- Average of values
 MIN(column)           -- Minimum value
 MAX(column)           -- Maximum value
+MEDIAN(column)        -- Median value
+STDDEV(column)        -- Standard deviation
+VARIANCE(column)      -- Variance
+
+-- Percentile functions
+PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY column)  -- Continuous percentile (interpolated)
+PERCENTILE_DISC(0.95) WITHIN GROUP (ORDER BY column)  -- Discrete percentile (actual value)
+
+-- Collection aggregates
+ARRAY_AGG(column)                    -- Collect values into array
+ARRAY_AGG(DISTINCT column)           -- Collect unique values into array
+STRING_AGG(column, ',')              -- Concatenate strings with delimiter
+STRING_AGG(DISTINCT column, ',')     -- Concatenate unique strings
 ```
 
 **Examples:**
@@ -547,6 +560,21 @@ SELECT COUNT(*) FROM users;
 SELECT COUNT(DISTINCT category) FROM products;
 SELECT SUM(amount), AVG(amount) FROM transactions;
 SELECT MIN(price), MAX(price) FROM products WHERE category = 'electronics';
+
+-- Statistical analysis
+SELECT MEDIAN(response_time_ms) FROM api_requests;
+SELECT
+    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency) as p50,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency) as p95,
+    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency) as p99
+FROM requests;
+
+-- Collection aggregates
+SELECT user_id, ARRAY_AGG(product_id) as purchased_products
+FROM orders GROUP BY user_id;
+
+SELECT department, STRING_AGG(name, ', ') as team_members
+FROM employees GROUP BY department;
 ```
 
 ### String Functions
@@ -562,6 +590,13 @@ SUBSTR(string, start, length)    -- Extract substring
 CONCAT(str1, str2, ...)          -- Concatenate strings
 REPLACE(string, from, to)        -- Replace occurrences
 COALESCE(val1, val2, ...)        -- First non-NULL value
+
+-- Regular expression functions
+REGEXP_REPLACE(string, pattern, replacement)           -- Replace regex matches
+REGEXP_REPLACE(string, pattern, replacement, flags)    -- With flags (i=case-insensitive, g=global)
+REGEXP_MATCH(string, pattern)                          -- Check if pattern matches
+REGEXP_EXTRACT(string, pattern)                        -- Extract first match
+REGEXP_EXTRACT(string, pattern, group)                 -- Extract specific capture group
 ```
 
 **Examples:**
@@ -570,6 +605,12 @@ SELECT UPPER(name) FROM users;
 SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM users;
 SELECT SUBSTR(phone, 1, 3) AS area_code FROM users;
 SELECT COALESCE(nickname, name) AS display_name FROM users;
+
+-- Regex examples
+SELECT REGEXP_REPLACE(email, '@.*', '@redacted.com') AS masked_email FROM users;
+SELECT REGEXP_REPLACE(phone, '[^0-9]', '', 'g') AS digits_only FROM users;
+SELECT * FROM logs WHERE REGEXP_MATCH(message, 'error|warning', 'i');
+SELECT REGEXP_EXTRACT(url, 'https?://([^/]+)', 1) AS domain FROM requests;
 ```
 
 ### Math Functions
@@ -855,6 +896,30 @@ Vacuum complete: processed=1500 removed=1450 reclaimed=524288000 bytes new=12
 - Use `VACUUM FULL` when segment count grows excessively (e.g., >10,000 segments per table)
 - Schedule during low-traffic periods as it temporarily increases I/O
 
+### COMPACT TABLE
+
+Merge small segments into larger ones without full rewrite.
+
+```sql
+COMPACT TABLE [database.]table_name;
+```
+
+**Example:**
+```sql
+-- Compact a specific table
+COMPACT TABLE analytics.events;
+```
+
+**Returns:**
+```
+Compaction complete: merged 150 segments into 12, reclaimed 52428800 bytes
+```
+
+**Difference from VACUUM:**
+- `COMPACT TABLE` is faster and merges adjacent small segments
+- `VACUUM` rewrites all fragmented segments
+- `VACUUM FULL` rewrites the entire table
+
 ---
 
 ## Utility Statements
@@ -868,6 +933,47 @@ SHOW TABLES IN database_name;
 SHOW USERS;
 SHOW ROLES;
 SHOW GRANTS FOR username;
+SHOW SERVER INFO;              -- Server version and statistics
+SHOW MISSING SEGMENTS;         -- Find segments missing from disk
+SHOW MISSING SEGMENTS FROM database.table;  -- For specific table
+```
+
+### Server Information
+
+```sql
+SHOW SERVER INFO;
+```
+
+Returns server status including:
+- Server version
+- Database count
+- Table count
+- Segment count
+- Manifest version
+- WAL LSN
+
+### Segment Integrity
+
+```sql
+-- Find segments referenced in manifest but missing from disk
+SHOW MISSING SEGMENTS;
+SHOW MISSING SEGMENTS FROM analytics.events;
+
+-- Remove missing segment entries from manifest (repairs metadata)
+REPAIR SEGMENTS database.table;
+REPAIR SEGMENTS *.*;           -- Repair all tables
+```
+
+**Example workflow:**
+```sql
+-- Check for missing segments
+SHOW MISSING SEGMENTS;
+
+-- If segments are missing, repair the manifest
+REPAIR SEGMENTS analytics.events;
+
+-- Verify repair
+SHOW MISSING SEGMENTS FROM analytics.events;
 ```
 
 ### DESCRIBE

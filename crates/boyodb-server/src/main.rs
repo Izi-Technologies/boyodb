@@ -183,6 +183,18 @@ impl ConnectionTracker {
 }
 
 /// Shared connection statistics for metrics reporting
+/// RAII guard for tracking active queries - decrements count when dropped
+struct QueryPermit<'a> {
+    _permit: tokio::sync::SemaphorePermit<'a>,
+    active_queries: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for QueryPermit<'_> {
+    fn drop(&mut self) {
+        self.active_queries.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 struct ConnectionStats {
     /// Maximum allowed connections
     max: usize,
@@ -192,16 +204,70 @@ struct ConnectionStats {
     queries_rejected: std::sync::atomic::AtomicU64,
     /// Connection tracker for per-connection state
     tracker: ConnectionTracker,
+    /// Query concurrency limiter - prevents overloading
+    query_semaphore: Semaphore,
+    /// Maximum concurrent queries
+    max_concurrent_queries: usize,
+    /// Currently running queries
+    active_queries: std::sync::atomic::AtomicUsize,
 }
 
 impl ConnectionStats {
     fn new(max_connections: usize) -> Self {
+        Self::with_query_limit(max_connections, max_connections * 2)
+    }
+
+    fn with_query_limit(max_connections: usize, max_concurrent_queries: usize) -> Self {
         Self {
             max: max_connections,
             queries_admitted: std::sync::atomic::AtomicU64::new(0),
             queries_rejected: std::sync::atomic::AtomicU64::new(0),
             tracker: ConnectionTracker::new(),
+            query_semaphore: Semaphore::new(max_concurrent_queries),
+            max_concurrent_queries,
+            active_queries: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Try to acquire a query permit with timeout (returns None if overloaded or timeout)
+    async fn try_acquire_query_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Option<QueryPermit<'_>> {
+        match tokio::time::timeout(timeout, self.query_semaphore.acquire()).await {
+            Ok(Ok(permit)) => {
+                self.active_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(QueryPermit {
+                    _permit: permit,
+                    active_queries: &self.active_queries,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to acquire a query permit immediately (returns None if overloaded)
+    fn try_acquire_query(&self) -> Option<QueryPermit<'_>> {
+        match self.query_semaphore.try_acquire() {
+            Ok(permit) => {
+                self.active_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(QueryPermit {
+                    _permit: permit,
+                    active_queries: &self.active_queries,
+                })
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Get current active query count
+    fn active_queries(&self) -> usize {
+        self.active_queries.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get max concurrent queries
+    fn max_queries(&self) -> usize {
+        self.max_concurrent_queries
     }
 
     /// Register a new connection, returns connection ID
@@ -715,6 +781,10 @@ struct ServerConfig {
     allow_manifest_import: bool,
     retention_watermark: Option<u64>,
     compact_min_segments: usize,
+    /// Compact segments on startup if count exceeds threshold
+    compact_on_start: bool,
+    /// Segment count threshold for compact-on-start (default: 10000)
+    compact_on_start_threshold: usize,
     maintenance_interval_ms: u64,
     replicate_from: Option<String>,
     replicate_token: Option<String>,
@@ -749,6 +819,12 @@ struct ServerConfig {
     /// Enable 2-node cluster mode (primary/replica with quorum of 1).
     two_node_mode: bool,
     pg_port: Option<u16>,
+    /// Automatic backup interval in hours (0 = disabled)
+    backup_interval_hours: u64,
+    /// Maximum number of automatic backups to retain (0 = unlimited)
+    backup_max_count: usize,
+    /// Directory to store backups (defaults to data_dir/backups)
+    backup_dir: Option<PathBuf>,
 }
 
 pub mod server_pg;
@@ -1053,7 +1129,11 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut max_frame_len: usize = DEFAULT_MAX_FRAME_LEN;
     let mut max_query_len: usize = DEFAULT_MAX_QUERY_LEN;
     let mut max_connections: usize = 64;
-    let mut worker_threads: usize = 8;
+    // Auto-detect worker threads based on CPU count (default to available CPUs, min 4)
+    let mut worker_threads: usize = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(8)
+        .max(4);
     let mut io_timeout_ms: u64 = DEFAULT_IO_TIMEOUT_MILLIS;
     let mut idle_timeout_secs: u64 = 300; // 5 minutes
     let mut conn_max_lifetime_secs: u64 = 3600; // 1 hour
@@ -1064,6 +1144,8 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut allow_manifest_import = false;
     let mut retention_watermark: Option<u64> = None;
     let mut compact_min_segments: usize = 2;
+    let mut compact_on_start = false;
+    let mut compact_on_start_threshold: usize = 10000;
     let mut maintenance_interval_ms: u64 = 0;
     let mut replicate_from: Option<String> = None;
     let mut replicate_token: Option<String> = None;
@@ -1097,6 +1179,11 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut seed_nodes: Vec<String> = Vec::new();
     let mut two_node_mode = false;
     let mut pg_port: Option<u16> = None;
+
+    // Automatic backup configuration
+    let mut backup_interval_hours: u64 = 0; // 0 = disabled
+    let mut backup_max_count: usize = 0; // 0 = unlimited
+    let mut backup_dir: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -1284,6 +1371,17 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                     i += 1;
                 }
             }
+            "--compact-on-start" => {
+                compact_on_start = true;
+            }
+            "--compact-on-start-threshold" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        compact_on_start_threshold = v;
+                    }
+                    i += 1;
+                }
+            }
             "--maintenance-interval-ms" => {
                 if let Some(val) = args.get(i + 1) {
                     if let Ok(v) = val.parse::<u64>() {
@@ -1450,6 +1548,28 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                     i += 1;
                 }
             }
+            "--backup-interval" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        backup_interval_hours = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--backup-max-count" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        backup_max_count = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--backup-dir" => {
+                if let Some(val) = args.get(i + 1) {
+                    backup_dir = Some(PathBuf::from(val));
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1488,6 +1608,8 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         allow_manifest_import,
         retention_watermark,
         compact_min_segments,
+        compact_on_start,
+        compact_on_start_threshold,
         maintenance_interval_ms,
         replicate_from,
         replicate_token,
@@ -1520,6 +1642,9 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         seed_nodes,
         two_node_mode,
         pg_port,
+        backup_interval_hours,
+        backup_max_count,
+        backup_dir,
     })
 }
 
@@ -1548,6 +1673,41 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     engine_cfg.compact_min_segments = cfg.compact_min_segments;
     engine_cfg.segment_cache_capacity = cfg.segment_cache_capacity;
     let db = Arc::new(Db::open(engine_cfg).map_err(|e| format!("db open failed: {e}"))?);
+
+    // Compact on start if enabled and segment count exceeds threshold
+    if cfg.compact_on_start {
+        let segment_count = db.segment_count();
+        if segment_count >= cfg.compact_on_start_threshold {
+            info!(
+                segments = segment_count,
+                threshold = cfg.compact_on_start_threshold,
+                "Starting compaction on startup (segment count exceeds threshold)"
+            );
+            let start = std::time::Instant::now();
+            match db.compact_all() {
+                Ok(compacted) => {
+                    let new_count = db.segment_count();
+                    info!(
+                        compacted_tables = compacted,
+                        old_segments = segment_count,
+                        new_segments = new_count,
+                        duration_ms = start.elapsed().as_millis(),
+                        "Startup compaction complete"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Startup compaction failed, continuing with fragmented segments");
+                }
+            }
+        } else {
+            debug!(
+                segments = segment_count,
+                threshold = cfg.compact_on_start_threshold,
+                "Skipping startup compaction (below threshold)"
+            );
+        }
+    }
+
     let prepared_cache = Arc::new(Mutex::new(PreparedStatementCache::new(
         cfg.prepared_cache_size,
         cfg.prepared_cache_ttl_secs,
@@ -1790,6 +1950,73 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Spawn automatic backup scheduler if enabled
+    if cfg.backup_interval_hours > 0 {
+        let backup_db = db.clone();
+        let backup_interval = Duration::from_secs(cfg.backup_interval_hours * 3600);
+        let backup_max_count = cfg.backup_max_count;
+        info!(
+            interval_hours = cfg.backup_interval_hours,
+            max_count = backup_max_count,
+            "Automatic backup scheduler started"
+        );
+        println!(
+            "Automatic backups enabled: every {} hours, max {} backups retained",
+            cfg.backup_interval_hours,
+            if backup_max_count == 0 { "unlimited".to_string() } else { backup_max_count.to_string() }
+        );
+        tokio::spawn(async move {
+            // Wait for initial interval before first backup
+            tokio::time::sleep(backup_interval).await;
+            loop {
+                // Create automatic backup
+                let label = format!("auto-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                match backup_db.create_backup(Some(label.clone())) {
+                    Ok(info) => {
+                        info!(
+                            backup_id = %info.id,
+                            label = %label,
+                            "Automatic backup created successfully"
+                        );
+                        // Cleanup old backups if max_count is set
+                        if backup_max_count > 0 {
+                            match backup_db.list_backups() {
+                                Ok(mut backups) => {
+                                    // Sort by creation time (oldest first)
+                                    backups.sort_by_key(|b| b.start_timestamp_micros);
+                                    // Filter to only automatic backups
+                                    let auto_backups: Vec<_> = backups
+                                        .iter()
+                                        .filter(|b| b.label.as_deref().map(|l| l.starts_with("auto-")).unwrap_or(false))
+                                        .collect();
+                                    // Delete oldest backups if we have too many
+                                    if auto_backups.len() > backup_max_count {
+                                        let to_delete = auto_backups.len() - backup_max_count;
+                                        for backup in auto_backups.iter().take(to_delete) {
+                                            if let Err(e) = backup_db.delete_backup(&backup.id) {
+                                                warn!(backup_id = %backup.id, error = %e, "Failed to delete old backup");
+                                            } else {
+                                                info!(backup_id = %backup.id, "Deleted old automatic backup");
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to list backups for cleanup");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Automatic backup failed");
+                    }
+                }
+                // Wait for next interval
+                tokio::time::sleep(backup_interval).await;
+            }
+        });
+    }
+
     let listener = TcpListener::bind(&cfg.bind_addr)
         .await
         .map_err(|e| format!("bind {} failed: {e}", cfg.bind_addr))?;
@@ -1809,6 +2036,16 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "none"
     };
+    // Log detected system resources
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    info!(
+        cpu_cores = cpu_cores,
+        workers = cfg.worker_threads,
+        "System resources detected"
+    );
+
     info!(
         bind_addr = %cfg.bind_addr,
         max_ipc_bytes = cfg.max_ipc_bytes,
@@ -1824,18 +2061,14 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         "boyodb-server started"
     );
     println!(
-        "boyodb-server listening on {} (max_ipc_bytes={}, wal_dir={}, wal_max_bytes={}, wal_max_segments={}, max_conns={}, workers={}, auth={}, tls={}, replicate_from={}, replicate_tls={})",
+        "boyodb-server listening on {} (cpus={}, workers={}, max_conns={}, max_ipc_bytes={}, auth={}, tls={})",
         cfg.bind_addr,
-        cfg.max_ipc_bytes,
-        cfg.wal_dir.display(),
-        cfg.wal_max_bytes,
-        cfg.wal_max_segments,
-        cfg.max_connections,
+        cpu_cores,
         cfg.worker_threads,
+        cfg.max_connections,
+        cfg.max_ipc_bytes,
         auth_mode,
-        tls_mode,
-        cfg.replicate_from.clone().unwrap_or_else(|| "none".into()),
-        if cfg.replicate_use_tls { "yes" } else { "no" }
+        tls_mode
     );
 
     let limiter = Arc::new(Semaphore::new(cfg.max_connections));
@@ -1843,8 +2076,17 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Rate limiter for authentication: 10 attempts per 60 seconds per IP
     let auth_rate_limiter = Arc::new(AuthRateLimiter::new(10, 60));
 
-    // Connection statistics for metrics
-    let connection_stats = Arc::new(ConnectionStats::new(cfg.max_connections));
+    // Connection statistics for metrics with query concurrency based on worker threads
+    // Allow 2x worker threads for concurrent queries to maximize CPU utilization
+    let max_concurrent_queries = cfg.worker_threads * 2;
+    let connection_stats = Arc::new(ConnectionStats::with_query_limit(
+        cfg.max_connections,
+        max_concurrent_queries,
+    ));
+    info!(
+        max_concurrent_queries = max_concurrent_queries,
+        "Query concurrency limit configured"
+    );
 
     let cfg = Arc::new(cfg);
 
@@ -2263,8 +2505,52 @@ async fn handle_conn(
             }
         }
 
-        // Process the request - track query admission
-        conn_stats.query_admitted();
+        // Process the request - try to acquire a query slot for load management
+        // For heavy operations (queries), we use backpressure to prevent overload
+        let is_heavy_operation = matches!(
+            &env.request,
+            Request::Query { .. }
+                | Request::QueryBinary { .. }
+                | Request::ExecuteSubQuery { .. }
+                | Request::IngestIpc { .. }
+                | Request::IngestIpcBinary { .. }
+        );
+
+        let _query_permit = if is_heavy_operation {
+            // Try to acquire a permit, waiting briefly if system is loaded
+            match conn_stats
+                .try_acquire_query_with_timeout(Duration::from_millis(100))
+                .await
+            {
+                Some(permit) => {
+                    conn_stats.query_admitted();
+                    Some(permit)
+                }
+                None => {
+                    // Timeout or closed - system is overloaded, apply backpressure
+                    // Log at debug level to avoid log spam during high load
+                    debug!(
+                        active = conn_stats.active_queries(),
+                        max = conn_stats.max_queries(),
+                        "query throttled due to high load"
+                    );
+                    conn_stats.query_rejected();
+                    write_response(
+                        &mut stream,
+                        &Response::error("server busy - try again"),
+                        cfg.io_timeout,
+                        cfg.max_frame_len,
+                    )
+                    .await?;
+                    continue;
+                }
+            }
+        } else {
+            // Light operations (ping, auth) don't need throttling
+            conn_stats.query_admitted();
+            None
+        };
+
         match env.request {
             Request::ExecuteSubQuery {
                 plan_json,
@@ -3473,12 +3759,16 @@ async fn process_request(
             let conn_max = conn_stats.max();
             let queries_admitted = conn_stats.queries_admitted();
             let queries_rejected = conn_stats.queries_rejected();
+            let queries_active = conn_stats.active_queries();
+            let queries_max = conn_stats.max_queries();
             let metrics_text = blocking(move || {
                 Ok(db.prometheus_metrics_with_connections(
                     conn_current,
                     conn_max,
                     queries_admitted,
                     queries_rejected,
+                    queries_active,
+                    queries_max,
                 ))
             })
             .await?;
@@ -5608,6 +5898,283 @@ where
                 backup_id
             )))
         }
+        DdlCommand::ShowServerInfo => {
+            let db = db.clone();
+            let info = blocking(move || {
+                db.get_server_info()
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!(
+                "Server Information:\n  Version: {}\n  Databases: {}\n  Tables: {}\n  Segments: {}\n  Manifest Version: {}\n  WAL LSN: {}",
+                info.version, info.database_count, info.table_count,
+                info.segment_count, info.manifest_version, info.wal_lsn
+            )))
+        }
+        DdlCommand::ShowMissingSegments { database, table } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let missing = blocking(move || {
+                db.find_missing_segments(database.as_deref(), table.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if missing.is_empty() {
+                Ok(Response::ok_message("No missing segments found"))
+            } else {
+                let lines: Vec<String> = missing
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{} | {}.{} | {} bytes",
+                            m.segment_id, m.database, m.table, m.size_bytes
+                        )
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Missing segments ({}):\n{}",
+                    missing.len(),
+                    lines.join("\n")
+                )))
+            }
+        }
+        DdlCommand::ShowCorruptedSegments { database, table } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let corrupted = blocking(move || {
+                db.find_corrupted_segments(database.as_deref(), table.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if corrupted.is_empty() {
+                Ok(Response::ok_message("No corrupted segments found"))
+            } else {
+                let lines: Vec<String> = corrupted
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{} | {}.{} | {} bytes | expected={} actual={}",
+                            c.segment_id, c.database, c.table, c.size_bytes,
+                            c.expected_checksum, c.actual_checksum
+                        )
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Corrupted segments ({}):\n{}",
+                    corrupted.len(),
+                    lines.join("\n")
+                )))
+            }
+        }
+        DdlCommand::ShowDamagedSegments { database, table } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let damaged = blocking(move || {
+                db.find_damaged_segments(database.as_deref(), table.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if damaged.is_empty() {
+                Ok(Response::ok_message("No damaged segments found"))
+            } else {
+                use boyodb_core::engine::DamagedSegment;
+                let lines: Vec<String> = damaged
+                    .iter()
+                    .map(|d| match d {
+                        DamagedSegment::Missing(m) => {
+                            format!(
+                                "MISSING | {} | {}.{} | {} bytes",
+                                m.segment_id, m.database, m.table, m.size_bytes
+                            )
+                        }
+                        DamagedSegment::Corrupted(c) => {
+                            format!(
+                                "CORRUPTED | {} | {}.{} | {} bytes | expected={} actual={}",
+                                c.segment_id, c.database, c.table, c.size_bytes,
+                                c.expected_checksum, c.actual_checksum
+                            )
+                        }
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Damaged segments ({}):\n{}",
+                    damaged.len(),
+                    lines.join("\n")
+                )))
+            }
+        }
+        DdlCommand::RepairSegments { database, table } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let scope = match (&database, &table) {
+                (None, None) => "all databases".to_string(),
+                (Some(d), None) => format!("database {}", d),
+                (Some(d), Some(t)) => format!("{}.{}", d, t),
+                (None, Some(_)) => "all databases".to_string(),
+            };
+            let removed = blocking(move || {
+                db.repair_segments(database.as_deref(), table.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            if removed.is_empty() {
+                Ok(Response::ok_message("No repairs needed"))
+            } else {
+                Ok(Response::ok_message(&format!(
+                    "Removed {} damaged segments from {} in manifest:\n{}",
+                    removed.len(),
+                    scope,
+                    removed.join("\n")
+                )))
+            }
+        }
+        DdlCommand::CheckManifest => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let result = blocking(move || {
+                db.check_manifest()
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+
+            let mut report = format!(
+                "Manifest Check Report:\n\
+                 =======================\n\
+                 Manifest Version: {}\n\
+                 Total Databases: {}\n\
+                 Total Tables: {}\n\
+                 Total Segments: {}\n",
+                result.manifest_version,
+                result.total_databases,
+                result.total_tables,
+                result.total_segments
+            );
+
+            if result.missing_segments.is_empty()
+                && result.corrupted_segments.is_empty()
+                && result.orphaned_files.is_empty()
+            {
+                report.push_str("\nStatus: HEALTHY - No issues found");
+            } else {
+                report.push_str(&format!(
+                    "\nIssues Found:\n\
+                     - Missing segments: {}\n\
+                     - Corrupted segments: {}\n\
+                     - Orphaned files: {}\n",
+                    result.missing_segments.len(),
+                    result.corrupted_segments.len(),
+                    result.orphaned_files.len()
+                ));
+
+                if !result.missing_segments.is_empty() {
+                    report.push_str("\nMissing Segments:\n");
+                    for seg in &result.missing_segments {
+                        report.push_str(&format!(
+                            "  {} | {}.{} | {} bytes\n",
+                            seg.segment_id, seg.database, seg.table, seg.size_bytes
+                        ));
+                    }
+                }
+
+                if !result.corrupted_segments.is_empty() {
+                    report.push_str("\nCorrupted Segments:\n");
+                    for seg in &result.corrupted_segments {
+                        report.push_str(&format!(
+                            "  {} | {}.{} | expected={} actual={}\n",
+                            seg.segment_id, seg.database, seg.table,
+                            seg.expected_checksum, seg.actual_checksum
+                        ));
+                    }
+                }
+
+                if !result.orphaned_files.is_empty() {
+                    report.push_str("\nOrphaned Files (not in manifest):\n");
+                    for f in &result.orphaned_files {
+                        report.push_str(&format!("  {} | {} bytes\n", f.path, f.size_bytes));
+                    }
+                }
+
+                report.push_str("\nRun REPAIR ALL SEGMENTS to fix these issues.");
+            }
+
+            Ok(Response::ok_message(&report))
+        }
+        DdlCommand::CompactTable { database, table } => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let result = blocking(move || {
+                // Run compaction multiple times to fully compact
+                let mut total_merged = 0;
+                loop {
+                    match db.compact_table(&database, &table) {
+                        Ok(Some(_)) => total_merged += 1,
+                        Ok(None) => break,
+                        Err(e) => return Err(ServerError::Db(e.to_string())),
+                    }
+                }
+                Ok(total_merged)
+            })
+            .await?;
+            if result == 0 {
+                Ok(Response::ok_message("No compaction needed - table already optimized"))
+            } else {
+                Ok(Response::ok_message(&format!(
+                    "Compaction complete: merged {} segment groups",
+                    result
+                )))
+            }
+        }
+        DdlCommand::CompactAll => {
+            require_privilege(Privilege::Superuser, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let result = blocking(move || {
+                let mut total_merged = 0;
+                // Run multiple passes until no more compaction needed
+                loop {
+                    match db.run_background_compaction() {
+                        Ok(0) => break,
+                        Ok(n) => total_merged += n,
+                        Err(e) => return Err(ServerError::Db(e.to_string())),
+                    }
+                }
+                Ok(total_merged)
+            })
+            .await?;
+            if result == 0 {
+                Ok(Response::ok_message("No compaction needed - all tables already optimized"))
+            } else {
+                Ok(Response::ok_message(&format!(
+                    "Compaction complete: merged {} segment groups across all tables",
+                    result
+                )))
+            }
+        }
+        // Transaction commands
+        // Note: BoyoDB is currently an OLAP system optimized for analytics.
+        // Full ACID transactions would require significant architecture changes.
+        // For now, we provide basic transaction syntax support with implicit auto-commit.
+        DdlCommand::BeginTransaction => {
+            // In auto-commit mode, BEGIN is acknowledged but doesn't change behavior
+            Ok(Response::ok_message("BEGIN - Transaction started (auto-commit mode, all statements commit immediately)"))
+        }
+        DdlCommand::CommitTransaction => {
+            // In auto-commit mode, COMMIT is always successful
+            Ok(Response::ok_message("COMMIT - Transaction committed"))
+        }
+        DdlCommand::RollbackTransaction => {
+            // In auto-commit mode, ROLLBACK cannot undo already-committed statements
+            Ok(Response::ok_message("ROLLBACK - Transaction rolled back (note: in auto-commit mode, previous statements were already committed)"))
+        }
+        DdlCommand::Savepoint { name } => {
+            // Savepoints are acknowledged but not enforced in auto-commit mode
+            Ok(Response::ok_message(&format!("SAVEPOINT {} created (auto-commit mode)", name)))
+        }
+        DdlCommand::ReleaseSavepoint { name } => {
+            Ok(Response::ok_message(&format!("SAVEPOINT {} released", name)))
+        }
+        DdlCommand::RollbackToSavepoint { name } => {
+            Ok(Response::ok_message(&format!("Rolled back to SAVEPOINT {} (note: in auto-commit mode, previous statements were already committed)", name)))
+        }
     }
 }
 
@@ -7410,6 +7977,41 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
         DdlCommand::ShowBackups => DdlCommand::ShowBackups,
         DdlCommand::ShowWalStatus => DdlCommand::ShowWalStatus,
         DdlCommand::DeleteBackup { backup_id } => DdlCommand::DeleteBackup { backup_id },
+        // Server info and segment repair commands don't have database context
+        DdlCommand::ShowServerInfo => DdlCommand::ShowServerInfo,
+        DdlCommand::ShowMissingSegments { database, table } => {
+            DdlCommand::ShowMissingSegments { database, table }
+        }
+        DdlCommand::ShowCorruptedSegments { database, table } => {
+            DdlCommand::ShowCorruptedSegments { database, table }
+        }
+        DdlCommand::ShowDamagedSegments { database, table } => {
+            DdlCommand::ShowDamagedSegments { database, table }
+        }
+        DdlCommand::RepairSegments { database, table } => {
+            let db = match database {
+                Some(d) if d == "default" => Some(effective_db.to_string()),
+                other => other,
+            };
+            DdlCommand::RepairSegments { database: db, table }
+        }
+        DdlCommand::CheckManifest => DdlCommand::CheckManifest,
+        DdlCommand::CompactTable { database, table } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::CompactTable { database: db, table }
+        }
+        DdlCommand::CompactAll => DdlCommand::CompactAll,
+        // Transaction commands don't need database binding
+        DdlCommand::BeginTransaction => DdlCommand::BeginTransaction,
+        DdlCommand::CommitTransaction => DdlCommand::CommitTransaction,
+        DdlCommand::RollbackTransaction => DdlCommand::RollbackTransaction,
+        DdlCommand::Savepoint { name } => DdlCommand::Savepoint { name },
+        DdlCommand::ReleaseSavepoint { name } => DdlCommand::ReleaseSavepoint { name },
+        DdlCommand::RollbackToSavepoint { name } => DdlCommand::RollbackToSavepoint { name },
     }
 }
 
