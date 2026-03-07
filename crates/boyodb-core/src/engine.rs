@@ -16476,6 +16476,9 @@ pub struct QueryFilter {
     /// LIKE patterns: Vec<(column, pattern, negate)>
     /// negate=true means NOT LIKE
     like_filters: Vec<(String, String, bool)>,
+    /// ILIKE patterns (case-insensitive): Vec<(column, pattern, negate)>
+    #[serde(default)]
+    ilike_filters: Vec<(String, String, bool)>,
     /// IS NULL checks: Vec<(column, is_null)>
     /// is_null=true means IS NULL, is_null=false means IS NOT NULL
     null_filters: Vec<(String, bool)>,
@@ -16728,6 +16731,7 @@ fn query_filter_from_sql(filter: &crate::sql::QueryFilter) -> QueryFilter {
         float_eq_filters: Vec::new(),
         bool_eq_filters: Vec::new(),
         like_filters: filter.like_filters.clone(),
+        ilike_filters: filter.ilike_filters.clone(),
         null_filters: filter.null_filters.clone(),
         string_eq_filters: filter.string_eq_filters.clone(),
         string_in_filters: filter.string_in_filters.clone(),

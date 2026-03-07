@@ -193,6 +193,9 @@ pub struct QueryFilter {
     pub numeric_in_filters: Vec<(String, Vec<i64>)>,
     /// LIKE patterns: Vec<(column, pattern, negate)>
     pub like_filters: Vec<(String, String, bool)>,
+    /// ILIKE patterns (case-insensitive): Vec<(column, pattern, negate)>
+    #[serde(default)]
+    pub ilike_filters: Vec<(String, String, bool)>,
     /// IS NULL checks: Vec<(column, is_null)> - is_null=true means IS NULL, false means IS NOT NULL
     pub null_filters: Vec<(String, bool)>,
     /// Generic string equality filters: Vec<(column, value)>
@@ -4449,12 +4452,32 @@ fn parse_where_expr(expr: &Expr, filter: &mut QueryFilter) -> Result<(), EngineE
             pattern,
             ..
         } => {
-            if let Expr::Identifier(ident) = like_expr.as_ref() {
-                if let Some(pattern_str) = extract_string_value(pattern) {
-                    filter
-                        .like_filters
-                        .push((ident.value.clone(), pattern_str, *negated));
-                }
+            let col_name = match like_expr.as_ref() {
+                Expr::Identifier(ident) => Some(ident.value.clone()),
+                Expr::CompoundIdentifier(parts) => parts.last().map(|p| p.value.clone()),
+                _ => None,
+            };
+            if let (Some(col), Some(pattern_str)) = (col_name, extract_string_value(pattern)) {
+                filter.like_filters.push((col, pattern_str, *negated));
+            }
+        }
+        // ILike expression: column ILIKE 'pattern' (case-insensitive)
+        Expr::ILike {
+            negated,
+            expr: like_expr,
+            pattern,
+            ..
+        } => {
+            let col_name = match like_expr.as_ref() {
+                Expr::Identifier(ident) => Some(ident.value.clone()),
+                Expr::CompoundIdentifier(parts) => parts.last().map(|p| p.value.clone()),
+                _ => None,
+            };
+            if let (Some(col), Some(pattern_str)) = (col_name, extract_string_value(pattern)) {
+                // For ILIKE, we convert pattern to lowercase for case-insensitive match
+                filter
+                    .ilike_filters
+                    .push((col, pattern_str.to_lowercase(), *negated));
             }
         }
         // IN expression: column IN ('a', 'b', 'c') or column IN (1, 2, 3)
