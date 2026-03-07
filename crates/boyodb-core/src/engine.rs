@@ -67,6 +67,8 @@ pub enum EngineError {
     Configuration(String),
     #[error("constraint violation: {0}")]
     ConstraintViolation(String),
+    #[error("server busy: {0}")]
+    Backpressure(String),
 }
 
 /// Data provider for constraint validation that queries existing data from the engine
@@ -393,6 +395,14 @@ pub struct EngineConfig {
     /// When true, corrupt records are skipped and logged
     /// When false, WAL corruption will prevent startup
     pub wal_skip_corrupt_records: bool,
+
+    // --- Rate Limiting / Backpressure ---
+    /// Maximum ingests per second (0 = unlimited)
+    pub ingest_rate_limit_per_sec: u64,
+    /// Maximum concurrent ingest operations (0 = unlimited)
+    pub max_concurrent_ingests: usize,
+    /// Backpressure threshold: return "busy" when pending ingests exceed this
+    pub ingest_backpressure_threshold: usize,
 }
 
 impl EngineConfig {
@@ -475,6 +485,10 @@ impl EngineConfig {
             orphan_cleanup_enabled: true,      // Clean up orphaned files
             orphan_cleanup_age_secs: 86400,    // 24 hours safety buffer
             wal_skip_corrupt_records: true,    // Skip corrupt WAL records by default
+            // Rate limiting defaults (disabled by default for backward compatibility)
+            ingest_rate_limit_per_sec: 0,      // Unlimited
+            max_concurrent_ingests: 0,         // Unlimited
+            ingest_backpressure_threshold: 10000, // Return busy when 10K pending ingests
         }
     }
 
@@ -9939,11 +9953,23 @@ impl Db {
     /// Vacuum a table to reclaim storage
     /// - Regular VACUUM: rewrites fragmented segments (< 50% of target size)
     /// - VACUUM FULL: merges all segments into optimal-sized chunks
+    /// - VACUUM FORCE: skip missing/corrupted segments instead of failing
     pub fn vacuum(
         &self,
         database: &str,
         table: &str,
         full: bool,
+    ) -> Result<VacuumResult, EngineError> {
+        self.vacuum_with_options(database, table, full, false)
+    }
+
+    /// Vacuum with full options including force mode
+    pub fn vacuum_with_options(
+        &self,
+        database: &str,
+        table: &str,
+        full: bool,
+        force: bool,
     ) -> Result<VacuumResult, EngineError> {
         let table_meta = {
             let manifest = self
@@ -10006,9 +10032,30 @@ impl Db {
 
             // VACUUM FULL: merge ALL segments into optimal chunks
             let mut all_batches = Vec::new();
+            let mut skipped_segments = 0usize;
             for entry in &segments_to_vacuum {
-                let decoded = self.load_segment_batches_cached(entry)?;
-                all_batches.extend(decoded.iter().cloned());
+                match self.load_segment_batches_cached(entry) {
+                    Ok(decoded) => {
+                        all_batches.extend(decoded.iter().cloned());
+                    }
+                    Err(e) => {
+                        if force {
+                            tracing::warn!(
+                                "VACUUM FORCE: skipping damaged segment {}: {}",
+                                entry.segment_id, e
+                            );
+                            skipped_segments += 1;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            if skipped_segments > 0 {
+                tracing::info!(
+                    "VACUUM FORCE: skipped {} damaged segments out of {}",
+                    skipped_segments, original_count
+                );
             }
 
             if all_batches.is_empty() {

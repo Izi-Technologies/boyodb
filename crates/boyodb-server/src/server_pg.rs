@@ -1455,6 +1455,10 @@ fn engine_error_to_pg(e: boyodb_core::engine::EngineError) -> PgWireError {
             sqlstate::INTEGRITY_CONSTRAINT,
             format!("constraint violation: {}", msg),
         ),
+        EngineError::Backpressure(msg) => (
+            "53000", // PostgreSQL insufficient_resources
+            format!("server busy, retry later: {}", msg),
+        ),
     };
 
     let error_info = ErrorInfo::new("ERROR".to_string(), code.to_string(), message);

@@ -5470,6 +5470,7 @@ where
             database,
             table,
             full,
+            force,
         } => {
             require_privilege(
                 Privilege::Alter,
@@ -5480,7 +5481,7 @@ where
             )?;
             let db = db.clone();
             let result = blocking(move || {
-                db.vacuum(&database, &table, full)
+                db.vacuum_with_options(&database, &table, full, force)
                     .map_err(|e| ServerError::Db(e.to_string()))
             })
             .await?;
@@ -8363,6 +8364,7 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             database,
             table,
             full,
+            force,
         } => {
             let db = if database == "default" {
                 effective_db.to_string()
@@ -8373,6 +8375,7 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 database: db,
                 table,
                 full,
+                force,
             }
         }
         DdlCommand::Deduplicate { database, table } => {

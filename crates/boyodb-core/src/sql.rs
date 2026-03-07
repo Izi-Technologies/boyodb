@@ -958,11 +958,13 @@ pub enum DdlCommand {
         database: String,
         table: String,
     },
-    /// VACUUM [FULL] database.table - Reclaim storage
+    /// VACUUM [FULL] [FORCE] database.table - Reclaim storage
+    /// FORCE option skips missing/corrupted segments instead of failing
     Vacuum {
         database: String,
         table: String,
         full: bool,
+        force: bool,
     },
     /// DEDUPLICATE database.table - Remove duplicate rows based on configured keys
     Deduplicate {
@@ -1567,7 +1569,7 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }
     }
 
-    // VACUUM [FULL] database.table
+    // VACUUM [FULL] [FORCE] database.table
     if upper_trimmed.starts_with("VACUUM ") {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
         if tokens.len() < 2 {
@@ -1576,11 +1578,23 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             ));
         }
 
-        let (full, table_idx) = if tokens.len() >= 2 && tokens[1].eq_ignore_ascii_case("FULL") {
-            (true, 2)
-        } else {
-            (false, 1)
-        };
+        // Parse FULL and FORCE options (can appear in any order)
+        let mut full = false;
+        let mut force = false;
+        let mut table_idx = 1;
+
+        while table_idx < tokens.len() {
+            let token_upper = tokens[table_idx].to_uppercase();
+            if token_upper == "FULL" {
+                full = true;
+                table_idx += 1;
+            } else if token_upper == "FORCE" {
+                force = true;
+                table_idx += 1;
+            } else {
+                break;
+            }
+        }
 
         if table_idx >= tokens.len() {
             return Err(EngineError::InvalidArgument(
@@ -1594,6 +1608,7 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             database,
             table,
             full,
+            force,
         }));
     }
 

@@ -11,6 +11,7 @@ pub enum BoyodbStatus {
     NotImplemented = 4,
     Io = 5,
     Timeout = 6,
+    Backpressure = 7,
 }
 
 impl BoyodbStatus {
@@ -28,6 +29,7 @@ impl BoyodbStatus {
             Err(crate::engine::EngineError::ConstraintViolation(_)) => {
                 BoyodbStatus::InvalidArgument
             }
+            Err(crate::engine::EngineError::Backpressure(_)) => BoyodbStatus::Backpressure,
         }
     }
 }

@@ -725,6 +725,7 @@ fn status_from_error(err: EngineError) -> BoyodbStatus {
         EngineError::Remote(_) => BoyodbStatus::Internal,
         EngineError::Configuration(_) => BoyodbStatus::Internal,
         EngineError::ConstraintViolation(_) => BoyodbStatus::InvalidArgument,
+        EngineError::Backpressure(_) => BoyodbStatus::Backpressure,
     }
 }
 

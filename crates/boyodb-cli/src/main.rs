@@ -1219,6 +1219,7 @@ fn check_status(status: BoyodbStatus) -> Result<()> {
         BoyodbStatus::NotImplemented => "not implemented",
         BoyodbStatus::Io => "io error",
         BoyodbStatus::Timeout => "query timeout",
+        BoyodbStatus::Backpressure => "server busy, retry later",
     };
     match detail {
         Some(msg) if !msg.is_empty() => Err(anyhow!("{kind}: {msg}")),
