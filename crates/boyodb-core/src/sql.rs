@@ -67,13 +67,62 @@ pub enum JoinType {
     Right,
     FullOuter,
     Cross,
+    /// ASOF join - match on closest timestamp/value (for time-series)
+    AsOf,
+    /// ASOF LEFT join - like LEFT JOIN but matches on closest value
+    AsOfLeft,
+    /// Semi join - exists in right table (for IN subqueries)
+    Semi,
+    /// Anti join - not exists in right table (for NOT IN subqueries)
+    Anti,
 }
 
-/// JOIN ON condition (equi-join only for now)
+/// JOIN ON condition with support for non-equi joins
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinCondition {
     pub left_column: String,
     pub right_column: String,
+    /// Comparison operator (=, <, >, <=, >=, <>)
+    #[serde(default = "default_join_op")]
+    pub operator: JoinComparisonOp,
+}
+
+fn default_join_op() -> JoinComparisonOp {
+    JoinComparisonOp::Equal
+}
+
+/// Join comparison operators (for non-equi joins)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum JoinComparisonOp {
+    #[default]
+    Equal,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    NotEqual,
+}
+
+/// ASOF join configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsOfJoinConfig {
+    /// Column to match on (usually timestamp)
+    pub match_column: String,
+    /// Tolerance window (e.g., "5 seconds", "1 hour")
+    pub tolerance: Option<String>,
+    /// Direction: 'backward' (default), 'forward', 'nearest'
+    pub direction: AsOfDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AsOfDirection {
+    /// Match the closest value <= the probe value (default)
+    #[default]
+    Backward,
+    /// Match the closest value >= the probe value
+    Forward,
+    /// Match the nearest value in either direction
+    Nearest,
 }
 
 /// ORDER BY clause representation
@@ -316,10 +365,12 @@ pub struct AggPlan {
 }
 
 /// Supported GROUP BY column identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GroupByColumn {
     TenantId,
     RouteId,
+    /// Dynamic column name for flexible grouping
+    Named(String),
 }
 
 /// Group by clause type - supports single or multiple columns
@@ -331,6 +382,17 @@ pub enum GroupBy {
     Route,
     /// Multiple columns grouped together (e.g., GROUP BY tenant_id, route_id)
     Columns(Vec<GroupByColumn>),
+    /// GROUP BY ALL - group by all non-aggregate columns
+    All,
+    /// GROUPING SETS - explicit list of grouping combinations
+    /// e.g., GROUPING SETS ((a, b), (a), ())
+    GroupingSets(Vec<Vec<GroupByColumn>>),
+    /// ROLLUP - hierarchical grouping with progressive subtotals
+    /// e.g., ROLLUP(a, b, c) = GROUPING SETS ((a,b,c), (a,b), (a), ())
+    Rollup(Vec<GroupByColumn>),
+    /// CUBE - all possible grouping combinations
+    /// e.g., CUBE(a, b) = GROUPING SETS ((a,b), (a), (b), ())
+    Cube(Vec<GroupByColumn>),
 }
 
 /// Set operation type (UNION, INTERSECT, EXCEPT)
@@ -528,6 +590,115 @@ pub enum ScalarFunction {
         array: Box<SelectExpr>,
         delimiter: String,
     },
+
+    // Full-Text Search functions
+    /// MATCH(column, 'search query') - full-text search with relevance scoring
+    Match {
+        column: Box<SelectExpr>,
+        query: String,
+        mode: Option<String>, // 'boolean', 'natural', 'phrase'
+    },
+    /// CONTAINS(column, 'word') - check if text contains term
+    Contains {
+        expr: Box<SelectExpr>,
+        search: String,
+    },
+    /// FTS_RANK(column, 'query') - get relevance score for search
+    FtsRank {
+        column: Box<SelectExpr>,
+        query: String,
+    },
+    /// HIGHLIGHT(column, 'query', '<b>', '</b>') - highlight matching terms
+    Highlight {
+        column: Box<SelectExpr>,
+        query: String,
+        start_tag: String,
+        end_tag: String,
+    },
+    /// SNIPPET(column, 'query', max_length) - extract snippet with context
+    Snippet {
+        column: Box<SelectExpr>,
+        query: String,
+        max_length: i64,
+    },
+    /// TO_TSVECTOR(text) - convert text to searchable vector
+    ToTsvector(Box<SelectExpr>),
+    /// TO_TSQUERY(query) - convert query string to search query
+    ToTsquery(Box<SelectExpr>),
+    /// PLAINTO_TSQUERY(text) - convert plain text to search query
+    PlainToTsquery(Box<SelectExpr>),
+
+    // Geospatial functions
+    /// ST_POINT(lon, lat) - create a point geometry
+    StPoint {
+        longitude: Box<SelectExpr>,
+        latitude: Box<SelectExpr>,
+    },
+    /// ST_DISTANCE(geom1, geom2) - calculate distance between geometries
+    StDistance {
+        geom1: Box<SelectExpr>,
+        geom2: Box<SelectExpr>,
+    },
+    /// ST_DISTANCESPHERE(point1, point2) - distance on earth in meters
+    StDistanceSphere {
+        point1: Box<SelectExpr>,
+        point2: Box<SelectExpr>,
+    },
+    /// ST_CONTAINS(geom1, geom2) - check if geom1 contains geom2
+    StContains {
+        geom1: Box<SelectExpr>,
+        geom2: Box<SelectExpr>,
+    },
+    /// ST_WITHIN(geom1, geom2) - check if geom1 is within geom2
+    StWithin {
+        geom1: Box<SelectExpr>,
+        geom2: Box<SelectExpr>,
+    },
+    /// ST_INTERSECTS(geom1, geom2) - check if geometries intersect
+    StIntersects {
+        geom1: Box<SelectExpr>,
+        geom2: Box<SelectExpr>,
+    },
+    /// ST_BUFFER(geom, distance) - create buffer around geometry
+    StBuffer {
+        geom: Box<SelectExpr>,
+        distance: Box<SelectExpr>,
+    },
+    /// ST_AREA(geom) - calculate area of polygon
+    StArea(Box<SelectExpr>),
+    /// ST_LENGTH(geom) - calculate length of line
+    StLength(Box<SelectExpr>),
+    /// ST_CENTROID(geom) - calculate centroid
+    StCentroid(Box<SelectExpr>),
+    /// ST_ASTEXT(geom) - convert geometry to WKT string
+    StAsText(Box<SelectExpr>),
+    /// ST_GEOMFROMTEXT(wkt) - parse WKT string to geometry
+    StGeomFromText(Box<SelectExpr>),
+    /// ST_SETSRID(geom, srid) - set spatial reference ID
+    StSetSrid {
+        geom: Box<SelectExpr>,
+        srid: i32,
+    },
+    /// ST_MAKEENVELOPE(xmin, ymin, xmax, ymax, srid) - create bounding box
+    StMakeEnvelope {
+        xmin: Box<SelectExpr>,
+        ymin: Box<SelectExpr>,
+        xmax: Box<SelectExpr>,
+        ymax: Box<SelectExpr>,
+        srid: Option<i32>,
+    },
+
+    // Vector/Similarity functions
+    /// VECTOR_DISTANCE(vec1, vec2, metric) - calculate vector distance
+    VectorDistance {
+        vec1: Box<SelectExpr>,
+        vec2: Box<SelectExpr>,
+        metric: String, // 'cosine', 'euclidean', 'dot', 'manhattan'
+    },
+    /// VECTOR_DIMS(vec) - get vector dimensions
+    VectorDims(Box<SelectExpr>),
+    /// VECTOR_NORM(vec) - get vector L2 norm
+    VectorNorm(Box<SelectExpr>),
 }
 
 /// Window function types
@@ -946,6 +1117,78 @@ pub enum DdlCommand {
     ReleaseSavepoint { name: String },
     /// ROLLBACK TO SAVEPOINT name - Rollback to a savepoint
     RollbackToSavepoint { name: String },
+
+    // User-Defined Functions (UDFs)
+    /// CREATE FUNCTION name(args) RETURNS type AS 'body'
+    CreateFunction {
+        name: String,
+        parameters: Vec<FunctionParameter>,
+        return_type: String,
+        body: FunctionBody,
+        or_replace: bool,
+        language: Option<String>, // SQL, expression
+    },
+    /// DROP FUNCTION [IF EXISTS] name
+    DropFunction {
+        name: String,
+        if_exists: bool,
+    },
+    /// SHOW FUNCTIONS [LIKE pattern]
+    ShowFunctions {
+        pattern: Option<String>,
+    },
+
+    // Streaming/CDC commands
+    /// CREATE STREAM name FROM KAFKA 'topic' WITH (options)
+    CreateStream {
+        name: String,
+        source_type: StreamSourceType,
+        source_config: String, // JSON config
+        target_table: Option<String>,
+        format: Option<String>,
+    },
+    /// DROP STREAM [IF EXISTS] name
+    DropStream {
+        name: String,
+        if_exists: bool,
+    },
+    /// SHOW STREAMS
+    ShowStreams,
+    /// START STREAM name
+    StartStream { name: String },
+    /// STOP STREAM name
+    StopStream { name: String },
+    /// SHOW STREAM STATUS name
+    ShowStreamStatus { name: String },
+}
+
+/// Function parameter definition
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FunctionParameter {
+    pub name: String,
+    pub data_type: String,
+    pub default_value: Option<String>,
+}
+
+/// Function body - can be SQL expression or reference to external code
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FunctionBody {
+    /// SQL expression body
+    SqlExpression(String),
+    /// SQL query body (for table functions)
+    SqlQuery(String),
+    /// External reference (for future extension)
+    External { library: String, symbol: String },
+}
+
+/// Stream source types for CDC/streaming
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StreamSourceType {
+    Kafka,
+    Pulsar,
+    Kinesis,
+    /// File-based streaming (for testing)
+    File,
 }
 
 /// Index type for CREATE INDEX
@@ -959,6 +1202,12 @@ pub enum IndexType {
     Bloom,
     /// Bitmap index - good for low-cardinality columns
     Bitmap,
+    /// Full-text search index - good for text search with tokenization
+    Fulltext,
+    /// HNSW index - approximate nearest neighbor for vector search
+    Hnsw,
+    /// GiST index - generalized search tree for spatial data
+    Gist,
 }
 
 /// Deduplication configuration for a table
@@ -3127,6 +3376,7 @@ fn parse_joins(joins: &[Join]) -> Result<Vec<JoinClause>, EngineError> {
                 JoinCondition {
                     left_column: String::new(),
                     right_column: String::new(),
+                    operator: JoinComparisonOp::Equal,
                 }
             }
             JoinOperator::Inner(constraint)
@@ -3174,6 +3424,7 @@ fn parse_join_condition(expr: &Expr) -> Result<JoinCondition, EngineError> {
             Ok(JoinCondition {
                 left_column: left_col,
                 right_column: right_col,
+                operator: JoinComparisonOp::Equal,
             })
         }
         _ => Err(EngineError::NotImplemented(

@@ -6175,6 +6175,74 @@ where
         DdlCommand::RollbackToSavepoint { name } => {
             Ok(Response::ok_message(&format!("Rolled back to SAVEPOINT {} (note: in auto-commit mode, previous statements were already committed)", name)))
         }
+        // User-Defined Functions (UDFs)
+        DdlCommand::CreateFunction {
+            name,
+            parameters,
+            return_type,
+            body: _,
+            or_replace: _,
+            language: _,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let params_str: Vec<String> = parameters
+                .iter()
+                .map(|p| format!("{} {}", p.name, p.data_type))
+                .collect();
+            Ok(Response::ok_message(&format!(
+                "CREATE FUNCTION {}({}) RETURNS {} - UDFs are parsed but not yet executed",
+                name,
+                params_str.join(", "),
+                return_type
+            )))
+        }
+        DdlCommand::DropFunction { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let msg = if if_exists {
+                format!("DROP FUNCTION IF EXISTS {} - acknowledged", name)
+            } else {
+                format!("DROP FUNCTION {} - acknowledged", name)
+            };
+            Ok(Response::ok_message(&msg))
+        }
+        DdlCommand::ShowFunctions { pattern: _ } => {
+            Ok(Response::ok_message("No user-defined functions defined"))
+        }
+        // Streaming (Kafka/Pulsar connectors)
+        DdlCommand::CreateStream {
+            name,
+            source_type,
+            source_config: _,
+            target_table: _,
+            format: _,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message(&format!(
+                "CREATE STREAM {} FROM {:?} - Streaming is parsed but connector not yet implemented",
+                name, source_type
+            )))
+        }
+        DdlCommand::DropStream { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let msg = if if_exists {
+                format!("DROP STREAM IF EXISTS {} - acknowledged", name)
+            } else {
+                format!("DROP STREAM {} - acknowledged", name)
+            };
+            Ok(Response::ok_message(&msg))
+        }
+        DdlCommand::ShowStreams => {
+            Ok(Response::ok_message("No streams defined"))
+        }
+        DdlCommand::StartStream { name } => {
+            Ok(Response::ok_message(&format!("START STREAM {} - acknowledged (no-op)", name)))
+        }
+        DdlCommand::StopStream { name } => {
+            Ok(Response::ok_message(&format!("STOP STREAM {} - acknowledged (no-op)", name)))
+        }
+        DdlCommand::ShowStreamStatus { name } => {
+            Ok(Response::ok_message(&format!("STREAM {} status: not running", name)))
+        }
     }
 }
 
@@ -8012,6 +8080,42 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
         DdlCommand::Savepoint { name } => DdlCommand::Savepoint { name },
         DdlCommand::ReleaseSavepoint { name } => DdlCommand::ReleaseSavepoint { name },
         DdlCommand::RollbackToSavepoint { name } => DdlCommand::RollbackToSavepoint { name },
+        // UDF and Streaming commands don't need database binding - pass through
+        DdlCommand::CreateFunction {
+            name,
+            parameters,
+            return_type,
+            body,
+            or_replace,
+            language,
+        } => DdlCommand::CreateFunction {
+            name,
+            parameters,
+            return_type,
+            body,
+            or_replace,
+            language,
+        },
+        DdlCommand::DropFunction { name, if_exists } => DdlCommand::DropFunction { name, if_exists },
+        DdlCommand::ShowFunctions { pattern } => DdlCommand::ShowFunctions { pattern },
+        DdlCommand::CreateStream {
+            name,
+            source_type,
+            source_config,
+            target_table,
+            format,
+        } => DdlCommand::CreateStream {
+            name,
+            source_type,
+            source_config,
+            target_table,
+            format,
+        },
+        DdlCommand::DropStream { name, if_exists } => DdlCommand::DropStream { name, if_exists },
+        DdlCommand::ShowStreams => DdlCommand::ShowStreams,
+        DdlCommand::StartStream { name } => DdlCommand::StartStream { name },
+        DdlCommand::StopStream { name } => DdlCommand::StopStream { name },
+        DdlCommand::ShowStreamStatus { name } => DdlCommand::ShowStreamStatus { name },
     }
 }
 

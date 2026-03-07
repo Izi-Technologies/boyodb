@@ -4372,6 +4372,55 @@ impl Db {
                             &join.on_condition.right_column,
                         )?,
                         JoinType::Cross => None,
+                        // ASOF joins match on closest timestamp/value
+                        JoinType::AsOf | JoinType::AsOfLeft => {
+                            // For now, fall back to inner join behavior
+                            // TODO: implement proper ASOF join with temporal matching
+                            if left_batches.is_empty() || right_batches.is_empty() {
+                                None
+                            } else {
+                                Self::hash_join_batches(
+                                    &left_batches,
+                                    &right_batches,
+                                    &join.on_condition.left_column,
+                                    &join.on_condition.right_column,
+                                )?
+                            }
+                        }
+                        // Semi join returns left rows that have matches in right
+                        JoinType::Semi => {
+                            if left_batches.is_empty() || right_batches.is_empty() {
+                                None
+                            } else {
+                                Self::semi_join_batches(
+                                    &left_batches,
+                                    &right_batches,
+                                    &join.on_condition.left_column,
+                                    &join.on_condition.right_column,
+                                    false, // not anti
+                                )?
+                            }
+                        }
+                        // Anti join returns left rows that have NO matches in right
+                        JoinType::Anti => {
+                            if left_batches.is_empty() {
+                                None
+                            } else if right_batches.is_empty() {
+                                // All left rows have no match - return all left rows
+                                Some(arrow_select::concat::concat_batches(
+                                    &left_batches[0].schema(),
+                                    &left_batches,
+                                ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?)
+                            } else {
+                                Self::semi_join_batches(
+                                    &left_batches,
+                                    &right_batches,
+                                    &join.on_condition.left_column,
+                                    &join.on_condition.right_column,
+                                    true, // anti
+                                )?
+                            }
+                        }
                     };
 
                     if let Some(batch) = joined_batch {
@@ -4501,6 +4550,60 @@ impl Db {
                     &join.on_condition.left_column,
                     &join.on_condition.right_column,
                 )?,
+                JoinType::AsOf | JoinType::AsOfLeft => {
+                    // ASOF joins: fall back to hash join for now
+                    // TODO: implement proper ASOF join with temporal matching
+                    if current_batches.is_empty() || right_batches.is_empty() {
+                        None
+                    } else {
+                        Self::hash_join_batches(
+                            &current_batches,
+                            &right_batches,
+                            &join.on_condition.left_column,
+                            &join.on_condition.right_column,
+                        )?
+                    }
+                }
+                JoinType::Semi => {
+                    if current_batches.is_empty() || right_batches.is_empty() {
+                        if matches!(join.join_type, JoinType::Semi) {
+                            None
+                        } else {
+                            None
+                        }
+                    } else {
+                        Self::semi_join_batches(
+                            &current_batches,
+                            &right_batches,
+                            &join.on_condition.left_column,
+                            &join.on_condition.right_column,
+                            false, // not anti
+                        )?
+                    }
+                }
+                JoinType::Anti => {
+                    if right_batches.is_empty() {
+                        // No right rows means all left rows qualify for anti-join
+                        if current_batches.is_empty() {
+                            None
+                        } else {
+                            Some(arrow_select::concat::concat_batches(
+                                &current_batches[0].schema(),
+                                &current_batches,
+                            ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?)
+                        }
+                    } else if current_batches.is_empty() {
+                        None
+                    } else {
+                        Self::semi_join_batches(
+                            &current_batches,
+                            &right_batches,
+                            &join.on_condition.left_column,
+                            &join.on_condition.right_column,
+                            true, // anti
+                        )?
+                    }
+                }
             };
             check_timeout()?;
 
@@ -5258,6 +5361,92 @@ impl Db {
                 Ok(Arc::new(NullArray::new(indices.len())))
             }
         }
+    }
+
+    /// Perform SEMI or ANTI JOIN
+    /// Semi-join returns left rows that have at least one match in right
+    /// Anti-join returns left rows that have NO matches in right
+    fn semi_join_batches(
+        left_batches: &[RecordBatch],
+        right_batches: &[RecordBatch],
+        left_col: &str,
+        right_col: &str,
+        anti: bool,
+    ) -> Result<Option<RecordBatch>, EngineError> {
+        use rustc_hash::FxHashSet;
+
+        if left_batches.is_empty() {
+            return Ok(None);
+        }
+        if right_batches.is_empty() {
+            // No right rows: semi-join returns nothing, anti-join returns all left rows
+            if anti {
+                return Ok(Some(arrow_select::concat::concat_batches(
+                    &left_batches[0].schema(),
+                    left_batches,
+                ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?));
+            } else {
+                return Ok(None);
+            }
+        }
+
+        // Build hash set from right side (just need to know if key exists)
+        let right_row_count: usize = right_batches.iter().map(|b| b.num_rows()).sum();
+        let mut hash_set: FxHashSet<u64> =
+            FxHashSet::with_capacity_and_hasher(right_row_count, Default::default());
+
+        for batch in right_batches {
+            let col_idx = batch.schema().index_of(right_col).map_err(|_| {
+                EngineError::InvalidArgument(format!(
+                    "column '{right_col}' not found in right table"
+                ))
+            })?;
+
+            let col = batch.column(col_idx);
+            for row_idx in 0..batch.num_rows() {
+                let key = Self::compute_hash_key(col.as_ref(), row_idx);
+                hash_set.insert(key);
+            }
+        }
+
+        // Probe with left side, collecting matching row indices
+        let mut left_indices: Vec<(u32, u32)> = Vec::new();
+
+        for (left_batch_idx, left_batch) in left_batches.iter().enumerate() {
+            let col_idx = left_batch.schema().index_of(left_col).map_err(|_| {
+                EngineError::InvalidArgument(format!("column '{left_col}' not found in left table"))
+            })?;
+
+            let col = left_batch.column(col_idx);
+            for row_idx in 0..left_batch.num_rows() {
+                let key = Self::compute_hash_key(col.as_ref(), row_idx);
+                let has_match = hash_set.contains(&key);
+
+                // For semi-join: include if match exists
+                // For anti-join: include if no match exists
+                if has_match != anti {
+                    left_indices.push((left_batch_idx as u32, row_idx as u32));
+                }
+            }
+        }
+
+        if left_indices.is_empty() {
+            return Ok(None);
+        }
+
+        // Build result using only left table schema
+        let left_schema = left_batches[0].schema();
+        let mut result_arrays: Vec<ArrayRef> = Vec::with_capacity(left_schema.fields().len());
+
+        for col_idx in 0..left_schema.fields().len() {
+            let array = Self::take_from_batches(left_batches, col_idx, &left_indices)?;
+            result_arrays.push(array);
+        }
+
+        let result_batch = RecordBatch::try_new(left_schema, result_arrays)
+            .map_err(|e| EngineError::Internal(format!("failed to create result batch: {e}")))?;
+
+        Ok(Some(result_batch))
     }
 
     /// Execute a set operation query (UNION, INTERSECT, EXCEPT)
@@ -13553,30 +13742,52 @@ fn mix64(mut x: u64) -> u64 {
 pub(crate) fn load_manifest(path: &Path) -> Result<Manifest, EngineError> {
     // Try binary format first (.bincode), then fall back to JSON (.json)
     let binary_path = path.with_extension("bincode");
+    let json_path = path;
 
+    // Try binary format first
     if binary_path.exists() {
         let bytes = fs::read(&binary_path)
             .map_err(|e| EngineError::Internal(format!("read binary manifest failed: {e}")))?;
 
         if crate::replication::is_binary_manifest(&bytes) {
-            let manifest = crate::replication::deserialize_manifest_binary(&bytes)
-                .map_err(|e| EngineError::Internal(format!("parse binary manifest failed: {e}")))?;
-            return Ok(manifest);
+            match crate::replication::deserialize_manifest_binary(&bytes) {
+                Ok(manifest) => return Ok(manifest),
+                Err(e) => {
+                    // Binary format failed - try JSON fallback
+                    eprintln!(
+                        "WARNING: Binary manifest parse failed ({}), trying JSON fallback...",
+                        e
+                    );
+                }
+            }
         }
     }
 
     // Fall back to JSON format
-    if !path.exists() {
+    if !json_path.exists() {
+        // Neither binary nor JSON exists - check if we have a bincode that failed
+        if binary_path.exists() {
+            // Binary exists but failed to parse - this is a real error
+            return Err(EngineError::Internal(
+                "binary manifest exists but failed to parse, and no JSON fallback available".into(),
+            ));
+        }
         return Ok(Manifest::empty());
     }
-    let bytes =
-        fs::read(path).map_err(|e| EngineError::Internal(format!("read manifest failed: {e}")))?;
+
+    let bytes = fs::read(json_path)
+        .map_err(|e| EngineError::Internal(format!("read manifest failed: {e}")))?;
 
     // Check if it's actually binary format saved with .json extension (shouldn't happen but be safe)
     if crate::replication::is_binary_manifest(&bytes) {
-        let manifest = crate::replication::deserialize_manifest_binary(&bytes)
-            .map_err(|e| EngineError::Internal(format!("parse binary manifest failed: {e}")))?;
-        return Ok(manifest);
+        match crate::replication::deserialize_manifest_binary(&bytes) {
+            Ok(manifest) => return Ok(manifest),
+            Err(e) => {
+                return Err(EngineError::Internal(format!(
+                    "parse binary manifest failed: {e}"
+                )));
+            }
+        }
     }
 
     let mut manifest: Manifest = serde_json::from_slice(&bytes)
@@ -14909,12 +15120,19 @@ fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
             crate::sql::GroupBy::Route => GroupBy::Route,
             crate::sql::GroupBy::Columns(cols) => GroupBy::Columns(
                 cols.into_iter()
-                    .map(|c| match c {
-                        crate::sql::GroupByColumn::TenantId => GroupByColumn::TenantId,
-                        crate::sql::GroupByColumn::RouteId => GroupByColumn::RouteId,
+                    .filter_map(|c| match c {
+                        crate::sql::GroupByColumn::TenantId => Some(GroupByColumn::TenantId),
+                        crate::sql::GroupByColumn::RouteId => Some(GroupByColumn::RouteId),
+                        crate::sql::GroupByColumn::Named(_) => None, // Named columns handled at SQL layer
                     })
                     .collect(),
             ),
+            // Advanced GROUP BY features - fall back to None for this internal API
+            // The full GROUPING SETS/CUBE/ROLLUP support is handled at the SQL execution layer
+            crate::sql::GroupBy::All
+            | crate::sql::GroupBy::GroupingSets(_)
+            | crate::sql::GroupBy::Rollup(_)
+            | crate::sql::GroupBy::Cube(_) => GroupBy::None,
         },
         aggs: plan.aggs.into_iter().map(agg_expr_from_sql).collect(),
         having: plan
