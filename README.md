@@ -2,8 +2,18 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.2.2-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
+
+## What's New in v0.2.2
+
+- **Enhanced Fault Tolerance**: Segment checksum journals, IPC format validation, auto-repair on corruption
+- **Race Condition Fixes**: TOCTOU fixes in lock manager, transaction manager, and MVCC
+- **CPU Efficiency**: Optimized deadlock detection, pre-allocated collections, reduced allocations
+- **S3 Upload Verification**: Read-back verification for cold storage uploads
+
+See the [CHANGELOG](CHANGELOG.md) for full release history.
 
 ## Why BoyoDB?
 

@@ -76,7 +76,7 @@ ORDER BY event_count DESC;
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/boyodb.git
+git clone https://github.com/Izi-Technologies/boyodb.git
 cd boyodb
 
 # Build release binaries
@@ -1168,6 +1168,80 @@ boyodb-server /data 0.0.0.0:8765 --background-scrubbing
 boyodb-server /data 0.0.0.0:8765 --scrub-interval-secs 1800
 ```
 
+### Deep Scrub with IPC Validation
+
+Deep scrub validates not just checksums but also the internal Arrow IPC format:
+
+```bash
+# Enable deep scrub with IPC validation
+boyodb-server /data 0.0.0.0:8765 \
+    --deep-scrub-validate-ipc \
+    --validate-schema-on-load
+```
+
+Deep scrub detects:
+- Corrupted IPC headers or footers
+- Invalid Arrow record batches
+- Schema mismatches between manifest and segment data
+- Truncated or malformed segment files
+
+### Segment Checksum Journal
+
+For critical deployments, enable redundant checksum tracking:
+
+```bash
+# Enable checksum journal
+boyodb-server /data 0.0.0.0:8765 \
+    --segment-checksum-journal \
+    --segment-checksum-journal-path /var/lib/boyodb/checksums
+```
+
+The checksum journal:
+- Maintains independent checksums separate from the manifest
+- Enables cross-validation of segment integrity
+- Survives manifest corruption
+- Can be used for forensic analysis
+
+### Auto-Repair on Corruption
+
+Enable automatic repair when corruption is detected:
+
+```bash
+# Enable auto-repair
+boyodb-server /data 0.0.0.0:8765 --auto-repair-on-corruption
+```
+
+When corruption is detected during scrub:
+1. Corrupted segments are logged
+2. If auto-repair is enabled, segments are removed from manifest
+3. Data can be recovered from replicas or backups
+4. Alerts are generated for operator review
+
+### S3 Upload Verification
+
+For cold storage, enable read-back verification:
+
+```bash
+# Verify S3 uploads by reading back and comparing checksums
+boyodb-server /data 0.0.0.0:8765 --verify-s3-uploads
+```
+
+This catches:
+- Silent write corruption
+- S3 eventual consistency issues
+- Network transmission errors
+
+### Retry Configuration
+
+Configure retry behavior for transient failures:
+
+```bash
+# Set retry parameters
+boyodb-server /data 0.0.0.0:8765 \
+    --segment-operation-max-retries 5 \
+    --segment-operation-retry-delay-ms 500
+```
+
 ### Best Practices for Data Integrity
 
 1. **Use ECC RAM**: Prevents memory bit-flips from corrupting data
@@ -1586,8 +1660,8 @@ boyodb-server /data 0.0.0.0:8765 --log-requests
 
 ## Additional Resources
 
-- [GitHub Repository](https://github.com/your-org/boyodb)
-- [Issue Tracker](https://github.com/your-org/boyodb/issues)
+- [GitHub Repository](https://github.com/Izi-Technologies/boyodb)
+- [Issue Tracker](https://github.com/Izi-Technologies/boyodb/issues)
 - [API Documentation](./API.md)
 
 ---

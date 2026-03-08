@@ -845,6 +845,71 @@ BoyoDB includes enterprise features for financial and mission-critical workloads
 - Recover to any timestamp or specific LSN
 - Supports local and S3 archive storage
 
+## Fault Tolerance
+
+BoyoDB includes multiple layers of fault tolerance to protect against data corruption and ensure reliability.
+
+### Checksum Validation
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Data Integrity Layers                       │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌──────────┐ │
+│  │  Segment  │  │    WAL    │  │  Manifest │  │ Checksum │ │
+│  │ Checksums │  │ Checksums │  │ Checksums │  │  Journal │ │
+│  └───────────┘  └───────────┘  └───────────┘  └──────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Segment Checksums**: xxHash64 checksums on all data segments
+- **WAL Checksums**: CRC32 on every WAL record
+- **Manifest Checksums**: Integrity verification of metadata
+- **Checksum Journal**: Redundant independent checksum tracking
+
+### IPC Format Validation
+
+Deep validation of Arrow IPC format during loads:
+
+```rust
+pub fn validate_ipc_format(ipc: &[u8]) -> Result<bool, EngineError> {
+    // Validates:
+    // - IPC header and footer structure
+    // - Record batch integrity
+    // - Schema consistency
+}
+```
+
+### Auto-Repair
+
+Automatic recovery from detected corruption:
+
+```rust
+pub struct EngineConfig {
+    pub auto_repair_on_corruption: bool,
+    pub verify_s3_uploads: bool,
+    pub segment_operation_max_retries: usize,
+    pub segment_operation_retry_delay_ms: u64,
+}
+```
+
+### S3 Upload Verification
+
+Read-back verification for cold storage:
+
+```rust
+pub fn persist_segment_cold_with_verify(
+    &self,
+    segment_id: &str,
+    data: &[u8],
+    verify: bool,
+) -> Result<(), EngineError> {
+    // 1. Upload to S3
+    // 2. Read back uploaded data
+    // 3. Compare checksums
+}
+```
+
 ## Key Differentiators
 
 | Aspect | BoyoDB |
@@ -858,3 +923,4 @@ BoyoDB includes enterprise features for financial and mission-critical workloads
 | Resource Management | Built-in memory pools, I/O scheduling, workload groups |
 | Transactions | Full ACID with MVCC and snapshot isolation |
 | Recovery | Point-in-time recovery with WAL archiving |
+| Fault Tolerance | Multi-layer checksums, auto-repair, S3 verification |

@@ -57,5 +57,6 @@ boyodb-server /data/node2 0.0.0.0:8767 \
 
 ## Support
 
-- [GitHub Issues](https://github.com/your-org/boyodb/issues)
-- [Discussions](https://github.com/your-org/boyodb/discussions)
+- [GitHub Issues](https://github.com/Izi-Technologies/boyodb/issues)
+- [Discussions](https://github.com/Izi-Technologies/boyodb/discussions)
+- [Changelog](../CHANGELOG.md) - Release history and version changes
