@@ -304,6 +304,38 @@ Import options:
 - `--batch-size <rows>` - Rows per batch (default: 1000)
 - `--progress` - Show import progress
 
+### AI/Vector Search
+
+Built-in vector similarity search for AI and machine learning workloads:
+
+```sql
+-- Create table with vector column
+CREATE TABLE embeddings (
+    id INT64,
+    content STRING,
+    embedding VECTOR(1536)  -- OpenAI ada-002 dimensions
+);
+
+-- Vector similarity search
+SELECT id, content,
+       COSINE_SIMILARITY(embedding, $query_vector) as score
+FROM embeddings
+ORDER BY score DESC
+LIMIT 10;
+
+-- Hybrid search (vector + text)
+SELECT * FROM embeddings
+WHERE content LIKE '%machine learning%'
+ORDER BY COSINE_SIMILARITY(embedding, $query_vector) DESC
+LIMIT 10;
+```
+
+**Vector Features:**
+- Distance metrics: Cosine, Euclidean, Dot Product, Manhattan
+- Pre-configured dimensions for OpenAI, Cohere, HuggingFace models
+- Hybrid search with RRF and linear fusion
+- Text chunking: Fixed-size, sentence, paragraph, semantic
+
 ### Storage Engine
 
 - **Columnar Storage**: Apache Arrow-based format for cache-efficient analytics
@@ -312,6 +344,7 @@ Import options:
 - **Tiered Storage**: Hot (SSD) → Warm (HDD) → Cold (S3)
 - **Bloom Filters**: Fast segment pruning
 - **Deduplication**: Configurable key-based deduplication
+- **Sharded Caches**: 64-shard segment cache, 32-shard batch cache for parallel access
 
 ### Resource Governance
 
@@ -707,6 +740,19 @@ timeout_ms = 30000
 | Compression ratio | 5-10x typical |
 | Query latency | Sub-second on TB datasets |
 | Ingestion | 500K+ rows/sec |
+| Concurrent queries | Linear scaling with sharded caches |
+
+### Concurrency Optimizations
+
+BoyoDB is engineered for high-concurrency workloads:
+
+- **Sharded Segment Cache**: 64 independent shards eliminate lock contention
+- **Sharded Batch Cache**: 32 shards for parallel IPC decoding
+- **Targeted Lock Wakeups**: Per-lock waiter tracking prevents thundering herd
+- **MVCC Row Write Index**: O(R+W) conflict detection for fast transaction validation
+- **Adaptive Wait Timeouts**: Exponential backoff reduces CPU spinning
+- **Manifest Early Release**: Lock released before segment I/O
+- **Parallel S3 I/O**: Concurrent cold segment loading
 
 ## Building from Source
 
