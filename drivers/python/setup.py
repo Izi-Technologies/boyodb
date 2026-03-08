@@ -7,7 +7,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="boyodb",
-    version="0.2.0",
+    version="0.2.1",
     author="",
     author_email="",
     description="Python driver for boyodb-server - a high-performance columnar database",

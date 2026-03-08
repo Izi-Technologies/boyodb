@@ -180,6 +180,16 @@ impl TieredStorage {
     }
 
     pub fn persist_segment_cold(&self, segment_id: &str, data: &[u8]) -> Result<(), EngineError> {
+        self.persist_segment_cold_with_verify(segment_id, data, true)
+    }
+
+    /// Persist segment to S3 cold tier with optional verification
+    pub fn persist_segment_cold_with_verify(
+        &self,
+        segment_id: &str,
+        data: &[u8],
+        verify: bool,
+    ) -> Result<(), EngineError> {
         let remote = self.remote.as_ref().ok_or_else(|| {
             EngineError::Configuration("Cold tier accessed but no S3 configured".into())
         })?;
@@ -187,18 +197,90 @@ impl TieredStorage {
             EngineError::Configuration("Cold tier requires tokio runtime".into())
         })?;
         let path = ObjPath::from(format!("{}.ipc", segment_id));
+        let expected_checksum = crate::engine::compute_checksum(data);
         let data_vec = data.to_vec();
+        let data_len = data.len();
 
         // Use block_in_place to allow calling this safe sync wrapper from within an async context
         tokio::task::block_in_place(move || {
             runtime.block_on(async {
+                // Upload to S3
                 remote
                     .put(&path, data_vec.into())
                     .await
                     .map_err(|e| EngineError::Io(format!("s3 put failed: {}", e)))?;
+
+                // Verify upload if enabled
+                if verify {
+                    // Read back and verify
+                    let get_result = remote
+                        .get(&path)
+                        .await
+                        .map_err(|e| EngineError::Io(format!("s3 verify get failed: {}", e)))?;
+
+                    let bytes = get_result
+                        .bytes()
+                        .await
+                        .map_err(|e| EngineError::Io(format!("s3 verify bytes failed: {}", e)))?;
+
+                    // Check size first (fast check)
+                    if bytes.len() != data_len {
+                        return Err(EngineError::Io(format!(
+                            "s3 upload verification failed for {}: size mismatch (expected {}, got {})",
+                            segment_id, data_len, bytes.len()
+                        )));
+                    }
+
+                    // Verify checksum
+                    let actual_checksum = crate::engine::compute_checksum(&bytes);
+                    if actual_checksum != expected_checksum {
+                        // Delete the corrupt upload
+                        let _ = remote.delete(&path).await;
+                        return Err(EngineError::Io(format!(
+                            "s3 upload verification failed for {}: checksum mismatch (expected {:016x}, got {:016x})",
+                            segment_id, expected_checksum, actual_checksum
+                        )));
+                    }
+
+                    tracing::debug!("S3 upload verified for segment {}", segment_id);
+                }
+
                 Ok(())
             })
         })
+    }
+
+    /// Upload segment to S3 with retry logic
+    pub fn persist_segment_cold_with_retry(
+        &self,
+        segment_id: &str,
+        data: &[u8],
+        max_retries: usize,
+        retry_delay_ms: u64,
+    ) -> Result<(), EngineError> {
+        let mut last_error = None;
+
+        for attempt in 0..=max_retries {
+            match self.persist_segment_cold_with_verify(segment_id, data, true) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < max_retries {
+                        tracing::warn!(
+                            "S3 upload attempt {} for segment {} failed, retrying in {}ms",
+                            attempt + 1,
+                            segment_id,
+                            retry_delay_ms
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            EngineError::Internal("persist_segment_cold_with_retry: no error captured".into())
+        }))
     }
 
     /// Persist to LOCAL store only (Hot/Warm). Tiering manager handles S3 upload.

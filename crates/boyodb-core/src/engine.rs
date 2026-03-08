@@ -426,6 +426,24 @@ pub struct EngineConfig {
     pub check_disk_space: bool,
     /// Sync parent directory after file creation (ensures directory entry is persisted)
     pub sync_parent_dirs: bool,
+
+    // --- Enhanced Fault Tolerance ---
+    /// Validate schema hash on every segment load (catches schema corruption)
+    pub validate_schema_on_load: bool,
+    /// Validate IPC format integrity during deep scrubbing
+    pub deep_scrub_validate_ipc: bool,
+    /// Automatically trigger repair when corruption is detected during read
+    pub auto_repair_on_corruption: bool,
+    /// Verify S3 uploads by reading back and checking checksum
+    pub verify_s3_uploads: bool,
+    /// Write segment checksums to a separate journal for redundancy
+    pub segment_checksum_journal_enabled: bool,
+    /// Path for segment checksum journal
+    pub segment_checksum_journal_path: Option<PathBuf>,
+    /// Maximum retries for segment operations before failing
+    pub segment_operation_max_retries: usize,
+    /// Delay between retries in milliseconds
+    pub segment_operation_retry_delay_ms: u64,
 }
 
 impl EngineConfig {
@@ -523,6 +541,15 @@ impl EngineConfig {
             min_free_disk_bytes: 1024 * 1024 * 1024, // 1GB minimum free space
             check_disk_space: true,            // Check disk space before writes
             sync_parent_dirs: true,            // Sync parent dirs after file creation
+            // Enhanced fault tolerance defaults
+            validate_schema_on_load: true,     // Validate schema hash on every load
+            deep_scrub_validate_ipc: true,     // Validate IPC format during deep scrub
+            auto_repair_on_corruption: true,   // Auto-repair when corruption detected
+            verify_s3_uploads: true,           // Verify S3 uploads
+            segment_checksum_journal_enabled: true, // Enable checksum journal
+            segment_checksum_journal_path: None,    // Use default path
+            segment_operation_max_retries: 3,  // Retry failed operations up to 3 times
+            segment_operation_retry_delay_ms: 100, // 100ms between retries
         }
     }
 
@@ -15908,9 +15935,174 @@ impl Db {
 
         if !corrupted.is_empty() {
             tracing::warn!("Scrub completed: found {} corrupted segments", corrupted.len());
+
+            // Auto-repair if enabled
+            if self.cfg.auto_repair_on_corruption && !corrupted.is_empty() {
+                tracing::info!("Auto-repair triggered for {} corrupted segments", corrupted.len());
+                match self.repair_segments_with_recovery(None, None) {
+                    Ok((recovered, removed)) => {
+                        tracing::info!(
+                            "Auto-repair complete: {} recovered, {} removed",
+                            recovered.len(),
+                            removed.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("Auto-repair failed: {}", e);
+                    }
+                }
+            }
         }
 
         Ok(corrupted)
+    }
+
+    /// Deep scrub: validate checksums, IPC format, and schema integrity
+    /// More thorough than scrub_segments but slower
+    pub fn deep_scrub_segments(&self, batch_size: usize) -> Result<DeepScrubResult, EngineError> {
+        let entries_to_scrub: Vec<ManifestEntry> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            manifest.entries.iter().take(batch_size).cloned().collect()
+        };
+
+        let mut result = DeepScrubResult::default();
+
+        for entry in entries_to_scrub {
+            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+
+            if !path.exists() {
+                tracing::warn!("Deep scrub: segment {} is missing", entry.segment_id);
+                result.missing.push(entry.segment_id.clone());
+                continue;
+            }
+
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    // 1. Checksum validation
+                    let xxhash = compute_checksum(&data);
+                    let crc32 = compute_checksum_crc32(&data);
+                    if xxhash != entry.checksum && crc32 != entry.checksum {
+                        tracing::warn!("Deep scrub: segment {} checksum mismatch", entry.segment_id);
+                        result.checksum_mismatch.push(entry.segment_id.clone());
+                        continue;
+                    }
+
+                    // 2. Compression type validation
+                    if !validate_compression_type(&data, entry.compression.as_deref()) {
+                        tracing::warn!(
+                            "Deep scrub: segment {} compression type mismatch",
+                            entry.segment_id
+                        );
+                        result.compression_mismatch.push(entry.segment_id.clone());
+                        continue;
+                    }
+
+                    // 3. Decompress and validate IPC format
+                    if self.cfg.deep_scrub_validate_ipc {
+                        match decompress_payload(data.clone(), entry.compression.as_deref()) {
+                            Ok(decompressed) => {
+                                match validate_ipc_format(&decompressed) {
+                                    Ok(true) => {
+                                        // 4. Schema validation if available
+                                        if self.cfg.validate_schema_on_load {
+                                            if let Some(expected_hash) = entry.schema_hash {
+                                                match compute_schema_hash_from_payload(
+                                                    &decompressed,
+                                                    None,
+                                                ) {
+                                                    Ok(actual_hash) => {
+                                                        if actual_hash != expected_hash {
+                                                            tracing::warn!(
+                                                                "Deep scrub: segment {} schema hash mismatch",
+                                                                entry.segment_id
+                                                            );
+                                                            result.schema_mismatch.push(
+                                                                entry.segment_id.clone(),
+                                                            );
+                                                            continue;
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "Deep scrub: segment {} schema hash computation failed: {}",
+                                                            entry.segment_id,
+                                                            e
+                                                        );
+                                                        result.ipc_invalid.push(
+                                                            entry.segment_id.clone(),
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        result.valid_count += 1;
+                                    }
+                                    Ok(false) => {
+                                        tracing::warn!(
+                                            "Deep scrub: segment {} has invalid IPC format",
+                                            entry.segment_id
+                                        );
+                                        result.ipc_invalid.push(entry.segment_id.clone());
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Deep scrub: segment {} IPC validation error: {}",
+                                            entry.segment_id,
+                                            e
+                                        );
+                                        result.ipc_invalid.push(entry.segment_id.clone());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Deep scrub: segment {} decompression failed: {}",
+                                    entry.segment_id,
+                                    e
+                                );
+                                result.decompression_failed.push(entry.segment_id.clone());
+                            }
+                        }
+                    } else {
+                        result.valid_count += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Deep scrub: failed to read segment {}: {}", entry.segment_id, e);
+                    result.read_errors.push(entry.segment_id.clone());
+                }
+            }
+        }
+
+        let total_issues = result.total_issues();
+        if total_issues > 0 {
+            tracing::warn!(
+                "Deep scrub completed: {} valid, {} issues (missing={}, checksum={}, ipc={}, schema={}, decompress={}, read={})",
+                result.valid_count,
+                total_issues,
+                result.missing.len(),
+                result.checksum_mismatch.len(),
+                result.ipc_invalid.len(),
+                result.schema_mismatch.len(),
+                result.decompression_failed.len(),
+                result.read_errors.len()
+            );
+
+            // Auto-repair if enabled
+            if self.cfg.auto_repair_on_corruption {
+                tracing::info!("Auto-repair triggered after deep scrub");
+                let _ = self.repair_segments_with_recovery(None, None);
+            }
+        } else {
+            tracing::info!("Deep scrub completed: {} segments validated", result.valid_count);
+        }
+
+        Ok(result)
     }
 
     /// Check available disk space and return error if below minimum
@@ -16955,6 +17147,79 @@ fn load_segment(
     decompress_payload(data, entry.compression.as_deref())
 }
 
+/// Load segment with retry logic for transient errors
+fn load_segment_with_retry(
+    storage: &crate::storage::TieredStorage,
+    entry: &ManifestEntry,
+    max_retries: usize,
+    retry_delay_ms: u64,
+) -> Result<Vec<u8>, EngineError> {
+    let mut last_error = None;
+
+    for attempt in 0..=max_retries {
+        match load_segment(storage, entry) {
+            Ok(data) => return Ok(data),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt < max_retries {
+                    tracing::warn!(
+                        "Segment {} load attempt {} failed, retrying in {}ms",
+                        entry.segment_id,
+                        attempt + 1,
+                        retry_delay_ms
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(retry_delay_ms));
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        EngineError::Internal("load_segment_with_retry: no error captured".into())
+    }))
+}
+
+/// Load and validate segment with comprehensive integrity checks
+fn load_segment_validated(
+    storage: &crate::storage::TieredStorage,
+    entry: &ManifestEntry,
+    validate_schema: bool,
+    validate_ipc: bool,
+) -> Result<Vec<u8>, EngineError> {
+    let data = storage.load_segment(entry)?;
+
+    // Verify checksum first
+    verify_segment_checksum(&data, entry.checksum, &entry.segment_id)?;
+
+    // Decompress
+    let decompressed = decompress_payload(data, entry.compression.as_deref())?;
+
+    // Validate IPC format if enabled
+    if validate_ipc {
+        if !validate_ipc_format(&decompressed)? {
+            return Err(EngineError::Io(format!(
+                "segment {} has invalid IPC format - CORRUPTION DETECTED",
+                entry.segment_id
+            )));
+        }
+    }
+
+    // Validate schema hash if enabled and hash is available
+    if validate_schema {
+        if let Some(expected_schema_hash) = entry.schema_hash {
+            let actual_schema_hash = compute_schema_hash_from_payload(&decompressed, None)?;
+            if actual_schema_hash != expected_schema_hash {
+                return Err(EngineError::Io(format!(
+                    "segment {} schema hash mismatch: expected {:016x}, got {:016x} - SCHEMA CORRUPTION",
+                    entry.segment_id, expected_schema_hash, actual_schema_hash
+                )));
+            }
+        }
+    }
+
+    Ok(decompressed)
+}
+
 fn load_segment_raw(
     storage: &crate::storage::TieredStorage,
     entry: &ManifestEntry,
@@ -16962,6 +17227,35 @@ fn load_segment_raw(
     let data = storage.load_segment(entry)?;
     verify_segment_checksum(&data, entry.checksum, &entry.segment_id)?;
     Ok(data)
+}
+
+/// Validate compression type matches the actual data format
+fn validate_compression_type(data: &[u8], compression: Option<&str>) -> bool {
+    match compression {
+        Some("zstd") => {
+            // ZSTD magic number: 0x28B52FFD (little-endian)
+            data.len() >= 4 && data[0..4] == [0x28, 0xB5, 0x2F, 0xFD]
+        }
+        Some("lz4") => {
+            // LZ4 frame magic: 0x184D2204 (little-endian) or size-prefixed
+            if data.len() < 4 {
+                return false;
+            }
+            // lz4_flex uses size-prefixed format, first 4 bytes are uncompressed size
+            // We can't easily validate without trying to decompress
+            true
+        }
+        Some("snappy") => {
+            // Snappy framing format starts with stream identifier
+            data.len() >= 4 && data[0] == 0xFF
+        }
+        None => {
+            // No compression - should start with Arrow IPC magic or valid data
+            // Arrow IPC stream starts with schema message
+            true
+        }
+        _ => true, // Unknown compression, allow it
+    }
 }
 
 /// Sort a hot ingest payload by event_time, tenant_id, route_id when present.
@@ -19353,6 +19647,58 @@ fn iso_week_number(year: i32, month: u32, day: u32) -> u32 {
 
 // --- RESTORED UTILITIES ---
 
+/// Result of deep segment scrubbing
+#[derive(Debug, Default)]
+pub struct DeepScrubResult {
+    /// Number of segments that passed all validation checks
+    pub valid_count: usize,
+    /// Segments that are missing from disk
+    pub missing: Vec<String>,
+    /// Segments with checksum mismatch
+    pub checksum_mismatch: Vec<String>,
+    /// Segments with invalid IPC format
+    pub ipc_invalid: Vec<String>,
+    /// Segments with schema hash mismatch
+    pub schema_mismatch: Vec<String>,
+    /// Segments where decompression failed
+    pub decompression_failed: Vec<String>,
+    /// Segments with compression type mismatch
+    pub compression_mismatch: Vec<String>,
+    /// Segments with read errors
+    pub read_errors: Vec<String>,
+}
+
+impl DeepScrubResult {
+    /// Total number of issues found
+    pub fn total_issues(&self) -> usize {
+        self.missing.len()
+            + self.checksum_mismatch.len()
+            + self.ipc_invalid.len()
+            + self.schema_mismatch.len()
+            + self.decompression_failed.len()
+            + self.compression_mismatch.len()
+            + self.read_errors.len()
+    }
+
+    /// Get all corrupted segment IDs
+    pub fn all_corrupted(&self) -> Vec<String> {
+        let mut all = Vec::new();
+        all.extend(self.missing.clone());
+        all.extend(self.checksum_mismatch.clone());
+        all.extend(self.ipc_invalid.clone());
+        all.extend(self.schema_mismatch.clone());
+        all.extend(self.decompression_failed.clone());
+        all.extend(self.compression_mismatch.clone());
+        all.extend(self.read_errors.clone());
+        all
+    }
+
+    /// Check if any issues were found
+    pub fn has_issues(&self) -> bool {
+        self.total_issues() > 0
+    }
+}
+
 pub struct SegmentStats {
     pub event_time_min: Option<u64>,
     pub event_time_max: Option<u64>,
@@ -19481,6 +19827,169 @@ pub fn read_ipc_batches(ipc: &[u8]) -> Result<Vec<RecordBatch>, EngineError> {
         batches.push(b.map_err(|e| EngineError::Internal(format!("{e}")))?);
     }
     Ok(batches)
+}
+
+/// Validate IPC format integrity without fully parsing
+/// Returns true if the IPC data appears valid
+pub fn validate_ipc_format(ipc: &[u8]) -> Result<bool, EngineError> {
+    use arrow_ipc::reader::StreamReader;
+    use std::io::Cursor;
+
+    if ipc.is_empty() {
+        return Ok(false);
+    }
+
+    // Try to create a reader - this validates the header
+    let cursor = Cursor::new(ipc);
+    match StreamReader::try_new(cursor, None) {
+        Ok(mut reader) => {
+            // Try to read at least one batch to validate structure
+            match reader.next() {
+                Some(Ok(_)) => Ok(true),
+                Some(Err(e)) => {
+                    tracing::warn!("IPC validation failed: {}", e);
+                    Ok(false)
+                }
+                None => Ok(true), // Empty but valid IPC
+            }
+        }
+        Err(e) => {
+            tracing::warn!("IPC header validation failed: {}", e);
+            Ok(false)
+        }
+    }
+}
+
+/// Segment checksum journal entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChecksumJournalEntry {
+    pub segment_id: String,
+    pub checksum: u64,
+    pub schema_hash: u64,
+    pub size_bytes: u64,
+    pub timestamp_secs: u64,
+    pub compression: Option<String>,
+}
+
+/// Segment checksum journal for redundant integrity tracking
+#[derive(Debug)]
+pub struct SegmentChecksumJournal {
+    path: PathBuf,
+    entries: parking_lot::RwLock<HashMap<String, ChecksumJournalEntry>>,
+}
+
+impl SegmentChecksumJournal {
+    pub fn new(path: PathBuf) -> Result<Self, EngineError> {
+        let entries = if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let mut map = HashMap::new();
+                    for line in content.lines() {
+                        if let Ok(entry) = serde_json::from_str::<ChecksumJournalEntry>(line) {
+                            map.insert(entry.segment_id.clone(), entry);
+                        }
+                    }
+                    map
+                }
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+
+        Ok(Self {
+            path,
+            entries: parking_lot::RwLock::new(entries),
+        })
+    }
+
+    /// Record a segment's checksum in the journal
+    pub fn record(
+        &self,
+        segment_id: &str,
+        checksum: u64,
+        schema_hash: u64,
+        size_bytes: u64,
+        compression: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let entry = ChecksumJournalEntry {
+            segment_id: segment_id.to_string(),
+            checksum,
+            schema_hash,
+            size_bytes,
+            timestamp_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            compression: compression.map(String::from),
+        };
+
+        // Update in-memory map
+        self.entries.write().insert(segment_id.to_string(), entry.clone());
+
+        // Append to journal file
+        let line = serde_json::to_string(&entry)
+            .map_err(|e| EngineError::Internal(format!("serialize journal entry: {}", e)))?;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| EngineError::Io(format!("open checksum journal: {}", e)))?;
+
+        writeln!(file, "{}", line)
+            .map_err(|e| EngineError::Io(format!("write checksum journal: {}", e)))?;
+
+        file.sync_all()
+            .map_err(|e| EngineError::Io(format!("sync checksum journal: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Verify a segment's checksum against the journal
+    pub fn verify(&self, segment_id: &str, actual_checksum: u64) -> Option<bool> {
+        self.entries.read().get(segment_id).map(|entry| entry.checksum == actual_checksum)
+    }
+
+    /// Get the expected checksum for a segment
+    pub fn get_expected(&self, segment_id: &str) -> Option<u64> {
+        self.entries.read().get(segment_id).map(|e| e.checksum)
+    }
+
+    /// Remove a segment from the journal
+    pub fn remove(&self, segment_id: &str) {
+        self.entries.write().remove(segment_id);
+    }
+
+    /// Compact the journal file (rewrite without deleted entries)
+    pub fn compact(&self) -> Result<(), EngineError> {
+        let entries: Vec<_> = self.entries.read().values().cloned().collect();
+
+        let tmp_path = self.path.with_extension("tmp");
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| EngineError::Io(format!("create tmp journal: {}", e)))?;
+
+            for entry in entries {
+                let line = serde_json::to_string(&entry)
+                    .map_err(|e| EngineError::Internal(format!("serialize: {}", e)))?;
+                writeln!(file, "{}", line)
+                    .map_err(|e| EngineError::Io(format!("write: {}", e)))?;
+            }
+
+            file.sync_all()
+                .map_err(|e| EngineError::Io(format!("sync: {}", e)))?;
+        }
+
+        std::fs::rename(&tmp_path, &self.path)
+            .map_err(|e| EngineError::Io(format!("rename journal: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 pub fn record_batches_to_ipc(
