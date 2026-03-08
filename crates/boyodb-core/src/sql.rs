@@ -695,17 +695,39 @@ pub enum ScalarFunction {
         srid: Option<i32>,
     },
 
-    // Vector/Similarity functions
+    // Vector/Similarity functions for AI/ML workloads
     /// VECTOR_DISTANCE(vec1, vec2, metric) - calculate vector distance
     VectorDistance {
         vec1: Box<SelectExpr>,
         vec2: Box<SelectExpr>,
         metric: String, // 'cosine', 'euclidean', 'dot', 'manhattan'
     },
+    /// VECTOR_SIMILARITY(vec1, vec2) - cosine similarity (1 = identical, 0 = orthogonal)
+    VectorSimilarity {
+        vec1: Box<SelectExpr>,
+        vec2: Box<SelectExpr>,
+    },
     /// VECTOR_DIMS(vec) - get vector dimensions
     VectorDims(Box<SelectExpr>),
     /// VECTOR_NORM(vec) - get vector L2 norm
     VectorNorm(Box<SelectExpr>),
+    /// VECTOR_NORMALIZE(vec) - normalize to unit vector
+    VectorNormalize(Box<SelectExpr>),
+    /// INNER_PRODUCT(vec1, vec2) - dot product
+    InnerProduct {
+        vec1: Box<SelectExpr>,
+        vec2: Box<SelectExpr>,
+    },
+    /// EUCLIDEAN_DISTANCE(vec1, vec2) - L2 distance
+    EuclideanDistance {
+        vec1: Box<SelectExpr>,
+        vec2: Box<SelectExpr>,
+    },
+    /// MANHATTAN_DISTANCE(vec1, vec2) - L1 distance
+    ManhattanDistance {
+        vec1: Box<SelectExpr>,
+        vec2: Box<SelectExpr>,
+    },
 }
 
 /// Window function types
@@ -956,10 +978,11 @@ pub enum DdlCommand {
         database: Option<String>,
         table: Option<String>,
     },
-    /// ANALYZE TABLE database.table - Collect statistics
+    /// ANALYZE TABLE database.table [COLUMNS (col1, col2, ...)] - Collect statistics
     AnalyzeTable {
         database: String,
         table: String,
+        columns: Option<Vec<String>>,
     },
     /// VACUUM [FULL] [FORCE] database.table - Reclaim storage
     /// FORCE option skips missing/corrupted segments instead of failing
@@ -992,6 +1015,46 @@ pub enum DdlCommand {
         table: String,
         old_column: String,
         new_column: String,
+    },
+    /// ALTER TABLE ... SET RETENTION retention_period [ON time_column]
+    SetRetention {
+        database: String,
+        table: String,
+        retention_seconds: u64,
+        time_column: Option<String>,
+    },
+    /// ALTER TABLE ... DROP RETENTION
+    DropRetention {
+        database: String,
+        table: String,
+    },
+    /// SHOW RETENTION [FOR database.table]
+    ShowRetention {
+        database: Option<String>,
+        table: Option<String>,
+    },
+    /// ALTER TABLE ... PARTITION BY granularity ON time_column
+    SetPartition {
+        database: String,
+        table: String,
+        granularity: String,
+        time_column: String,
+    },
+    /// ALTER TABLE ... DROP PARTITION
+    DropPartition {
+        database: String,
+        table: String,
+    },
+    /// SHOW PARTITIONS [FOR database.table]
+    ShowPartitions {
+        database: Option<String>,
+        table: Option<String>,
+    },
+    /// SHOW STATISTICS FOR database.table [COLUMN column_name]
+    ShowStatistics {
+        database: String,
+        table: String,
+        column: Option<String>,
     },
     /// CREATE TABLE ... AS SELECT ...
     CreateTableAs {
@@ -1632,6 +1695,38 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     // or ALTER TABLE ... DROP DEDUPLICATION
     if upper_trimmed.starts_with("ALTER TABLE ") && upper_trimmed.contains("DEDUPLICATION") {
         return parse_set_deduplication(sql);
+    }
+
+    // ALTER TABLE ... SET RETENTION <duration> [ON column]
+    // or ALTER TABLE ... DROP RETENTION
+    if upper_trimmed.starts_with("ALTER TABLE ") && upper_trimmed.contains("RETENTION") {
+        return parse_set_retention(sql);
+    }
+
+    // SHOW RETENTION [FOR database.table]
+    if upper_trimmed.starts_with("SHOW RETENTION") {
+        return parse_show_retention(sql);
+    }
+
+    // ALTER TABLE ... PARTITION BY granularity ON time_column
+    // or ALTER TABLE ... DROP PARTITION
+    if upper_trimmed.starts_with("ALTER TABLE ") && upper_trimmed.contains("PARTITION") {
+        return parse_partition_command(sql);
+    }
+
+    // SHOW PARTITIONS [FOR database.table]
+    if upper_trimmed.starts_with("SHOW PARTITIONS") {
+        return parse_show_partitions(sql);
+    }
+
+    // ANALYZE TABLE database.table [COLUMNS (col1, col2, ...)]
+    if upper_trimmed.starts_with("ANALYZE TABLE") || upper_trimmed.starts_with("ANALYZE ") {
+        return parse_analyze_table(sql);
+    }
+
+    // SHOW STATISTICS FOR database.table [COLUMN column_name]
+    if upper_trimmed.starts_with("SHOW STATISTICS") || upper_trimmed.starts_with("SHOW STATS") {
+        return parse_show_statistics(sql);
     }
 
     // CREATE BACKUP ['label'] - Create an online backup
@@ -2486,6 +2581,366 @@ fn parse_set_deduplication(sql: &str) -> Result<Option<DdlCommand>, EngineError>
             version_column,
             mode,
         }),
+    }))
+}
+
+/// Parse duration string into seconds
+/// Supports: 1d, 7d, 30d, 1h, 24h, 1w, 1m (month), 1y
+fn parse_duration_to_seconds(s: &str) -> Result<u64, EngineError> {
+    let s = s.trim().to_lowercase();
+    let s = s.trim_end_matches(';');
+
+    // Try to split into number and unit
+    let (num_str, unit) = if s.ends_with("days") || s.ends_with("day") {
+        let num_str = s.trim_end_matches("days").trim_end_matches("day").trim();
+        (num_str, "d")
+    } else if s.ends_with("hours") || s.ends_with("hour") {
+        let num_str = s.trim_end_matches("hours").trim_end_matches("hour").trim();
+        (num_str, "h")
+    } else if s.ends_with("weeks") || s.ends_with("week") {
+        let num_str = s.trim_end_matches("weeks").trim_end_matches("week").trim();
+        (num_str, "w")
+    } else if s.ends_with("months") || s.ends_with("month") {
+        let num_str = s.trim_end_matches("months").trim_end_matches("month").trim();
+        (num_str, "m")
+    } else if s.ends_with("years") || s.ends_with("year") {
+        let num_str = s.trim_end_matches("years").trim_end_matches("year").trim();
+        (num_str, "y")
+    } else if s.ends_with('d') {
+        (&s[..s.len() - 1], "d")
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], "h")
+    } else if s.ends_with('w') {
+        (&s[..s.len() - 1], "w")
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], "m")
+    } else if s.ends_with('y') {
+        (&s[..s.len() - 1], "y")
+    } else if s.ends_with('s') {
+        (&s[..s.len() - 1], "s")
+    } else {
+        // Assume seconds if no unit
+        (&s[..], "s")
+    };
+
+    let num: u64 = num_str.parse::<u64>().map_err(|_| {
+        EngineError::InvalidArgument(format!("invalid retention duration number: {}", num_str))
+    })?;
+
+    let seconds = match unit {
+        "s" => num,
+        "h" => num * 3600,
+        "d" => num * 86400,
+        "w" => num * 7 * 86400,
+        "m" => num * 30 * 86400,  // Approximate month
+        "y" => num * 365 * 86400, // Approximate year
+        _ => {
+            return Err(EngineError::InvalidArgument(format!(
+                "invalid duration unit: {}. Use s, h, d, w, m, or y",
+                unit
+            )))
+        }
+    };
+
+    Ok(seconds)
+}
+
+/// Parse ALTER TABLE ... SET RETENTION or DROP RETENTION
+fn parse_set_retention(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // ALTER TABLE table_name DROP RETENTION
+    if upper.contains("DROP RETENTION") {
+        if tokens.len() < 4 {
+            return Err(EngineError::InvalidArgument(
+                "ALTER TABLE DROP RETENTION requires table name".into(),
+            ));
+        }
+        let table_name = tokens[2].trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::DropRetention { database, table }));
+    }
+
+    // ALTER TABLE table_name SET RETENTION <duration> [ON column]
+    if !upper.contains("SET RETENTION") {
+        return Ok(None);
+    }
+
+    if tokens.len() < 5 {
+        return Err(EngineError::InvalidArgument(
+            "ALTER TABLE SET RETENTION requires table name and duration".into(),
+        ));
+    }
+
+    let table_name = tokens[2];
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Find "SET RETENTION" position and get duration
+    let set_idx = tokens
+        .iter()
+        .position(|t| t.to_uppercase() == "SET")
+        .unwrap_or(0);
+    let retention_idx = set_idx + 1; // "RETENTION"
+    let duration_idx = retention_idx + 1;
+
+    if duration_idx >= tokens.len() {
+        return Err(EngineError::InvalidArgument(
+            "SET RETENTION requires a duration (e.g., 30d, 1y, 24h)".into(),
+        ));
+    }
+
+    let duration_str = tokens[duration_idx];
+    let retention_seconds = parse_duration_to_seconds(duration_str)?;
+
+    // Check for optional ON column
+    let mut time_column = None;
+    if duration_idx + 2 < tokens.len() && tokens[duration_idx + 1].to_uppercase() == "ON" {
+        time_column = Some(tokens[duration_idx + 2].trim_end_matches(';').to_string());
+    }
+
+    Ok(Some(DdlCommand::SetRetention {
+        database,
+        table,
+        retention_seconds,
+        time_column,
+    }))
+}
+
+/// Parse SHOW RETENTION [FOR database.table]
+fn parse_show_retention(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // SHOW RETENTION - show all retention policies
+    if tokens.len() == 2 {
+        return Ok(Some(DdlCommand::ShowRetention {
+            database: None,
+            table: None,
+        }));
+    }
+
+    // SHOW RETENTION FOR database.table
+    if tokens.len() >= 4 && tokens[2].to_uppercase() == "FOR" {
+        let table_name = tokens[3].trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ShowRetention {
+            database: Some(database),
+            table: Some(table),
+        }));
+    }
+
+    Ok(Some(DdlCommand::ShowRetention {
+        database: None,
+        table: None,
+    }))
+}
+
+/// Parse ALTER TABLE ... PARTITION BY or DROP PARTITION
+fn parse_partition_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // ALTER TABLE table_name DROP PARTITION
+    if upper.contains("DROP PARTITION") {
+        if tokens.len() < 4 {
+            return Err(EngineError::InvalidArgument(
+                "ALTER TABLE DROP PARTITION requires table name".into(),
+            ));
+        }
+        let table_name = tokens[2].trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::DropPartition { database, table }));
+    }
+
+    // ALTER TABLE table_name PARTITION BY granularity ON time_column
+    if !upper.contains("PARTITION BY") {
+        return Ok(None);
+    }
+
+    if tokens.len() < 7 {
+        return Err(EngineError::InvalidArgument(
+            "ALTER TABLE PARTITION BY requires table name, granularity, and time column".into(),
+        ));
+    }
+
+    let table_name = tokens[2];
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Find "PARTITION BY" position
+    let partition_idx = tokens
+        .iter()
+        .position(|t| t.to_uppercase() == "PARTITION")
+        .unwrap_or(0);
+    let by_idx = partition_idx + 1; // "BY"
+    let granularity_idx = by_idx + 1;
+
+    if granularity_idx >= tokens.len() {
+        return Err(EngineError::InvalidArgument(
+            "PARTITION BY requires a granularity (hour, day, week, month, year)".into(),
+        ));
+    }
+
+    let granularity = tokens[granularity_idx].trim_end_matches(';').to_lowercase();
+
+    // Check for optional ON column
+    let time_column = if granularity_idx + 2 < tokens.len()
+        && tokens[granularity_idx + 1].to_uppercase() == "ON"
+    {
+        tokens[granularity_idx + 2].trim_end_matches(';').to_string()
+    } else {
+        "event_time".to_string()
+    };
+
+    Ok(Some(DdlCommand::SetPartition {
+        database,
+        table,
+        granularity,
+        time_column,
+    }))
+}
+
+/// Parse SHOW PARTITIONS [FOR database.table]
+fn parse_show_partitions(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // SHOW PARTITIONS - show all partition configs
+    if tokens.len() == 2 {
+        return Ok(Some(DdlCommand::ShowPartitions {
+            database: None,
+            table: None,
+        }));
+    }
+
+    // SHOW PARTITIONS FOR database.table
+    if tokens.len() >= 4 && tokens[2].to_uppercase() == "FOR" {
+        let table_name = tokens[3].trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ShowPartitions {
+            database: Some(database),
+            table: Some(table),
+        }));
+    }
+
+    Ok(Some(DdlCommand::ShowPartitions {
+        database: None,
+        table: None,
+    }))
+}
+
+/// Parse ANALYZE TABLE database.table [COLUMNS (col1, col2, ...)]
+fn parse_analyze_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // ANALYZE TABLE table_name
+    // or ANALYZE table_name
+    let table_idx = if tokens.len() >= 3 && tokens[1].to_uppercase() == "TABLE" {
+        2
+    } else if tokens.len() >= 2 {
+        1
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "ANALYZE requires table name".into(),
+        ));
+    };
+
+    if table_idx >= tokens.len() {
+        return Err(EngineError::InvalidArgument(
+            "ANALYZE requires table name".into(),
+        ));
+    }
+
+    let table_name = tokens[table_idx].trim_end_matches(';');
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Check for COLUMNS clause
+    let columns = if upper.contains("COLUMNS") || upper.contains("COLUMN") {
+        // Find the opening parenthesis
+        if let Some(paren_start) = sql.find('(') {
+            if let Some(paren_end) = sql.find(')') {
+                let cols_str = &sql[paren_start + 1..paren_end];
+                let cols: Vec<String> = cols_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !cols.is_empty() {
+                    Some(cols)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::AnalyzeTable {
+        database,
+        table,
+        columns,
+    }))
+}
+
+/// Parse SHOW STATISTICS FOR database.table [COLUMN column_name]
+fn parse_show_statistics(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+
+    // SHOW STATISTICS FOR table_name or SHOW STATS FOR table_name
+    if tokens.len() < 4 {
+        return Err(EngineError::InvalidArgument(
+            "SHOW STATISTICS requires FOR table_name".into(),
+        ));
+    }
+
+    // Handle both "SHOW STATISTICS" and "SHOW STATS"
+    let for_idx = if tokens[1].to_uppercase() == "STATISTICS" || tokens[1].to_uppercase() == "STATS" {
+        if tokens[2].to_uppercase() == "FOR" {
+            3
+        } else {
+            return Err(EngineError::InvalidArgument(
+                "SHOW STATISTICS requires FOR keyword".into(),
+            ));
+        }
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "Invalid SHOW STATISTICS syntax".into(),
+        ));
+    };
+
+    if for_idx >= tokens.len() {
+        return Err(EngineError::InvalidArgument(
+            "SHOW STATISTICS FOR requires table name".into(),
+        ));
+    }
+
+    let table_name = tokens[for_idx].trim_end_matches(';');
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Check for COLUMN clause
+    let column = if upper.contains(" COLUMN ") {
+        let col_idx = tokens
+            .iter()
+            .position(|t| t.to_uppercase() == "COLUMN")
+            .unwrap_or(0);
+        if col_idx + 1 < tokens.len() {
+            Some(tokens[col_idx + 1].trim_end_matches(';').to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::ShowStatistics {
+        database,
+        table,
+        column,
     }))
 }
 
@@ -3560,6 +4015,7 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             Ok(SqlStatement::Ddl(DdlCommand::AnalyzeTable {
                 database,
                 table,
+                columns: None,
             }))
         }
         _ => Err(EngineError::NotImplemented(format!(
@@ -5799,6 +6255,66 @@ fn parse_function_expr(func: &sqlparser::ast::Function) -> Result<SelectExpr, En
             ScalarFunction::ArrayJoin {
                 array: Box::new(array),
                 delimiter,
+            }
+        }
+
+        // ================================================================
+        // Vector/AI functions for embedding search and similarity
+        // ================================================================
+        "vector_distance" | "vec_distance" => {
+            let vec1 = get_arg(&args, 0, "VECTOR_DISTANCE")?;
+            let vec2 = get_arg(&args, 1, "VECTOR_DISTANCE")?;
+            let metric = if args.len() > 2 {
+                get_string_arg(&args, 2, "VECTOR_DISTANCE")?
+            } else {
+                "cosine".to_string()
+            };
+            ScalarFunction::VectorDistance {
+                vec1: Box::new(vec1),
+                vec2: Box::new(vec2),
+                metric,
+            }
+        }
+        "vector_similarity" | "vec_similarity" | "cosine_similarity" => {
+            // Convenience function that returns similarity (1 - distance for cosine)
+            let vec1 = get_arg(&args, 0, "VECTOR_SIMILARITY")?;
+            let vec2 = get_arg(&args, 1, "VECTOR_SIMILARITY")?;
+            ScalarFunction::VectorSimilarity {
+                vec1: Box::new(vec1),
+                vec2: Box::new(vec2),
+            }
+        }
+        "vector_dims" | "vec_dims" | "array_dims" => {
+            ScalarFunction::VectorDims(Box::new(get_arg(&args, 0, "VECTOR_DIMS")?))
+        }
+        "vector_norm" | "vec_norm" | "l2_norm" => {
+            ScalarFunction::VectorNorm(Box::new(get_arg(&args, 0, "VECTOR_NORM")?))
+        }
+        "vector_normalize" | "vec_normalize" | "l2_normalize" => {
+            ScalarFunction::VectorNormalize(Box::new(get_arg(&args, 0, "VECTOR_NORMALIZE")?))
+        }
+        "inner_product" | "dot_product" => {
+            let vec1 = get_arg(&args, 0, "INNER_PRODUCT")?;
+            let vec2 = get_arg(&args, 1, "INNER_PRODUCT")?;
+            ScalarFunction::InnerProduct {
+                vec1: Box::new(vec1),
+                vec2: Box::new(vec2),
+            }
+        }
+        "euclidean_distance" | "l2_distance" => {
+            let vec1 = get_arg(&args, 0, "EUCLIDEAN_DISTANCE")?;
+            let vec2 = get_arg(&args, 1, "EUCLIDEAN_DISTANCE")?;
+            ScalarFunction::EuclideanDistance {
+                vec1: Box::new(vec1),
+                vec2: Box::new(vec2),
+            }
+        }
+        "manhattan_distance" | "l1_distance" => {
+            let vec1 = get_arg(&args, 0, "MANHATTAN_DISTANCE")?;
+            let vec2 = get_arg(&args, 1, "MANHATTAN_DISTANCE")?;
+            ScalarFunction::ManhattanDistance {
+                vec1: Box::new(vec1),
+                vec2: Box::new(vec2),
             }
         }
 

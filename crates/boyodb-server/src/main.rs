@@ -5450,7 +5450,7 @@ where
                 ..Default::default()
             })
         }
-        DdlCommand::AnalyzeTable { database, table } => {
+        DdlCommand::AnalyzeTable { database, table, columns: _ } => {
             require_privilege(
                 Privilege::Select,
                 PrivilegeTarget::Table {
@@ -5465,6 +5465,49 @@ where
             })
             .await?;
             Ok(Response::ok_message("table analyzed"))
+        }
+        DdlCommand::ShowStatistics {
+            database,
+            table,
+            column,
+        } => {
+            require_privilege(
+                Privilege::Select,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            let result = blocking(move || {
+                db.get_table_statistics(&database, &table, column.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+
+            let mut output = format!(
+                "Statistics for {}.{}:\n  Segments: {}\n  Total bytes: {}\n  Estimated rows: {}\n",
+                result.database, result.table, result.segment_count, result.total_bytes, result.estimated_rows
+            );
+
+            if !result.columns.is_empty() {
+                output.push_str("\nColumn Statistics:\n");
+                for col in &result.columns {
+                    output.push_str(&format!("  {}:\n", col.column_name));
+                    output.push_str(&format!("    Nulls: {}\n", col.null_count));
+                    if let Some(dc) = col.distinct_count {
+                        output.push_str(&format!("    Distinct (approx): {}\n", dc));
+                    }
+                    if let Some(ref min) = col.min_value {
+                        output.push_str(&format!("    Min: {:?}\n", min));
+                    }
+                    if let Some(ref max) = col.max_value {
+                        output.push_str(&format!("    Max: {:?}\n", max));
+                    }
+                }
+            }
+
+            Ok(Response::ok_message(&output))
         }
         DdlCommand::Vacuum {
             database,
@@ -5538,6 +5581,214 @@ where
                 "deduplication disabled"
             };
             Ok(Response::ok_message(msg))
+        }
+        // Data retention policy commands
+        DdlCommand::SetRetention {
+            database,
+            table,
+            retention_seconds,
+            time_column,
+        } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.set_retention_policy(&database, &table, retention_seconds, time_column)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            // Format human-readable duration
+            let duration_str = if retention_seconds >= 365 * 86400 {
+                format!("{} year(s)", retention_seconds / (365 * 86400))
+            } else if retention_seconds >= 30 * 86400 {
+                format!("{} month(s)", retention_seconds / (30 * 86400))
+            } else if retention_seconds >= 7 * 86400 {
+                format!("{} week(s)", retention_seconds / (7 * 86400))
+            } else if retention_seconds >= 86400 {
+                format!("{} day(s)", retention_seconds / 86400)
+            } else if retention_seconds >= 3600 {
+                format!("{} hour(s)", retention_seconds / 3600)
+            } else {
+                format!("{} second(s)", retention_seconds)
+            };
+            Ok(Response::ok_message(&format!(
+                "Retention policy set: data older than {} will be deleted",
+                duration_str
+            )))
+        }
+        DdlCommand::DropRetention { database, table } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.remove_retention_policy(&database, &table)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("Retention policy removed"))
+        }
+        DdlCommand::ShowRetention { database, table } => {
+            let db = db.clone();
+            let result = blocking(move || {
+                if let (Some(database), Some(table)) = (database, table) {
+                    // Show retention for specific table
+                    match db.get_retention_policy(&database, &table) {
+                        Ok(Some(policy)) => {
+                            let duration_str = if policy.retention_seconds >= 365 * 86400 {
+                                format!("{} year(s)", policy.retention_seconds / (365 * 86400))
+                            } else if policy.retention_seconds >= 30 * 86400 {
+                                format!("{} month(s)", policy.retention_seconds / (30 * 86400))
+                            } else if policy.retention_seconds >= 86400 {
+                                format!("{} day(s)", policy.retention_seconds / 86400)
+                            } else {
+                                format!("{} second(s)", policy.retention_seconds)
+                            };
+                            let time_col = policy.time_column.as_deref().unwrap_or("event_time");
+                            let status = if policy.enabled { "enabled" } else { "disabled" };
+                            Ok(format!(
+                                "{}.{}: {} retention on column '{}' ({})",
+                                database, table, duration_str, time_col, status
+                            ))
+                        }
+                        Ok(None) => Ok(format!("{}.{}: no retention policy", database, table)),
+                        Err(e) => Err(ServerError::Db(e.to_string())),
+                    }
+                } else {
+                    // Show all retention policies
+                    let manifest = db.export_manifest().map_err(|e| ServerError::Db(e.to_string()))?;
+                    let manifest: serde_json::Value = serde_json::from_slice(&manifest)
+                        .map_err(|e| ServerError::Db(e.to_string()))?;
+
+                    let mut output = String::from("Retention Policies:\n");
+                    if let Some(tables) = manifest.get("tables").and_then(|t| t.as_array()) {
+                        for t in tables {
+                            if let Some(policy) = t.get("retention_policy") {
+                                if !policy.is_null() {
+                                    let db_name = t.get("database").and_then(|d| d.as_str()).unwrap_or("default");
+                                    let tbl_name = t.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                                    let secs = policy.get("retention_seconds").and_then(|s| s.as_u64()).unwrap_or(0);
+                                    let duration_str = if secs >= 86400 {
+                                        format!("{}d", secs / 86400)
+                                    } else {
+                                        format!("{}s", secs)
+                                    };
+                                    output.push_str(&format!("  {}.{}: {}\n", db_name, tbl_name, duration_str));
+                                }
+                            }
+                        }
+                    }
+                    if output == "Retention Policies:\n" {
+                        output.push_str("  (none configured)");
+                    }
+                    Ok(output)
+                }
+            })
+            .await?;
+            Ok(Response::ok_message(&result))
+        }
+        // Time-based partitioning commands
+        DdlCommand::SetPartition {
+            database,
+            table,
+            granularity,
+            time_column,
+        } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            let granularity_parsed: boyodb_core::replication::PartitionGranularity = granularity
+                .parse()
+                .map_err(|e: String| ServerError::BadRequest(e))?;
+            blocking(move || {
+                db.set_partition_config(&database, &table, granularity_parsed, time_column)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!(
+                "Partitioning enabled: {} granularity",
+                granularity
+            )))
+        }
+        DdlCommand::DropPartition { database, table } => {
+            require_privilege(
+                Privilege::Alter,
+                PrivilegeTarget::Table {
+                    database: database.clone(),
+                    table: table.clone(),
+                },
+            )?;
+            let db = db.clone();
+            blocking(move || {
+                db.remove_partition_config(&database, &table)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("Partitioning disabled"))
+        }
+        DdlCommand::ShowPartitions { database, table } => {
+            let db = db.clone();
+            let result = blocking(move || {
+                if let (Some(database), Some(table)) = (database, table) {
+                    // Show partitions for specific table
+                    match db.list_table_partitions(&database, &table) {
+                        Ok(partitions) => {
+                            if partitions.is_empty() {
+                                return Ok(format!("{}.{}: no partitions (no data)", database, table));
+                            }
+                            let mut output = format!("Partitions for {}.{}:\n", database, table);
+                            for p in &partitions {
+                                output.push_str(&format!(
+                                    "  {}: {} segments, {} bytes\n",
+                                    p.partition_key, p.segment_count, p.total_bytes
+                                ));
+                            }
+                            Ok(output)
+                        }
+                        Err(e) => Err(ServerError::Db(e.to_string())),
+                    }
+                } else {
+                    // Show all partition configs
+                    let manifest = db.export_manifest().map_err(|e| ServerError::Db(e.to_string()))?;
+                    let manifest: serde_json::Value = serde_json::from_slice(&manifest)
+                        .map_err(|e| ServerError::Db(e.to_string()))?;
+
+                    let mut output = String::from("Partition Configurations:\n");
+                    if let Some(tables) = manifest.get("tables").and_then(|t| t.as_array()) {
+                        for t in tables {
+                            if let Some(config) = t.get("partition_config") {
+                                if !config.is_null() {
+                                    let db_name = t.get("database").and_then(|d| d.as_str()).unwrap_or("default");
+                                    let tbl_name = t.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                                    let granularity = config.get("granularity").and_then(|g| g.as_str()).unwrap_or("unknown");
+                                    let time_col = config.get("time_column").and_then(|c| c.as_str()).unwrap_or("event_time");
+                                    output.push_str(&format!("  {}.{}: {} on {}\n", db_name, tbl_name, granularity, time_col));
+                                }
+                            }
+                        }
+                    }
+                    if output == "Partition Configurations:\n" {
+                        output.push_str("  (none configured)");
+                    }
+                    Ok(output)
+                }
+            })
+            .await?;
+            Ok(Response::ok_message(&result))
         }
         // New DDL commands
         DdlCommand::AlterTableRename {
@@ -8349,7 +8600,7 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             }
         }
         // Maintenance commands need database substitution
-        DdlCommand::AnalyzeTable { database, table } => {
+        DdlCommand::AnalyzeTable { database, table, columns } => {
             let db = if database == "default" {
                 effective_db.to_string()
             } else {
@@ -8358,6 +8609,19 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             DdlCommand::AnalyzeTable {
                 database: db,
                 table,
+                columns,
+            }
+        }
+        DdlCommand::ShowStatistics { database, table, column } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::ShowStatistics {
+                database: db,
+                table,
+                column,
             }
         }
         DdlCommand::Vacuum {
@@ -8403,6 +8667,92 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 database: db,
                 table,
                 config,
+            }
+        }
+        // Data retention policy commands
+        DdlCommand::SetRetention {
+            database,
+            table,
+            retention_seconds,
+            time_column,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::SetRetention {
+                database: db,
+                table,
+                retention_seconds,
+                time_column,
+            }
+        }
+        DdlCommand::DropRetention { database, table } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropRetention {
+                database: db,
+                table,
+            }
+        }
+        DdlCommand::ShowRetention { database, table } => {
+            let db = database.map(|d| {
+                if d == "default" {
+                    effective_db.to_string()
+                } else {
+                    d
+                }
+            });
+            DdlCommand::ShowRetention {
+                database: db,
+                table,
+            }
+        }
+        // Partition commands
+        DdlCommand::SetPartition {
+            database,
+            table,
+            granularity,
+            time_column,
+        } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::SetPartition {
+                database: db,
+                table,
+                granularity,
+                time_column,
+            }
+        }
+        DdlCommand::DropPartition { database, table } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DropPartition {
+                database: db,
+                table,
+            }
+        }
+        DdlCommand::ShowPartitions { database, table } => {
+            let db = database.map(|d| {
+                if d == "default" {
+                    effective_db.to_string()
+                } else {
+                    d
+                }
+            });
+            DdlCommand::ShowPartitions {
+                database: db,
+                table,
             }
         }
         // New DDL commands for Phase 19

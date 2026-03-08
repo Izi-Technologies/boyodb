@@ -21,6 +21,9 @@ pub struct TableStats {
     pub columns: HashMap<String, ColumnStatistics>,
     /// Timestamp of last stats update
     pub last_updated: u64,
+    /// Column correlations for multi-column predicate estimation
+    /// Key format: "col1:col2" (alphabetically ordered), Value: Pearson correlation coefficient (-1.0 to 1.0)
+    pub correlations: HashMap<String, f64>,
 }
 
 /// Statistics about a column for cardinality estimation
@@ -38,6 +41,59 @@ pub struct ColumnStatistics {
     pub avg_length: Option<f64>,
     /// Histogram buckets for value distribution
     pub histogram: Option<Histogram>,
+    /// Most Common Values for better equality selectivity estimation
+    pub most_common_values: Option<MostCommonValues>,
+}
+
+/// Most Common Values (MCV) list for low-cardinality columns
+/// Stores the top N most frequent values and their frequencies
+#[derive(Debug, Clone)]
+pub struct MostCommonValues {
+    /// Top values sorted by frequency (descending)
+    pub values: Vec<McvEntry>,
+    /// Total row count used to calculate frequencies
+    pub total_rows: u64,
+    /// Cached sum of all MCV frequencies (avoids recomputing on every query)
+    pub total_mcv_frequency: f64,
+}
+
+impl Default for MostCommonValues {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            total_rows: 0,
+            total_mcv_frequency: 0.0,
+        }
+    }
+}
+
+impl MostCommonValues {
+    /// Create a new MostCommonValues with precomputed total frequency
+    pub fn new(values: Vec<McvEntry>, total_rows: u64) -> Self {
+        let total_mcv_frequency = values.iter().map(|e| e.frequency).sum();
+        Self {
+            values,
+            total_rows,
+            total_mcv_frequency,
+        }
+    }
+
+    /// Find an entry by value (linear scan, but MCV is typically small)
+    #[inline]
+    pub fn find(&self, value: &StatValue) -> Option<&McvEntry> {
+        self.values.iter().find(|e| &e.value == value)
+    }
+}
+
+/// Single entry in the Most Common Values list
+#[derive(Debug, Clone)]
+pub struct McvEntry {
+    /// The value
+    pub value: StatValue,
+    /// Number of occurrences
+    pub count: u64,
+    /// Frequency as fraction of total rows (0.0 - 1.0)
+    pub frequency: f64,
 }
 
 /// Histogram for value distribution
@@ -654,7 +710,7 @@ impl SelectivityEstimator {
                 }
             }
             Predicate::And(preds) => {
-                // Assume independence (may overestimate selectivity)
+                // Without correlations, assume independence
                 preds.iter().map(|p| self.estimate(p, stats)).product()
             }
             Predicate::Or(preds) => {
@@ -678,10 +734,36 @@ impl SelectivityEstimator {
     ) -> f64 {
         match op {
             CompareOp::Eq => {
-                // Uniform distribution assumption
+                // First, check if value is in Most Common Values list
+                if let Some(ref mcv) = stats.most_common_values {
+                    if let Some(entry) = mcv.find(value) {
+                        // Found in MCV - use actual frequency
+                        return entry.frequency;
+                    }
+                    // Not in MCV - estimate from remaining values
+                    // Use cached total_mcv_frequency to avoid recomputing
+                    let remaining_fraction = 1.0 - mcv.total_mcv_frequency;
+                    // Remaining distinct = total distinct - MCV count
+                    let remaining_distinct =
+                        stats.distinct_count.saturating_sub(mcv.values.len() as u64);
+                    if remaining_distinct > 0 {
+                        return remaining_fraction / remaining_distinct as f64;
+                    }
+                }
+                // Fall back to uniform distribution assumption
                 1.0 / stats.distinct_count.max(1) as f64
             }
-            CompareOp::Ne => 1.0 - (1.0 / stats.distinct_count.max(1) as f64),
+            CompareOp::Ne => {
+                // For inequality, check if value is in MCV
+                if let Some(ref mcv) = stats.most_common_values {
+                    if let Some(entry) = mcv.find(value) {
+                        // Found in MCV - selectivity is 1 - frequency
+                        return 1.0 - entry.frequency;
+                    }
+                }
+                // Fall back to uniform distribution
+                1.0 - (1.0 / stats.distinct_count.max(1) as f64)
+            }
             CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
                 // Use histogram if available
                 if let Some(ref histogram) = stats.histogram {
@@ -771,6 +853,200 @@ impl SelectivityEstimator {
         } else {
             self.range_selectivity
         }
+    }
+
+    /// Estimate selectivity using full table stats including correlations
+    /// This provides more accurate estimates for multi-column predicates
+    pub fn estimate_with_correlations(
+        &self,
+        predicate: &Predicate,
+        table_stats: &TableStats,
+    ) -> f64 {
+        self.estimate_with_correlations_impl(predicate, &table_stats.columns, &table_stats.correlations)
+    }
+
+    fn estimate_with_correlations_impl(
+        &self,
+        predicate: &Predicate,
+        stats: &HashMap<String, ColumnStatistics>,
+        correlations: &HashMap<String, f64>,
+    ) -> f64 {
+        match predicate {
+            Predicate::And(preds) => {
+                // Use correlations to adjust for non-independence
+                self.estimate_and_with_correlations(preds, stats, correlations)
+            }
+            Predicate::Or(preds) => {
+                // Use correlations for OR as well
+                self.estimate_or_with_correlations(preds, stats, correlations)
+            }
+            // For other predicates, delegate to the basic estimate
+            _ => self.estimate(predicate, stats),
+        }
+    }
+
+    /// Estimate AND predicate selectivity using column correlations
+    fn estimate_and_with_correlations(
+        &self,
+        preds: &[Predicate],
+        stats: &HashMap<String, ColumnStatistics>,
+        correlations: &HashMap<String, f64>,
+    ) -> f64 {
+        if preds.is_empty() {
+            return 1.0;
+        }
+        if preds.len() == 1 {
+            return self.estimate_with_correlations_impl(&preds[0], stats, correlations);
+        }
+
+        // Get individual selectivities
+        let selectivities: Vec<f64> = preds
+            .iter()
+            .map(|p| self.estimate_with_correlations_impl(p, stats, correlations))
+            .collect();
+
+        // Extract columns involved in each predicate
+        let columns: Vec<Option<String>> = preds.iter().map(extract_predicate_column).collect();
+
+        // Start with independence assumption
+        let mut result = selectivities[0];
+
+        for i in 1..selectivities.len() {
+            let s_i = selectivities[i];
+
+            // Check if we have correlation info between this column and previous ones
+            let mut max_correlation = 0.0_f64;
+
+            if let Some(ref col_i) = columns[i] {
+                for j in 0..i {
+                    if let Some(ref col_j) = columns[j] {
+                        if let Some(corr) = lookup_correlation(correlations, col_i, col_j) {
+                            max_correlation = max_correlation.max(corr.abs());
+                        }
+                    }
+                }
+            }
+
+            // Adjust selectivity based on correlation
+            // High correlation -> predicates are dependent -> combined selectivity is higher
+            // Formula: adjusted = s1 * (s2 + (1-s2) * correlation * s1)
+            // When correlation = 0: result = s1 * s2 (independence)
+            // When correlation = 1: result approaches max(s1, s2) (full dependence)
+            if max_correlation > 0.01 {
+                // Correlation exists - adjust for dependence
+                // Use the formula: P(A AND B) = min(P(A), P(B)) * (1-c) + max(P(A), P(B)) * c * min(P(A), P(B))
+                // Simplified: blend between independent and dependent estimates
+                let independent = result * s_i;
+                let dependent = result.min(s_i); // Fully correlated = min of selectivities
+                result = independent * (1.0 - max_correlation) + dependent * max_correlation;
+            } else {
+                // No correlation - assume independence
+                result *= s_i;
+            }
+        }
+
+        result.max(0.0).min(1.0)
+    }
+
+    /// Estimate OR predicate selectivity using column correlations
+    fn estimate_or_with_correlations(
+        &self,
+        preds: &[Predicate],
+        stats: &HashMap<String, ColumnStatistics>,
+        correlations: &HashMap<String, f64>,
+    ) -> f64 {
+        if preds.is_empty() {
+            return 0.0;
+        }
+        if preds.len() == 1 {
+            return self.estimate_with_correlations_impl(&preds[0], stats, correlations);
+        }
+
+        // Get individual selectivities
+        let selectivities: Vec<f64> = preds
+            .iter()
+            .map(|p| self.estimate_with_correlations_impl(p, stats, correlations))
+            .collect();
+
+        // Extract columns
+        let columns: Vec<Option<String>> = preds.iter().map(extract_predicate_column).collect();
+
+        // P(A OR B) = P(A) + P(B) - P(A AND B)
+        // Start with first selectivity
+        let mut result = selectivities[0];
+
+        for i in 1..selectivities.len() {
+            let s_i = selectivities[i];
+
+            // Check correlation
+            let mut max_correlation = 0.0_f64;
+            if let Some(ref col_i) = columns[i] {
+                for j in 0..i {
+                    if let Some(ref col_j) = columns[j] {
+                        if let Some(corr) = lookup_correlation(correlations, col_i, col_j) {
+                            max_correlation = max_correlation.max(corr.abs());
+                        }
+                    }
+                }
+            }
+
+            // Adjust P(A AND B) based on correlation
+            let and_independent = result * s_i;
+            let and_dependent = result.min(s_i);
+            let and_estimate = and_independent * (1.0 - max_correlation) + and_dependent * max_correlation;
+
+            // P(A OR B) = P(A) + P(B) - P(A AND B)
+            result = result + s_i - and_estimate;
+        }
+
+        result.max(0.0).min(1.0)
+    }
+}
+
+/// Extract the column name from a predicate if it's a simple column predicate
+fn extract_predicate_column(predicate: &Predicate) -> Option<String> {
+    match predicate {
+        Predicate::Comparison { column, .. } => Some(column.clone()),
+        Predicate::In { column, .. } => Some(column.clone()),
+        Predicate::Between { column, .. } => Some(column.clone()),
+        Predicate::IsNull { column, .. } => Some(column.clone()),
+        Predicate::Like { column, .. } => Some(column.clone()),
+        _ => None,
+    }
+}
+
+/// Create a canonical correlation key from two column names (alphabetically ordered)
+/// Look up correlation between two columns without allocating a key string
+/// Returns None if no correlation exists
+#[inline]
+fn lookup_correlation(correlations: &HashMap<String, f64>, col1: &str, col2: &str) -> Option<f64> {
+    // Keys are stored as "smaller:larger" alphabetically
+    // Build key in stack buffer to avoid heap allocation
+    let (first, second) = if col1 < col2 { (col1, col2) } else { (col2, col1) };
+
+    // Use a stack-allocated buffer for small keys (most column names < 64 chars)
+    let key_len = first.len() + 1 + second.len();
+    if key_len <= 128 {
+        let mut buf = [0u8; 128];
+        buf[..first.len()].copy_from_slice(first.as_bytes());
+        buf[first.len()] = b':';
+        buf[first.len() + 1..key_len].copy_from_slice(second.as_bytes());
+        // SAFETY: we're constructing valid UTF-8 from two valid UTF-8 strings and ':'
+        let key = unsafe { std::str::from_utf8_unchecked(&buf[..key_len]) };
+        correlations.get(key).copied()
+    } else {
+        // Fallback for very long column names (rare)
+        let key = format!("{}:{}", first, second);
+        correlations.get(&key).copied()
+    }
+}
+
+// Keep for backwards compatibility with existing code that generates keys
+fn make_correlation_key(col1: &str, col2: &str) -> String {
+    if col1 < col2 {
+        format!("{}:{}", col1, col2)
+    } else {
+        format!("{}:{}", col2, col1)
     }
 }
 
@@ -1901,6 +2177,7 @@ mod tests {
                 max_value: Some(StatValue::Int64(1000)),
                 avg_length: None,
                 histogram: None,
+                most_common_values: None,
             },
         );
 

@@ -246,4 +246,179 @@ export class Client {
    * @param options - Transaction options
    */
   inTransaction<T>(fn: () => Promise<T>, options?: TransactionOptions): Promise<T>;
+
+  // Vector Search Support
+
+  /**
+   * Perform a vector similarity search.
+   * @param table - Table name (format: database.table or just table if database is set)
+   * @param column - Vector column name
+   * @param queryVector - Query vector
+   * @param options - Search options
+   */
+  vectorSearch(
+    table: string,
+    column: string,
+    queryVector: number[],
+    options?: VectorSearchOptions
+  ): Promise<VectorSearchResult[]>;
+
+  /**
+   * Perform a hybrid search combining vector similarity and text search.
+   * @param table - Table name
+   * @param vectorColumn - Vector column name
+   * @param queryVector - Query vector
+   * @param textColumn - Text column for text search
+   * @param textQuery - Text search query
+   * @param options - Search options
+   */
+  hybridSearch(
+    table: string,
+    vectorColumn: string,
+    queryVector: number[],
+    textColumn: string,
+    textQuery: string,
+    options?: HybridSearchOptions
+  ): Promise<HybridSearchResult[]>;
 }
+
+// Vector Search Types
+
+export interface VectorSearchOptions {
+  /** Number of results to return (default: 10) */
+  k?: number;
+  /** Distance metric (cosine, euclidean, dot_product, manhattan) */
+  metric?: 'cosine' | 'euclidean' | 'dot_product' | 'inner_product' | 'manhattan';
+  /** SQL WHERE clause for filtering */
+  filter?: string;
+  /** HNSW ef_search parameter */
+  efSearch?: number;
+  /** IVF nprobe parameter */
+  nprobe?: number;
+}
+
+export interface VectorSearchResult {
+  id: any;
+  distance: number;
+  data: Record<string, any>;
+}
+
+export interface HybridSearchOptions {
+  /** Number of results to return (default: 10) */
+  k?: number;
+  /** Distance metric (default: cosine) */
+  metric?: 'cosine' | 'euclidean' | 'dot_product' | 'inner_product' | 'manhattan';
+  /** Weight for vector results (0-1, default: 0.5) */
+  vectorWeight?: number;
+  /** Fusion method (rrf, linear) */
+  fusion?: 'rrf' | 'linear';
+  /** RRF k parameter (default: 60) */
+  rrfK?: number;
+  /** SQL WHERE clause for filtering */
+  filter?: string;
+}
+
+export interface HybridSearchResult {
+  id: any;
+  score: number;
+  data: Record<string, any>;
+}
+
+// Vector Utility Functions
+
+/**
+ * Calculate cosine similarity between two vectors.
+ * @param a - First vector
+ * @param b - Second vector
+ * @returns Cosine similarity (-1 to 1)
+ */
+export function cosineSimilarity(a: number[], b: number[]): number;
+
+/**
+ * Calculate Euclidean distance between two vectors.
+ * @param a - First vector
+ * @param b - Second vector
+ * @returns Euclidean distance
+ */
+export function euclideanDistance(a: number[], b: number[]): number;
+
+/**
+ * Calculate dot product of two vectors.
+ * @param a - First vector
+ * @param b - Second vector
+ * @returns Dot product
+ */
+export function dotProduct(a: number[], b: number[]): number;
+
+/**
+ * Calculate Manhattan distance between two vectors.
+ * @param a - First vector
+ * @param b - Second vector
+ * @returns Manhattan distance
+ */
+export function manhattanDistance(a: number[], b: number[]): number;
+
+/**
+ * Normalize a vector to unit length.
+ * @param vector - Input vector
+ * @returns Normalized vector
+ */
+export function normalizeVector(vector: number[]): number[];
+
+// Text Chunking
+
+export enum ChunkingStrategy {
+  FIXED_SIZE = 'fixed_size',
+  SENTENCE = 'sentence',
+  PARAGRAPH = 'paragraph',
+  SEMANTIC = 'semantic',
+}
+
+export interface ChunkOptions {
+  /** Chunking strategy (default: fixed_size) */
+  strategy?: ChunkingStrategy | string;
+  /** Target chunk size in characters (default: 512) */
+  chunkSize?: number;
+  /** Overlap between chunks (default: 50) */
+  overlap?: number;
+}
+
+export interface TextChunk {
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Chunk text into smaller pieces for embedding.
+ * @param text - Text to chunk
+ * @param options - Chunking options
+ */
+export function chunkText(text: string, options?: ChunkOptions): TextChunk[];
+
+// Embedding Models
+
+export interface EmbeddingModel {
+  name: string;
+  provider: 'openai' | 'huggingface' | 'cohere';
+  dimensions: number;
+  maxTokens: number;
+}
+
+/**
+ * Common embedding models with their configurations.
+ */
+export const EmbeddingModels: Record<string, EmbeddingModel>;
+
+/**
+ * Get embedding model configuration.
+ * @param modelName - Model name
+ * @returns Model configuration or null if not found
+ */
+export function getEmbeddingModel(modelName: string): EmbeddingModel | null;
+
+/**
+ * List all available embedding models.
+ * @returns Array of model configurations
+ */
+export function listEmbeddingModels(): EmbeddingModel[];

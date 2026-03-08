@@ -760,6 +760,8 @@ mod tests {
             compression: None,
             deduplication: None,
             constraints: vec![],
+            retention_policy: None,
+            partition_config: None,
         }
     }
 

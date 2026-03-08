@@ -1,6 +1,6 @@
 {
   "name": "boyodb-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Node binding for the boyodb Rust core",
   "main": "index.js",
   "scripts": {

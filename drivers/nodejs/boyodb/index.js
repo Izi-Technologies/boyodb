@@ -835,6 +835,163 @@ class Client {
     }
   }
 
+  // Vector Search Support
+
+  /**
+   * Perform a vector similarity search.
+   * @param {string} table - Table name (format: database.table or just table if database is set)
+   * @param {string} column - Vector column name
+   * @param {Array<number>} queryVector - Query vector
+   * @param {Object} [options={}] - Search options
+   * @param {number} [options.k=10] - Number of results to return
+   * @param {string} [options.metric='cosine'] - Distance metric (cosine, euclidean, dot_product, manhattan)
+   * @param {string} [options.filter] - SQL WHERE clause for filtering
+   * @param {number} [options.efSearch] - HNSW ef_search parameter
+   * @param {number} [options.nprobe] - IVF nprobe parameter
+   * @returns {Promise<Array<{id: any, distance: number, data: Object}>>}
+   */
+  async vectorSearch(table, column, queryVector, options = {}) {
+    const k = options.k || 10;
+    const metric = options.metric || 'cosine';
+
+    // Build the distance function call
+    let distanceFunc;
+    switch (metric.toLowerCase()) {
+      case 'euclidean':
+        distanceFunc = 'euclidean_distance';
+        break;
+      case 'dot_product':
+      case 'inner_product':
+        distanceFunc = 'inner_product';
+        break;
+      case 'manhattan':
+        distanceFunc = 'manhattan_distance';
+        break;
+      case 'cosine':
+      default:
+        distanceFunc = 'vector_similarity';
+        break;
+    }
+
+    // Format query vector as array literal
+    const vectorStr = `[${queryVector.join(',')}]`;
+
+    // Build SQL query
+    let sql = `SELECT *, ${distanceFunc}(${column}, ${vectorStr}) AS distance FROM ${table}`;
+
+    if (options.filter) {
+      sql += ` WHERE ${options.filter}`;
+    }
+
+    // For cosine similarity, higher is better; for distances, lower is better
+    if (metric.toLowerCase() === 'cosine') {
+      sql += ` ORDER BY distance DESC`;
+    } else {
+      sql += ` ORDER BY distance ASC`;
+    }
+
+    sql += ` LIMIT ${k}`;
+
+    const result = await this.query(sql);
+
+    return result.rows.map(row => ({
+      id: row.id || row._id || null,
+      distance: row.distance,
+      data: row,
+    }));
+  }
+
+  /**
+   * Perform a hybrid search combining vector similarity and text search.
+   * @param {string} table - Table name
+   * @param {string} vectorColumn - Vector column name
+   * @param {Array<number>} queryVector - Query vector
+   * @param {string} textColumn - Text column for text search
+   * @param {string} textQuery - Text search query
+   * @param {Object} [options={}] - Search options
+   * @param {number} [options.k=10] - Number of results to return
+   * @param {string} [options.metric='cosine'] - Distance metric
+   * @param {number} [options.vectorWeight=0.5] - Weight for vector results (0-1)
+   * @param {string} [options.fusion='rrf'] - Fusion method (rrf, linear)
+   * @param {number} [options.rrfK=60] - RRF k parameter
+   * @param {string} [options.filter] - SQL WHERE clause for filtering
+   * @returns {Promise<Array<{id: any, score: number, data: Object}>>}
+   */
+  async hybridSearch(table, vectorColumn, queryVector, textColumn, textQuery, options = {}) {
+    const k = options.k || 10;
+    const metric = options.metric || 'cosine';
+    const vectorWeight = options.vectorWeight !== undefined ? options.vectorWeight : 0.5;
+    const textWeight = 1.0 - vectorWeight;
+    const fusion = options.fusion || 'rrf';
+    const rrfK = options.rrfK || 60;
+
+    // Get vector search results
+    const vectorResults = await this.vectorSearch(table, vectorColumn, queryVector, {
+      k: k * 2,
+      metric,
+      filter: options.filter,
+    });
+
+    // Get text search results
+    let textSql = `SELECT *, 1.0 AS text_score FROM ${table} WHERE ${textColumn} LIKE '%${textQuery.replace(/'/g, "''")}%'`;
+    if (options.filter) {
+      textSql += ` AND ${options.filter}`;
+    }
+    textSql += ` LIMIT ${k * 2}`;
+
+    const textResult = await this.query(textSql);
+    const textResults = textResult.rows;
+
+    // Build ID maps
+    const vectorScores = new Map();
+    const textScores = new Map();
+
+    vectorResults.forEach((item, idx) => {
+      const id = JSON.stringify(item.id || item.data);
+      vectorScores.set(id, { rank: idx + 1, score: item.distance, data: item.data });
+    });
+
+    textResults.forEach((item, idx) => {
+      const id = JSON.stringify(item.id || item._id || item);
+      textScores.set(id, { rank: idx + 1, score: 1.0, data: item });
+    });
+
+    // Combine all IDs
+    const allIds = new Set([...vectorScores.keys(), ...textScores.keys()]);
+
+    // Calculate fusion scores
+    const results = [];
+    for (const id of allIds) {
+      const vectorItem = vectorScores.get(id);
+      const textItem = textScores.get(id);
+
+      let score;
+      if (fusion === 'rrf') {
+        // Reciprocal Rank Fusion
+        const vectorRrf = vectorItem ? 1.0 / (rrfK + vectorItem.rank) : 0;
+        const textRrf = textItem ? 1.0 / (rrfK + textItem.rank) : 0;
+        score = vectorWeight * vectorRrf + textWeight * textRrf;
+      } else {
+        // Linear fusion
+        const vectorScore = vectorItem ? vectorItem.score : 0;
+        const textScore = textItem ? textItem.score : 0;
+        score = vectorWeight * vectorScore + textWeight * textScore;
+      }
+
+      const data = vectorItem ? vectorItem.data : textItem.data;
+      results.push({
+        id: vectorItem?.data?.id || textItem?.id || null,
+        score,
+        data,
+      });
+    }
+
+    // Sort by score (descending)
+    results.sort((a, b) => b.score - a.score);
+
+    return results.slice(0, k);
+  }
+
   /**
   * Parse Arrow IPC stream format using apache-arrow.
    *
@@ -874,9 +1031,320 @@ class Client {
 
 const { PoolConfig, ConnectionPool, PooledClient } = require('./pool');
 
+// Vector Utility Functions
+
+/**
+ * Calculate cosine similarity between two vectors.
+ * @param {Array<number>} a - First vector
+ * @param {Array<number>} b - Second vector
+ * @returns {number} - Cosine similarity (-1 to 1)
+ */
+function cosineSimilarity(a, b) {
+  if (a.length !== b.length) {
+    throw new Error('Vectors must have the same length');
+  }
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const magnitude = Math.sqrt(normA) * Math.sqrt(normB);
+  if (magnitude === 0) {
+    return 0;
+  }
+
+  return dotProduct / magnitude;
+}
+
+/**
+ * Calculate Euclidean distance between two vectors.
+ * @param {Array<number>} a - First vector
+ * @param {Array<number>} b - Second vector
+ * @returns {number} - Euclidean distance
+ */
+function euclideanDistance(a, b) {
+  if (a.length !== b.length) {
+    throw new Error('Vectors must have the same length');
+  }
+
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const diff = a[i] - b[i];
+    sum += diff * diff;
+  }
+
+  return Math.sqrt(sum);
+}
+
+/**
+ * Calculate dot product of two vectors.
+ * @param {Array<number>} a - First vector
+ * @param {Array<number>} b - Second vector
+ * @returns {number} - Dot product
+ */
+function dotProduct(a, b) {
+  if (a.length !== b.length) {
+    throw new Error('Vectors must have the same length');
+  }
+
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    sum += a[i] * b[i];
+  }
+
+  return sum;
+}
+
+/**
+ * Calculate Manhattan distance between two vectors.
+ * @param {Array<number>} a - First vector
+ * @param {Array<number>} b - Second vector
+ * @returns {number} - Manhattan distance
+ */
+function manhattanDistance(a, b) {
+  if (a.length !== b.length) {
+    throw new Error('Vectors must have the same length');
+  }
+
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    sum += Math.abs(a[i] - b[i]);
+  }
+
+  return sum;
+}
+
+/**
+ * Normalize a vector to unit length.
+ * @param {Array<number>} vector - Input vector
+ * @returns {Array<number>} - Normalized vector
+ */
+function normalizeVector(vector) {
+  let norm = 0;
+  for (let i = 0; i < vector.length; i++) {
+    norm += vector[i] * vector[i];
+  }
+  norm = Math.sqrt(norm);
+
+  if (norm === 0) {
+    return vector.slice();
+  }
+
+  return vector.map(v => v / norm);
+}
+
+// Text Chunking
+
+/**
+ * Chunking strategies for text processing.
+ * @enum {string}
+ */
+const ChunkingStrategy = {
+  FIXED_SIZE: 'fixed_size',
+  SENTENCE: 'sentence',
+  PARAGRAPH: 'paragraph',
+  SEMANTIC: 'semantic',
+};
+
+/**
+ * Chunk text into smaller pieces for embedding.
+ * @param {string} text - Text to chunk
+ * @param {Object} [options={}] - Chunking options
+ * @param {string} [options.strategy='fixed_size'] - Chunking strategy
+ * @param {number} [options.chunkSize=512] - Target chunk size in characters
+ * @param {number} [options.overlap=50] - Overlap between chunks
+ * @returns {Array<{text: string, start: number, end: number}>}
+ */
+function chunkText(text, options = {}) {
+  const strategy = options.strategy || ChunkingStrategy.FIXED_SIZE;
+  const chunkSize = options.chunkSize || 512;
+  const overlap = options.overlap || 50;
+
+  const chunks = [];
+
+  switch (strategy) {
+    case ChunkingStrategy.SENTENCE: {
+      // Split by sentence boundaries
+      const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+      let currentChunk = '';
+      let currentStart = 0;
+      let charPos = 0;
+
+      for (const sentence of sentences) {
+        if (currentChunk.length + sentence.length > chunkSize && currentChunk.length > 0) {
+          chunks.push({
+            text: currentChunk.trim(),
+            start: currentStart,
+            end: charPos,
+          });
+          currentChunk = sentence;
+          currentStart = charPos;
+        } else {
+          currentChunk += sentence;
+        }
+        charPos += sentence.length;
+      }
+
+      if (currentChunk.length > 0) {
+        chunks.push({
+          text: currentChunk.trim(),
+          start: currentStart,
+          end: charPos,
+        });
+      }
+      break;
+    }
+
+    case ChunkingStrategy.PARAGRAPH: {
+      // Split by paragraphs
+      const paragraphs = text.split(/\n\s*\n/);
+      let charPos = 0;
+
+      for (const para of paragraphs) {
+        if (para.trim().length > 0) {
+          chunks.push({
+            text: para.trim(),
+            start: charPos,
+            end: charPos + para.length,
+          });
+        }
+        charPos += para.length + 2; // Account for newlines
+      }
+      break;
+    }
+
+    case ChunkingStrategy.FIXED_SIZE:
+    default: {
+      // Fixed size with overlap
+      let pos = 0;
+      while (pos < text.length) {
+        const end = Math.min(pos + chunkSize, text.length);
+        chunks.push({
+          text: text.slice(pos, end),
+          start: pos,
+          end: end,
+        });
+        pos += chunkSize - overlap;
+        if (pos + overlap >= text.length) {
+          break;
+        }
+      }
+      break;
+    }
+  }
+
+  return chunks;
+}
+
+// Embedding Models
+
+/**
+ * Common embedding models with their configurations.
+ */
+const EmbeddingModels = {
+  // OpenAI models
+  'text-embedding-3-small': {
+    name: 'text-embedding-3-small',
+    provider: 'openai',
+    dimensions: 1536,
+    maxTokens: 8191,
+  },
+  'text-embedding-3-large': {
+    name: 'text-embedding-3-large',
+    provider: 'openai',
+    dimensions: 3072,
+    maxTokens: 8191,
+  },
+  'text-embedding-ada-002': {
+    name: 'text-embedding-ada-002',
+    provider: 'openai',
+    dimensions: 1536,
+    maxTokens: 8191,
+  },
+
+  // HuggingFace models
+  'all-MiniLM-L6-v2': {
+    name: 'sentence-transformers/all-MiniLM-L6-v2',
+    provider: 'huggingface',
+    dimensions: 384,
+    maxTokens: 256,
+  },
+  'all-mpnet-base-v2': {
+    name: 'sentence-transformers/all-mpnet-base-v2',
+    provider: 'huggingface',
+    dimensions: 768,
+    maxTokens: 384,
+  },
+  'e5-large-v2': {
+    name: 'intfloat/e5-large-v2',
+    provider: 'huggingface',
+    dimensions: 1024,
+    maxTokens: 512,
+  },
+  'bge-large-en-v1.5': {
+    name: 'BAAI/bge-large-en-v1.5',
+    provider: 'huggingface',
+    dimensions: 1024,
+    maxTokens: 512,
+  },
+
+  // Cohere models
+  'embed-english-v3.0': {
+    name: 'embed-english-v3.0',
+    provider: 'cohere',
+    dimensions: 1024,
+    maxTokens: 512,
+  },
+  'embed-multilingual-v3.0': {
+    name: 'embed-multilingual-v3.0',
+    provider: 'cohere',
+    dimensions: 1024,
+    maxTokens: 512,
+  },
+};
+
+/**
+ * Get embedding model configuration.
+ * @param {string} modelName - Model name
+ * @returns {Object|null} - Model configuration or null if not found
+ */
+function getEmbeddingModel(modelName) {
+  return EmbeddingModels[modelName] || null;
+}
+
+/**
+ * List all available embedding models.
+ * @returns {Array<Object>} - Array of model configurations
+ */
+function listEmbeddingModels() {
+  return Object.values(EmbeddingModels);
+}
+
 module.exports = {
   Client,
   PoolConfig,
   ConnectionPool,
   PooledClient,
+
+  // Vector utilities
+  cosineSimilarity,
+  euclideanDistance,
+  dotProduct,
+  manhattanDistance,
+  normalizeVector,
+
+  // Text chunking
+  ChunkingStrategy,
+  chunkText,
+
+  // Embedding models
+  EmbeddingModels,
+  getEmbeddingModel,
+  listEmbeddingModels,
 };

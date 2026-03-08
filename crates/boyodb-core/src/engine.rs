@@ -373,6 +373,15 @@ pub struct EngineConfig {
     pub constraint_validation_enabled: bool,
     /// Enable transaction support (ACID transactions, MVCC)
     pub transactions_enabled: bool,
+
+    // --- Statistics Configuration ---
+    /// Enable automatic statistics updates after data ingestion
+    pub auto_stats_enabled: bool,
+    /// Minimum rows changed before triggering stats refresh (0 = every ingest)
+    pub auto_stats_min_rows_changed: u64,
+    /// Minimum seconds between stats refreshes for the same table
+    pub auto_stats_cooldown_secs: u64,
+
     /// Skip damaged segments (missing or checksum mismatch) during queries
     /// When true, queries will continue with valid segments and log warnings
     /// When false, queries will fail if any segment is damaged
@@ -490,6 +499,10 @@ impl EngineConfig {
             max_concurrent_transactions: 10000,
             constraint_validation_enabled: true,
             transactions_enabled: false,
+            // Auto-stats defaults (enabled by default for query optimization)
+            auto_stats_enabled: true,           // Enable automatic stats updates
+            auto_stats_min_rows_changed: 10000, // Update after 10K rows changed
+            auto_stats_cooldown_secs: 60,       // At most once per minute per table
             skip_damaged_segments: true, // Default to true for resilience
             // Data integrity defaults
             scrubbing_enabled: true,           // Enable proactive corruption detection
@@ -1472,6 +1485,41 @@ pub struct Metrics {
     pub schema_cache_misses: AtomicU64,
     /// Segments skipped due to being damaged (missing or checksum mismatch)
     pub skipped_segments: AtomicU64,
+    /// Segments repaired by auto-repair
+    pub segments_repaired: AtomicU64,
+    /// Query latency buckets (microseconds): <1ms, <10ms, <100ms, <1s, <10s, >10s
+    pub query_latency_bucket_1ms: AtomicU64,
+    pub query_latency_bucket_10ms: AtomicU64,
+    pub query_latency_bucket_100ms: AtomicU64,
+    pub query_latency_bucket_1s: AtomicU64,
+    pub query_latency_bucket_10s: AtomicU64,
+    pub query_latency_bucket_inf: AtomicU64,
+    /// Total query latency in microseconds (for calculating average)
+    pub query_latency_sum_us: AtomicU64,
+    /// Compactions completed
+    pub compactions_total: AtomicU64,
+    /// Bytes compacted
+    pub compactions_bytes: AtomicU64,
+}
+
+impl Metrics {
+    /// Record a query latency in microseconds
+    pub fn record_query_latency(&self, latency_us: u64) {
+        self.query_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        if latency_us < 1_000 {
+            self.query_latency_bucket_1ms.fetch_add(1, Ordering::Relaxed);
+        } else if latency_us < 10_000 {
+            self.query_latency_bucket_10ms.fetch_add(1, Ordering::Relaxed);
+        } else if latency_us < 100_000 {
+            self.query_latency_bucket_100ms.fetch_add(1, Ordering::Relaxed);
+        } else if latency_us < 1_000_000 {
+            self.query_latency_bucket_1s.fetch_add(1, Ordering::Relaxed);
+        } else if latency_us < 10_000_000 {
+            self.query_latency_bucket_10s.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.query_latency_bucket_inf.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Metrics {
@@ -1568,6 +1616,56 @@ impl Metrics {
             "boyodb_skipped_segments {}\n",
             self.skipped_segments.load(Ordering::Relaxed)
         ));
+
+        out.push_str("# HELP boyodb_segments_repaired Total segments repaired\n");
+        out.push_str("# TYPE boyodb_segments_repaired counter\n");
+        out.push_str(&format!(
+            "boyodb_segments_repaired {}\n",
+            self.segments_repaired.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP boyodb_compactions_total Total compactions performed\n");
+        out.push_str("# TYPE boyodb_compactions_total counter\n");
+        out.push_str(&format!(
+            "boyodb_compactions_total {}\n",
+            self.compactions_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP boyodb_compactions_bytes_total Total bytes compacted\n");
+        out.push_str("# TYPE boyodb_compactions_bytes_total counter\n");
+        out.push_str(&format!(
+            "boyodb_compactions_bytes_total {}\n",
+            self.compactions_bytes.load(Ordering::Relaxed)
+        ));
+
+        // Query latency histogram
+        out.push_str("# HELP boyodb_query_latency_seconds Query latency histogram\n");
+        out.push_str("# TYPE boyodb_query_latency_seconds histogram\n");
+
+        let bucket_1ms = self.query_latency_bucket_1ms.load(Ordering::Relaxed);
+        let bucket_10ms = self.query_latency_bucket_10ms.load(Ordering::Relaxed);
+        let bucket_100ms = self.query_latency_bucket_100ms.load(Ordering::Relaxed);
+        let bucket_1s = self.query_latency_bucket_1s.load(Ordering::Relaxed);
+        let bucket_10s = self.query_latency_bucket_10s.load(Ordering::Relaxed);
+        let bucket_inf = self.query_latency_bucket_inf.load(Ordering::Relaxed);
+        let latency_sum_us = self.query_latency_sum_us.load(Ordering::Relaxed);
+
+        // Cumulative buckets for histogram
+        let cum_1ms = bucket_1ms;
+        let cum_10ms = cum_1ms + bucket_10ms;
+        let cum_100ms = cum_10ms + bucket_100ms;
+        let cum_1s = cum_100ms + bucket_1s;
+        let cum_10s = cum_1s + bucket_10s;
+        let cum_inf = cum_10s + bucket_inf;
+
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.001\"}} {}\n", cum_1ms));
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.01\"}} {}\n", cum_10ms));
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.1\"}} {}\n", cum_100ms));
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"1\"}} {}\n", cum_1s));
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"10\"}} {}\n", cum_10s));
+        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"+Inf\"}} {}\n", cum_inf));
+        out.push_str(&format!("boyodb_query_latency_seconds_sum {}\n", latency_sum_us as f64 / 1_000_000.0));
+        out.push_str(&format!("boyodb_query_latency_seconds_count {}\n", cum_inf));
 
         out
     }
@@ -1797,6 +1895,23 @@ pub struct Db {
     udf_registry: parking_lot::RwLock<UdfRegistry>,
     /// Stream registry for Kafka/Pulsar connectors
     stream_registry: parking_lot::RwLock<StreamRegistry>,
+    /// Stats tracking for auto-refresh: tracks (rows_changed, last_update_time) per table
+    stats_tracker: parking_lot::RwLock<StatsTracker>,
+}
+
+/// Tracks statistics freshness per table for auto-refresh decisions
+#[derive(Debug, Default)]
+struct StatsTracker {
+    /// Per-table state: (rows_changed_since_last_update, last_update_timestamp_secs)
+    tables: HashMap<String, TableStatsState>,
+}
+
+#[derive(Debug, Clone)]
+struct TableStatsState {
+    rows_changed: u64,
+    last_update_secs: u64,
+    /// Flag to prevent concurrent stats updates (race condition prevention)
+    updating: bool,
 }
 
 /// Registry of user-defined functions
@@ -2394,6 +2509,8 @@ impl Db {
             udf_registry: parking_lot::RwLock::new(UdfRegistry::new()),
             // Initialize stream registry for Kafka/Pulsar connectors
             stream_registry: parking_lot::RwLock::new(StreamRegistry::new()),
+            // Initialize stats tracker for auto-refresh
+            stats_tracker: parking_lot::RwLock::new(StatsTracker::default()),
         };
 
         db.spawn_background_compaction_loop();
@@ -2792,6 +2909,15 @@ impl Db {
             validated
         };
 
+        // Get row count for auto-stats tracking before moving stats
+        let ingested_row_count = validated
+            .stats
+            .column_stats
+            .values()
+            .next()
+            .map(|cs| cs.row_count)
+            .unwrap_or(0);
+
         let stats = validated.stats;
         let schema_json = serde_json::to_string(&validated.schema_spec)
             .map_err(|e| EngineError::Internal(format!("serialize schema spec failed: {e}")))?;
@@ -2934,6 +3060,8 @@ impl Db {
                         compression: table_compression.clone(),
                         deduplication: None,
                         constraints: Vec::new(),
+                        retention_policy: None,
+                        partition_config: None,
                     });
                 }
             }
@@ -3006,6 +3134,18 @@ impl Db {
         self.metrics
             .ingests_bytes
             .fetch_add(payload_len, Ordering::Relaxed);
+
+        // Track rows for auto-stats (use pre-computed row count)
+        self.track_rows_and_maybe_update_stats(
+            db_name,
+            table_name,
+            if ingested_row_count > 0 {
+                ingested_row_count
+            } else {
+                payload_len / 100 // Estimate ~100 bytes per row if no stats
+            },
+        );
+
         Ok(())
     }
 
@@ -3268,13 +3408,15 @@ impl Db {
                 self.metrics.queries_cached.fetch_add(1, Ordering::Relaxed);
                 self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
                 // Add cache hit stats if requested
+                let latency_us = query_start.elapsed().as_micros() as u64;
                 if collect_stats {
                     cached.execution_stats = Some(QueryExecutionStats {
                         cache_hit: true,
-                        execution_time_micros: query_start.elapsed().as_micros() as u64,
+                        execution_time_micros: latency_us,
                         ..Default::default()
                     });
                 }
+                self.metrics.record_query_latency(latency_us);
                 return Ok(cached);
             }
         }
@@ -3283,6 +3425,7 @@ impl Db {
         // Check for information_schema queries (virtual tables)
         if let Some(response) = self.handle_information_schema_query(&request.sql)? {
             self.metrics.queries_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
             return Ok(response);
         }
 
@@ -3310,7 +3453,7 @@ impl Db {
             }
         }
 
-        match plan.kind {
+        let result = match plan.kind {
             PlanKind::Join => self.execute_join_query(&request, deadline, manifest_version),
             PlanKind::SetOperation => {
                 self.execute_set_operation(&request, deadline, manifest_version)
@@ -3346,7 +3489,11 @@ impl Db {
                 query_start,
                 request.transaction_id,
             ),
-        }
+        };
+
+        // Record query latency for all execution paths
+        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+        result
     }
 
     /// Execute a simple SELECT query and write IPC batches directly to the writer.
@@ -3698,6 +3845,7 @@ impl Db {
         };
 
         self.metrics.queries_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
 
         Ok(QueryResponse {
             records_ipc: Vec::new(),
@@ -3713,7 +3861,7 @@ impl Db {
         // TODO: Support timeout in distributed request
         let deadline = None;
 
-        match plan {
+        let result = match plan {
             PlanKind::Simple {
                 agg,
                 db,
@@ -3737,7 +3885,10 @@ impl Db {
             _ => Err(EngineError::NotImplemented(
                 "Distributed execution supports Simple plans only".into(),
             )),
-        }
+        };
+
+        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+        result
     }
 
     fn execute_simple_plan(
@@ -7557,16 +7708,44 @@ impl Db {
     // Query Optimizer Integration
     // ==========================================================================
 
-    /// Update table statistics for the optimizer's cost model
+    /// Update table statistics for the optimizer's cost model.
+    /// Prefers ANALYZE-generated statistics (with histograms) over segment-level estimates.
     pub fn update_optimizer_stats(&self, database: &str, table: &str) -> Result<(), EngineError> {
-        use crate::optimizer::{ColumnStatistics as OptimizerColStats, StatValue, TableStats};
+        use crate::optimizer::{
+            ColumnStatistics as OptimizerColStats, Histogram, HistogramBucket, StatValue,
+            TableStats,
+        };
 
         let manifest = self
             .manifest
             .read()
             .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
 
-        // Collect statistics from manifest entries
+        // First, check if we have ANALYZE-generated statistics (preferred - has histograms)
+        let analyze_stats = manifest
+            .table_stats
+            .iter()
+            .find(|s| s.database == database && s.table == table);
+
+        if let Some(table_stats_meta) = analyze_stats {
+            // Use ANALYZE-generated statistics with histograms
+            let stats = Self::convert_analyze_stats_to_optimizer(table_stats_meta);
+
+            // Update the optimizer context
+            let mut optimizer_ctx = self.optimizer_context.write();
+            optimizer_ctx.update_table_stats(database, table, stats);
+
+            tracing::debug!(
+                "Updated optimizer stats for {}.{} from ANALYZE (row_count={}, {} columns)",
+                database,
+                table,
+                table_stats_meta.row_count,
+                table_stats_meta.columns.len()
+            );
+            return Ok(());
+        }
+
+        // Fall back to segment-level statistics if no ANALYZE stats available
         let matching: Vec<&ManifestEntry> = manifest
             .entries
             .iter()
@@ -7578,8 +7757,14 @@ impl Db {
         }
 
         let total_bytes: u64 = matching.iter().map(|e| e.size_bytes).sum();
-        // Estimate rows based on average row size of 100 bytes
-        let estimated_rows = total_bytes / 100;
+        // Better row estimation: use segment row counts if available, else estimate
+        let estimated_rows = matching
+            .iter()
+            .filter_map(|e| e.column_stats.as_ref())
+            .flat_map(|cs| cs.values())
+            .map(|cs| cs.row_count)
+            .max()
+            .unwrap_or(total_bytes / 100); // Fall back to 100 bytes/row estimate
 
         let mut stats = TableStats {
             row_count: estimated_rows,
@@ -7590,6 +7775,7 @@ impl Db {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            correlations: std::collections::HashMap::new(), // Correlations require ANALYZE
         };
 
         // Helper function to convert PrimitiveValue to StatValue
@@ -7612,7 +7798,7 @@ impl Db {
             }
         }
 
-        // Extract column statistics from segments
+        // Aggregate column statistics from segments with proper min/max tracking
         for entry in &matching {
             if let Some(ref col_stats_map) = entry.column_stats {
                 for (col, col_stats) in col_stats_map {
@@ -7621,28 +7807,38 @@ impl Db {
                         .entry(col.clone())
                         .or_insert_with(OptimizerColStats::default);
 
-                    // Update min value
+                    // Update min value (take true minimum across segments)
                     if let Some(ref min) = col_stats.min {
                         let min_val = primitive_to_stat_value(min);
-                        if entry_stats.min_value.is_none() {
-                            entry_stats.min_value = Some(min_val);
+                        match (&entry_stats.min_value, &min_val) {
+                            (None, _) => entry_stats.min_value = Some(min_val),
+                            (Some(existing), new) if new < existing => {
+                                entry_stats.min_value = Some(new.clone())
+                            }
+                            _ => {}
                         }
                     }
 
-                    // Update max value
+                    // Update max value (take true maximum across segments)
                     if let Some(ref max) = col_stats.max {
                         let max_val = primitive_to_stat_value(max);
-                        if entry_stats.max_value.is_none() {
-                            entry_stats.max_value = Some(max_val);
+                        match (&entry_stats.max_value, &max_val) {
+                            (None, _) => entry_stats.max_value = Some(max_val),
+                            (Some(existing), new) if new > existing => {
+                                entry_stats.max_value = Some(new.clone())
+                            }
+                            _ => {}
                         }
                     }
 
-                    // Update distinct count (sum across segments)
+                    // For distinct count, use HyperLogLog-style estimation (max of segments)
+                    // since summing overestimates due to duplicates across segments
                     if let Some(distinct) = col_stats.distinct_count {
-                        entry_stats.distinct_count += distinct;
+                        entry_stats.distinct_count =
+                            entry_stats.distinct_count.max(distinct);
                     }
 
-                    // Update null count (sum across segments)
+                    // Null count sums across segments
                     entry_stats.null_count += col_stats.null_count;
                 }
             }
@@ -7652,7 +7848,112 @@ impl Db {
         let mut optimizer_ctx = self.optimizer_context.write();
         optimizer_ctx.update_table_stats(database, table, stats);
 
+        tracing::debug!(
+            "Updated optimizer stats for {}.{} from segments (estimated_rows={}, {} segments)",
+            database,
+            table,
+            estimated_rows,
+            matching.len()
+        );
+
         Ok(())
+    }
+
+    /// Convert ANALYZE-generated TableStatsMeta to optimizer TableStats format
+    fn convert_analyze_stats_to_optimizer(
+        meta: &crate::replication::TableStatsMeta,
+    ) -> crate::optimizer::TableStats {
+        use crate::optimizer::{
+            ColumnStatistics as OptimizerColStats, Histogram, HistogramBucket, McvEntry,
+            MostCommonValues, StatValue, TableStats,
+        };
+
+        let mut columns = std::collections::HashMap::new();
+
+        for (col_name, col_meta) in &meta.columns {
+            let mut col_stats = OptimizerColStats {
+                distinct_count: col_meta.distinct_count,
+                null_count: col_meta.null_count,
+                min_value: col_meta.min_value.as_ref().and_then(|s| parse_stat_value(s)),
+                max_value: col_meta.max_value.as_ref().and_then(|s| parse_stat_value(s)),
+                avg_length: col_meta.avg_length,
+                histogram: None,
+                most_common_values: None,
+            };
+
+            // Convert histogram if present
+            if let Some(ref hist_meta) = col_meta.histogram {
+                col_stats.histogram = Some(Self::convert_histogram_meta(hist_meta));
+            }
+
+            // Convert MCV if present
+            if let Some(ref mcv_meta) = col_meta.most_common_values {
+                col_stats.most_common_values = Some(Self::convert_mcv_meta(mcv_meta));
+            }
+
+            columns.insert(col_name.clone(), col_stats);
+        }
+
+        TableStats {
+            row_count: meta.row_count,
+            size_bytes: meta.size_bytes,
+            segment_count: meta.segment_count,
+            columns,
+            last_updated: meta.last_updated / 1000, // Convert millis to secs
+            correlations: meta.correlations.clone(),
+        }
+    }
+
+    /// Convert McvMeta to optimizer MostCommonValues format
+    fn convert_mcv_meta(meta: &crate::replication::McvMeta) -> crate::optimizer::MostCommonValues {
+        use crate::optimizer::{McvEntry, MostCommonValues, StatValue};
+
+        let total_rows_f64 = meta.total_rows.max(1) as f64;
+        let values: Vec<McvEntry> = meta
+            .values
+            .iter()
+            .zip(meta.counts.iter())
+            .map(|(val_str, count)| {
+                let value = parse_stat_value(val_str).unwrap_or(StatValue::String(val_str.clone()));
+                let frequency = *count as f64 / total_rows_f64;
+                McvEntry {
+                    value,
+                    count: *count,
+                    frequency,
+                }
+            })
+            .collect();
+
+        // Use constructor which computes cached total_mcv_frequency
+        MostCommonValues::new(values, meta.total_rows)
+    }
+
+    /// Convert HistogramMeta to optimizer Histogram format
+    fn convert_histogram_meta(meta: &crate::replication::HistogramMeta) -> crate::optimizer::Histogram {
+        use crate::optimizer::{Histogram, HistogramBucket, StatValue};
+
+        let mut buckets = Vec::with_capacity(meta.num_buckets);
+
+        // HistogramMeta stores boundaries as [b0, b1, b2, ...] where bucket i spans [bi, bi+1]
+        for i in 0..meta.num_buckets {
+            if i + 1 >= meta.boundaries.len() {
+                break;
+            }
+
+            let lower = parse_stat_value(&meta.boundaries[i]).unwrap_or(StatValue::Null);
+            let upper = parse_stat_value(&meta.boundaries[i + 1]).unwrap_or(StatValue::Null);
+            let count = meta.counts.get(i).copied().unwrap_or(0);
+            let distinct_count = meta.distinct_counts.get(i).copied().unwrap_or(1);
+
+            buckets.push(HistogramBucket {
+                lower_bound: lower,
+                upper_bound: upper,
+                count,
+                distinct_count,
+            });
+        }
+
+        Histogram { buckets }
     }
 
     /// Enable or disable the query optimizer
@@ -7665,6 +7966,87 @@ impl Db {
     pub fn is_optimizer_enabled(&self) -> bool {
         let optimizer_ctx = self.optimizer_context.read();
         optimizer_ctx.enabled
+    }
+
+    /// Track rows changed for a table and trigger stats update if needed
+    /// This is called after successful data ingestion
+    fn track_rows_and_maybe_update_stats(
+        &self,
+        database: &str,
+        table: &str,
+        rows_ingested: u64,
+    ) {
+        if !self.cfg.auto_stats_enabled {
+            return;
+        }
+
+        let table_key = format!("{}.{}", database, table);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let should_update = {
+            let mut tracker = self.stats_tracker.write();
+            let state = tracker.tables.entry(table_key.clone()).or_insert(TableStatsState {
+                rows_changed: 0,
+                last_update_secs: 0,
+                updating: false,
+            });
+
+            state.rows_changed += rows_ingested;
+
+            // Check if we should trigger an update
+            let rows_threshold_met = state.rows_changed >= self.cfg.auto_stats_min_rows_changed;
+            let cooldown_elapsed =
+                now_secs.saturating_sub(state.last_update_secs) >= self.cfg.auto_stats_cooldown_secs;
+
+            // Prevent concurrent updates (race condition fix)
+            if rows_threshold_met && cooldown_elapsed && !state.updating {
+                // Mark as updating to prevent other threads from starting concurrent updates
+                state.updating = true;
+                state.rows_changed = 0;
+                state.last_update_secs = now_secs;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_update {
+            // Update optimizer stats from segment-level data
+            // This is cheaper than a full ANALYZE
+            let result = self.update_optimizer_stats(database, table);
+
+            // Clear the updating flag
+            {
+                let mut tracker = self.stats_tracker.write();
+                if let Some(state) = tracker.tables.get_mut(&table_key) {
+                    state.updating = false;
+                }
+            }
+
+            if let Err(e) = result {
+                tracing::warn!(
+                    "Auto-stats update failed for {}.{}: {}",
+                    database,
+                    table,
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    "Auto-stats updated for {}.{} (rows threshold reached)",
+                    database,
+                    table
+                );
+            }
+        }
+    }
+
+    /// Force refresh statistics for a table from segment-level data
+    /// This is faster than ANALYZE but less accurate (no histograms/MCV unless ANALYZE was run)
+    pub fn refresh_stats(&self, database: &str, table: &str) -> Result<(), EngineError> {
+        self.update_optimizer_stats(database, table)
     }
 
     /// Generate an optimized physical plan for a query
@@ -8128,6 +8510,11 @@ impl Db {
             self.remove_segment_file(&e.segment_id);
         }
 
+        // Record compaction metrics
+        let original_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
+        self.metrics.compactions_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.compactions_bytes.fetch_add(original_bytes, Ordering::Relaxed);
+
         Ok(new_entry)
     }
 
@@ -8484,6 +8871,8 @@ impl Db {
             compression: None,
             deduplication: None,
             constraints: Vec::new(),
+            retention_policy: None,
+            partition_config: None,
         });
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         Ok(())
@@ -9593,7 +9982,13 @@ impl Db {
             is_numeric: bool,
             is_string: bool,
             histogram_values: Vec<f64>, // For building histogram
+            value_counts: std::collections::HashMap<String, u64>, // For MCV tracking
         }
+
+        // Memory limits for ANALYZE to prevent OOM on large tables
+        const MAX_HISTOGRAM_SAMPLES: usize = 100_000;
+        const MAX_DISTINCT_TRACK: usize = 50_000;
+        const MAX_MCV_DISTINCT: usize = 10_000;
 
         impl ColumnAccum {
             fn new() -> Self {
@@ -9611,6 +10006,54 @@ impl Db {
                     is_numeric: false,
                     is_string: false,
                     histogram_values: Vec::new(),
+                    value_counts: std::collections::HashMap::new(),
+                }
+            }
+
+            // Track value for MCV - takes &str to avoid allocation, only clones when inserting new
+            #[inline]
+            fn track_value(&mut self, value: &str) {
+                // Fast path: check if value exists first (no allocation)
+                if let Some(count) = self.value_counts.get_mut(value) {
+                    *count += 1;
+                } else if self.value_counts.len() < MAX_MCV_DISTINCT {
+                    // Only allocate String when inserting new value
+                    self.value_counts.insert(value.to_owned(), 1);
+                }
+            }
+
+            // Track histogram value with memory limit
+            #[inline]
+            fn track_histogram(&mut self, value: f64) {
+                if self.histogram_values.len() < MAX_HISTOGRAM_SAMPLES {
+                    self.histogram_values.push(value);
+                }
+            }
+
+            // Track distinct value - takes &str, only allocates when inserting new
+            #[inline]
+            fn track_distinct(&mut self, value: &str) {
+                if self.distinct_values.len() < MAX_DISTINCT_TRACK && !self.distinct_values.contains(value) {
+                    self.distinct_values.insert(value.to_owned());
+                }
+            }
+
+            // Combined tracking to minimize string operations
+            #[inline]
+            fn track_string_value(&mut self, value: &str) {
+                // Single check for distinct, avoid double lookup
+                let is_new = self.distinct_values.len() < MAX_DISTINCT_TRACK
+                    && !self.distinct_values.contains(value);
+
+                if is_new {
+                    self.distinct_values.insert(value.to_owned());
+                }
+
+                // Track for MCV
+                if let Some(count) = self.value_counts.get_mut(value) {
+                    *count += 1;
+                } else if self.value_counts.len() < MAX_MCV_DISTINCT {
+                    self.value_counts.insert(value.to_owned(), 1);
                 }
             }
         }
@@ -9669,8 +10112,9 @@ impl Db {
                                         let v = arr.value(i) as i64;
                                         accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
                                         accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
-                                        accum.histogram_values.push(v as f64);
-                                        accum.distinct_values.insert(v.to_string());
+                                        accum.track_histogram(v as f64);
+                                        // Convert to string and track (single allocation path)
+                                        accum.track_string_value(&v.to_string());
                                     }
                                 }
                             }
@@ -9683,8 +10127,9 @@ impl Db {
                                         let v = arr.value(i) as i64;
                                         accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
                                         accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
-                                        accum.histogram_values.push(v as f64);
-                                        accum.distinct_values.insert(v.to_string());
+                                        accum.track_histogram(v as f64);
+                                        // Convert to string and track (single allocation path)
+                                        accum.track_string_value(&v.to_string());
                                     }
                                 }
                             }
@@ -9697,8 +10142,9 @@ impl Db {
                                         let v = arr.value(i) as i64;
                                         accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
                                         accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
-                                        accum.histogram_values.push(v as f64);
-                                        accum.distinct_values.insert(v.to_string());
+                                        accum.track_histogram(v as f64);
+                                        // Convert to string and track (single allocation path)
+                                        accum.track_string_value(&v.to_string());
                                     }
                                 }
                             }
@@ -9711,8 +10157,9 @@ impl Db {
                                         let v = arr.value(i);
                                         accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
                                         accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
-                                        accum.histogram_values.push(v as f64);
-                                        accum.distinct_values.insert(v.to_string());
+                                        accum.track_histogram(v as f64);
+                                        // Convert to string and track (single allocation path)
+                                        accum.track_string_value(&v.to_string());
                                     }
                                 }
                             }
@@ -9726,8 +10173,9 @@ impl Db {
                                         if v.is_finite() {
                                             accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
                                             accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
-                                            accum.histogram_values.push(v);
-                                            accum.distinct_values.insert(format!("{:.6}", v));
+                                            accum.track_histogram(v);
+                                            // Use ryu for fast float formatting if available, else format
+                                            accum.track_string_value(&format!("{:.6}", v));
                                         }
                                     }
                                 }
@@ -9742,8 +10190,9 @@ impl Db {
                                         if v.is_finite() {
                                             accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
                                             accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
-                                            accum.histogram_values.push(v);
-                                            accum.distinct_values.insert(format!("{:.6}", v));
+                                            accum.track_histogram(v);
+                                            // Use ryu for fast float formatting if available, else format
+                                            accum.track_string_value(&format!("{:.6}", v));
                                         }
                                     }
                                 }
@@ -9756,12 +10205,14 @@ impl Db {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i);
                                         accum.total_str_len += v.len() as u64;
-                                        accum.distinct_values.insert(v.to_string());
-                                        if accum.min_str.is_none() || v < accum.min_str.as_ref().unwrap().as_str() {
-                                            accum.min_str = Some(v.to_string());
+                                        // Use v directly - it's already &str, avoid allocation
+                                        accum.track_string_value(v);
+                                        // Only allocate for min/max when needed
+                                        if accum.min_str.as_ref().map_or(true, |m| v < m.as_str()) {
+                                            accum.min_str = Some(v.to_owned());
                                         }
-                                        if accum.max_str.is_none() || v > accum.max_str.as_ref().unwrap().as_str() {
-                                            accum.max_str = Some(v.to_string());
+                                        if accum.max_str.as_ref().map_or(true, |m| v > m.as_str()) {
+                                            accum.max_str = Some(v.to_owned());
                                         }
                                     }
                                 }
@@ -9774,12 +10225,14 @@ impl Db {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i);
                                         accum.total_str_len += v.len() as u64;
-                                        accum.distinct_values.insert(v.to_string());
-                                        if accum.min_str.is_none() || v < accum.min_str.as_ref().unwrap().as_str() {
-                                            accum.min_str = Some(v.to_string());
+                                        // Use v directly - it's already &str, avoid allocation
+                                        accum.track_string_value(v);
+                                        // Only allocate for min/max when needed
+                                        if accum.min_str.as_ref().map_or(true, |m| v < m.as_str()) {
+                                            accum.min_str = Some(v.to_owned());
                                         }
-                                        if accum.max_str.is_none() || v > accum.max_str.as_ref().unwrap().as_str() {
-                                            accum.max_str = Some(v.to_string());
+                                        if accum.max_str.as_ref().map_or(true, |m| v > m.as_str()) {
+                                            accum.max_str = Some(v.to_owned());
                                         }
                                     }
                                 }
@@ -9787,10 +10240,11 @@ impl Db {
                         }
                         arrow_schema::DataType::Boolean => {
                             if let Some(arr) = col_array.as_any().downcast_ref::<BooleanArray>() {
+                                // Booleans only have two values - use static strings
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
-                                        let v = arr.value(i);
-                                        accum.distinct_values.insert(v.to_string());
+                                        let vs = if arr.value(i) { "true" } else { "false" };
+                                        accum.track_string_value(vs);
                                     }
                                 }
                             }
@@ -9803,12 +10257,55 @@ impl Db {
             }
         }
 
+        // Compute correlations between numeric columns before consuming column_stats
+        let correlations = {
+            let mut corrs = std::collections::HashMap::new();
+
+            // Collect numeric columns with enough data
+            let numeric_cols: Vec<(&String, &Vec<f64>)> = column_stats
+                .iter()
+                .filter(|(_, accum)| accum.is_numeric && accum.histogram_values.len() >= 10)
+                .map(|(name, accum)| (name, &accum.histogram_values))
+                .collect();
+
+            // Sort by data availability and limit to top 10 columns
+            let mut sorted_cols = numeric_cols;
+            sorted_cols.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            let top_cols: Vec<_> = sorted_cols.into_iter().take(10).collect();
+
+            // Compute pairwise correlations
+            for i in 0..top_cols.len() {
+                for j in (i + 1)..top_cols.len() {
+                    let (col1_name, col1_vals) = top_cols[i];
+                    let (col2_name, col2_vals) = top_cols[j];
+
+                    let n = col1_vals.len().min(col2_vals.len()).min(1000);
+                    if n < 10 {
+                        continue;
+                    }
+
+                    // Use slices directly to avoid allocation
+                    if let Some(corr) = Self::pearson_correlation(&col1_vals[..n], &col2_vals[..n]) {
+                        if corr.abs() > 0.1 {
+                            let key = if col1_name < col2_name {
+                                format!("{}:{}", col1_name, col2_name)
+                            } else {
+                                format!("{}:{}", col2_name, col1_name)
+                            };
+                            corrs.insert(key, corr);
+                        }
+                    }
+                }
+            }
+            corrs
+        };
+
         // Build statistics metadata
         let mut col_stats_meta: std::collections::HashMap<String, crate::replication::ColumnStatsMeta> =
             std::collections::HashMap::new();
 
         let column_count = column_stats.len();
-        for (col_name, accum) in column_stats {
+        for (col_name, mut accum) in column_stats {
             let distinct_count = accum.distinct_values.len() as u64;
 
             // Determine min/max values as JSON strings
@@ -9835,8 +10332,17 @@ impl Db {
             };
 
             // Build histogram for numeric columns with enough data
+            // Note: build_histogram sorts in place, but accum is consumed so that's fine
             let histogram = if accum.is_numeric && accum.histogram_values.len() >= 100 {
-                Some(Self::build_histogram(&mut accum.histogram_values.clone(), 64))
+                Some(Self::build_histogram(&mut accum.histogram_values, 64))
+            } else {
+                None
+            };
+
+            // Build MCV (Most Common Values) for columns with skewed distribution
+            // Only include MCV if there are repeated values (not all unique)
+            let most_common_values = if accum.non_null_count > 0 {
+                Self::build_mcv(&accum.value_counts, accum.non_null_count, 10)
             } else {
                 None
             };
@@ -9851,6 +10357,7 @@ impl Db {
                     max_value,
                     avg_length,
                     histogram,
+                    most_common_values,
                 },
             );
         }
@@ -9877,6 +10384,7 @@ impl Db {
             columns: col_stats_meta,
             last_updated: now_millis,
             sample_rate,
+            correlations,
         };
 
         // Store statistics in manifest
@@ -9941,12 +10449,12 @@ impl Db {
 
             counts.push((end - start) as u64);
 
-            // Count distinct in bucket (approximate)
-            let bucket_values: std::collections::HashSet<_> = values[start..end]
+            // Count distinct in bucket using raw bits (avoids string allocation)
+            let bucket_distinct: std::collections::HashSet<u64> = values[start..end]
                 .iter()
-                .map(|v| format!("{:.6}", v))
+                .map(|v| v.to_bits())
                 .collect();
-            distinct_counts.push(bucket_values.len() as u64);
+            distinct_counts.push(bucket_distinct.len() as u64);
         }
 
         crate::replication::HistogramMeta {
@@ -9955,6 +10463,93 @@ impl Db {
             counts,
             distinct_counts,
         }
+    }
+
+    /// Build Most Common Values (MCV) list from value counts
+    /// Returns the top N most frequent values if they represent significant fraction of data
+    fn build_mcv(
+        value_counts: &std::collections::HashMap<String, u64>,
+        total_rows: u64,
+        max_values: usize,
+    ) -> Option<crate::replication::McvMeta> {
+        if value_counts.is_empty() || total_rows == 0 {
+            return None;
+        }
+
+        // Sort by count descending
+        let mut sorted: Vec<_> = value_counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+
+        // Only include values that appear more than once (not all unique)
+        // and represent at least 0.1% of the data
+        let min_count = (total_rows / 1000).max(2);
+        let top_values: Vec<_> = sorted
+            .into_iter()
+            .filter(|(_, count)| **count >= min_count)
+            .take(max_values)
+            .collect();
+
+        if top_values.is_empty() {
+            return None;
+        }
+
+        // Calculate total frequency of MCV values
+        let mcv_total: u64 = top_values.iter().map(|(_, c)| **c).sum();
+        let mcv_fraction = mcv_total as f64 / total_rows as f64;
+
+        // Only create MCV if the top values represent at least 1% of data
+        // This indicates skewed distribution where MCV is useful
+        if mcv_fraction < 0.01 {
+            return None;
+        }
+
+        let values: Vec<String> = top_values.iter().map(|(v, _)| (*v).clone()).collect();
+        let counts: Vec<u64> = top_values.iter().map(|(_, c)| **c).collect();
+
+        Some(crate::replication::McvMeta {
+            values,
+            counts,
+            total_rows,
+        })
+    }
+
+    /// Compute Pearson correlation coefficient between two vectors
+    fn pearson_correlation(x: &[f64], y: &[f64]) -> Option<f64> {
+        let n = x.len();
+        if n != y.len() || n < 2 {
+            return None;
+        }
+
+        let n_f64 = n as f64;
+
+        // Compute means
+        let mean_x: f64 = x.iter().sum::<f64>() / n_f64;
+        let mean_y: f64 = y.iter().sum::<f64>() / n_f64;
+
+        // Compute covariance and standard deviations
+        let mut cov = 0.0;
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+
+        for i in 0..n {
+            let dx = x[i] - mean_x;
+            let dy = y[i] - mean_y;
+            cov += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+
+        if var_x == 0.0 || var_y == 0.0 {
+            return None; // Constant column, no correlation
+        }
+
+        let std_x = var_x.sqrt();
+        let std_y = var_y.sqrt();
+
+        let corr = cov / (std_x * std_y);
+
+        // Clamp to [-1, 1] to handle floating point errors
+        Some(corr.max(-1.0).min(1.0))
     }
 
     /// Get table statistics from manifest (for query optimizer)
@@ -12248,6 +12843,13 @@ impl Db {
             cache.invalidate_table(database, table);
         }
 
+        // Clean up stats tracker to prevent memory leak
+        {
+            let table_key = format!("{}.{}", database, table);
+            let mut tracker = self.stats_tracker.write();
+            tracker.tables.remove(&table_key);
+        }
+
         // Drop the lock before file operations
         drop(manifest);
 
@@ -14488,6 +15090,9 @@ impl Db {
             *index = ManifestIndex::build(&manifest.entries);
         }
 
+        // Record segments repaired metric
+        self.metrics.segments_repaired.fetch_add(removed_ids.len() as u64, Ordering::Relaxed);
+
         Ok(removed_ids)
     }
 
@@ -14555,6 +15160,460 @@ impl Db {
             scan_interval_secs: 300,
             max_repairs_per_scan: 100,
         }
+    }
+
+    /// Set retention policy for a table
+    pub fn set_retention_policy(
+        &self,
+        database: &str,
+        table: &str,
+        retention_seconds: u64,
+        time_column: Option<String>,
+    ) -> Result<(), EngineError> {
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Find the table
+        let table_meta = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
+
+        // Set retention policy
+        table_meta.retention_policy = Some(crate::replication::RetentionPolicy {
+            retention_seconds,
+            time_column,
+            enabled: true,
+        });
+
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Remove retention policy from a table
+    pub fn remove_retention_policy(&self, database: &str, table: &str) -> Result<(), EngineError> {
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
+
+        table_meta.retention_policy = None;
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Get retention policy for a table
+    pub fn get_retention_policy(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Option<crate::replication::RetentionPolicy>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table);
+
+        Ok(table_meta.and_then(|t| t.retention_policy.clone()))
+    }
+
+    /// Enforce retention policy for a specific table
+    /// Returns the number of segments deleted and bytes reclaimed
+    pub fn enforce_retention(
+        &self,
+        database: &str,
+        table: &str,
+        max_deletes: usize,
+    ) -> Result<RetentionResult, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Get retention policy
+        let table_meta = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
+
+        let policy = table_meta
+            .retention_policy
+            .as_ref()
+            .ok_or_else(|| {
+                EngineError::InvalidArgument(format!(
+                    "no retention policy for {}.{}",
+                    database, table
+                ))
+            })?;
+
+        if !policy.enabled {
+            return Ok(RetentionResult {
+                database: database.to_string(),
+                table: table.to_string(),
+                segments_deleted: 0,
+                bytes_reclaimed: 0,
+                cutoff_time_micros: 0,
+            });
+        }
+
+        // Calculate cutoff time
+        let now_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(0);
+        let retention_micros = policy.retention_seconds * 1_000_000;
+        let cutoff_micros = now_micros.saturating_sub(retention_micros);
+
+        // Find segments to delete (those with event_time_max < cutoff)
+        let mut segments_to_delete: Vec<(String, u64)> = Vec::new();
+        for entry in &manifest.entries {
+            if entry.database == database && entry.table == table {
+                if let Some(max_time) = entry.event_time_max {
+                    if max_time < cutoff_micros {
+                        segments_to_delete.push((entry.segment_id.clone(), entry.size_bytes));
+                        if segments_to_delete.len() >= max_deletes {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        drop(manifest);
+
+        if segments_to_delete.is_empty() {
+            return Ok(RetentionResult {
+                database: database.to_string(),
+                table: table.to_string(),
+                segments_deleted: 0,
+                bytes_reclaimed: 0,
+                cutoff_time_micros: cutoff_micros,
+            });
+        }
+
+        let segment_ids: Vec<String> = segments_to_delete.iter().map(|(id, _)| id.clone()).collect();
+        let bytes_reclaimed: u64 = segments_to_delete.iter().map(|(_, sz)| *sz).sum();
+        let segment_count = segment_ids.len();
+
+        // Delete segments from manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            let id_set: std::collections::HashSet<String> = segment_ids.iter().cloned().collect();
+            manifest.entries.retain(|e| !id_set.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+
+            // Rebuild index
+            let mut index = self
+                .manifest_index
+                .write()
+                .map_err(|_| EngineError::Internal("manifest_index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        // Delete segment files
+        for segment_id in &segment_ids {
+            self.remove_segment_file(segment_id);
+        }
+
+        // Invalidate query cache for this table
+        {
+            let mut cache = self.query_cache.lock();
+            cache.invalidate_table(database, table);
+        }
+
+        Ok(RetentionResult {
+            database: database.to_string(),
+            table: table.to_string(),
+            segments_deleted: segment_count,
+            bytes_reclaimed,
+            cutoff_time_micros: cutoff_micros,
+        })
+    }
+
+    /// Enforce retention policies for all tables that have them configured
+    pub fn enforce_all_retention_policies(
+        &self,
+        max_deletes_per_table: usize,
+    ) -> Result<Vec<RetentionResult>, EngineError> {
+        let tables_with_retention: Vec<(String, String)> = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            manifest
+                .tables
+                .iter()
+                .filter(|t| {
+                    t.retention_policy
+                        .as_ref()
+                        .map(|p| p.enabled)
+                        .unwrap_or(false)
+                })
+                .map(|t| (t.database.clone(), t.name.clone()))
+                .collect()
+        };
+
+        let mut results = Vec::new();
+        for (database, table) in tables_with_retention {
+            match self.enforce_retention(&database, &table, max_deletes_per_table) {
+                Ok(result) => {
+                    if result.segments_deleted > 0 {
+                        results.push(result);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        database = %database,
+                        table = %table,
+                        error = %e,
+                        "Failed to enforce retention policy"
+                    );
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Set partition configuration for a table
+    pub fn set_partition_config(
+        &self,
+        database: &str,
+        table: &str,
+        granularity: crate::replication::PartitionGranularity,
+        time_column: String,
+    ) -> Result<(), EngineError> {
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
+
+        table_meta.partition_config = Some(crate::replication::PartitionConfig {
+            granularity,
+            time_column,
+            enabled: true,
+        });
+
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Remove partition configuration from a table
+    pub fn remove_partition_config(&self, database: &str, table: &str) -> Result<(), EngineError> {
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
+
+        table_meta.partition_config = None;
+        manifest.bump_version();
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        Ok(())
+    }
+
+    /// Get partition configuration for a table
+    pub fn get_partition_config(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Option<crate::replication::PartitionConfig>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table);
+
+        Ok(table_meta.and_then(|t| t.partition_config.clone()))
+    }
+
+    /// Get list of partition keys for a table based on its segments
+    pub fn list_table_partitions(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Result<Vec<PartitionInfo>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        // Get partition config
+        let partition_config = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table)
+            .and_then(|t| t.partition_config.as_ref());
+
+        let granularity = match partition_config {
+            Some(cfg) => cfg.granularity,
+            None => {
+                // No partitioning configured, use day as default for display
+                crate::replication::PartitionGranularity::Day
+            }
+        };
+
+        // Group segments by partition key
+        let mut partitions: std::collections::HashMap<String, PartitionInfo> =
+            std::collections::HashMap::new();
+
+        for entry in &manifest.entries {
+            if entry.database == database && entry.table == table {
+                // Use min event time to determine partition
+                let partition_key = if let Some(min_time) = entry.event_time_min {
+                    granularity.partition_key(min_time)
+                } else {
+                    "unknown".to_string()
+                };
+
+                let info = partitions.entry(partition_key.clone()).or_insert(PartitionInfo {
+                    partition_key: partition_key.clone(),
+                    segment_count: 0,
+                    total_bytes: 0,
+                    min_time: entry.event_time_min,
+                    max_time: entry.event_time_max,
+                });
+
+                info.segment_count += 1;
+                info.total_bytes += entry.size_bytes;
+
+                // Update time range
+                if let Some(min) = entry.event_time_min {
+                    info.min_time = Some(info.min_time.map_or(min, |m| m.min(min)));
+                }
+                if let Some(max) = entry.event_time_max {
+                    info.max_time = Some(info.max_time.map_or(max, |m| m.max(max)));
+                }
+            }
+        }
+
+        let mut result: Vec<_> = partitions.into_values().collect();
+        result.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
+        Ok(result)
+    }
+
+    /// Get aggregated column statistics for a table
+    pub fn get_table_statistics(
+        &self,
+        database: &str,
+        table: &str,
+        specific_column: Option<&str>,
+    ) -> Result<TableStatistics, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let mut total_rows: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut segment_count: usize = 0;
+        let mut column_stats: std::collections::HashMap<String, AggregatedColumnStats> =
+            std::collections::HashMap::new();
+
+        for entry in &manifest.entries {
+            if entry.database == database && entry.table == table {
+                segment_count += 1;
+                total_bytes += entry.size_bytes;
+
+                // Aggregate column stats if available
+                if let Some(ref stats_map) = entry.column_stats {
+                    for (col_name, stats) in stats_map {
+                        if let Some(specific) = specific_column {
+                            if col_name != specific {
+                                continue;
+                            }
+                        }
+
+                        let agg = column_stats
+                            .entry(col_name.clone())
+                            .or_insert(AggregatedColumnStats {
+                                column_name: col_name.clone(),
+                                null_count: 0,
+                                distinct_count: None,
+                                min_value: None,
+                                max_value: None,
+                                avg_length: None,
+                            });
+
+                        agg.null_count += stats.null_count;
+
+                        // Track distinct count (approximate sum across segments)
+                        if let Some(dc) = stats.distinct_count {
+                            agg.distinct_count = Some(
+                                agg.distinct_count.unwrap_or(0) + dc,
+                            );
+                        }
+
+                        // Track min/max (just take first encountered values for now)
+                        // Full comparison would require PartialOrd on PrimitiveValue
+                        if agg.min_value.is_none() {
+                            if let Some(ref min) = stats.min {
+                                agg.min_value = Some(min.clone());
+                            }
+                        }
+                        if agg.max_value.is_none() {
+                            if let Some(ref max) = stats.max {
+                                agg.max_value = Some(max.clone());
+                            }
+                        }
+
+                        // avg_length is not available in ColumnStats
+                        // leaving agg.avg_length as None
+                    }
+                }
+            }
+        }
+
+        // Estimate row count from segment sizes (rough approximation)
+        // Assuming ~100 bytes per row on average
+        total_rows = total_bytes / 100;
+
+        Ok(TableStatistics {
+            database: database.to_string(),
+            table: table.to_string(),
+            segment_count,
+            total_bytes,
+            estimated_rows: total_rows,
+            columns: column_stats.into_values().collect(),
+        })
     }
 
     /// Try to recover a damaged segment from WAL
@@ -15209,6 +16268,91 @@ impl Default for AutoRepairStats {
     }
 }
 
+/// Configuration for automatic data retention enforcement
+#[derive(Debug, Clone)]
+pub struct RetentionConfig {
+    /// Enable automatic retention enforcement
+    pub enabled: bool,
+    /// Interval between retention scans (seconds)
+    pub scan_interval_secs: u64,
+    /// Maximum segments to delete per scan per table
+    pub max_deletes_per_scan: usize,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scan_interval_secs: 3600, // 1 hour
+            max_deletes_per_scan: 1000,
+        }
+    }
+}
+
+/// Result of a retention enforcement run
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RetentionResult {
+    /// Database name
+    pub database: String,
+    /// Table name
+    pub table: String,
+    /// Number of segments deleted
+    pub segments_deleted: usize,
+    /// Total bytes reclaimed
+    pub bytes_reclaimed: u64,
+    /// Cutoff time used (Unix microseconds)
+    pub cutoff_time_micros: u64,
+}
+
+/// Information about a table partition
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartitionInfo {
+    /// Partition key (e.g., "20240115" for daily, "2024" for yearly)
+    pub partition_key: String,
+    /// Number of segments in this partition
+    pub segment_count: usize,
+    /// Total bytes in this partition
+    pub total_bytes: u64,
+    /// Minimum event time in this partition (Unix microseconds)
+    pub min_time: Option<u64>,
+    /// Maximum event time in this partition (Unix microseconds)
+    pub max_time: Option<u64>,
+}
+
+/// Table statistics summary
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TableStatistics {
+    /// Database name
+    pub database: String,
+    /// Table name
+    pub table: String,
+    /// Number of segments
+    pub segment_count: usize,
+    /// Total storage bytes
+    pub total_bytes: u64,
+    /// Estimated row count
+    pub estimated_rows: u64,
+    /// Per-column statistics
+    pub columns: Vec<AggregatedColumnStats>,
+}
+
+/// Aggregated column statistics across all segments
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AggregatedColumnStats {
+    /// Column name
+    pub column_name: String,
+    /// Total null values
+    pub null_count: u64,
+    /// Approximate distinct count
+    pub distinct_count: Option<u64>,
+    /// Minimum value
+    pub min_value: Option<crate::replication::PrimitiveValue>,
+    /// Maximum value
+    pub max_value: Option<crate::replication::PrimitiveValue>,
+    /// Average length for string columns
+    pub avg_length: Option<f64>,
+}
+
 #[allow(dead_code)]
 fn mix64(mut x: u64) -> u64 {
     // Simple mixer to spread shard hints; not cryptographic.
@@ -15406,6 +16550,35 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+/// Parse a string value (from ANALYZE stats) into an optimizer StatValue
+fn parse_stat_value(s: &str) -> Option<crate::optimizer::StatValue> {
+    use crate::optimizer::StatValue;
+
+    // Try parsing as integer first
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(StatValue::Int64(v));
+    }
+
+    // Try parsing as float
+    if let Ok(v) = s.parse::<f64>() {
+        return Some(StatValue::Float64(v));
+    }
+
+    // Try parsing as boolean
+    match s.to_lowercase().as_str() {
+        "true" => return Some(StatValue::Bool(true)),
+        "false" => return Some(StatValue::Bool(false)),
+        _ => {}
+    }
+
+    // Treat as string
+    if !s.is_empty() {
+        Some(StatValue::String(s.to_string()))
+    } else {
+        None
+    }
 }
 
 fn normalize_compression(opt: Option<String>) -> Result<Option<String>, EngineError> {

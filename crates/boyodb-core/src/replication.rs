@@ -174,6 +174,109 @@ pub struct TableMeta {
     /// Table constraints (PRIMARY KEY, UNIQUE, CHECK, NOT NULL, DEFAULT)
     #[serde(default)]
     pub constraints: Vec<crate::sql::TableConstraint>,
+    /// Data retention policy for automatic deletion of old data
+    #[serde(default)]
+    pub retention_policy: Option<RetentionPolicy>,
+    /// Time-based partitioning configuration
+    #[serde(default)]
+    pub partition_config: Option<PartitionConfig>,
+}
+
+/// Time-based partitioning configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PartitionConfig {
+    /// Partition granularity
+    pub granularity: PartitionGranularity,
+    /// Column to use for partitioning (must be a timestamp column)
+    pub time_column: String,
+    /// Whether partitioning is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Partition granularity for time-based partitioning
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PartitionGranularity {
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl PartitionGranularity {
+    /// Get partition boundary in microseconds
+    pub fn boundary_micros(&self) -> u64 {
+        match self {
+            Self::Hour => 3600 * 1_000_000,
+            Self::Day => 86400 * 1_000_000,
+            Self::Week => 7 * 86400 * 1_000_000,
+            Self::Month => 30 * 86400 * 1_000_000,
+            Self::Year => 365 * 86400 * 1_000_000,
+        }
+    }
+
+    /// Get partition key from timestamp
+    pub fn partition_key(&self, timestamp_micros: u64) -> String {
+        let secs = timestamp_micros / 1_000_000;
+        let dt = chrono::DateTime::from_timestamp(secs as i64, 0)
+            .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        match self {
+            Self::Hour => dt.format("%Y%m%d%H").to_string(),
+            Self::Day => dt.format("%Y%m%d").to_string(),
+            Self::Week => {
+                // Use ISO week format
+                dt.format("%G%V").to_string()
+            }
+            Self::Month => dt.format("%Y%m").to_string(),
+            Self::Year => dt.format("%Y").to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for PartitionGranularity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hour => write!(f, "hour"),
+            Self::Day => write!(f, "day"),
+            Self::Week => write!(f, "week"),
+            Self::Month => write!(f, "month"),
+            Self::Year => write!(f, "year"),
+        }
+    }
+}
+
+impl std::str::FromStr for PartitionGranularity {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hour" | "hourly" => Ok(Self::Hour),
+            "day" | "daily" => Ok(Self::Day),
+            "week" | "weekly" => Ok(Self::Week),
+            "month" | "monthly" => Ok(Self::Month),
+            "year" | "yearly" => Ok(Self::Year),
+            _ => Err(format!("invalid partition granularity: {}. Use hour, day, week, month, or year", s)),
+        }
+    }
+}
+
+/// Data retention policy for automatic deletion of old data
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    /// Retention duration in seconds (data older than this will be deleted)
+    pub retention_seconds: u64,
+    /// Column to use for time-based retention (must be a timestamp column)
+    /// If None, uses event_time from segment metadata
+    pub time_column: Option<String>,
+    /// Enable automatic enforcement of retention policy
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -863,6 +966,10 @@ pub struct TableStatsMeta {
     pub last_updated: u64,
     /// Sample rate used (0.0-1.0)
     pub sample_rate: f64,
+    /// Column correlations for multi-column predicate estimation
+    /// Key format: "col1:col2" (alphabetically ordered), Value: Pearson correlation coefficient
+    #[serde(default)]
+    pub correlations: HashMap<String, f64>,
 }
 
 /// Column-level statistics for cardinality estimation
@@ -886,6 +993,30 @@ pub struct ColumnStatsMeta {
     /// Histogram buckets for value distribution
     #[serde(default)]
     pub histogram: Option<HistogramMeta>,
+    /// Most Common Values for equality predicate estimation
+    #[serde(default)]
+    pub most_common_values: Option<McvMeta>,
+}
+
+/// Most Common Values (MCV) list - top N most frequent values
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McvMeta {
+    /// Values (JSON-encoded) sorted by frequency descending
+    pub values: Vec<String>,
+    /// Count for each value
+    pub counts: Vec<u64>,
+    /// Total rows used to calculate frequencies
+    pub total_rows: u64,
+}
+
+impl Default for McvMeta {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            counts: Vec::new(),
+            total_rows: 0,
+        }
+    }
 }
 
 /// Histogram for value distribution
@@ -976,6 +1107,12 @@ impl Manifest {
         if self.format_version == 2 {
             // No data transformation needed - table_stats has serde(default)
             self.format_version = 3;
+        }
+
+        // Migration from version 3 to 4: checksum wrapper + column correlations/MCV
+        if self.format_version == 3 {
+            // No data transformation needed - new fields have serde(default)
+            self.format_version = 4;
         }
 
         true

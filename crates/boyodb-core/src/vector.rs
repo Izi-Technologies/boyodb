@@ -466,6 +466,528 @@ pub struct VectorSearchStats {
     pub cache_misses: u64,
 }
 
+// ============================================================================
+// AI Data Support - Filtered Search, Hybrid Search, Embeddings
+// ============================================================================
+
+/// Result from filtered vector search (includes row ID for joining with metadata)
+#[derive(Debug, Clone)]
+pub struct FilteredSearchResult {
+    /// Row ID in the source table
+    pub row_id: u64,
+    /// Vector similarity/distance score
+    pub vector_score: f32,
+    /// Optional metadata score (e.g., BM25 for hybrid search)
+    pub metadata_score: Option<f32>,
+    /// Combined score for ranking
+    pub combined_score: f32,
+}
+
+/// Configuration for hybrid search (vector + text)
+#[derive(Debug, Clone)]
+pub struct HybridSearchConfig {
+    /// Weight for vector similarity score (0.0-1.0)
+    pub vector_weight: f32,
+    /// Weight for text/BM25 score (0.0-1.0)
+    pub text_weight: f32,
+    /// Reciprocal Rank Fusion constant (default: 60)
+    pub rrf_k: u32,
+    /// Normalization method for score fusion
+    pub fusion_method: ScoreFusionMethod,
+}
+
+impl Default for HybridSearchConfig {
+    fn default() -> Self {
+        Self {
+            vector_weight: 0.5,
+            text_weight: 0.5,
+            rrf_k: 60,
+            fusion_method: ScoreFusionMethod::RRF,
+        }
+    }
+}
+
+/// Method for fusing vector and text scores
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreFusionMethod {
+    /// Reciprocal Rank Fusion - robust to score distribution differences
+    RRF,
+    /// Weighted linear combination (requires score normalization)
+    Linear,
+    /// Convex combination after min-max normalization
+    Convex,
+}
+
+/// Filtered vector search - search vectors with metadata predicates
+///
+/// This is the key feature for AI workloads: find similar vectors that also
+/// match certain criteria (e.g., category, date range, user permissions).
+///
+/// # Arguments
+/// * `query` - Query vector
+/// * `candidates` - Pre-filtered candidate vectors with their IDs
+/// * `k` - Number of results to return
+/// * `metric` - Distance metric to use
+///
+/// # Example
+/// ```ignore
+/// // Pre-filter by category, then vector search
+/// let candidates: Vec<(u64, Vec<f32>)> = db
+///     .query("SELECT id, embedding FROM docs WHERE category = 'AI'")
+///     .collect();
+/// let results = filtered_vector_search(&query_embedding, &candidates, 10, DistanceMetric::Cosine);
+/// ```
+pub fn filtered_vector_search(
+    query: &[f32],
+    candidates: &[(u64, Vec<f32>)],
+    k: usize,
+    metric: DistanceMetric,
+) -> Vec<FilteredSearchResult> {
+    if candidates.is_empty() {
+        return vec![];
+    }
+
+    // Use parallel search for large candidate sets
+    let results: Vec<(u64, f32)> = if candidates.len() > 1000 {
+        candidates
+            .par_iter()
+            .map(|(id, vec)| (*id, compute_distance(query, vec, metric)))
+            .collect()
+    } else {
+        candidates
+            .iter()
+            .map(|(id, vec)| (*id, compute_distance(query, vec, metric)))
+            .collect()
+    };
+
+    // Sort by distance and take top k
+    let mut scored: Vec<_> = results;
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+
+    scored
+        .into_iter()
+        .map(|(row_id, vector_score)| FilteredSearchResult {
+            row_id,
+            vector_score,
+            metadata_score: None,
+            combined_score: vector_score,
+        })
+        .collect()
+}
+
+/// Hybrid search combining vector similarity and text relevance (BM25)
+///
+/// Uses Reciprocal Rank Fusion (RRF) by default for robust score combination
+/// without requiring score normalization.
+///
+/// # Arguments
+/// * `vector_results` - Results from vector search: (row_id, distance)
+/// * `text_results` - Results from text search (BM25): (row_id, score)
+/// * `k` - Number of final results
+/// * `config` - Hybrid search configuration
+///
+/// # Returns
+/// Combined results ranked by fused score
+pub fn hybrid_search(
+    vector_results: &[(u64, f32)],
+    text_results: &[(u64, f32)],
+    k: usize,
+    config: &HybridSearchConfig,
+) -> Vec<FilteredSearchResult> {
+    use std::collections::HashMap;
+
+    match config.fusion_method {
+        ScoreFusionMethod::RRF => {
+            // Reciprocal Rank Fusion: score = sum(1 / (k + rank))
+            let mut scores: HashMap<u64, (f32, Option<f32>, f32)> = HashMap::new();
+            let rrf_k = config.rrf_k as f32;
+
+            // Add vector scores (lower distance = higher rank)
+            for (rank, (id, dist)) in vector_results.iter().enumerate() {
+                let rrf_score = config.vector_weight / (rrf_k + rank as f32 + 1.0);
+                scores.entry(*id).or_insert((0.0, None, 0.0)).0 = *dist;
+                scores.entry(*id).or_insert((0.0, None, 0.0)).2 += rrf_score;
+            }
+
+            // Add text scores (higher BM25 = higher rank, already sorted desc)
+            for (rank, (id, bm25)) in text_results.iter().enumerate() {
+                let rrf_score = config.text_weight / (rrf_k + rank as f32 + 1.0);
+                let entry = scores.entry(*id).or_insert((f32::MAX, None, 0.0));
+                entry.1 = Some(*bm25);
+                entry.2 += rrf_score;
+            }
+
+            // Sort by RRF score (descending)
+            let mut results: Vec<_> = scores.into_iter().collect();
+            results.sort_by(|a, b| b.1 .2.partial_cmp(&a.1 .2).unwrap_or(std::cmp::Ordering::Equal));
+            results.truncate(k);
+
+            results
+                .into_iter()
+                .map(|(row_id, (vector_score, metadata_score, combined_score))| {
+                    FilteredSearchResult {
+                        row_id,
+                        vector_score,
+                        metadata_score,
+                        combined_score,
+                    }
+                })
+                .collect()
+        }
+        ScoreFusionMethod::Linear | ScoreFusionMethod::Convex => {
+            // Linear/Convex combination requires normalized scores
+            let mut scores: HashMap<u64, (f32, Option<f32>, f32)> = HashMap::new();
+
+            // Normalize vector distances to 0-1 (invert so higher = better)
+            let (v_min, v_max) = vector_results
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(min, max), (_, d)| {
+                    (min.min(*d), max.max(*d))
+                });
+            let v_range = (v_max - v_min).max(1e-6);
+
+            for (id, dist) in vector_results {
+                let normalized = 1.0 - ((*dist - v_min) / v_range);
+                scores.insert(*id, (*dist, None, normalized * config.vector_weight));
+            }
+
+            // Normalize text scores to 0-1
+            let (t_min, t_max) = text_results
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(min, max), (_, s)| {
+                    (min.min(*s), max.max(*s))
+                });
+            let t_range = (t_max - t_min).max(1e-6);
+
+            for (id, bm25) in text_results {
+                let normalized = (*bm25 - t_min) / t_range;
+                let entry = scores.entry(*id).or_insert((f32::MAX, None, 0.0));
+                entry.1 = Some(*bm25);
+                entry.2 += normalized * config.text_weight;
+            }
+
+            let mut results: Vec<_> = scores.into_iter().collect();
+            results.sort_by(|a, b| b.1 .2.partial_cmp(&a.1 .2).unwrap_or(std::cmp::Ordering::Equal));
+            results.truncate(k);
+
+            results
+                .into_iter()
+                .map(|(row_id, (vector_score, metadata_score, combined_score))| {
+                    FilteredSearchResult {
+                        row_id,
+                        vector_score,
+                        metadata_score,
+                        combined_score,
+                    }
+                })
+                .collect()
+        }
+    }
+}
+
+/// Embedding model metadata for tracking which model generated embeddings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingModelInfo {
+    /// Model identifier (e.g., "text-embedding-3-small", "all-MiniLM-L6-v2")
+    pub model_id: String,
+    /// Model provider (e.g., "openai", "huggingface", "cohere")
+    pub provider: String,
+    /// Vector dimensions
+    pub dimensions: u32,
+    /// Maximum tokens/sequence length
+    pub max_tokens: u32,
+    /// Model version for tracking re-embedding needs
+    pub version: String,
+}
+
+impl EmbeddingModelInfo {
+    /// Create info for OpenAI embedding models
+    pub fn openai(model: &str) -> Self {
+        let (dimensions, max_tokens) = match model {
+            "text-embedding-3-small" => (1536, 8191),
+            "text-embedding-3-large" => (3072, 8191),
+            "text-embedding-ada-002" => (1536, 8191),
+            _ => (1536, 8191), // Default
+        };
+        Self {
+            model_id: model.to_string(),
+            provider: "openai".to_string(),
+            dimensions,
+            max_tokens,
+            version: "1".to_string(),
+        }
+    }
+
+    /// Create info for common open-source models
+    pub fn open_source(model: &str) -> Self {
+        let (dimensions, max_tokens) = match model {
+            "all-MiniLM-L6-v2" => (384, 256),
+            "all-mpnet-base-v2" => (768, 384),
+            "bge-small-en-v1.5" => (384, 512),
+            "bge-base-en-v1.5" => (768, 512),
+            "bge-large-en-v1.5" => (1024, 512),
+            "e5-small-v2" => (384, 512),
+            "e5-base-v2" => (768, 512),
+            "e5-large-v2" => (1024, 512),
+            "gte-small" => (384, 512),
+            "gte-base" => (768, 512),
+            "gte-large" => (1024, 512),
+            _ => (768, 512), // Default
+        };
+        Self {
+            model_id: model.to_string(),
+            provider: "huggingface".to_string(),
+            dimensions,
+            max_tokens,
+            version: "1".to_string(),
+        }
+    }
+}
+
+/// Chunking strategy for splitting documents before embedding
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChunkingStrategy {
+    /// Fixed token count per chunk
+    FixedTokens { size: u32, overlap: u32 },
+    /// Split by sentences with max size
+    Sentence { max_tokens: u32, overlap_sentences: u32 },
+    /// Split by paragraphs
+    Paragraph { max_tokens: u32 },
+    /// Semantic chunking (split at topic boundaries)
+    Semantic { max_tokens: u32 },
+}
+
+impl Default for ChunkingStrategy {
+    fn default() -> Self {
+        Self::FixedTokens {
+            size: 512,
+            overlap: 50,
+        }
+    }
+}
+
+/// Chunk text into segments suitable for embedding
+///
+/// Simple implementation - for production use, consider using a proper tokenizer
+pub fn chunk_text(text: &str, strategy: ChunkingStrategy) -> Vec<String> {
+    match strategy {
+        ChunkingStrategy::FixedTokens { size, overlap } => {
+            // Approximate tokens by splitting on whitespace
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let size = size as usize;
+            let overlap = overlap as usize;
+            let step = size.saturating_sub(overlap).max(1);
+
+            let mut chunks = Vec::new();
+            let mut start = 0;
+
+            while start < words.len() {
+                let end = (start + size).min(words.len());
+                chunks.push(words[start..end].join(" "));
+                start += step;
+            }
+
+            chunks
+        }
+        ChunkingStrategy::Sentence { max_tokens, overlap_sentences } => {
+            // Split by sentence-ending punctuation
+            let sentences: Vec<&str> = text
+                .split(|c| c == '.' || c == '!' || c == '?')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let max_tokens = max_tokens as usize;
+            let overlap = overlap_sentences as usize;
+            let mut chunks = Vec::new();
+            let mut current_chunk = Vec::new();
+            let mut current_len = 0;
+
+            for sentence in &sentences {
+                let sentence_len = sentence.split_whitespace().count();
+
+                if current_len + sentence_len > max_tokens && !current_chunk.is_empty() {
+                    chunks.push(current_chunk.join(". ") + ".");
+                    // Keep overlap sentences
+                    let keep = current_chunk.len().saturating_sub(overlap);
+                    current_chunk = current_chunk[keep..].to_vec();
+                    current_len = current_chunk.iter().map(|s: &&str| s.split_whitespace().count()).sum();
+                }
+
+                current_chunk.push(*sentence);
+                current_len += sentence_len;
+            }
+
+            if !current_chunk.is_empty() {
+                chunks.push(current_chunk.join(". ") + ".");
+            }
+
+            chunks
+        }
+        ChunkingStrategy::Paragraph { max_tokens } => {
+            let max_tokens = max_tokens as usize;
+            let paragraphs: Vec<&str> = text
+                .split("\n\n")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let mut chunks = Vec::new();
+            let mut current_chunk = String::new();
+            let mut current_len = 0;
+
+            for para in paragraphs {
+                let para_len = para.split_whitespace().count();
+
+                if current_len + para_len > max_tokens && !current_chunk.is_empty() {
+                    chunks.push(current_chunk.trim().to_string());
+                    current_chunk = String::new();
+                    current_len = 0;
+                }
+
+                if !current_chunk.is_empty() {
+                    current_chunk.push_str("\n\n");
+                }
+                current_chunk.push_str(para);
+                current_len += para_len;
+            }
+
+            if !current_chunk.is_empty() {
+                chunks.push(current_chunk.trim().to_string());
+            }
+
+            chunks
+        }
+        ChunkingStrategy::Semantic { max_tokens } => {
+            // Simplified semantic chunking - split on heading patterns and paragraph breaks
+            let max_tokens = max_tokens as usize;
+            let mut chunks = Vec::new();
+            let mut current_chunk = String::new();
+            let mut current_len = 0;
+
+            for line in text.lines() {
+                let line = line.trim();
+                let line_len = line.split_whitespace().count();
+
+                // Check for heading patterns (start new chunk)
+                let is_heading = line.starts_with('#')
+                    || (line.len() < 100 && line.ends_with(':'))
+                    || line.chars().all(|c| c.is_uppercase() || c.is_whitespace());
+
+                if (is_heading || current_len + line_len > max_tokens) && !current_chunk.is_empty() {
+                    chunks.push(current_chunk.trim().to_string());
+                    current_chunk = String::new();
+                    current_len = 0;
+                }
+
+                if !current_chunk.is_empty() && !line.is_empty() {
+                    current_chunk.push('\n');
+                }
+                current_chunk.push_str(line);
+                current_len += line_len;
+            }
+
+            if !current_chunk.is_empty() {
+                chunks.push(current_chunk.trim().to_string());
+            }
+
+            chunks
+        }
+    }
+}
+
+/// Rerank results using cross-encoder style scoring
+///
+/// Takes initial retrieval results and reranks them based on query-document
+/// relevance. This is typically more accurate than bi-encoder similarity
+/// but slower, so used on top-k candidates.
+///
+/// # Arguments
+/// * `query` - The query text
+/// * `documents` - Candidate documents with their IDs
+/// * `scores` - Pre-computed relevance scores from a reranker model
+/// * `k` - Number of results to return
+pub fn rerank_results(
+    _query: &str,
+    documents: &[(u64, String)],
+    scores: &[f32],
+    k: usize,
+) -> Vec<(u64, f32)> {
+    assert_eq!(documents.len(), scores.len(), "Documents and scores must have same length");
+
+    let mut ranked: Vec<(u64, f32)> = documents
+        .iter()
+        .zip(scores.iter())
+        .map(|((id, _), score)| (*id, *score))
+        .collect();
+
+    // Sort by score descending
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(k);
+    ranked
+}
+
+/// Compute similarity matrix between two sets of vectors
+/// Useful for clustering, deduplication, and batch similarity checks
+pub fn similarity_matrix(
+    vectors_a: &[Vec<f32>],
+    vectors_b: &[Vec<f32>],
+    metric: DistanceMetric,
+) -> Vec<Vec<f32>> {
+    vectors_a
+        .par_iter()
+        .map(|a| {
+            vectors_b
+                .iter()
+                .map(|b| {
+                    match metric {
+                        DistanceMetric::Cosine => cosine_similarity(a, b),
+                        _ => -compute_distance(a, b, metric), // Negate distance for similarity
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Find near-duplicate vectors using similarity threshold
+/// Returns pairs of indices that are above the similarity threshold
+pub fn find_near_duplicates(
+    vectors: &[Vec<f32>],
+    threshold: f32,
+    metric: DistanceMetric,
+) -> Vec<(usize, usize, f32)> {
+    let n = vectors.len();
+    let mut duplicates = Vec::new();
+
+    // Parallel comparison of all pairs
+    let pairs: Vec<_> = (0..n)
+        .flat_map(|i| (i + 1..n).map(move |j| (i, j)))
+        .collect();
+
+    let results: Vec<_> = pairs
+        .par_iter()
+        .filter_map(|(i, j)| {
+            let sim = match metric {
+                DistanceMetric::Cosine => cosine_similarity(&vectors[*i], &vectors[*j]),
+                _ => {
+                    let dist = compute_distance(&vectors[*i], &vectors[*j], metric);
+                    1.0 / (1.0 + dist) // Convert distance to similarity
+                }
+            };
+            if sim >= threshold {
+                Some((*i, *j, sim))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    duplicates.extend(results);
+    duplicates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,7 +1130,7 @@ mod tests {
 
     #[test]
     fn test_ivf_index() {
-        let mut config = VectorIndexConfig {
+        let config = VectorIndexConfig {
             dimensions: 2,
             metric: DistanceMetric::Euclidean,
             num_clusters: 2,
@@ -626,5 +1148,131 @@ mod tests {
 
         let results = index.search(&[0.5, 0.5], 5);
         assert_eq!(results.len(), 5);
+    }
+
+    // =========================================================
+    // AI Data Feature Tests
+    // =========================================================
+
+    #[test]
+    fn test_filtered_vector_search() {
+        // Simulate pre-filtered candidates (e.g., WHERE category = 'AI')
+        let candidates: Vec<(u64, Vec<f32>)> = vec![
+            (1, vec![1.0, 0.0, 0.0]),
+            (5, vec![0.9, 0.1, 0.0]),
+            (10, vec![0.0, 1.0, 0.0]),
+            (15, vec![0.5, 0.5, 0.0]),
+        ];
+
+        let query = vec![1.0, 0.0, 0.0];
+        let results = filtered_vector_search(&query, &candidates, 2, DistanceMetric::Cosine);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].row_id, 1); // Exact match
+        assert_eq!(results[1].row_id, 5); // Second closest
+    }
+
+    #[test]
+    fn test_hybrid_search_rrf() {
+        // Vector results (sorted by distance, lower = better)
+        let vector_results: Vec<(u64, f32)> = vec![
+            (1, 0.1),  // Rank 1
+            (2, 0.2),  // Rank 2
+            (3, 0.5),  // Rank 3
+        ];
+
+        // Text/BM25 results (sorted by score, higher = better)
+        let text_results: Vec<(u64, f32)> = vec![
+            (3, 10.0), // Rank 1
+            (1, 8.0),  // Rank 2
+            (4, 5.0),  // Rank 3
+        ];
+
+        let config = HybridSearchConfig::default();
+        let results = hybrid_search(&vector_results, &text_results, 3, &config);
+
+        assert_eq!(results.len(), 3);
+        // Doc 1 should rank high (good in both)
+        // Doc 3 should also rank high (best text, ok vector)
+        assert!(results.iter().any(|r| r.row_id == 1));
+        assert!(results.iter().any(|r| r.row_id == 3));
+    }
+
+    #[test]
+    fn test_chunk_text_fixed_tokens() {
+        let text = "This is a test. It has multiple sentences. We want to chunk it properly.";
+        let chunks = chunk_text(text, ChunkingStrategy::FixedTokens { size: 5, overlap: 2 });
+
+        assert!(!chunks.is_empty());
+        // Each chunk should have roughly 5 words
+        for chunk in &chunks {
+            let word_count = chunk.split_whitespace().count();
+            assert!(word_count <= 6); // Allow some flexibility
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_sentences() {
+        let text = "First sentence here. Second sentence follows. Third one too. And a fourth.";
+        let chunks = chunk_text(
+            text,
+            ChunkingStrategy::Sentence {
+                max_tokens: 10,
+                overlap_sentences: 0,
+            },
+        );
+
+        assert!(!chunks.is_empty());
+        // Chunks should end with periods
+        for chunk in &chunks {
+            assert!(chunk.ends_with('.'));
+        }
+    }
+
+    #[test]
+    fn test_embedding_model_info() {
+        let openai = EmbeddingModelInfo::openai("text-embedding-3-small");
+        assert_eq!(openai.dimensions, 1536);
+        assert_eq!(openai.provider, "openai");
+
+        let oss = EmbeddingModelInfo::open_source("all-MiniLM-L6-v2");
+        assert_eq!(oss.dimensions, 384);
+        assert_eq!(oss.provider, "huggingface");
+    }
+
+    #[test]
+    fn test_similarity_matrix() {
+        let vectors_a = vec![
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+        ];
+        let vectors_b = vec![
+            vec![1.0, 0.0],
+            vec![0.5, 0.5],
+        ];
+
+        let matrix = similarity_matrix(&vectors_a, &vectors_b, DistanceMetric::Cosine);
+
+        assert_eq!(matrix.len(), 2);
+        assert_eq!(matrix[0].len(), 2);
+        // First vector of A should match first vector of B perfectly
+        assert!((matrix[0][0] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_find_near_duplicates() {
+        let vectors = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![0.99, 0.01, 0.0], // Near duplicate of first
+            vec![0.0, 1.0, 0.0],   // Different
+            vec![0.0, 0.99, 0.01], // Near duplicate of third
+        ];
+
+        let duplicates = find_near_duplicates(&vectors, 0.95, DistanceMetric::Cosine);
+
+        // Should find pairs (0,1) and (2,3) as near duplicates
+        assert!(duplicates.len() >= 2);
+        assert!(duplicates.iter().any(|(i, j, _)| (*i == 0 && *j == 1)));
+        assert!(duplicates.iter().any(|(i, j, _)| (*i == 2 && *j == 3)));
     }
 }

@@ -945,3 +945,358 @@ func (c *Client) InTransaction(fn func() error) error {
 
 	return nil
 }
+
+// ============================================================================
+// AI/Vector Search Support
+// ============================================================================
+
+// VectorSearchResult represents a single result from vector similarity search.
+type VectorSearchResult struct {
+	ID            int64   `json:"id"`
+	Score         float64 `json:"score"`
+	Distance      float64 `json:"distance"`
+	VectorScore   float64 `json:"vector_score"`
+	MetadataScore float64 `json:"metadata_score,omitempty"`
+}
+
+// VectorSearchOptions configures vector similarity search.
+type VectorSearchOptions struct {
+	// Table is the table to search (required)
+	Table string
+	// VectorColumn is the column containing embeddings (default: "embedding")
+	VectorColumn string
+	// IDColumn is the column containing row IDs (default: "id")
+	IDColumn string
+	// Metric is the distance metric: "cosine", "euclidean", "dot", "manhattan"
+	Metric string
+	// Limit is the maximum number of results (default: 10)
+	Limit int
+	// Filter is an optional SQL WHERE clause for metadata filtering
+	Filter string
+	// SelectColumns are additional columns to return
+	SelectColumns []string
+}
+
+// VectorSearch performs similarity search on vector embeddings.
+//
+// Example:
+//
+//	results, err := client.VectorSearch(ctx, queryVector, &VectorSearchOptions{
+//	    Table:        "documents",
+//	    VectorColumn: "embedding",
+//	    Metric:       "cosine",
+//	    Limit:        10,
+//	    Filter:       "category = 'AI'",
+//	})
+func (c *Client) VectorSearch(queryVector []float32, opts *VectorSearchOptions) (*Result, error) {
+	if opts == nil {
+		return nil, errors.New("VectorSearchOptions is required")
+	}
+	if opts.Table == "" {
+		return nil, errors.New("Table is required")
+	}
+
+	// Set defaults
+	vectorCol := opts.VectorColumn
+	if vectorCol == "" {
+		vectorCol = "embedding"
+	}
+	idCol := opts.IDColumn
+	if idCol == "" {
+		idCol = "id"
+	}
+	metric := opts.Metric
+	if metric == "" {
+		metric = "cosine"
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	// Build the query
+	selectCols := idCol
+	if len(opts.SelectColumns) > 0 {
+		selectCols = idCol + ", " + strings.Join(opts.SelectColumns, ", ")
+	}
+
+	// Format vector as array literal
+	vectorStr := formatVector(queryVector)
+
+	var sql string
+	if metric == "cosine" {
+		sql = fmt.Sprintf(
+			"SELECT %s, vector_similarity(%s, %s) AS score FROM %s",
+			selectCols, vectorCol, vectorStr, opts.Table,
+		)
+	} else {
+		sql = fmt.Sprintf(
+			"SELECT %s, vector_distance(%s, %s, '%s') AS score FROM %s",
+			selectCols, vectorCol, vectorStr, metric, opts.Table,
+		)
+	}
+
+	if opts.Filter != "" {
+		sql += " WHERE " + opts.Filter
+	}
+
+	if metric == "cosine" {
+		sql += " ORDER BY score DESC"
+	} else {
+		sql += " ORDER BY score ASC"
+	}
+	sql += fmt.Sprintf(" LIMIT %d", limit)
+
+	return c.Query(sql)
+}
+
+// HybridSearchOptions configures hybrid search (vector + text).
+type HybridSearchOptions struct {
+	// Table is the table to search
+	Table string
+	// VectorColumn is the embedding column
+	VectorColumn string
+	// TextColumn is the text column for full-text search
+	TextColumn string
+	// IDColumn is the ID column
+	IDColumn string
+	// VectorWeight is the weight for vector similarity (0.0-1.0)
+	VectorWeight float64
+	// TextWeight is the weight for text relevance (0.0-1.0)
+	TextWeight float64
+	// Limit is the maximum results
+	Limit int
+	// Filter is an optional WHERE clause
+	Filter string
+	// SelectColumns are additional columns to return
+	SelectColumns []string
+}
+
+// HybridSearch performs combined vector similarity and full-text search.
+//
+// This uses Reciprocal Rank Fusion (RRF) to combine results from both
+// vector similarity and BM25 text search.
+func (c *Client) HybridSearch(queryVector []float32, textQuery string, opts *HybridSearchOptions) (*Result, error) {
+	if opts == nil {
+		return nil, errors.New("HybridSearchOptions is required")
+	}
+	if opts.Table == "" {
+		return nil, errors.New("Table is required")
+	}
+
+	// Set defaults
+	vectorCol := opts.VectorColumn
+	if vectorCol == "" {
+		vectorCol = "embedding"
+	}
+	textCol := opts.TextColumn
+	if textCol == "" {
+		textCol = "content"
+	}
+	idCol := opts.IDColumn
+	if idCol == "" {
+		idCol = "id"
+	}
+	vectorWeight := opts.VectorWeight
+	if vectorWeight <= 0 {
+		vectorWeight = 0.5
+	}
+	textWeight := opts.TextWeight
+	if textWeight <= 0 {
+		textWeight = 0.5
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	selectCols := idCol
+	if len(opts.SelectColumns) > 0 {
+		selectCols = idCol + ", " + strings.Join(opts.SelectColumns, ", ")
+	}
+
+	vectorStr := formatVector(queryVector)
+
+	// Build hybrid search query using weighted combination
+	sql := fmt.Sprintf(`
+		SELECT %s,
+		       vector_similarity(%s, %s) * %.2f AS vector_score,
+		       COALESCE(match_score(%s, '%s'), 0) * %.2f AS text_score,
+		       vector_similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
+		FROM %s
+	`, selectCols,
+		vectorCol, vectorStr, vectorWeight,
+		textCol, escapeString(textQuery), textWeight,
+		vectorCol, vectorStr, vectorWeight,
+		textCol, escapeString(textQuery), textWeight,
+		opts.Table,
+	)
+
+	if opts.Filter != "" {
+		sql += " WHERE " + opts.Filter
+	}
+
+	sql += " ORDER BY combined_score DESC"
+	sql += fmt.Sprintf(" LIMIT %d", limit)
+
+	return c.Query(sql)
+}
+
+// EmbeddingModel represents an embedding model configuration.
+type EmbeddingModel struct {
+	ID         string `json:"id"`
+	Provider   string `json:"provider"`
+	Dimensions int    `json:"dimensions"`
+	MaxTokens  int    `json:"max_tokens"`
+}
+
+// CommonEmbeddingModels returns configurations for popular embedding models.
+func CommonEmbeddingModels() map[string]EmbeddingModel {
+	return map[string]EmbeddingModel{
+		// OpenAI
+		"text-embedding-3-small": {ID: "text-embedding-3-small", Provider: "openai", Dimensions: 1536, MaxTokens: 8191},
+		"text-embedding-3-large": {ID: "text-embedding-3-large", Provider: "openai", Dimensions: 3072, MaxTokens: 8191},
+		"text-embedding-ada-002": {ID: "text-embedding-ada-002", Provider: "openai", Dimensions: 1536, MaxTokens: 8191},
+		// Open source
+		"all-MiniLM-L6-v2":  {ID: "all-MiniLM-L6-v2", Provider: "huggingface", Dimensions: 384, MaxTokens: 256},
+		"all-mpnet-base-v2": {ID: "all-mpnet-base-v2", Provider: "huggingface", Dimensions: 768, MaxTokens: 384},
+		"bge-small-en-v1.5": {ID: "bge-small-en-v1.5", Provider: "huggingface", Dimensions: 384, MaxTokens: 512},
+		"bge-base-en-v1.5":  {ID: "bge-base-en-v1.5", Provider: "huggingface", Dimensions: 768, MaxTokens: 512},
+		"bge-large-en-v1.5": {ID: "bge-large-en-v1.5", Provider: "huggingface", Dimensions: 1024, MaxTokens: 512},
+	}
+}
+
+// ChunkText splits text into chunks suitable for embedding.
+func ChunkText(text string, chunkSize, overlap int) []string {
+	if chunkSize <= 0 {
+		chunkSize = 512
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+
+	words := strings.Fields(text)
+	if len(words) <= chunkSize {
+		return []string{text}
+	}
+
+	var chunks []string
+	step := chunkSize - overlap
+	if step <= 0 {
+		step = 1
+	}
+
+	for i := 0; i < len(words); i += step {
+		end := i + chunkSize
+		if end > len(words) {
+			end = len(words)
+		}
+		chunk := strings.Join(words[i:end], " ")
+		chunks = append(chunks, chunk)
+		if end == len(words) {
+			break
+		}
+	}
+
+	return chunks
+}
+
+// CosineSimilarity computes cosine similarity between two vectors.
+func CosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+
+	return dot / (sqrt(normA) * sqrt(normB))
+}
+
+// EuclideanDistance computes Euclidean (L2) distance between two vectors.
+func EuclideanDistance(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return 0
+	}
+
+	var sum float64
+	for i := range a {
+		d := float64(a[i]) - float64(b[i])
+		sum += d * d
+	}
+
+	return sqrt(sum)
+}
+
+// DotProduct computes the dot product of two vectors.
+func DotProduct(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return 0
+	}
+
+	var sum float64
+	for i := range a {
+		sum += float64(a[i]) * float64(b[i])
+	}
+
+	return sum
+}
+
+// NormalizeVector returns a unit-length version of the vector.
+func NormalizeVector(v []float32) []float32 {
+	var norm float64
+	for _, val := range v {
+		norm += float64(val) * float64(val)
+	}
+	norm = sqrt(norm)
+
+	if norm == 0 {
+		return v
+	}
+
+	result := make([]float32, len(v))
+	for i, val := range v {
+		result[i] = float32(float64(val) / norm)
+	}
+
+	return result
+}
+
+// formatVector formats a float32 slice as a SQL array literal.
+func formatVector(v []float32) string {
+	var sb strings.Builder
+	sb.WriteString("ARRAY[")
+	for i, val := range v {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(fmt.Sprintf("%g", val))
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// escapeString escapes a string for SQL.
+func escapeString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
+}
+
+// sqrt is a simple square root implementation.
+func sqrt(x float64) float64 {
+	if x <= 0 {
+		return 0
+	}
+	z := x / 2
+	for i := 0; i < 10; i++ {
+		z = z - (z*z-x)/(2*z)
+	}
+	return z
+}

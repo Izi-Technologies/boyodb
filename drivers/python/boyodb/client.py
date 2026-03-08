@@ -743,6 +743,135 @@ class Client:
         """
         self.exec(f"RELEASE SAVEPOINT {name}")
 
+    # =========================================================================
+    # AI/Vector Search Support
+    # =========================================================================
+
+    def vector_search(
+        self,
+        query_vector: List[float],
+        table: str,
+        *,
+        vector_column: str = "embedding",
+        id_column: str = "id",
+        metric: str = "cosine",
+        limit: int = 10,
+        filter_clause: Optional[str] = None,
+        select_columns: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform vector similarity search.
+
+        Args:
+            query_vector: Query embedding vector
+            table: Table to search
+            vector_column: Column containing embeddings (default: "embedding")
+            id_column: Column containing row IDs (default: "id")
+            metric: Distance metric: "cosine", "euclidean", "dot", "manhattan"
+            limit: Maximum number of results
+            filter_clause: Optional SQL WHERE clause for filtering
+            select_columns: Additional columns to return
+
+        Returns:
+            List of result dictionaries with id, score, and requested columns
+
+        Example:
+            results = client.vector_search(
+                query_vector=embedding,
+                table="documents",
+                metric="cosine",
+                limit=10,
+                filter_clause="category = 'AI'",
+                select_columns=["title", "content"],
+            )
+        """
+        # Format vector as SQL array
+        vector_str = self._format_vector(query_vector)
+
+        # Build column list
+        cols = [id_column]
+        if select_columns:
+            cols.extend(select_columns)
+        select_list = ", ".join(cols)
+
+        # Build query
+        if metric == "cosine":
+            sql = f"SELECT {select_list}, vector_similarity({vector_column}, {vector_str}) AS score FROM {table}"
+            order = "DESC"
+        else:
+            sql = f"SELECT {select_list}, vector_distance({vector_column}, {vector_str}, '{metric}') AS score FROM {table}"
+            order = "ASC"
+
+        if filter_clause:
+            sql += f" WHERE {filter_clause}"
+
+        sql += f" ORDER BY score {order} LIMIT {limit}"
+
+        return self.query(sql)
+
+    def hybrid_search(
+        self,
+        query_vector: List[float],
+        text_query: str,
+        table: str,
+        *,
+        vector_column: str = "embedding",
+        text_column: str = "content",
+        id_column: str = "id",
+        vector_weight: float = 0.5,
+        text_weight: float = 0.5,
+        limit: int = 10,
+        filter_clause: Optional[str] = None,
+        select_columns: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform hybrid search combining vector similarity and text search.
+
+        Args:
+            query_vector: Query embedding vector
+            text_query: Text query for BM25 search
+            table: Table to search
+            vector_column: Column containing embeddings
+            text_column: Column containing text for full-text search
+            id_column: Column containing row IDs
+            vector_weight: Weight for vector similarity (0.0-1.0)
+            text_weight: Weight for text relevance (0.0-1.0)
+            limit: Maximum number of results
+            filter_clause: Optional SQL WHERE clause
+            select_columns: Additional columns to return
+
+        Returns:
+            List of result dictionaries with combined scores
+        """
+        vector_str = self._format_vector(query_vector)
+        escaped_text = text_query.replace("'", "''")
+
+        cols = [id_column]
+        if select_columns:
+            cols.extend(select_columns)
+        select_list = ", ".join(cols)
+
+        sql = f"""
+            SELECT {select_list},
+                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} AS vector_score,
+                   COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS text_score,
+                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} +
+                   COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS combined_score
+            FROM {table}
+        """
+
+        if filter_clause:
+            sql += f" WHERE {filter_clause}"
+
+        sql += f" ORDER BY combined_score DESC LIMIT {limit}"
+
+        return self.query(sql)
+
+    def _format_vector(self, vector: List[float]) -> str:
+        """Format a vector as a SQL array literal."""
+        values = ",".join(str(v) for v in vector)
+        return f"ARRAY[{values}]"
+
     def transaction(self, isolation_level: Optional[str] = None, read_only: bool = False):
         """
         Context manager for transactions.
@@ -1262,3 +1391,150 @@ class TransactionContext:
             return None
 
         return None
+
+
+# =============================================================================
+# AI/Vector Utilities
+# =============================================================================
+
+@dataclass
+class EmbeddingModel:
+    """Embedding model configuration."""
+    id: str
+    provider: str
+    dimensions: int
+    max_tokens: int
+
+
+# Common embedding models
+EMBEDDING_MODELS: Dict[str, EmbeddingModel] = {
+    # OpenAI
+    "text-embedding-3-small": EmbeddingModel("text-embedding-3-small", "openai", 1536, 8191),
+    "text-embedding-3-large": EmbeddingModel("text-embedding-3-large", "openai", 3072, 8191),
+    "text-embedding-ada-002": EmbeddingModel("text-embedding-ada-002", "openai", 1536, 8191),
+    # Open source
+    "all-MiniLM-L6-v2": EmbeddingModel("all-MiniLM-L6-v2", "huggingface", 384, 256),
+    "all-mpnet-base-v2": EmbeddingModel("all-mpnet-base-v2", "huggingface", 768, 384),
+    "bge-small-en-v1.5": EmbeddingModel("bge-small-en-v1.5", "huggingface", 384, 512),
+    "bge-base-en-v1.5": EmbeddingModel("bge-base-en-v1.5", "huggingface", 768, 512),
+    "bge-large-en-v1.5": EmbeddingModel("bge-large-en-v1.5", "huggingface", 1024, 512),
+}
+
+
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if len(a) != len(b) or len(a) == 0:
+        return 0.0
+
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return dot / (norm_a * norm_b)
+
+
+def euclidean_distance(a: List[float], b: List[float]) -> float:
+    """Compute Euclidean (L2) distance between two vectors."""
+    if len(a) != len(b):
+        return 0.0
+
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def dot_product(a: List[float], b: List[float]) -> float:
+    """Compute dot product of two vectors."""
+    if len(a) != len(b):
+        return 0.0
+
+    return sum(x * y for x, y in zip(a, b))
+
+
+def normalize_vector(v: List[float]) -> List[float]:
+    """Normalize a vector to unit length."""
+    norm = sum(x * x for x in v) ** 0.5
+    if norm == 0:
+        return v
+    return [x / norm for x in v]
+
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 512,
+    overlap: int = 50,
+) -> List[str]:
+    """
+    Split text into overlapping chunks suitable for embedding.
+
+    Args:
+        text: Text to split
+        chunk_size: Target number of words per chunk
+        overlap: Number of words to overlap between chunks
+
+    Returns:
+        List of text chunks
+    """
+    words = text.split()
+    if len(words) <= chunk_size:
+        return [text]
+
+    chunks = []
+    step = max(1, chunk_size - overlap)
+
+    for i in range(0, len(words), step):
+        chunk_words = words[i : i + chunk_size]
+        chunks.append(" ".join(chunk_words))
+        if i + chunk_size >= len(words):
+            break
+
+    return chunks
+
+
+def chunk_by_sentences(
+    text: str,
+    max_tokens: int = 512,
+    overlap_sentences: int = 1,
+) -> List[str]:
+    """
+    Split text by sentences with overlap.
+
+    Args:
+        text: Text to split
+        max_tokens: Maximum words per chunk
+        overlap_sentences: Number of sentences to overlap
+
+    Returns:
+        List of text chunks
+    """
+    import re
+
+    # Simple sentence splitting
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return [text] if text.strip() else []
+
+    chunks = []
+    current_chunk: List[str] = []
+    current_len = 0
+
+    for sentence in sentences:
+        sentence_len = len(sentence.split())
+
+        if current_len + sentence_len > max_tokens and current_chunk:
+            chunks.append(" ".join(current_chunk))
+            # Keep overlap
+            keep = max(0, len(current_chunk) - overlap_sentences)
+            current_chunk = current_chunk[keep:]
+            current_len = sum(len(s.split()) for s in current_chunk)
+
+        current_chunk.append(sentence)
+        current_len += sentence_len
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
