@@ -913,13 +913,114 @@ struct BatchCacheEntry {
     size_bytes: u64,
 }
 
-/// Cache decoded RecordBatches per segment to avoid repeated IPC decoding.
-#[derive(Debug)]
-struct BatchCache {
+/// Single shard of the batch cache
+struct BatchCacheShard {
     lru: LruCache<String, BatchCacheEntry>,
     current_bytes: u64,
-    max_bytes: u64,
 }
+
+impl BatchCacheShard {
+    fn new() -> Self {
+        let cap = NonZeroUsize::new(10000).unwrap();
+        BatchCacheShard {
+            lru: LruCache::new(cap),
+            current_bytes: 0,
+        }
+    }
+
+    fn get(&mut self, segment_id: &str) -> Option<Arc<Vec<RecordBatch>>> {
+        self.lru.get(segment_id).map(|e| e.batches.clone())
+    }
+
+    fn insert(&mut self, segment_id: String, batches: Vec<RecordBatch>, max_shard_bytes: u64) -> Arc<Vec<RecordBatch>> {
+        let size_bytes = batches.iter().map(|b| b.get_array_memory_size() as u64).sum();
+        let arc_batches = Arc::new(batches);
+
+        if max_shard_bytes == 0 || size_bytes > max_shard_bytes {
+            return arc_batches;
+        }
+
+        if let Some(existing) = self.lru.pop(&segment_id) {
+            self.current_bytes = self.current_bytes.saturating_sub(existing.size_bytes);
+        }
+
+        while self.current_bytes + size_bytes > max_shard_bytes {
+            if let Some((_key, evicted)) = self.lru.pop_lru() {
+                self.current_bytes = self.current_bytes.saturating_sub(evicted.size_bytes);
+            } else {
+                break;
+            }
+        }
+
+        self.current_bytes = self.current_bytes.saturating_add(size_bytes);
+        self.lru.put(segment_id, BatchCacheEntry { batches: arc_batches.clone(), size_bytes });
+        arc_batches
+    }
+
+    fn invalidate(&mut self, segment_id: &str) {
+        if let Some(existing) = self.lru.pop(segment_id) {
+            self.current_bytes = self.current_bytes.saturating_sub(existing.size_bytes);
+        }
+    }
+}
+
+/// Sharded cache for decoded RecordBatches - enables parallel IPC decoding
+const BATCH_CACHE_SHARDS: usize = 32;
+
+struct ShardedBatchCache {
+    shards: Vec<ParkingMutex<BatchCacheShard>>,
+    max_bytes_per_shard: u64,
+}
+
+impl std::fmt::Debug for ShardedBatchCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total_entries: usize = self.shards.iter().map(|s| s.lock().lru.len()).sum();
+        let total_bytes: u64 = self.shards.iter().map(|s| s.lock().current_bytes).sum();
+        f.debug_struct("ShardedBatchCache")
+            .field("shards", &BATCH_CACHE_SHARDS)
+            .field("total_entries", &total_entries)
+            .field("total_bytes", &total_bytes)
+            .finish()
+    }
+}
+
+impl ShardedBatchCache {
+    fn new(max_bytes: u64) -> Self {
+        let max_bytes_per_shard = max_bytes / BATCH_CACHE_SHARDS as u64;
+        ShardedBatchCache {
+            shards: (0..BATCH_CACHE_SHARDS)
+                .map(|_| ParkingMutex::new(BatchCacheShard::new()))
+                .collect(),
+            max_bytes_per_shard,
+        }
+    }
+
+    #[inline]
+    fn shard_index(&self, segment_id: &str) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        segment_id.hash(&mut hasher);
+        (hasher.finish() as usize) % BATCH_CACHE_SHARDS
+    }
+
+    fn get(&self, segment_id: &str) -> Option<Arc<Vec<RecordBatch>>> {
+        let idx = self.shard_index(segment_id);
+        self.shards[idx].lock().get(segment_id)
+    }
+
+    fn insert(&self, segment_id: String, batches: Vec<RecordBatch>) -> Arc<Vec<RecordBatch>> {
+        let idx = self.shard_index(&segment_id);
+        self.shards[idx].lock().insert(segment_id, batches, self.max_bytes_per_shard)
+    }
+
+    fn invalidate(&self, segment_id: &str) {
+        let idx = self.shard_index(segment_id);
+        self.shards[idx].lock().invalidate(segment_id);
+    }
+}
+
+// Type alias for backward compatibility
+type BatchCache = ShardedBatchCache;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PlanKind {
@@ -964,64 +1065,6 @@ struct PlanCache {
     ttl: std::time::Duration,
 }
 
-impl BatchCache {
-    fn new(max_bytes: u64) -> Self {
-        let cap = NonZeroUsize::new(1024).unwrap();
-        BatchCache {
-            lru: LruCache::new(cap),
-            current_bytes: 0,
-            max_bytes,
-        }
-    }
-
-    fn estimate_bytes(batches: &[RecordBatch]) -> u64 {
-        batches
-            .iter()
-            .map(|b| b.get_array_memory_size() as u64)
-            .sum()
-    }
-
-    fn get(&mut self, segment_id: &str) -> Option<Arc<Vec<RecordBatch>>> {
-        self.lru.get(segment_id).map(|e| e.batches.clone())
-    }
-
-    fn insert(&mut self, segment_id: String, batches: Vec<RecordBatch>) -> Arc<Vec<RecordBatch>> {
-        let size_bytes = Self::estimate_bytes(&batches);
-        let arc_batches = Arc::new(batches);
-
-        if self.max_bytes == 0 || size_bytes > self.max_bytes {
-            return arc_batches;
-        }
-
-        if let Some(existing) = self.lru.pop(&segment_id) {
-            self.current_bytes = self.current_bytes.saturating_sub(existing.size_bytes);
-        }
-
-        while self.current_bytes + size_bytes > self.max_bytes {
-            if let Some((_key, evicted)) = self.lru.pop_lru() {
-                self.current_bytes = self.current_bytes.saturating_sub(evicted.size_bytes);
-            } else {
-                break;
-            }
-        }
-
-        self.current_bytes = self.current_bytes.saturating_add(size_bytes);
-        self.lru.put(
-            segment_id,
-            BatchCacheEntry {
-                batches: arc_batches.clone(),
-                size_bytes,
-            },
-        );
-        arc_batches
-    }
-
-    fn invalidate(&mut self, segment_id: &str) {
-        if let Some(existing) = self.lru.pop(segment_id) {
-            self.current_bytes = self.current_bytes.saturating_sub(existing.size_bytes);
-        }
-    }
-}
 
 impl std::fmt::Debug for QueryCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1941,8 +1984,9 @@ pub struct Db {
     /// Sharded LRU segment cache with byte-size limits and Arc for zero-copy sharing
     /// Uses 64 independent shards for high-concurrency parallel access
     segment_cache: SegmentCache,
-    /// LRU cache of decoded record batches by segment_id
-    batch_cache: ParkingMutex<BatchCache>,
+    /// Sharded LRU cache of decoded record batches by segment_id
+    /// Uses 32 independent shards for parallel IPC decoding
+    batch_cache: BatchCache,
     /// LRU cache of segment schemas by segment_id
     schema_cache: ParkingMutex<LruCache<String, Arc<Schema>>>,
     /// LRU of recently applied bundle plan hashes to prevent replays
@@ -2539,7 +2583,7 @@ impl Db {
                 cfg.plan_cache_ttl_secs,
             )),
             segment_cache: SegmentCache::new(cfg.segment_cache_bytes),
-            batch_cache: ParkingMutex::new(BatchCache::new(cfg.batch_cache_bytes)),
+            batch_cache: BatchCache::new(cfg.batch_cache_bytes),
             schema_cache: ParkingMutex::new(LruCache::new(
                 NonZeroUsize::new(cfg.schema_cache_entries.max(1)).unwrap(),
             )),
@@ -4260,11 +4304,15 @@ impl Db {
         }
         drop(manifest_index);
 
-        // Create references to matching entries (manifest lock is still held)
-        let matching: Vec<&ManifestEntry> = matching_indices
+        // OPTIMIZATION: Clone matching entries and release manifest lock BEFORE I/O
+        // This allows concurrent queries to proceed while we do segment I/O
+        let matching: Vec<ManifestEntry> = matching_indices
             .iter()
-            .map(|&idx| &manifest.entries[idx])
+            .map(|&idx| manifest.entries[idx].clone())
             .collect();
+
+        // Release manifest lock before any I/O operations
+        drop(manifest);
 
         if matching.is_empty() {
             return Err(EngineError::NotFound(format!(
@@ -4600,10 +4648,8 @@ impl Db {
             return Ok(Arc::new(batches));
         }
 
-        if let Some(batches) = {
-            let mut cache = self.batch_cache.lock();
-            cache.get(&entry.segment_id)
-        } {
+        // Fast path: check sharded batch cache (each shard has independent lock)
+        if let Some(batches) = self.batch_cache.get(&entry.segment_id) {
             self.metrics
                 .batch_cache_hits
                 .fetch_add(1, Ordering::Relaxed);
@@ -4613,10 +4659,12 @@ impl Db {
             .batch_cache_misses
             .fetch_add(1, Ordering::Relaxed);
 
+        // Cache miss: load and decode segment OUTSIDE of any cache lock
         let payload = self.load_segment_cached(entry)?;
         let batches = read_ipc_batches(&payload)?;
-        let mut cache = self.batch_cache.lock();
-        Ok(cache.insert(entry.segment_id.clone(), batches))
+
+        // Insert into sharded cache (only locks one shard briefly)
+        Ok(self.batch_cache.insert(entry.segment_id.clone(), batches))
     }
 
     fn cache_enabled_for_tier(&self, tier: &SegmentTier) -> bool {
@@ -8286,11 +8334,10 @@ impl Db {
                 *index = ManifestIndex::build(&manifest.entries);
             }
 
-            // Invalidate caches - segment cache is sharded, batch cache needs lock
-            let mut batch_cache = self.batch_cache.lock();
+            // Invalidate caches - both caches are sharded (each shard has independent lock)
             for (segment_id, _, _, _) in updates {
                 self.segment_cache.invalidate(&segment_id);
-                batch_cache.invalidate(&segment_id);
+                self.batch_cache.invalidate(&segment_id);
             }
             changed = true;
         }

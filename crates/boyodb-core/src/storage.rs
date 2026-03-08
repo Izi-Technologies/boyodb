@@ -365,4 +365,75 @@ impl TieredStorage {
         }
         // If no runtime, silently drop the task (local-only mode)
     }
+
+    /// Load multiple cold segments in parallel using async S3 operations.
+    /// Returns results in the same order as input entries.
+    /// Falls back to sequential loading for hot/warm segments (local I/O is fast).
+    pub fn load_segments_parallel(
+        &self,
+        entries: &[&ManifestEntry],
+    ) -> Vec<Result<Vec<u8>, EngineError>> {
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Check if all entries are cold tier with S3 configured
+        let all_cold = entries.iter().all(|e| matches!(e.tier, SegmentTier::Cold));
+        let has_s3 = self.remote.is_some() && self.runtime.is_some();
+
+        if all_cold && has_s3 && entries.len() > 1 {
+            // Parallel async S3 fetch using tokio join_all
+            let remote = self.remote.as_ref().unwrap();
+            let runtime = self.runtime.as_ref().unwrap();
+
+            let segment_ids: Vec<String> = entries.iter().map(|e| e.segment_id.clone()).collect();
+            let expected_checksums: Vec<u64> = entries.iter().map(|e| e.checksum).collect();
+
+            tokio::task::block_in_place(move || {
+                runtime.block_on(async {
+                    let mut futures = Vec::with_capacity(segment_ids.len());
+
+                    for segment_id in &segment_ids {
+                        let path = ObjPath::from(format!("{}.ipc", segment_id));
+                        let remote = remote.clone();
+                        futures.push(async move {
+                            let result = remote.get(&path).await;
+                            match result {
+                                Ok(get_result) => match get_result.bytes().await {
+                                    Ok(bytes) => Ok(bytes.to_vec()),
+                                    Err(e) => Err(EngineError::Io(format!("s3 bytes failed: {}", e))),
+                                },
+                                Err(e) => Err(EngineError::Io(format!("s3 get failed: {}", e))),
+                            }
+                        });
+                    }
+
+                    let results = futures::future::join_all(futures).await;
+
+                    // Verify checksums for all successful loads
+                    results
+                        .into_iter()
+                        .zip(expected_checksums.iter())
+                        .zip(segment_ids.iter())
+                        .map(|((result, &expected_checksum), segment_id)| {
+                            result.and_then(|data| {
+                                let actual = crate::engine::compute_checksum(&data);
+                                if actual != expected_checksum {
+                                    Err(EngineError::Io(format!(
+                                        "checksum mismatch for segment {}: expected {:016x}, got {:016x}",
+                                        segment_id, expected_checksum, actual
+                                    )))
+                                } else {
+                                    Ok(data)
+                                }
+                            })
+                        })
+                        .collect()
+                })
+            })
+        } else {
+            // Sequential loading for mixed tiers or single segment
+            entries.iter().map(|entry| self.load_segment(entry)).collect()
+        }
+    }
 }

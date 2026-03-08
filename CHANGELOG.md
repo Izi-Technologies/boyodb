@@ -5,6 +5,27 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-03-08
+
+### Added
+- **Sharded Segment Cache**: 64-shard cache with independent locks for parallel segment access
+- **Sharded Batch Cache**: 32-shard cache for decoded RecordBatches enabling parallel IPC decoding
+- **Parallel S3 I/O**: Concurrent cold segment loading using async S3 operations
+- **MVCC Row Write Index**: O(R+W) conflict detection using hash-indexed write tracking
+
+### Improved
+- **Lock Manager Targeted Wakeups**: Per-lock waiter tracking eliminates thundering herd on lock release
+- **Adaptive Wait Timeouts**: Exponential backoff (1-8ms) instead of fixed 10ms waits
+- **Manifest Snapshot Release**: Early lock release before segment I/O for better concurrency
+- **Cache Hit Rate Metrics**: Per-cache hit/miss counters for segment and batch caches
+
+### Performance
+- Segment cache operations now lock only 1 of 64 shards instead of global lock
+- Batch cache operations now lock only 1 of 32 shards instead of global lock
+- Lock release wakes only transactions waiting on that specific lock
+- MVCC validation reduced from O(M×(R+W)) to O(R+W) where M was all active transactions
+- Concurrent queries no longer block on manifest lock during segment I/O
+
 ## [0.2.2] - 2026-03-08
 
 ### Fixed

@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-bench"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arrow 54.2.1",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arrow-array 54.2.1",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1311,6 +1311,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-plan",
+ "futures",
  "hex",
  "hostname",
  "hyperloglogplus",
@@ -1342,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-node"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "boyodb-core",
  "napi",
@@ -1352,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-server"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "arrow-array 54.2.1",
  "arrow-csv 54.2.1",
