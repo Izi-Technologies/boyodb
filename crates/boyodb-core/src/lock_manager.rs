@@ -458,7 +458,11 @@ pub struct LockManager {
     /// Active locks by transaction (for cleanup)
     txn_locks: RwLock<HashMap<TransactionId, Vec<LockHandle>>>,
 
-    /// Condition variable for wake-up
+    /// Per-lock waiters for targeted wakeup (avoids thundering herd)
+    /// Maps lock target hash to set of waiting transaction IDs
+    per_lock_waiters: Mutex<HashMap<u64, HashSet<TransactionId>>>,
+
+    /// Condition variable per transaction for efficient wake-up
     waiters: Mutex<HashMap<TransactionId, Arc<std::sync::Condvar>>>,
 }
 
@@ -477,8 +481,18 @@ impl LockManager {
             deadlock_detector: DeadlockDetector::new(),
             next_lock_id: AtomicU64::new(1),
             txn_locks: RwLock::new(HashMap::new()),
+            per_lock_waiters: Mutex::new(HashMap::new()),
             waiters: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Compute hash for a lock target (for per-lock waiter tracking)
+    #[inline]
+    fn target_hash(target: &LockTarget) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        target.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Acquire a lock
@@ -529,7 +543,9 @@ impl LockManager {
         let wait_mutex = std::sync::Mutex::new(false);
 
         // Helper to cleanup waiters atomically
-        let cleanup_waiter = |this: &Self| {
+        let cleanup_waiter = |this: &Self, target: &LockTarget| {
+            // Unregister from per-lock waiters
+            this.unregister_waiter(target, txn_id);
             // Acquire both locks together to avoid TOCTOU
             let mut waiters = this.waiters.lock();
             waiters.remove(&txn_id);
@@ -537,21 +553,27 @@ impl LockManager {
             this.deadlock_detector.remove_waiter(txn_id);
         };
 
+        // Adaptive wait time: start short, increase on each retry
+        let mut wait_iteration = 0u32;
+
         loop {
             // Try to acquire the lock
             match self.try_acquire(&target, txn_id, mode)? {
                 AcquireResult::Granted(handle) => {
                     // Atomically remove from waiters map and deadlock detector
-                    cleanup_waiter(self);
+                    cleanup_waiter(self, &target);
                     return Ok(handle);
                 }
                 AcquireResult::MustWait(holders) => {
+                    // Register as waiting for this specific lock (for targeted wakeup)
+                    self.register_waiter(&target, txn_id);
+
                     // Check for deadlock - use atomic check-and-add pattern
                     if self.config.deadlock_detection {
                         // Check cycle and add wait atomically by holding detector lock
                         let would_deadlock = self.deadlock_detector.would_create_cycle(txn_id, &holders);
                         if would_deadlock {
-                            cleanup_waiter(self);
+                            cleanup_waiter(self, &target);
                             return Err(EngineError::Internal(format!(
                                 "Deadlock detected: transaction {} would create a cycle",
                                 txn_id
@@ -564,16 +586,19 @@ impl LockManager {
                     // Check timeout
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
-                        cleanup_waiter(self);
+                        cleanup_waiter(self, &target);
                         return Err(EngineError::Timeout(format!(
                             "Lock acquisition timed out after {:?}",
                             self.config.lock_timeout
                         )));
                     }
 
-                    // Use condition variable to wait efficiently instead of busy polling
-                    // Wait up to 10ms at a time to check for timeout and allow periodic retries
-                    let wait_time = remaining.min(Duration::from_millis(10));
+                    // Adaptive wait time: start at 1ms, double each iteration up to 10ms max
+                    // This reduces CPU usage for long waits while keeping latency low for short waits
+                    let base_wait_ms = 1u64 << wait_iteration.min(3); // 1, 2, 4, 8ms
+                    let wait_time = remaining.min(Duration::from_millis(base_wait_ms.min(10)));
+                    wait_iteration = wait_iteration.saturating_add(1);
+
                     let guard = wait_mutex.lock().unwrap();
                     let _ = condvar.wait_timeout(guard, wait_time);
                 }
@@ -581,20 +606,53 @@ impl LockManager {
         }
     }
 
-    /// Wake up a waiting transaction (called when a lock is released)
-    fn wake_waiters(&self, _target: &LockTarget) {
-        // Wake up all waiters - they'll check if they can acquire the lock
-        let waiters = self.waiters.lock();
-        for condvar in waiters.values() {
-            condvar.notify_all();
+    /// Wake up waiting transactions for a specific lock target (targeted wakeup)
+    /// This avoids the thundering herd problem by only waking transactions waiting for this lock
+    fn wake_waiters(&self, target: &LockTarget) {
+        let target_hash = Self::target_hash(target);
+
+        // Get the set of transactions waiting for this specific lock
+        let waiting_txns: Vec<TransactionId> = {
+            let per_lock = self.per_lock_waiters.lock();
+            per_lock
+                .get(&target_hash)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        // Only wake transactions that are waiting for this specific lock
+        if !waiting_txns.is_empty() {
+            let waiters = self.waiters.lock();
+            for txn_id in waiting_txns {
+                if let Some(condvar) = waiters.get(&txn_id) {
+                    condvar.notify_one();
+                }
+            }
         }
-        drop(waiters);
 
         // Periodically clean up stale entries (every ~100 wakeups based on lock ID)
-        // This prevents memory growth from orphaned waiters
         let lock_count = self.next_lock_id.load(Ordering::Relaxed);
         if lock_count % 100 == 0 {
             self.cleanup_stale_waiters();
+        }
+    }
+
+    /// Register a transaction as waiting for a specific lock
+    fn register_waiter(&self, target: &LockTarget, txn_id: TransactionId) {
+        let target_hash = Self::target_hash(target);
+        let mut per_lock = self.per_lock_waiters.lock();
+        per_lock.entry(target_hash).or_default().insert(txn_id);
+    }
+
+    /// Unregister a transaction from waiting for a specific lock
+    fn unregister_waiter(&self, target: &LockTarget, txn_id: TransactionId) {
+        let target_hash = Self::target_hash(target);
+        let mut per_lock = self.per_lock_waiters.lock();
+        if let Some(waiters) = per_lock.get_mut(&target_hash) {
+            waiters.remove(&txn_id);
+            if waiters.is_empty() {
+                per_lock.remove(&target_hash);
+            }
         }
     }
 
@@ -618,6 +676,18 @@ impl LockManager {
         };
 
         if !stale_condvar_txns.is_empty() {
+            // Clean up per-lock waiters
+            {
+                let mut per_lock = self.per_lock_waiters.lock();
+                for txn_id in &stale_condvar_txns {
+                    per_lock.retain(|_, waiters| {
+                        waiters.remove(txn_id);
+                        !waiters.is_empty()
+                    });
+                }
+            }
+
+            // Clean up condvars
             let mut waiters = self.waiters.lock();
             for txn_id in stale_condvar_txns {
                 waiters.remove(&txn_id);
@@ -795,6 +865,15 @@ impl LockManager {
         // Clean up deadlock detector and waiters
         self.deadlock_detector.remove_waiter(txn_id);
         self.deadlock_detector.remove_holder(txn_id);
+
+        // Clean up per-lock waiters (remove from all lock wait lists)
+        {
+            let mut per_lock = self.per_lock_waiters.lock();
+            per_lock.retain(|_, waiters| {
+                waiters.remove(&txn_id);
+                !waiters.is_empty()
+            });
+        }
 
         // Also clean up any orphaned condvar for this transaction
         self.waiters.lock().remove(&txn_id);

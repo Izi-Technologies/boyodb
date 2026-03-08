@@ -9,7 +9,9 @@ use crate::engine::EngineError;
 use crate::transaction::{IsolationLevel, TransactionId};
 
 use parking_lot::RwLock;
+use rustc_hash::FxHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A snapshot of the database at a specific point in time
@@ -137,6 +139,10 @@ pub struct MvccManager {
     /// Maps txn_id -> (commit_version, write_set)
     committed_transactions: RwLock<HashMap<TransactionId, (u64, HashSet<RowKey>)>>,
 
+    /// Index of row keys to transactions that wrote them (for O(1) conflict detection)
+    /// Maps row_key_hash -> Vec<(txn_id, commit_version)>
+    row_write_index: RwLock<HashMap<u64, Vec<(TransactionId, u64)>>>,
+
     /// Minimum version to retain (for garbage collection)
     min_retained_version: AtomicU64,
 
@@ -151,9 +157,18 @@ impl MvccManager {
             current_version: AtomicU64::new(1),
             active_transactions: RwLock::new(HashMap::new()),
             committed_transactions: RwLock::new(HashMap::new()),
+            row_write_index: RwLock::new(HashMap::new()),
             min_retained_version: AtomicU64::new(1),
             max_committed_history: 10000,
         }
+    }
+
+    /// Compute hash for a row key (for fast index lookup)
+    #[inline]
+    fn row_key_hash(key: &RowKey) -> u64 {
+        let mut hasher = FxHasher::default();
+        key.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Get the current global version
@@ -223,6 +238,7 @@ impl MvccManager {
     }
 
     /// Validate serializable isolation (check for conflicts)
+    /// Optimized to use row_write_index for O(R + W) instead of O(M × (R + W)) complexity
     pub fn validate_serializable(&self, txn_id: TransactionId) -> Result<(), String> {
         let active = self.active_transactions.read();
         let txn = match active.get(&txn_id) {
@@ -234,36 +250,48 @@ impl MvccManager {
             return Ok(());
         }
 
-        // Check if any of our reads were written by concurrent transactions
-        let committed = self.committed_transactions.read();
+        let start_version = txn.start_version;
 
-        for (other_txn_id, (commit_version, write_set)) in committed.iter() {
-            // Skip if this transaction committed before we started
-            if *commit_version <= txn.start_version {
-                continue;
-            }
+        // Use the row write index for fast conflict detection
+        let row_index = self.row_write_index.read();
 
-            // Skip our own transaction
-            if *other_txn_id == txn_id {
-                continue;
-            }
-
-            // Check for read-write conflict (our reads vs their writes)
-            for read_key in &txn.read_set {
-                if write_set.contains(read_key) {
+        // Check for read-write conflicts (our reads vs concurrent writes)
+        for read_key in &txn.read_set {
+            let key_hash = Self::row_key_hash(read_key);
+            if let Some(writers) = row_index.get(&key_hash) {
+                for &(writer_txn, commit_version) in writers {
+                    // Skip if committed before we started
+                    if commit_version <= start_version {
+                        continue;
+                    }
+                    // Skip our own transaction
+                    if writer_txn == txn_id {
+                        continue;
+                    }
                     return Err(format!(
                         "Serialization conflict: transaction {} read {:?}.{} which was written by transaction {}",
-                        txn_id, read_key.table, String::from_utf8_lossy(&read_key.row_id), other_txn_id
+                        txn_id, read_key.table, String::from_utf8_lossy(&read_key.row_id), writer_txn
                     ));
                 }
             }
+        }
 
-            // Check for write-write conflict (our writes vs their writes)
-            for write_key in &txn.write_set {
-                if write_set.contains(write_key) {
+        // Check for write-write conflicts (our writes vs concurrent writes)
+        for write_key in &txn.write_set {
+            let key_hash = Self::row_key_hash(write_key);
+            if let Some(writers) = row_index.get(&key_hash) {
+                for &(writer_txn, commit_version) in writers {
+                    // Skip if committed before we started
+                    if commit_version <= start_version {
+                        continue;
+                    }
+                    // Skip our own transaction
+                    if writer_txn == txn_id {
+                        continue;
+                    }
                     return Err(format!(
                         "Serialization conflict: transaction {} wrote {:?}.{} which was also written by transaction {}",
-                        txn_id, write_key.table, String::from_utf8_lossy(&write_key.row_id), other_txn_id
+                        txn_id, write_key.table, String::from_utf8_lossy(&write_key.row_id), writer_txn
                     ));
                 }
             }
@@ -284,6 +312,18 @@ impl MvccManager {
         };
 
         if !write_set.is_empty() {
+            // Update row write index for fast conflict detection
+            {
+                let mut row_index = self.row_write_index.write();
+                for key in &write_set {
+                    let key_hash = Self::row_key_hash(key);
+                    row_index
+                        .entry(key_hash)
+                        .or_default()
+                        .push((txn_id, commit_version));
+                }
+            }
+
             let mut committed = self.committed_transactions.write();
             committed.insert(txn_id, (commit_version, write_set));
 
@@ -293,7 +333,15 @@ impl MvccManager {
             let len_before = committed.len();
 
             // Aggressive cleanup: remove entries older than min_version
-            committed.retain(|_, (v, _)| *v >= min_version);
+            let removed_txns: Vec<TransactionId> = committed
+                .iter()
+                .filter(|(_, (v, _))| *v < min_version)
+                .map(|(txn_id, _)| *txn_id)
+                .collect();
+
+            for txn_id in &removed_txns {
+                committed.remove(txn_id);
+            }
 
             // If we're still over limit after version-based cleanup, remove oldest entries
             if committed.len() > self.max_committed_history {
@@ -301,11 +349,25 @@ impl MvccManager {
                 let mut versions: Vec<u64> = committed.values().map(|(v, _)| *v).collect();
                 versions.sort_unstable();
                 if let Some(&cutoff) = versions.get(versions.len() / 2) {
-                    committed.retain(|_, (v, _)| *v >= cutoff);
+                    let more_removed: Vec<TransactionId> = committed
+                        .iter()
+                        .filter(|(_, (v, _))| *v < cutoff)
+                        .map(|(txn_id, _)| *txn_id)
+                        .collect();
+                    for txn_id in &more_removed {
+                        committed.remove(txn_id);
+                    }
                 }
             }
 
             if len_before != committed.len() {
+                // Also clean up row_write_index for removed transactions
+                let mut row_index = self.row_write_index.write();
+                row_index.retain(|_, writers| {
+                    writers.retain(|(_, v)| *v >= min_version);
+                    !writers.is_empty()
+                });
+
                 tracing::debug!(
                     "MVCC cleanup: {} -> {} committed transactions",
                     len_before,
