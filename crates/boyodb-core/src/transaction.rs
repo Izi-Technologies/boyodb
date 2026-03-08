@@ -396,15 +396,7 @@ impl TransactionManager {
         read_only: bool,
         timeout: Option<Duration>,
     ) -> Result<TransactionId, EngineError> {
-        let active = self.active_transactions.read();
-        if active.len() >= self.max_transactions {
-            return Err(EngineError::Internal(format!(
-                "Maximum concurrent transactions ({}) exceeded",
-                self.max_transactions
-            )));
-        }
-        drop(active);
-
+        // Prepare transaction data before acquiring lock to minimize lock hold time
         let txn_id = self.next_txn_id.fetch_add(1, Ordering::SeqCst);
         let start_version = self.global_version.load(Ordering::SeqCst);
         let isolation = isolation_level.unwrap_or(self.default_isolation_level);
@@ -412,12 +404,21 @@ impl TransactionManager {
 
         let txn = Transaction::new(txn_id, start_version, isolation, read_only, txn_timeout);
 
-        // Register transaction with MVCC manager
+        // Atomically check limit and insert to prevent TOCTOU race
+        {
+            let mut active = self.active_transactions.write();
+            if active.len() >= self.max_transactions {
+                return Err(EngineError::Internal(format!(
+                    "Maximum concurrent transactions ({}) exceeded",
+                    self.max_transactions
+                )));
+            }
+            active.insert(txn_id, txn);
+        }
+
+        // Register transaction with MVCC manager (after successful insertion)
         self.mvcc_manager
             .register_transaction(txn_id, start_version, isolation);
-
-        let mut active = self.active_transactions.write();
-        active.insert(txn_id, txn);
 
         tracing::debug!(
             "Transaction {} started with isolation level {} (version {})",

@@ -287,11 +287,30 @@ impl MvccManager {
             let mut committed = self.committed_transactions.write();
             committed.insert(txn_id, (commit_version, write_set));
 
-            // Clean up old committed transactions
+            // Clean up old committed transactions - always check, not just when over limit
+            // Use SeqCst ordering for proper synchronization
+            let min_version = self.min_retained_version.load(Ordering::SeqCst);
+            let len_before = committed.len();
+
+            // Aggressive cleanup: remove entries older than min_version
+            committed.retain(|_, (v, _)| *v >= min_version);
+
+            // If we're still over limit after version-based cleanup, remove oldest entries
             if committed.len() > self.max_committed_history {
-                // Remove oldest entries
-                let min_version = self.min_retained_version.load(Ordering::Relaxed);
-                committed.retain(|_, (v, _)| *v >= min_version);
+                // Find the median version and remove everything below it
+                let mut versions: Vec<u64> = committed.values().map(|(v, _)| *v).collect();
+                versions.sort_unstable();
+                if let Some(&cutoff) = versions.get(versions.len() / 2) {
+                    committed.retain(|_, (v, _)| *v >= cutoff);
+                }
+            }
+
+            if len_before != committed.len() {
+                tracing::debug!(
+                    "MVCC cleanup: {} -> {} committed transactions",
+                    len_before,
+                    committed.len()
+                );
             }
         }
 

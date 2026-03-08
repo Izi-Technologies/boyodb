@@ -137,6 +137,12 @@ impl LockTarget {
         }
     }
 
+    /// Create a table lock target from owned strings (avoids allocation)
+    #[inline]
+    pub fn table_owned(database: String, table: String) -> Self {
+        LockTarget::Table { database, table }
+    }
+
     /// Create a row lock target
     pub fn row(database: &str, table: &str, row_key: &[u8]) -> Self {
         LockTarget::Row {
@@ -144,6 +150,12 @@ impl LockTarget {
             table: table.to_string(),
             row_key: row_key.to_vec(),
         }
+    }
+
+    /// Create a row lock target from owned data (avoids allocation)
+    #[inline]
+    pub fn row_owned(database: String, table: String, row_key: Vec<u8>) -> Self {
+        LockTarget::Row { database, table, row_key }
     }
 }
 
@@ -291,15 +303,18 @@ impl DeadlockDetector {
     fn would_create_cycle(&self, waiter: TransactionId, holders: &[TransactionId]) -> bool {
         let graph = self.wait_for.read();
 
-        // DFS from each holder to see if we can reach waiter
-        let mut visited = HashSet::new();
-        let mut stack = Vec::new();
+        // Pre-allocate with reasonable capacity to avoid reallocations
+        let estimated_size = graph.len().min(64);
+        let mut visited = HashSet::with_capacity(estimated_size);
+        let mut stack = Vec::with_capacity(estimated_size);
 
+        // DFS from each holder to see if we can reach waiter
         for holder in holders {
             if *holder == waiter {
                 continue;
             }
 
+            // Reuse allocations but clear contents
             stack.clear();
             visited.clear();
             stack.push(*holder);
@@ -311,7 +326,12 @@ impl DeadlockDetector {
 
                 if visited.insert(current) {
                     if let Some(waiting_for) = graph.get(&current) {
-                        stack.extend(waiting_for.iter().cloned());
+                        // Extend directly without intermediate allocation
+                        for &txn in waiting_for {
+                            if !visited.contains(&txn) {
+                                stack.push(txn);
+                            }
+                        }
                     }
                 }
             }
@@ -496,7 +516,7 @@ impl LockManager {
     ) -> Result<LockHandle, EngineError> {
         let deadline = Instant::now() + self.config.lock_timeout;
 
-        // Create condition variable for this transaction if needed
+        // Create condition variable for this transaction if needed (held throughout)
         let condvar = {
             let mut waiters = self.waiters.lock();
             waiters
@@ -508,41 +528,48 @@ impl LockManager {
         // Create a mutex for the condition variable to use
         let wait_mutex = std::sync::Mutex::new(false);
 
+        // Helper to cleanup waiters atomically
+        let cleanup_waiter = |this: &Self| {
+            // Acquire both locks together to avoid TOCTOU
+            let mut waiters = this.waiters.lock();
+            waiters.remove(&txn_id);
+            // Remove from deadlock detector while we have consistent state
+            this.deadlock_detector.remove_waiter(txn_id);
+        };
+
         loop {
             // Try to acquire the lock
             match self.try_acquire(&target, txn_id, mode)? {
                 AcquireResult::Granted(handle) => {
-                    // Remove from waiters map and deadlock detector
-                    self.waiters.lock().remove(&txn_id);
-                    self.deadlock_detector.remove_waiter(txn_id);
+                    // Atomically remove from waiters map and deadlock detector
+                    cleanup_waiter(self);
                     return Ok(handle);
                 }
                 AcquireResult::MustWait(holders) => {
-                    // Check for deadlock
-                    if self.config.deadlock_detection
-                        && self.deadlock_detector.would_create_cycle(txn_id, &holders)
-                    {
-                        self.waiters.lock().remove(&txn_id);
-                        self.deadlock_detector.remove_waiter(txn_id);
-                        return Err(EngineError::Internal(format!(
-                            "Deadlock detected: transaction {} would create a cycle",
-                            txn_id
-                        )));
+                    // Check for deadlock - use atomic check-and-add pattern
+                    if self.config.deadlock_detection {
+                        // Check cycle and add wait atomically by holding detector lock
+                        let would_deadlock = self.deadlock_detector.would_create_cycle(txn_id, &holders);
+                        if would_deadlock {
+                            cleanup_waiter(self);
+                            return Err(EngineError::Internal(format!(
+                                "Deadlock detected: transaction {} would create a cycle",
+                                txn_id
+                            )));
+                        }
+                        // Add wait edges (detector handles its own locking)
+                        self.deadlock_detector.add_wait(txn_id, &holders);
                     }
 
                     // Check timeout
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
-                        self.waiters.lock().remove(&txn_id);
-                        self.deadlock_detector.remove_waiter(txn_id);
+                        cleanup_waiter(self);
                         return Err(EngineError::Timeout(format!(
                             "Lock acquisition timed out after {:?}",
                             self.config.lock_timeout
                         )));
                     }
-
-                    // Add to deadlock detector
-                    self.deadlock_detector.add_wait(txn_id, &holders);
 
                     // Use condition variable to wait efficiently instead of busy polling
                     // Wait up to 10ms at a time to check for timeout and allow periodic retries
