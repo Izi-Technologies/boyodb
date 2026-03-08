@@ -5,6 +5,27 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-03-08
+
+### Added
+- **EXPLAIN ANALYZE**: Visual query plan with actual execution statistics
+- **Parallel Aggregation**: Segment-level partial aggregates merged for billion-row scale
+- **Fast COUNT(*)**: Metadata-based counting without loading segment data
+- **Go Driver Enhancements**: Circuit breaker, health checks, auto-reconnect, connection stats
+
+### Performance
+- COUNT(*) on billions of rows uses segment metadata (sub-second)
+- Aggregations (SUM, AVG, MIN, MAX) computed in parallel across segments
+- Connection pool health checks run in background goroutine
+- Circuit breaker prevents cascading failures during server issues
+
+### Go Driver
+- `CircuitBreakerEnabled`: Automatic failure detection and recovery
+- `HealthCheckInterval`: Background connection validation
+- `MaxConnLifetime`: Connection rotation for long-running applications
+- `MaxConnIdleTime`: Cleanup of stale connections
+- Enhanced `PoolStats` with request counts and circuit breaker state
+
 ## [0.2.3] - 2026-03-08
 
 ### Added

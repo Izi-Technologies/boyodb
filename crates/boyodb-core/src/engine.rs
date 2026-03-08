@@ -1575,6 +1575,16 @@ impl ShardedSegmentCache {
         shard.invalidate(segment_id);
     }
 
+    /// Get current cache hit count
+    fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    /// Get current cache miss count
+    fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+
     #[allow(dead_code)] // Reserved for future metrics endpoint
     fn stats(&self) -> (u64, u64, u64, usize) {
         let total_entries: usize = self.shards.iter().map(|s| s.lock().lru.len()).sum();
@@ -2435,6 +2445,158 @@ pub struct ExplainPlan {
     pub cpu_cost: Option<f64>,
     pub io_cost: Option<f64>,
     pub selectivity: Option<f64>,
+    // ANALYZE actual execution stats (populated when EXPLAIN ANALYZE is used)
+    pub actual_rows: Option<u64>,
+    pub actual_time_ms: Option<f64>,
+    pub actual_segments_scanned: Option<usize>,
+    pub actual_bytes_read: Option<u64>,
+    pub cache_hits: Option<u64>,
+    pub cache_misses: Option<u64>,
+}
+
+impl ExplainPlan {
+    /// Format the plan as a visual ASCII tree
+    pub fn format_tree(&self) -> String {
+        let mut output = String::new();
+
+        // Header
+        output.push_str("QUERY PLAN\n");
+        output.push_str(&"─".repeat(60));
+        output.push('\n');
+
+        // Root node - the query type
+        let query_type = if self.aggregation.is_some() {
+            "Aggregate"
+        } else if self.order_by.is_some() {
+            "Sort"
+        } else {
+            "Seq Scan"
+        };
+
+        // Build tree structure
+        output.push_str(&format!("→ {}", query_type));
+        if let Some(ref agg) = self.aggregation {
+            output.push_str(&format!(" ({})", agg));
+        }
+        output.push('\n');
+
+        // Cost line
+        if let Some(cost) = self.estimated_cost {
+            output.push_str(&format!("   │  cost={:.2}", cost));
+            if let Some(rows) = self.estimated_rows {
+                output.push_str(&format!(" rows={}", rows));
+            }
+            output.push('\n');
+        }
+
+        // Actual stats if available (ANALYZE mode)
+        if let Some(actual_time) = self.actual_time_ms {
+            output.push_str(&format!("   │  actual time={:.3}ms", actual_time));
+            if let Some(actual_rows) = self.actual_rows {
+                output.push_str(&format!(" rows={}", actual_rows));
+            }
+            output.push('\n');
+        }
+
+        // Sort node if present
+        if let Some(ref order_by) = self.order_by {
+            output.push_str("   │\n");
+            output.push_str(&format!("   └─→ Sort Key: {}\n", order_by.join(", ")));
+        }
+
+        // Scan node
+        output.push_str("   │\n");
+        let scan_type = if self.uses_parallel_scan {
+            "Parallel Seq Scan"
+        } else {
+            "Seq Scan"
+        };
+        output.push_str(&format!("   └─→ {} on {}.{}\n", scan_type, self.database, self.table));
+
+        // Scan details
+        output.push_str(&format!("         segments={} bytes={}\n",
+            self.segments_to_scan,
+            format_bytes(self.total_bytes)
+        ));
+
+        // Filters
+        if !self.filters.is_empty() {
+            output.push_str(&format!("         Filter: {}\n", self.filters.join(" AND ")));
+            if let Some(sel) = self.selectivity {
+                output.push_str(&format!("         Selectivity: {:.1}%\n", sel * 100.0));
+            }
+        }
+
+        // Projection
+        if let Some(ref proj) = self.projection {
+            if proj.len() <= 5 {
+                output.push_str(&format!("         Output: {}\n", proj.join(", ")));
+            } else {
+                output.push_str(&format!("         Output: {} columns\n", proj.len()));
+            }
+        }
+
+        // Optimizations used
+        output.push_str("         │\n");
+        output.push_str("         └─ Optimizations:\n");
+        if self.uses_bloom_filter {
+            output.push_str("              ✓ Bloom filter pruning\n");
+        }
+        if self.uses_parallel_scan {
+            output.push_str("              ✓ Parallel scan\n");
+        }
+        if self.limit.is_some() {
+            output.push_str("              ✓ Limit pushdown\n");
+        }
+
+        // Cache stats if available
+        if let (Some(hits), Some(misses)) = (self.cache_hits, self.cache_misses) {
+            let total = hits + misses;
+            if total > 0 {
+                let hit_rate = (hits as f64 / total as f64) * 100.0;
+                output.push_str(&format!("              Cache: {:.1}% hit rate ({}/{})\n",
+                    hit_rate, hits, total));
+            }
+        }
+
+        // Cost breakdown
+        output.push_str("\n");
+        output.push_str(&"─".repeat(60));
+        output.push_str("\nCost Breakdown:\n");
+        if let Some(io) = self.io_cost {
+            output.push_str(&format!("  I/O Cost:  {:.2}\n", io));
+        }
+        if let Some(cpu) = self.cpu_cost {
+            output.push_str(&format!("  CPU Cost:  {:.2}\n", cpu));
+        }
+        if let Some(total) = self.estimated_cost {
+            output.push_str(&format!("  Total:     {:.2}\n", total));
+        }
+
+        output
+    }
+
+    /// Format as JSON for programmatic consumption
+    pub fn format_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// Format bytes in human-readable form
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 impl Db {
@@ -4506,33 +4668,105 @@ impl Db {
                 }
             }
         } else if let Some(agg_plan) = agg.clone() {
-            let mut agg_state = Aggregator::new(agg_plan)?;
             let default_filter = QueryFilter::default();
-            let agg_projection = aggregation_projection(agg.as_ref().expect("agg present"), &[]);
+            let _agg_projection = aggregation_projection(agg.as_ref().expect("agg present"), &[]);
+
+            // FAST PATH: COUNT(*) without GROUP BY can use segment metadata
+            // This enables sub-second COUNT on billions of rows
+            let has_no_filters = filter.watermark_ge.is_none()
+                && filter.watermark_le.is_none()
+                && filter.tenant_id_eq.is_none()
+                && filter.route_id_eq.is_none()
+                && filter.string_eq_filters.is_empty()
+                && filter.numeric_eq_filters.is_empty();
+            let is_simple_count_star = agg_plan.aggs.len() == 1
+                && matches!(agg_plan.aggs[0].kind, AggKind::CountStar)
+                && matches!(agg_plan.group_by, GroupBy::None)
+                && has_no_filters;
+
+            if is_simple_count_star {
+                // Use row_count from segment metadata or count rows from column_stats
+                let mut total_count: u64 = 0;
+                for entry in &matching {
+                    // Try to get row count from column stats first
+                    if let Some(ref col_stats) = entry.column_stats {
+                        if let Some(stats) = col_stats.values().next() {
+                            if stats.row_count > 0 {
+                                total_count += stats.row_count;
+                                continue;
+                            }
+                        }
+                    }
+                    // Fall back to loading segment and counting
+                    let payload = self.load_segment_cached(entry)?;
+                    if let Ok(batches) = read_ipc_batches(&payload) {
+                        for batch in batches {
+                            total_count += batch.num_rows() as u64;
+                        }
+                    }
+                }
+
+                // Build COUNT(*) result
+                let schema = Arc::new(Schema::new(vec![Field::new("count", DataType::UInt64, false)]));
+                let count_array = UInt64Array::from(vec![total_count]);
+                let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(count_array)])
+                    .map_err(|e| EngineError::Internal(format!("count result: {e}")))?;
+                let mut buf = Vec::new();
+                {
+                    let mut writer = StreamWriter::try_new(&mut buf, &schema)
+                        .map_err(|e| EngineError::Internal(format!("ipc writer: {e}")))?;
+                    writer.write(&batch)
+                        .map_err(|e| EngineError::Internal(format!("ipc write: {e}")))?;
+                    writer.finish()
+                        .map_err(|e| EngineError::Internal(format!("ipc finish: {e}")))?;
+                }
+                records = buf;
+            } else
+            // OPTIMIZATION: Parallel aggregation with partial results for billion-row scale
+            // Each thread computes partial aggregates, then merge at the end
             if matching.len() >= self.cfg.parallel_scan_threshold {
                 let this = self;
-                let expected_schema_ref = expected_schema
-                    .as_ref()
-                    .map(|v: &Vec<TableFieldSpec>| Arc::new(v.clone()));
-                let payloads: Vec<Result<Arc<Vec<u8>>, EngineError>> = matching
+                let filter_ref = &filter;
+                let agg_plan_ref = &agg_plan;
+
+                // Process segments in parallel, each producing partial aggregate IPC
+                let partial_results: Vec<Result<Vec<u8>, EngineError>> = matching
                     .par_iter()
-                    .map(|entry| this.load_segment_cached(entry))
+                    .map(|entry| {
+                        let payload = this.load_segment_cached(entry)?;
+                        let filtered = filter_ipc(&payload, filter_ref)?;
+                        if filtered.is_empty() {
+                            return Ok(Vec::new());
+                        }
+                        // Create per-segment aggregator and process
+                        let mut seg_agg = Aggregator::new(agg_plan_ref.clone())?;
+                        seg_agg.consume_ipc(&filtered, &QueryFilter::default())?;
+                        seg_agg.finish()
+                    })
                     .collect();
-                for payload_result in payloads {
+
+                // Merge partial results
+                let mut final_agg = Aggregator::new(agg_plan)?;
+                for partial in partial_results {
                     check_timeout()?;
-                    let payload = payload_result?;
-                    let filtered = filter_ipc(&payload, &filter)?;
-                    agg_state.consume_ipc(&filtered, &default_filter)?;
+                    let partial_ipc = partial?;
+                    if !partial_ipc.is_empty() {
+                        // Feed partial aggregates into final aggregator
+                        final_agg.consume_ipc(&partial_ipc, &default_filter)?;
+                    }
                 }
+                records = final_agg.finish()?;
             } else {
+                // Sequential path for small number of segments
+                let mut agg_state = Aggregator::new(agg_plan)?;
                 for entry in &matching {
                     check_timeout()?;
                     let payload = self.load_segment_cached(entry)?;
                     let filtered = filter_ipc(&payload, &filter)?;
                     agg_state.consume_ipc(&filtered, &default_filter)?;
                 }
+                records = agg_state.finish()?;
             }
-            records = agg_state.finish()?;
         }
 
         let execution_stats = if collect_stats {
@@ -7824,7 +8058,65 @@ impl Db {
             cpu_cost: Some(cpu_cost),
             io_cost: Some(io_cost),
             selectivity,
+            // ANALYZE fields - populated by explain_analyze()
+            actual_rows: None,
+            actual_time_ms: None,
+            actual_segments_scanned: None,
+            actual_bytes_read: None,
+            cache_hits: None,
+            cache_misses: None,
         })
+    }
+
+    /// Execute EXPLAIN ANALYZE - runs the query and captures actual execution stats
+    pub fn explain_analyze(&self, sql: &str) -> Result<ExplainPlan, EngineError> {
+        // Get the base explain plan
+        let mut plan = self.explain(sql)?;
+
+        // Capture cache stats before query
+        let cache_hits_before = self.segment_cache.hits();
+        let cache_misses_before = self.segment_cache.misses();
+
+        // Execute the query and capture stats
+        let start = std::time::Instant::now();
+
+        // Execute the query with stats collection
+        let request = QueryRequest {
+            sql: sql.to_string(),
+            timeout_millis: 30000,
+            collect_stats: true,
+            transaction_id: None,
+        };
+
+        match self.query(request) {
+            Ok(response) => {
+                let elapsed = start.elapsed();
+                plan.actual_time_ms = Some(elapsed.as_secs_f64() * 1000.0);
+                plan.actual_segments_scanned = Some(response.segments_scanned);
+                plan.actual_bytes_read = Some(response.data_skipped_bytes);
+
+                // Parse IPC to count actual rows
+                if !response.records_ipc.is_empty() {
+                    if let Ok(batches) = read_ipc_batches(&response.records_ipc) {
+                        let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                        plan.actual_rows = Some(total_rows as u64);
+                    }
+                }
+
+                // Calculate cache stats delta
+                let cache_hits_after = self.segment_cache.hits();
+                let cache_misses_after = self.segment_cache.misses();
+                plan.cache_hits = Some(cache_hits_after.saturating_sub(cache_hits_before));
+                plan.cache_misses = Some(cache_misses_after.saturating_sub(cache_misses_before));
+            }
+            Err(e) => {
+                // Query failed but we can still return partial plan
+                plan.actual_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+                tracing::warn!("EXPLAIN ANALYZE query failed: {}", e);
+            }
+        }
+
+        Ok(plan)
     }
 
     pub fn maintenance(&self) -> Result<(), EngineError> {

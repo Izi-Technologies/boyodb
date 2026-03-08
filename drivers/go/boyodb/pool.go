@@ -55,29 +55,147 @@ type PoolConfig struct {
 	Database string
 	// QueryTimeout is the default query timeout in milliseconds
 	QueryTimeout uint32
+
+	// --- Enhanced pooling options ---
+
+	// HealthCheckInterval is how often to check connection health (0 = disabled)
+	HealthCheckInterval time.Duration
+	// MaxConnLifetime is the maximum lifetime of a connection (0 = unlimited)
+	MaxConnLifetime time.Duration
+	// MaxConnIdleTime is the maximum idle time before closing (0 = unlimited)
+	MaxConnIdleTime time.Duration
+	// MinPoolSize is the minimum connections to maintain (for warm pool)
+	MinPoolSize int
+
+	// --- Circuit breaker options ---
+
+	// CircuitBreakerEnabled enables the circuit breaker pattern
+	CircuitBreakerEnabled bool
+	// CircuitBreakerThreshold is failures before opening circuit
+	CircuitBreakerThreshold int
+	// CircuitBreakerTimeout is how long circuit stays open
+	CircuitBreakerTimeout time.Duration
 }
 
 // DefaultPoolConfig returns a PoolConfig with sensible defaults.
 func DefaultPoolConfig() *PoolConfig {
 	return &PoolConfig{
-		Host:           "localhost",
-		Port:           8765,
-		PoolSize:       10,
-		PoolTimeout:    30 * time.Second,
-		ConnectTimeout: 10 * time.Second,
-		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   10 * time.Second,
-		MaxRetries:     3,
-		RetryDelay:     time.Second,
-		QueryTimeout:   30000,
+		Host:                    "localhost",
+		Port:                    8765,
+		PoolSize:                10,
+		PoolTimeout:             30 * time.Second,
+		ConnectTimeout:          10 * time.Second,
+		ReadTimeout:             30 * time.Second,
+		WriteTimeout:            10 * time.Second,
+		MaxRetries:              3,
+		RetryDelay:              time.Second,
+		QueryTimeout:            30000,
+		HealthCheckInterval:     30 * time.Second,
+		MaxConnLifetime:         30 * time.Minute,
+		MaxConnIdleTime:         5 * time.Minute,
+		MinPoolSize:             2,
+		CircuitBreakerEnabled:   true,
+		CircuitBreakerThreshold: 5,
+		CircuitBreakerTimeout:   30 * time.Second,
 	}
+}
+
+// CircuitState represents the state of the circuit breaker.
+type CircuitState int
+
+const (
+	CircuitClosed CircuitState = iota // Normal operation
+	CircuitOpen                       // Failing, reject requests
+	CircuitHalfOpen                   // Testing if service recovered
+)
+
+// circuitBreaker implements the circuit breaker pattern.
+type circuitBreaker struct {
+	mu              sync.RWMutex
+	state           CircuitState
+	failures        int
+	threshold       int
+	timeout         time.Duration
+	lastFailure     time.Time
+	lastStateChange time.Time
+	successesNeeded int
+	successes       int
+}
+
+func newCircuitBreaker(threshold int, timeout time.Duration) *circuitBreaker {
+	return &circuitBreaker{
+		state:           CircuitClosed,
+		threshold:       threshold,
+		timeout:         timeout,
+		successesNeeded: 2,
+	}
+}
+
+func (cb *circuitBreaker) canExecute() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	switch cb.state {
+	case CircuitClosed:
+		return true
+	case CircuitOpen:
+		if time.Since(cb.lastFailure) > cb.timeout {
+			cb.state = CircuitHalfOpen
+			cb.successes = 0
+			cb.lastStateChange = time.Now()
+			return true
+		}
+		return false
+	case CircuitHalfOpen:
+		return true
+	}
+	return false
+}
+
+func (cb *circuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == CircuitHalfOpen {
+		cb.successes++
+		if cb.successes >= cb.successesNeeded {
+			cb.state = CircuitClosed
+			cb.failures = 0
+			cb.lastStateChange = time.Now()
+		}
+	} else if cb.state == CircuitClosed {
+		cb.failures = 0
+	}
+}
+
+func (cb *circuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	cb.lastFailure = time.Now()
+	cb.failures++
+
+	if cb.state == CircuitHalfOpen {
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+	} else if cb.state == CircuitClosed && cb.failures >= cb.threshold {
+		cb.state = CircuitOpen
+		cb.lastStateChange = time.Now()
+	}
+}
+
+func (cb *circuitBreaker) getState() CircuitState {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.state
 }
 
 // pooledConn represents a connection in the pool.
 type pooledConn struct {
-	conn      net.Conn
-	valid     bool
-	createdAt time.Time
+	conn       net.Conn
+	valid      bool
+	createdAt  time.Time
+	lastUsedAt time.Time
 }
 
 func (p *pooledConn) isValid() bool {
@@ -96,13 +214,45 @@ func (p *pooledConn) close() {
 	}
 }
 
+func (p *pooledConn) touch() {
+	p.lastUsedAt = time.Now()
+}
+
+func (p *pooledConn) isExpired(maxLifetime, maxIdleTime time.Duration) bool {
+	now := time.Now()
+	if maxLifetime > 0 && now.Sub(p.createdAt) > maxLifetime {
+		return true
+	}
+	if maxIdleTime > 0 && now.Sub(p.lastUsedAt) > maxIdleTime {
+		return true
+	}
+	return false
+}
+
 // ConnectionPool manages a pool of connections to BoyoDB.
 type ConnectionPool struct {
-	config    *PoolConfig
-	pool      chan *pooledConn
-	mu        sync.Mutex
-	closed    bool
-	sessionID string
+	config         *PoolConfig
+	pool           chan *pooledConn
+	mu             sync.Mutex
+	closed         bool
+	sessionID      string
+	circuitBreaker *circuitBreaker
+	stopHealthCh   chan struct{}
+
+	// Statistics
+	stats struct {
+		sync.RWMutex
+		totalConnections   int64
+		activeConnections  int64
+		idleConnections    int64
+		waitCount          int64
+		waitDuration       time.Duration
+		maxIdleTimeClosed  int64
+		maxLifetimeClosed  int64
+		successfulRequests int64
+		failedRequests     int64
+		circuitBreakerTrips int64
+	}
 }
 
 // NewConnectionPool creates a new connection pool.
@@ -113,20 +263,45 @@ func NewConnectionPool(config *PoolConfig) (*ConnectionPool, error) {
 	if config.PoolSize <= 0 {
 		config.PoolSize = 10
 	}
-
-	pool := &ConnectionPool{
-		config: config,
-		pool:   make(chan *pooledConn, config.PoolSize),
+	if config.MinPoolSize <= 0 {
+		config.MinPoolSize = 2
+	}
+	if config.MinPoolSize > config.PoolSize {
+		config.MinPoolSize = config.PoolSize
 	}
 
-	// Initialize pool with connections
-	for i := 0; i < config.PoolSize; i++ {
-		conn, err := pool.createConnection()
+	pool := &ConnectionPool{
+		config:       config,
+		pool:         make(chan *pooledConn, config.PoolSize),
+		stopHealthCh: make(chan struct{}),
+	}
+
+	// Initialize circuit breaker
+	if config.CircuitBreakerEnabled {
+		threshold := config.CircuitBreakerThreshold
+		if threshold <= 0 {
+			threshold = 5
+		}
+		timeout := config.CircuitBreakerTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		pool.circuitBreaker = newCircuitBreaker(threshold, timeout)
+	}
+
+	// Initialize pool with minimum connections
+	initialSize := config.MinPoolSize
+	for i := 0; i < initialSize; i++ {
+		conn, err := pool.createConnectionWithRetry()
 		if err != nil {
 			pool.Close()
 			return nil, fmt.Errorf("failed to initialize pool: %w", err)
 		}
 		pool.pool <- conn
+		pool.stats.Lock()
+		pool.stats.totalConnections++
+		pool.stats.idleConnections++
+		pool.stats.Unlock()
 	}
 
 	// Health check
@@ -135,7 +310,119 @@ func NewConnectionPool(config *PoolConfig) (*ConnectionPool, error) {
 		return nil, fmt.Errorf("health check failed: %w", err)
 	}
 
+	// Start background health checker
+	if config.HealthCheckInterval > 0 {
+		go pool.healthCheckLoop()
+	}
+
 	return pool, nil
+}
+
+// healthCheckLoop runs periodic health checks and connection maintenance.
+func (p *ConnectionPool) healthCheckLoop() {
+	ticker := time.NewTicker(p.config.HealthCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopHealthCh:
+			return
+		case <-ticker.C:
+			p.performHealthCheck()
+		}
+	}
+}
+
+// performHealthCheck checks and maintains pool health.
+func (p *ConnectionPool) performHealthCheck() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+
+	// Check pool size and replenish if needed
+	currentSize := len(p.pool)
+	if currentSize < p.config.MinPoolSize {
+		for i := currentSize; i < p.config.MinPoolSize; i++ {
+			go func() {
+				conn, err := p.createConnectionWithRetry()
+				if err != nil {
+					return
+				}
+				p.mu.Lock()
+				closed := p.closed
+				p.mu.Unlock()
+				if closed {
+					conn.close()
+					return
+				}
+				select {
+				case p.pool <- conn:
+					p.stats.Lock()
+					p.stats.totalConnections++
+					p.stats.idleConnections++
+					p.stats.Unlock()
+				default:
+					conn.close()
+				}
+			}()
+		}
+	}
+
+	// Test a connection from the pool
+	select {
+	case conn := <-p.pool:
+		if conn.isExpired(p.config.MaxConnLifetime, p.config.MaxConnIdleTime) {
+			conn.close()
+			p.stats.Lock()
+			if p.config.MaxConnLifetime > 0 && time.Since(conn.createdAt) > p.config.MaxConnLifetime {
+				p.stats.maxLifetimeClosed++
+			} else {
+				p.stats.maxIdleTimeClosed++
+			}
+			p.stats.Unlock()
+			// Replace with fresh connection
+			newConn, err := p.createConnectionWithRetry()
+			if err == nil {
+				p.pool <- newConn
+			}
+		} else {
+			// Return healthy connection
+			p.pool <- conn
+		}
+	default:
+		// Pool is empty, nothing to check
+	}
+}
+
+// createConnectionWithRetry creates a connection with exponential backoff retry.
+func (p *ConnectionPool) createConnectionWithRetry() (*pooledConn, error) {
+	var lastErr error
+	maxRetries := p.config.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		conn, err := p.createConnection()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+
+		if attempt < maxRetries {
+			// Exponential backoff: 1s, 2s, 4s, ...
+			backoff := p.config.RetryDelay * time.Duration(1<<uint(attempt))
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+	}
+
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // createConnection establishes a new connection.
@@ -168,10 +455,12 @@ func (p *ConnectionPool) createConnection() (*pooledConn, error) {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
+	now := time.Now()
 	return &pooledConn{
-		conn:      conn,
-		valid:     true,
-		createdAt: time.Now(),
+		conn:       conn,
+		valid:      true,
+		createdAt:  now,
+		lastUsedAt: now,
 	}, nil
 }
 
@@ -208,21 +497,42 @@ func (p *ConnectionPool) borrow() (*pooledConn, error) {
 	}
 	p.mu.Unlock()
 
+	startWait := time.Now()
 	timeout := p.config.PoolTimeout
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 
+	p.stats.Lock()
+	p.stats.waitCount++
+	p.stats.Unlock()
+
 	select {
 	case conn := <-p.pool:
-		if !conn.isValid() {
+		p.stats.Lock()
+		p.stats.waitDuration += time.Since(startWait)
+		p.stats.idleConnections--
+		p.stats.activeConnections++
+		p.stats.Unlock()
+
+		// Check if connection is expired or invalid
+		if !conn.isValid() || conn.isExpired(p.config.MaxConnLifetime, p.config.MaxConnIdleTime) {
 			conn.close()
-			newConn, err := p.createConnection()
+			if conn.isExpired(p.config.MaxConnLifetime, p.config.MaxConnIdleTime) {
+				p.stats.Lock()
+				p.stats.maxLifetimeClosed++
+				p.stats.Unlock()
+			}
+			newConn, err := p.createConnectionWithRetry()
 			if err != nil {
+				p.stats.Lock()
+				p.stats.activeConnections--
+				p.stats.Unlock()
 				return nil, err
 			}
 			return newConn, nil
 		}
+		conn.touch()
 		return conn, nil
 	case <-time.After(timeout):
 		return nil, errors.New("connection pool exhausted")
@@ -235,9 +545,17 @@ func (p *ConnectionPool) returnConn(conn *pooledConn) {
 	closed := p.closed
 	p.mu.Unlock()
 
+	p.stats.Lock()
+	p.stats.activeConnections--
+	p.stats.Unlock()
+
 	if conn.isValid() && !closed {
+		conn.touch()
 		select {
 		case p.pool <- conn:
+			p.stats.Lock()
+			p.stats.idleConnections++
+			p.stats.Unlock()
 			return
 		default:
 			conn.close()
@@ -245,14 +563,25 @@ func (p *ConnectionPool) returnConn(conn *pooledConn) {
 	} else {
 		conn.close()
 		if !closed {
-			// Replace with new connection
+			// Replace with new connection asynchronously
 			go func() {
-				newConn, err := p.createConnection()
+				newConn, err := p.createConnectionWithRetry()
 				if err != nil {
+					return
+				}
+				p.mu.Lock()
+				stillOpen := !p.closed
+				p.mu.Unlock()
+				if !stillOpen {
+					newConn.close()
 					return
 				}
 				select {
 				case p.pool <- newConn:
+					p.stats.Lock()
+					p.stats.totalConnections++
+					p.stats.idleConnections++
+					p.stats.Unlock()
 				default:
 					newConn.close()
 				}
@@ -263,6 +592,14 @@ func (p *ConnectionPool) returnConn(conn *pooledConn) {
 
 // sendRequest sends a request using a pooled connection.
 func (p *ConnectionPool) sendRequest(req map[string]interface{}) (*response, error) {
+	// Check circuit breaker
+	if p.circuitBreaker != nil && !p.circuitBreaker.canExecute() {
+		p.stats.Lock()
+		p.stats.circuitBreakerTrips++
+		p.stats.Unlock()
+		return nil, errors.New("circuit breaker is open - server appears unavailable")
+	}
+
 	// Add auth
 	p.mu.Lock()
 	if p.sessionID != "" {
@@ -279,6 +616,12 @@ func (p *ConnectionPool) sendRequest(req map[string]interface{}) (*response, err
 
 	conn, err := p.borrow()
 	if err != nil {
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.recordFailure()
+		}
+		p.stats.Lock()
+		p.stats.failedRequests++
+		p.stats.Unlock()
 		return nil, err
 	}
 
@@ -286,8 +629,22 @@ func (p *ConnectionPool) sendRequest(req map[string]interface{}) (*response, err
 	if err != nil {
 		conn.invalidate()
 		p.returnConn(conn)
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.recordFailure()
+		}
+		p.stats.Lock()
+		p.stats.failedRequests++
+		p.stats.Unlock()
 		return nil, err
 	}
+
+	// Success
+	if p.circuitBreaker != nil {
+		p.circuitBreaker.recordSuccess()
+	}
+	p.stats.Lock()
+	p.stats.successfulRequests++
+	p.stats.Unlock()
 
 	p.returnConn(conn)
 	return resp, nil
@@ -416,8 +773,17 @@ func (p *ConnectionPool) Logout() error {
 // Close closes all connections in the pool.
 func (p *ConnectionPool) Close() {
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
 	p.closed = true
 	p.mu.Unlock()
+
+	// Stop health check goroutine
+	if p.stopHealthCh != nil {
+		close(p.stopHealthCh)
+	}
 
 	close(p.pool)
 	for conn := range p.pool {
@@ -723,25 +1089,74 @@ func (c *PooledClient) InTransaction(fn func() error) error {
 // PoolStats returns statistics about the connection pool.
 func (c *PooledClient) PoolStats() PoolStats {
 	c.pool.mu.Lock()
-	defer c.pool.mu.Unlock()
+	closed := c.pool.closed
+	c.pool.mu.Unlock()
+
+	c.pool.stats.RLock()
+	defer c.pool.stats.RUnlock()
+
+	var circuitState string
+	if c.pool.circuitBreaker != nil {
+		switch c.pool.circuitBreaker.getState() {
+		case CircuitClosed:
+			circuitState = "closed"
+		case CircuitOpen:
+			circuitState = "open"
+		case CircuitHalfOpen:
+			circuitState = "half-open"
+		}
+	} else {
+		circuitState = "disabled"
+	}
+
 	return PoolStats{
-		PoolSize:   c.config.PoolSize,
-		Available:  len(c.pool.pool),
-		InUse:      c.config.PoolSize - len(c.pool.pool),
-		IsClosed:   c.pool.closed,
+		PoolSize:            c.config.PoolSize,
+		MinPoolSize:         c.config.MinPoolSize,
+		Available:           len(c.pool.pool),
+		InUse:               int(c.pool.stats.activeConnections),
+		IsClosed:            closed,
+		TotalConnections:    c.pool.stats.totalConnections,
+		WaitCount:           c.pool.stats.waitCount,
+		WaitDuration:        c.pool.stats.waitDuration,
+		MaxIdleTimeClosed:   c.pool.stats.maxIdleTimeClosed,
+		MaxLifetimeClosed:   c.pool.stats.maxLifetimeClosed,
+		SuccessfulRequests:  c.pool.stats.successfulRequests,
+		FailedRequests:      c.pool.stats.failedRequests,
+		CircuitBreakerTrips: c.pool.stats.circuitBreakerTrips,
+		CircuitBreakerState: circuitState,
 	}
 }
 
 // PoolStats contains connection pool statistics.
 type PoolStats struct {
-	// PoolSize is the total number of connections
+	// PoolSize is the maximum number of connections
 	PoolSize int
+	// MinPoolSize is the minimum connections to maintain
+	MinPoolSize int
 	// Available is the number of idle connections
 	Available int
 	// InUse is the number of connections currently in use
 	InUse int
 	// IsClosed indicates if the pool is closed
 	IsClosed bool
+	// TotalConnections is the total connections created over lifetime
+	TotalConnections int64
+	// WaitCount is total times a goroutine waited for a connection
+	WaitCount int64
+	// WaitDuration is total time spent waiting for connections
+	WaitDuration time.Duration
+	// MaxIdleTimeClosed is connections closed due to idle timeout
+	MaxIdleTimeClosed int64
+	// MaxLifetimeClosed is connections closed due to max lifetime
+	MaxLifetimeClosed int64
+	// SuccessfulRequests is total successful requests
+	SuccessfulRequests int64
+	// FailedRequests is total failed requests
+	FailedRequests int64
+	// CircuitBreakerTrips is times circuit breaker blocked requests
+	CircuitBreakerTrips int64
+	// CircuitBreakerState is current circuit breaker state
+	CircuitBreakerState string
 }
 
 // helper function for base64 decoding

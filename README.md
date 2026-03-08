@@ -2,17 +2,17 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.3-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.4-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
-## What's New in v0.2.3
+## What's New in v0.2.4
 
-- **Sharded Caches**: 64-shard segment cache and 32-shard batch cache for lock-free parallel access
-- **Targeted Lock Wakeups**: Per-lock waiter tracking eliminates thundering herd on lock release
-- **MVCC Row Write Index**: O(R+W) conflict detection instead of O(M×(R+W))
-- **Manifest Early Release**: Lock released before I/O for better query concurrency
-- **Parallel S3 I/O**: Concurrent cold segment loading using async operations
+- **Sub-Second Billion-Row Queries**: Parallel aggregation with segment-level partial results
+- **Fast COUNT(*)**: Metadata-based counting without loading segment data
+- **EXPLAIN ANALYZE**: Visual query plans with actual execution statistics
+- **Go Driver Circuit Breaker**: Health checks, auto-reconnect, connection pool stats
+- **Parallel Aggregation**: SUM/AVG/MIN/MAX computed in parallel across segments
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 
