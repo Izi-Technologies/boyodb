@@ -4873,7 +4873,9 @@ impl Db {
                 let results: Vec<Result<(Vec<u8>, u64), EngineError>> = matching
                     .par_iter()
                     .filter_map(|entry| {
-                        if collected_rows_ref.load(Ordering::Relaxed) >= limit as u64 {
+                        // Check limit ONLY when we have a meaningful limit (not MAX)
+                        // For full table scans without LIMIT, we must scan ALL segments
+                        if limit < usize::MAX && collected_rows_ref.load(Ordering::Relaxed) >= limit as u64 {
                             return None;
                         }
                         // Use try_load to skip damaged segments
@@ -4887,8 +4889,20 @@ impl Db {
                             Err(e) => return Some(Err(e)),
                         };
                         if !filtered.is_empty() {
-                            let estimated_rows = (filtered.len() / 100).max(1);
-                            collected_rows_ref.fetch_add(estimated_rows as u64, Ordering::Relaxed);
+                            // Get actual row count from segment metadata or decode IPC
+                            // Use segment metadata if available for efficiency
+                            let actual_rows = entry
+                                .column_stats
+                                .as_ref()
+                                .and_then(|cs| cs.values().next())
+                                .map(|s| s.row_count)
+                                .unwrap_or_else(|| {
+                                    // Fall back to decoding IPC to get accurate row count
+                                    read_ipc_batches(&filtered)
+                                        .map(|batches| batches.iter().map(|b| b.num_rows() as u64).sum())
+                                        .unwrap_or(1)
+                                });
+                            collected_rows_ref.fetch_add(actual_rows, Ordering::Relaxed);
                         }
                         let skipped = if filtered.is_empty() {
                             payload.len() as u64
@@ -4963,7 +4977,19 @@ impl Db {
                         if filtered.is_empty() {
                             data_skipped_bytes += original_size;
                         } else {
-                            estimated_rows += (filtered.len() / 100).max(1);
+                            // Get actual row count from segment metadata or decode IPC
+                            let actual_rows = entry
+                                .column_stats
+                                .as_ref()
+                                .and_then(|cs| cs.values().next())
+                                .map(|s| s.row_count as usize)
+                                .unwrap_or_else(|| {
+                                    // Fall back to decoding IPC to get accurate row count
+                                    read_ipc_batches(&filtered)
+                                        .map(|batches| batches.iter().map(|b| b.num_rows()).sum())
+                                        .unwrap_or(1)
+                                });
+                            estimated_rows += actual_rows;
                         }
                         records.extend_from_slice(&filtered);
                     }

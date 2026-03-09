@@ -50,74 +50,87 @@ pub(crate) struct PendingWrite {
 ///
 /// This dramatically improves throughput for workloads with many small writes
 /// by batching multiple writes into a single fsync call.
-pub struct GroupCommitBuffer {
+/// Internal state protected by mutex for atomic updates
+struct GroupCommitState {
     /// Pending writes waiting to be flushed
-    pending: StdMutex<Vec<PendingWrite>>,
+    pending: Vec<PendingWrite>,
+    /// Current pending bytes (tracked atomically with pending writes)
+    pending_bytes: u64,
+    /// Time of last flush
+    last_flush_time: Instant,
+}
+
+/// Group commit buffer for batching WAL writes
+///
+/// This dramatically improves throughput for workloads with many small writes
+/// by batching multiple writes into a single fsync call.
+pub struct GroupCommitBuffer {
+    /// All mutable state under single lock to prevent race conditions
+    state: StdMutex<GroupCommitState>,
     /// Condition variable for waiting writers
     flush_complete: Condvar,
     /// Last flushed sequence number (all writes <= this are durable)
     last_flushed_seq: AtomicU64,
     /// Next sequence number to assign
     next_seq: AtomicU64,
-    /// Current pending bytes
-    pending_bytes: AtomicU64,
-    /// Configuration
+    /// Configuration (immutable after creation)
     config: GroupCommitConfig,
-    /// Time of last flush
-    last_flush_time: StdMutex<Instant>,
 }
 
 impl GroupCommitBuffer {
     pub fn new(config: GroupCommitConfig) -> Self {
+        let max_writes = config.max_writes;
         Self {
-            pending: StdMutex::new(Vec::with_capacity(config.max_writes)),
+            state: StdMutex::new(GroupCommitState {
+                pending: Vec::with_capacity(max_writes),
+                pending_bytes: 0,
+                last_flush_time: Instant::now(),
+            }),
             flush_complete: Condvar::new(),
             last_flushed_seq: AtomicU64::new(0),
             next_seq: AtomicU64::new(1),
-            pending_bytes: AtomicU64::new(0),
             config,
-            last_flush_time: StdMutex::new(Instant::now()),
         }
     }
 
     /// Add a write to the buffer and return its sequence number
+    /// All state updates are atomic under a single lock
     pub fn add_write(&self, record_bytes: Vec<u8>) -> u64 {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let bytes_len = record_bytes.len() as u64;
 
-        {
-            let mut pending = self.pending.lock().unwrap();
-            pending.push(PendingWrite { record_bytes, seq });
-        }
+        // Single lock acquisition for atomic state update
+        let mut state = self.state.lock().unwrap();
+        state.pending.push(PendingWrite { record_bytes, seq });
+        state.pending_bytes += bytes_len;
 
-        self.pending_bytes.fetch_add(bytes_len, Ordering::SeqCst);
         seq
     }
 
     /// Check if the buffer should be flushed
+    /// All checks are done under a single lock for consistency
     pub fn should_flush(&self) -> bool {
         if !self.config.enabled {
             return true; // Always flush immediately if group commit disabled
         }
 
-        let pending = self.pending.lock().unwrap();
-        if pending.is_empty() {
+        let state = self.state.lock().unwrap();
+        if state.pending.is_empty() {
             return false;
         }
 
         // Flush if we hit write count threshold
-        if pending.len() >= self.config.max_writes {
+        if state.pending.len() >= self.config.max_writes {
             return true;
         }
 
         // Flush if we hit byte threshold
-        if self.pending_bytes.load(Ordering::SeqCst) >= self.config.max_bytes {
+        if state.pending_bytes >= self.config.max_bytes {
             return true;
         }
 
         // Flush if we hit time threshold
-        let last_flush = self.last_flush_time.lock().unwrap();
-        if last_flush.elapsed() >= Duration::from_millis(self.config.max_delay_ms) {
+        if state.last_flush_time.elapsed() >= Duration::from_millis(self.config.max_delay_ms) {
             return true;
         }
 
@@ -125,11 +138,12 @@ impl GroupCommitBuffer {
     }
 
     /// Take all pending writes for flushing
+    /// Atomically clears the buffer and returns all pending writes
     pub(crate) fn take_pending(&self) -> Vec<PendingWrite> {
-        let mut pending = self.pending.lock().unwrap();
-        let writes = std::mem::take(&mut *pending);
-        self.pending_bytes.store(0, Ordering::SeqCst);
-        *self.last_flush_time.lock().unwrap() = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let writes = std::mem::take(&mut state.pending);
+        state.pending_bytes = 0;
+        state.last_flush_time = Instant::now();
         writes
     }
 
@@ -141,7 +155,7 @@ impl GroupCommitBuffer {
 
     /// Wait until a specific sequence number has been flushed
     pub fn wait_for_flush(&self, seq: u64, timeout: Duration) -> bool {
-        let mut pending = self.pending.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         let deadline = Instant::now() + timeout;
 
         while self.last_flushed_seq.load(Ordering::SeqCst) < seq {
@@ -149,8 +163,8 @@ impl GroupCommitBuffer {
             if remaining.is_zero() {
                 return false; // Timeout
             }
-            let (lock, timeout_result) = self.flush_complete.wait_timeout(pending, remaining).unwrap();
-            pending = lock;
+            let (lock, timeout_result) = self.flush_complete.wait_timeout(state, remaining).unwrap();
+            state = lock;
             if timeout_result.timed_out() {
                 return false;
             }
@@ -160,12 +174,12 @@ impl GroupCommitBuffer {
 
     /// Get the number of pending writes
     pub fn pending_count(&self) -> usize {
-        self.pending.lock().unwrap().len()
+        self.state.lock().unwrap().pending.len()
     }
 
     /// Get the pending bytes
     pub fn pending_bytes(&self) -> u64 {
-        self.pending_bytes.load(Ordering::SeqCst)
+        self.state.lock().unwrap().pending_bytes
     }
 }
 

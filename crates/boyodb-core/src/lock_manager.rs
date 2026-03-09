@@ -850,16 +850,49 @@ impl LockManager {
     }
 
     /// Release all locks held by a transaction
+    /// Optimized: acquires txn_locks once and inlines release logic to avoid
+    /// redundant lock acquisitions and potential deadlocks
     pub fn release_all(&self, txn_id: TransactionId) -> Result<(), EngineError> {
-        // Get all locks for this transaction
+        // Get all locks for this transaction (single lock acquisition)
         let locks = {
             let mut txn_locks = self.txn_locks.write();
             txn_locks.remove(&txn_id).unwrap_or_default()
         };
+        // txn_locks is now dropped - we have ownership of the locks Vec
 
-        // Release each lock
+        // Collect targets for wake_waiters (to be called after releasing all locks)
+        let mut targets_to_wake = Vec::with_capacity(locks.len());
+
+        // Release each lock (inlined release logic, no recursive txn_locks access)
         for handle in locks {
-            self.release(handle)?;
+            targets_to_wake.push(handle.target.clone());
+
+            match &handle.target {
+                LockTarget::Table { .. } => {
+                    let mut table_locks = self.table_locks.write();
+                    if let Some(state) = table_locks.get_mut(&handle.target) {
+                        state.granted.retain(|(_, _, id)| *id != handle.id);
+                        state.waiting.retain(|r| r.id != handle.id);
+
+                        // Clean up empty states
+                        if state.granted.is_empty() && state.waiting.is_empty() {
+                            table_locks.remove(&handle.target);
+                        }
+                    }
+                }
+                LockTarget::Row { .. } => {
+                    let shard = self.row_locks.get_shard(&handle.target);
+                    let mut shard_locks = shard.write();
+                    if let Some(state) = shard_locks.get_mut(&handle.target) {
+                        state.granted.retain(|(_, _, id)| *id != handle.id);
+                        state.waiting.retain(|r| r.id != handle.id);
+
+                        if state.granted.is_empty() && state.waiting.is_empty() {
+                            shard_locks.remove(&handle.target);
+                        }
+                    }
+                }
+            }
         }
 
         // Clean up deadlock detector and waiters
@@ -877,6 +910,11 @@ impl LockManager {
 
         // Also clean up any orphaned condvar for this transaction
         self.waiters.lock().remove(&txn_id);
+
+        // Wake up waiters after all locks are released (batched for efficiency)
+        for target in targets_to_wake {
+            self.wake_waiters(&target);
+        }
 
         Ok(())
     }

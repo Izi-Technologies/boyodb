@@ -300,48 +300,48 @@ impl MvccManager {
         Ok(())
     }
 
+    /// Maximum entries per row key hash (prevents unbounded vector growth)
+    const MAX_WRITERS_PER_KEY: usize = 100;
+
     /// Commit a transaction
+    /// CRITICAL: All three data structures are updated atomically to prevent race conditions
     pub fn commit_transaction(&self, txn_id: TransactionId, commit_version: u64) {
-        // Remove from active and add to committed
-        let write_set = {
-            let mut active = self.active_transactions.write();
-            active
-                .remove(&txn_id)
-                .map(|t| t.write_set)
-                .unwrap_or_default()
-        };
+        // ATOMIC COMMIT: Acquire ALL locks before any modifications to prevent
+        // readers from seeing inconsistent state during commit
+        let mut active = self.active_transactions.write();
+        let mut row_index = self.row_write_index.write();
+        let mut committed = self.committed_transactions.write();
+
+        // Remove from active transactions
+        let write_set = active
+            .remove(&txn_id)
+            .map(|t| t.write_set)
+            .unwrap_or_default();
 
         if !write_set.is_empty() {
             // Update row write index for fast conflict detection
-            {
-                let mut row_index = self.row_write_index.write();
-                for key in &write_set {
-                    let key_hash = Self::row_key_hash(key);
-                    row_index
-                        .entry(key_hash)
-                        .or_default()
-                        .push((txn_id, commit_version));
+            for key in &write_set {
+                let key_hash = Self::row_key_hash(key);
+                let writers = row_index.entry(key_hash).or_default();
+                writers.push((txn_id, commit_version));
+
+                // Cap vector size to prevent unbounded growth
+                if writers.len() > Self::MAX_WRITERS_PER_KEY {
+                    // Remove oldest entries (first half)
+                    let drain_count = writers.len() / 2;
+                    writers.drain(0..drain_count);
                 }
             }
 
-            let mut committed = self.committed_transactions.write();
+            // Add to committed transactions
             committed.insert(txn_id, (commit_version, write_set));
 
-            // Clean up old committed transactions - always check, not just when over limit
-            // Use SeqCst ordering for proper synchronization
+            // Clean up old committed transactions
             let min_version = self.min_retained_version.load(Ordering::SeqCst);
             let len_before = committed.len();
 
             // Aggressive cleanup: remove entries older than min_version
-            let removed_txns: Vec<TransactionId> = committed
-                .iter()
-                .filter(|(_, (v, _))| *v < min_version)
-                .map(|(txn_id, _)| *txn_id)
-                .collect();
-
-            for txn_id in &removed_txns {
-                committed.remove(txn_id);
-            }
+            committed.retain(|_, (v, _)| *v >= min_version);
 
             // If we're still over limit after version-based cleanup, remove oldest entries
             if committed.len() > self.max_committed_history {
@@ -349,20 +349,12 @@ impl MvccManager {
                 let mut versions: Vec<u64> = committed.values().map(|(v, _)| *v).collect();
                 versions.sort_unstable();
                 if let Some(&cutoff) = versions.get(versions.len() / 2) {
-                    let more_removed: Vec<TransactionId> = committed
-                        .iter()
-                        .filter(|(_, (v, _))| *v < cutoff)
-                        .map(|(txn_id, _)| *txn_id)
-                        .collect();
-                    for txn_id in &more_removed {
-                        committed.remove(txn_id);
-                    }
+                    committed.retain(|_, (v, _)| *v >= cutoff);
                 }
             }
 
             if len_before != committed.len() {
                 // Also clean up row_write_index for removed transactions
-                let mut row_index = self.row_write_index.write();
                 row_index.retain(|_, writers| {
                     writers.retain(|(_, v)| *v >= min_version);
                     !writers.is_empty()
@@ -375,6 +367,11 @@ impl MvccManager {
                 );
             }
         }
+
+        // Drop locks before updating min retained version (to avoid holding locks)
+        drop(committed);
+        drop(row_index);
+        drop(active);
 
         // Update minimum retained version
         self.update_min_retained_version();
