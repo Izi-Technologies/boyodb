@@ -6,8 +6,10 @@
 //! - TF-IDF and BM25 relevance scoring
 //! - Boolean and phrase search
 //! - Highlighting and snippets
+//! - N-gram based fulltext indexes for substring search (LIKE '%pattern%')
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::engine::EngineError;
@@ -827,6 +829,411 @@ impl Default for FtsManager {
     }
 }
 
+// ============================================================================
+// N-gram Based Fulltext Index for Substring Search (LIKE '%pattern%')
+// ============================================================================
+
+/// Magic bytes for fulltext index file format
+pub const FULLTEXT_INDEX_MAGIC: &[u8; 8] = b"BOYOFTS\0";
+
+/// Current version of the fulltext index format
+pub const FULLTEXT_INDEX_VERSION: u32 = 1;
+
+/// Configuration for fulltext index
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FulltextConfig {
+    /// Minimum n-gram size (default: 3)
+    pub ngram_min: u8,
+    /// Maximum n-gram size (default: 3)
+    pub ngram_max: u8,
+    /// Whether to be case-sensitive (default: false)
+    pub case_sensitive: bool,
+}
+
+impl Default for FulltextConfig {
+    fn default() -> Self {
+        Self {
+            ngram_min: 3,
+            ngram_max: 3,
+            case_sensitive: false,
+        }
+    }
+}
+
+/// Generate n-grams from a string
+///
+/// # Arguments
+/// * `text` - The input string
+/// * `n` - The n-gram size
+/// * `case_sensitive` - Whether to preserve case
+///
+/// # Returns
+/// A HashSet of n-grams
+///
+/// # Example
+/// ```
+/// use boyodb_core::fts::generate_ngrams;
+/// let ngrams = generate_ngrams("254712345678", 3, false);
+/// assert!(ngrams.contains("254"));
+/// assert!(ngrams.contains("712"));
+/// ```
+pub fn generate_ngrams(text: &str, n: usize, case_sensitive: bool) -> HashSet<String> {
+    let text = if case_sensitive {
+        text.to_string()
+    } else {
+        text.to_lowercase()
+    };
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut ngrams = HashSet::new();
+
+    if chars.len() >= n {
+        for i in 0..=chars.len() - n {
+            let ngram: String = chars[i..i + n].iter().collect();
+            ngrams.insert(ngram);
+        }
+    }
+
+    ngrams
+}
+
+/// Generate n-grams for a range of sizes
+pub fn generate_ngrams_range(
+    text: &str,
+    min_n: usize,
+    max_n: usize,
+    case_sensitive: bool,
+) -> HashSet<String> {
+    let mut all_ngrams = HashSet::new();
+    for n in min_n..=max_n {
+        all_ngrams.extend(generate_ngrams(text, n, case_sensitive));
+    }
+    all_ngrams
+}
+
+/// Builder for constructing a fulltext index
+///
+/// This builds an inverted index mapping n-grams to row indices,
+/// enabling efficient segment pruning for LIKE '%pattern%' queries.
+pub struct FulltextIndexBuilder {
+    /// Map from n-gram to list of row indices containing that n-gram
+    terms: BTreeMap<String, Vec<u32>>,
+    /// N-gram size
+    ngram_size: usize,
+    /// Total row count
+    row_count: u32,
+    /// Configuration
+    config: FulltextConfig,
+}
+
+impl FulltextIndexBuilder {
+    /// Create a new fulltext index builder
+    pub fn new(config: FulltextConfig) -> Self {
+        Self {
+            terms: BTreeMap::new(),
+            ngram_size: config.ngram_min as usize,
+            row_count: 0,
+            config,
+        }
+    }
+
+    /// Add a value to the index at the given row index
+    pub fn add_value(&mut self, row_idx: u32, value: &str) {
+        let ngrams = generate_ngrams_range(
+            value,
+            self.config.ngram_min as usize,
+            self.config.ngram_max as usize,
+            self.config.case_sensitive,
+        );
+
+        for ngram in ngrams {
+            self.terms.entry(ngram).or_default().push(row_idx);
+        }
+
+        self.row_count = self.row_count.max(row_idx + 1);
+    }
+
+    /// Get the number of unique n-grams in the index
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
+    /// Get the total number of rows indexed
+    pub fn row_count(&self) -> u32 {
+        self.row_count
+    }
+
+    /// Build and serialize the index to bytes
+    pub fn build(self) -> Result<Vec<u8>, EngineError> {
+        serialize_fulltext_index(&self.terms, &self.config, self.row_count)
+    }
+}
+
+/// Serialized fulltext index that can be loaded and queried
+pub struct FulltextIndex {
+    /// Map from n-gram to list of row indices
+    terms: BTreeMap<String, Vec<u32>>,
+    /// Configuration
+    config: FulltextConfig,
+    /// Total document/row count
+    doc_count: u32,
+}
+
+impl FulltextIndex {
+    /// Check if the index might contain rows matching the given substring pattern
+    ///
+    /// This is used for segment pruning: if this returns false, the segment
+    /// definitely has no matches and can be skipped entirely.
+    ///
+    /// # Arguments
+    /// * `pattern` - The substring to search for (without % wildcards)
+    ///
+    /// # Returns
+    /// * `true` if the segment might contain matches (must scan)
+    /// * `false` if the segment definitely has no matches (can skip)
+    pub fn might_contain(&self, pattern: &str) -> bool {
+        let pattern = if self.config.case_sensitive {
+            pattern.to_string()
+        } else {
+            pattern.to_lowercase()
+        };
+
+        // Generate n-grams from the search pattern
+        let ngrams = generate_ngrams_range(
+            &pattern,
+            self.config.ngram_min as usize,
+            self.config.ngram_max as usize,
+            self.config.case_sensitive,
+        );
+
+        // If we can't generate any n-grams (pattern too short), we must scan
+        if ngrams.is_empty() {
+            return true;
+        }
+
+        // All n-grams from the pattern must exist in the index
+        // If any n-gram is missing, there can be no matches
+        for ngram in ngrams {
+            if !self.terms.contains_key(&ngram) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Get candidate row indices that might match the pattern
+    ///
+    /// Returns the intersection of row sets for all n-grams in the pattern.
+    /// This can be used to limit scanning to specific rows.
+    pub fn candidate_rows(&self, pattern: &str) -> Option<Vec<u32>> {
+        let pattern = if self.config.case_sensitive {
+            pattern.to_string()
+        } else {
+            pattern.to_lowercase()
+        };
+
+        let ngrams = generate_ngrams_range(
+            &pattern,
+            self.config.ngram_min as usize,
+            self.config.ngram_max as usize,
+            self.config.case_sensitive,
+        );
+
+        if ngrams.is_empty() {
+            return None; // Must scan all rows
+        }
+
+        let mut result: Option<HashSet<u32>> = None;
+
+        for ngram in ngrams {
+            match self.terms.get(&ngram) {
+                Some(rows) => {
+                    let row_set: HashSet<u32> = rows.iter().copied().collect();
+                    result = Some(match result {
+                        Some(current) => current.intersection(&row_set).copied().collect(),
+                        None => row_set,
+                    });
+                }
+                None => return Some(Vec::new()), // No matches possible
+            }
+        }
+
+        result.map(|s| {
+            let mut v: Vec<u32> = s.into_iter().collect();
+            v.sort_unstable();
+            v
+        })
+    }
+
+    /// Get the configuration
+    pub fn config(&self) -> &FulltextConfig {
+        &self.config
+    }
+
+    /// Get the document/row count
+    pub fn doc_count(&self) -> u32 {
+        self.doc_count
+    }
+
+    /// Get the number of unique terms (n-grams)
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+}
+
+/// Serialize a fulltext index to binary format
+///
+/// File format:
+/// - Header (64 bytes):
+///   - [8 bytes]  Magic: "BOYOFTS\0"
+///   - [4 bytes]  Version: 1
+///   - [1 byte]   ngram_min
+///   - [1 byte]   ngram_max
+///   - [1 byte]   case_sensitive (0 or 1)
+///   - [1 byte]   reserved
+///   - [8 bytes]  term_count
+///   - [8 bytes]  doc_count
+///   - [8 bytes]  data_offset
+///   - [8 bytes]  data_length
+///   - [16 bytes] reserved
+/// - Data section: bincode-serialized BTreeMap<String, Vec<u32>>
+pub fn serialize_fulltext_index(
+    terms: &BTreeMap<String, Vec<u32>>,
+    config: &FulltextConfig,
+    doc_count: u32,
+) -> Result<Vec<u8>, EngineError> {
+    // Serialize the terms map using bincode
+    let data = bincode::serialize(terms)
+        .map_err(|e| EngineError::Internal(format!("failed to serialize fulltext index: {e}")))?;
+
+    let term_count = terms.len() as u64;
+    let data_offset: u64 = 64; // Header size
+    let data_length = data.len() as u64;
+
+    let mut buffer = Vec::with_capacity(64 + data.len());
+
+    // Write header
+    buffer.extend_from_slice(FULLTEXT_INDEX_MAGIC);              // 8 bytes
+    buffer.extend_from_slice(&FULLTEXT_INDEX_VERSION.to_le_bytes()); // 4 bytes
+    buffer.push(config.ngram_min);                               // 1 byte
+    buffer.push(config.ngram_max);                               // 1 byte
+    buffer.push(if config.case_sensitive { 1 } else { 0 });      // 1 byte
+    buffer.push(0);                                              // 1 byte reserved
+    buffer.extend_from_slice(&term_count.to_le_bytes());         // 8 bytes
+    buffer.extend_from_slice(&(doc_count as u64).to_le_bytes()); // 8 bytes
+    buffer.extend_from_slice(&data_offset.to_le_bytes());        // 8 bytes
+    buffer.extend_from_slice(&data_length.to_le_bytes());        // 8 bytes
+    buffer.extend_from_slice(&[0u8; 16]);                        // 16 bytes reserved
+
+    // Write data
+    buffer.extend_from_slice(&data);
+
+    Ok(buffer)
+}
+
+/// Load a fulltext index from binary data
+pub fn load_fulltext_index(data: &[u8]) -> Result<FulltextIndex, EngineError> {
+    if data.len() < 64 {
+        return Err(EngineError::InvalidArgument(
+            "fulltext index too small".into(),
+        ));
+    }
+
+    // Verify magic
+    if &data[0..8] != FULLTEXT_INDEX_MAGIC {
+        return Err(EngineError::InvalidArgument(
+            "invalid fulltext index magic".into(),
+        ));
+    }
+
+    // Read header
+    let version = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    if version != FULLTEXT_INDEX_VERSION {
+        return Err(EngineError::InvalidArgument(format!(
+            "unsupported fulltext index version: {version}"
+        )));
+    }
+
+    let ngram_min = data[12];
+    let ngram_max = data[13];
+    let case_sensitive = data[14] != 0;
+    // data[15] is reserved
+
+    let _term_count = u64::from_le_bytes(data[16..24].try_into().unwrap());
+    let doc_count = u64::from_le_bytes(data[24..32].try_into().unwrap()) as u32;
+    let data_offset = u64::from_le_bytes(data[32..40].try_into().unwrap()) as usize;
+    let data_length = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+
+    if data.len() < data_offset + data_length {
+        return Err(EngineError::InvalidArgument(
+            "fulltext index data truncated".into(),
+        ));
+    }
+
+    let terms: BTreeMap<String, Vec<u32>> =
+        bincode::deserialize(&data[data_offset..data_offset + data_length])
+            .map_err(|e| EngineError::Internal(format!("failed to deserialize fulltext index: {e}")))?;
+
+    Ok(FulltextIndex {
+        terms,
+        config: FulltextConfig {
+            ngram_min,
+            ngram_max,
+            case_sensitive,
+        },
+        doc_count,
+    })
+}
+
+/// Load a fulltext index from a file path
+pub fn load_fulltext_index_from_path(path: &Path) -> Result<FulltextIndex, EngineError> {
+    let data = std::fs::read(path)
+        .map_err(|e| EngineError::Io(format!("failed to read fulltext index: {e}")))?;
+    load_fulltext_index(&data)
+}
+
+/// Extract the substring from a LIKE pattern of the form '%value%'
+///
+/// Returns `Some(value)` if the pattern is `%value%` where value contains no wildcards.
+/// Returns `None` for other patterns like 'prefix%', '%suffix', or patterns with internal wildcards.
+pub fn extract_like_substring(pattern: &str) -> Option<String> {
+    // Must start and end with %
+    if !pattern.starts_with('%') || !pattern.ends_with('%') {
+        return None;
+    }
+
+    // Remove the surrounding %
+    let inner = &pattern[1..pattern.len() - 1];
+
+    // Inner part must not contain any wildcards
+    if inner.contains('%') || inner.contains('_') {
+        return None;
+    }
+
+    // Must have actual content
+    if inner.is_empty() {
+        return None;
+    }
+
+    Some(inner.to_string())
+}
+
+/// Check if a fulltext index file might contain matches for a LIKE pattern
+///
+/// This is a convenience function that loads the index and checks for matches.
+pub fn fulltext_index_might_contain(index_path: &Path, pattern: &str) -> Result<bool, EngineError> {
+    // Extract substring from LIKE pattern
+    let substring = match extract_like_substring(pattern) {
+        Some(s) => s,
+        None => return Ok(true), // Can't optimize, must scan
+    };
+
+    // Load and check the index
+    let index = load_fulltext_index_from_path(index_path)?;
+    Ok(index.might_contain(&substring))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,5 +1308,149 @@ mod tests {
 
         assert!(highlighted.contains("<b>test</b>"));
         assert!(highlighted.contains("<b>document</b>"));
+    }
+
+    // ========================================================================
+    // Fulltext Index Tests (N-gram based for LIKE '%pattern%')
+    // ========================================================================
+
+    #[test]
+    fn test_generate_ngrams() {
+        let ngrams = generate_ngrams("254712345678", 3, false);
+        assert!(ngrams.contains("254"));
+        assert!(ngrams.contains("547"));
+        assert!(ngrams.contains("471"));
+        assert!(ngrams.contains("712"));
+        assert!(ngrams.contains("123"));
+        assert!(ngrams.contains("234"));
+        assert!(ngrams.contains("345"));
+        assert!(ngrams.contains("456"));
+        assert!(ngrams.contains("567"));
+        assert!(ngrams.contains("678"));
+        assert_eq!(ngrams.len(), 10);
+    }
+
+    #[test]
+    fn test_generate_ngrams_case_insensitive() {
+        let ngrams = generate_ngrams("AbCdEf", 3, false);
+        assert!(ngrams.contains("abc"));
+        assert!(ngrams.contains("bcd"));
+        assert!(ngrams.contains("cde"));
+        assert!(ngrams.contains("def"));
+    }
+
+    #[test]
+    fn test_generate_ngrams_case_sensitive() {
+        let ngrams = generate_ngrams("AbCdEf", 3, true);
+        assert!(ngrams.contains("AbC"));
+        assert!(ngrams.contains("bCd"));
+        assert!(ngrams.contains("CdE"));
+        assert!(ngrams.contains("dEf"));
+    }
+
+    #[test]
+    fn test_generate_ngrams_short_string() {
+        let ngrams = generate_ngrams("ab", 3, false);
+        assert!(ngrams.is_empty());
+    }
+
+    #[test]
+    fn test_fulltext_index_builder() {
+        let config = FulltextConfig::default();
+        let mut builder = FulltextIndexBuilder::new(config);
+
+        builder.add_value(0, "254712345678");
+        builder.add_value(1, "254799887766");
+        builder.add_value(2, "123456789012");
+
+        assert_eq!(builder.row_count(), 3);
+        assert!(builder.term_count() > 0);
+    }
+
+    #[test]
+    fn test_fulltext_index_serialization() {
+        let config = FulltextConfig::default();
+        let mut builder = FulltextIndexBuilder::new(config);
+
+        builder.add_value(0, "254712345678");
+        builder.add_value(1, "254799887766");
+        builder.add_value(2, "123456789012");
+
+        let data = builder.build().unwrap();
+
+        // Verify header
+        assert_eq!(&data[0..8], FULLTEXT_INDEX_MAGIC);
+
+        // Deserialize and verify
+        let index = load_fulltext_index(&data).unwrap();
+        assert_eq!(index.doc_count(), 3);
+        assert!(index.term_count() > 0);
+    }
+
+    #[test]
+    fn test_fulltext_index_might_contain() {
+        let config = FulltextConfig::default();
+        let mut builder = FulltextIndexBuilder::new(config);
+
+        builder.add_value(0, "254712345678");
+        builder.add_value(1, "254799887766");
+
+        let data = builder.build().unwrap();
+        let index = load_fulltext_index(&data).unwrap();
+
+        // Should find "712" - it's in "254712345678"
+        assert!(index.might_contain("712"));
+
+        // Should find "254" - it's in both numbers
+        assert!(index.might_contain("254"));
+
+        // Should not find "999" - not in any number
+        assert!(!index.might_contain("999"));
+
+        // Should not find "111" - not in any number
+        assert!(!index.might_contain("111"));
+    }
+
+    #[test]
+    fn test_fulltext_index_candidate_rows() {
+        let config = FulltextConfig::default();
+        let mut builder = FulltextIndexBuilder::new(config);
+
+        builder.add_value(0, "254712345678");
+        builder.add_value(1, "254799887766");
+        builder.add_value(2, "123456789012");
+
+        let data = builder.build().unwrap();
+        let index = load_fulltext_index(&data).unwrap();
+
+        // "712" only in row 0
+        let candidates = index.candidate_rows("712").unwrap();
+        assert_eq!(candidates, vec![0]);
+
+        // "254" in rows 0 and 1
+        let candidates = index.candidate_rows("254").unwrap();
+        assert!(candidates.contains(&0));
+        assert!(candidates.contains(&1));
+        assert!(!candidates.contains(&2));
+
+        // "999" in no rows
+        let candidates = index.candidate_rows("999").unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_extract_like_substring() {
+        // Valid patterns
+        assert_eq!(extract_like_substring("%712%"), Some("712".to_string()));
+        assert_eq!(extract_like_substring("%abc%"), Some("abc".to_string()));
+        assert_eq!(extract_like_substring("%Hello World%"), Some("Hello World".to_string()));
+
+        // Invalid patterns
+        assert_eq!(extract_like_substring("prefix%"), None);
+        assert_eq!(extract_like_substring("%suffix"), None);
+        assert_eq!(extract_like_substring("no_wildcards"), None);
+        assert_eq!(extract_like_substring("%a%b%"), None); // Internal wildcard
+        assert_eq!(extract_like_substring("%a_b%"), None); // Internal single-char wildcard
+        assert_eq!(extract_like_substring("%%"), None);    // Empty inner
     }
 }

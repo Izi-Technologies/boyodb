@@ -9895,16 +9895,45 @@ impl Db {
                 continue;
             }
             let column = &index.columns[0];
+            let path = self.index_segment_path(index, &entry.segment_id);
+            if !path.exists() {
+                continue;
+            }
+
+            // Handle fulltext indexes differently - check LIKE filters
+            if index.index_type == crate::sql::IndexType::Fulltext {
+                // Check if there are any LIKE filters for this column
+                let like_patterns = self.get_like_patterns_for_column(filter, column);
+                if like_patterns.is_empty() {
+                    continue;
+                }
+
+                // Load the fulltext index and check if any pattern might match
+                let bytes = fs::read(&path)
+                    .map_err(|e| EngineError::Io(format!("read fulltext index failed: {e}")))?;
+                let ft_index = crate::fts::load_fulltext_index(&bytes)?;
+
+                // For each LIKE pattern, check if the segment might contain matches
+                for (pattern, negate) in like_patterns {
+                    if let Some(substring) = crate::fts::extract_like_substring(&pattern) {
+                        let might_contain = ft_index.might_contain(&substring);
+                        // If NOT LIKE and segment might contain, we can't prune
+                        // If LIKE and segment doesn't contain, we can prune
+                        if !negate && !might_contain {
+                            return Ok(false); // Segment definitely has no matches
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // For Bloom/Hash indexes, use hash-based filtering
             let data_type = match schema_map.get(column) {
                 Some(t) => t,
                 None => continue,
             };
             let hashes = self.index_filter_hashes(filter, column, data_type);
             if hashes.is_empty() {
-                continue;
-            }
-            let path = self.index_segment_path(index, &entry.segment_id);
-            if !path.exists() {
                 continue;
             }
 
@@ -9926,6 +9955,12 @@ impl Db {
             }
         }
         Ok(true)
+    }
+
+    /// Extract LIKE patterns from the filter for a specific column
+    /// Returns Vec<(pattern, negate)> where negate=true means NOT LIKE
+    fn get_like_patterns_for_column(&self, filter: &QueryFilter, column: &str) -> Vec<(String, bool)> {
+        filter.all_like_patterns_for_column(column)
     }
 
     fn build_index_for_segment(
@@ -9952,23 +9987,52 @@ impl Db {
         let mut bloom = Bloom::new_for_fp_rate(total_rows.max(1), 0.01);
         let mut hash_values: HashSet<u64> = HashSet::new();
 
+        // For fulltext indexes, we use a different approach - build an n-gram index
+        let mut fulltext_builder = if index.index_type == crate::sql::IndexType::Fulltext {
+            Some(crate::fts::FulltextIndexBuilder::new(
+                crate::fts::FulltextConfig::default(),
+            ))
+        } else {
+            None
+        };
+
+        let mut global_row_idx: u32 = 0;
         for batch in batches.iter() {
             for row_idx in 0..batch.num_rows() {
-                let mut hasher = DefaultHasher::new();
-                for col_idx in &col_indices {
-                    let col = batch.column(*col_idx);
-                    hash_array_value(&mut hasher, col.as_ref(), row_idx);
-                }
-                let hash = hasher.finish();
                 match index.index_type {
-                    crate::sql::IndexType::Bloom => {
-                        bloom.set(&hash);
+                    crate::sql::IndexType::Fulltext => {
+                        // For fulltext indexes, extract string values and add to the builder
+                        if let Some(ref mut builder) = fulltext_builder {
+                            // Only support single-column fulltext indexes for now
+                            if col_indices.len() == 1 {
+                                let col = batch.column(col_indices[0]);
+                                let value = Self::extract_column_value_as_string(col, row_idx);
+                                if !value.is_empty() && value != "NULL" {
+                                    builder.add_value(global_row_idx, &value);
+                                }
+                            }
+                        }
                     }
-                    crate::sql::IndexType::Hash => {
-                        hash_values.insert(hash);
+                    crate::sql::IndexType::Bloom | crate::sql::IndexType::Hash => {
+                        let mut hasher = DefaultHasher::new();
+                        for col_idx in &col_indices {
+                            let col = batch.column(*col_idx);
+                            hash_array_value(&mut hasher, col.as_ref(), row_idx);
+                        }
+                        let hash = hasher.finish();
+                        match index.index_type {
+                            crate::sql::IndexType::Bloom => {
+                                bloom.set(&hash);
+                            }
+                            crate::sql::IndexType::Hash => {
+                                hash_values.insert(hash);
+                            }
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
+                global_row_idx += 1;
             }
         }
 
@@ -9994,6 +10058,13 @@ impl Db {
                 }
                 fs::write(&path, out)
                     .map_err(|e| EngineError::Io(format!("write hash index failed: {e}")))?;
+            }
+            crate::sql::IndexType::Fulltext => {
+                if let Some(builder) = fulltext_builder {
+                    let bytes = builder.build()?;
+                    fs::write(&path, bytes)
+                        .map_err(|e| EngineError::Io(format!("write fulltext index failed: {e}")))?;
+                }
             }
             _ => {}
         }
@@ -18352,6 +18423,36 @@ pub struct QueryFilter {
     /// Numeric range filters for segment pruning using column stats
     #[serde(default)]
     numeric_range_filters: Vec<crate::sql::NumericFilter>,
+}
+
+impl QueryFilter {
+    /// Get LIKE patterns for a column
+    /// Returns Vec<(pattern, negate)> where negate=true means NOT LIKE
+    pub fn like_patterns_for_column(&self, column: &str) -> Vec<(String, bool)> {
+        self.like_filters
+            .iter()
+            .filter(|(col, _, _)| col == column)
+            .map(|(_, pattern, negate)| (pattern.clone(), *negate))
+            .collect()
+    }
+
+    /// Get ILIKE patterns for a column (case-insensitive LIKE)
+    /// Returns Vec<(pattern, negate)> where negate=true means NOT ILIKE
+    pub fn ilike_patterns_for_column(&self, column: &str) -> Vec<(String, bool)> {
+        self.ilike_filters
+            .iter()
+            .filter(|(col, _, _)| col == column)
+            .map(|(_, pattern, negate)| (pattern.clone(), *negate))
+            .collect()
+    }
+
+    /// Get all LIKE and ILIKE patterns for a column
+    /// Returns Vec<(pattern, negate)>
+    pub fn all_like_patterns_for_column(&self, column: &str) -> Vec<(String, bool)> {
+        let mut patterns = self.like_patterns_for_column(column);
+        patterns.extend(self.ilike_patterns_for_column(column));
+        patterns
+    }
 }
 
 // --- RESTORED HELPER TYPES ---

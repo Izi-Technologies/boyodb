@@ -185,11 +185,14 @@ SELECT * FROM top_users WHERE spent > 1000;
 ## Indexes
 
 ```sql
--- Create index
+-- Create index (B-tree default)
 CREATE INDEX idx_email ON mydb.users (email);
 
 -- Hash index (equality lookups)
 CREATE INDEX idx_id ON mydb.users (id) USING HASH;
+
+-- Fulltext index (substring search)
+CREATE INDEX idx_phone ON mydb.users (phone) USING FULLTEXT;
 
 -- Unique index
 CREATE UNIQUE INDEX idx_email ON mydb.users (email);
@@ -200,6 +203,8 @@ DROP INDEX idx_email ON mydb.users;
 -- Show indexes
 SHOW INDEXES IN mydb.users;
 ```
+
+**Index Types:** `BTREE` (default), `HASH`, `BLOOM`, `BITMAP`, `FULLTEXT`
 
 ---
 

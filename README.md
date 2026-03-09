@@ -153,6 +153,9 @@ CREATE INDEX idx_timestamp ON events (timestamp);
 -- Hash index for equality lookups
 CREATE INDEX idx_user_id ON events (user_id) USING HASH;
 
+-- Fulltext index for substring searches (LIKE '%pattern%')
+CREATE INDEX idx_phone ON calls (phone_number) USING FULLTEXT;
+
 -- Unique constraint
 CREATE UNIQUE INDEX idx_email ON users (email);
 
@@ -160,7 +163,13 @@ CREATE UNIQUE INDEX idx_email ON users (email);
 CREATE INDEX idx_user_time ON events (user_id, timestamp);
 ```
 
-Index types: `BTREE`, `HASH`, `BLOOM`, `BITMAP`
+Index types: `BTREE`, `HASH`, `BLOOM`, `BITMAP`, `FULLTEXT`
+
+**Fulltext Index:**
+- Uses n-gram tokenization for efficient `LIKE '%substring%'` queries
+- Enables segment pruning - segments without matching n-grams are skipped entirely
+- Ideal for phone number searches, partial string matching, and substring lookups
+- Case-insensitive by default
 
 ### Interactive CLI Shell
 

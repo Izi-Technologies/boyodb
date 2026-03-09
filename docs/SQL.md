@@ -169,6 +169,84 @@ ALTER TABLE users ADD COLUMN verified BOOLEAN;
 ALTER TABLE users DROP COLUMN legacy_field;
 ```
 
+### CREATE INDEX
+
+```sql
+CREATE INDEX index_name ON [database.]table_name (column1, column2, ...) [USING type];
+CREATE UNIQUE INDEX index_name ON [database.]table_name (column);
+```
+
+**Index Types:**
+
+| Type | Description | Best For |
+|------|-------------|----------|
+| `BTREE` | B-tree index (default) | Range queries, ORDER BY |
+| `HASH` | Hash index | Equality lookups |
+| `BLOOM` | Bloom filter | Existence checks, high-cardinality columns |
+| `BITMAP` | Bitmap index | Low-cardinality columns |
+| `FULLTEXT` | N-gram based fulltext index | Substring search (`LIKE '%pattern%'`) |
+
+**Examples:**
+```sql
+-- B-tree index (default) for range queries
+CREATE INDEX idx_timestamp ON events (timestamp);
+
+-- Hash index for equality lookups
+CREATE INDEX idx_user_id ON events (user_id) USING HASH;
+
+-- Bloom filter for existence checks
+CREATE INDEX idx_email ON users (email) USING BLOOM;
+
+-- Fulltext index for substring searches
+CREATE INDEX idx_phone ON cdr (calling_number) USING FULLTEXT;
+
+-- Unique constraint
+CREATE UNIQUE INDEX idx_email ON users (email);
+
+-- Composite index
+CREATE INDEX idx_user_time ON events (user_id, timestamp);
+```
+
+**Fulltext Index Details:**
+
+The fulltext index uses n-gram tokenization (default: 3-grams) to enable efficient segment pruning for `LIKE '%substring%'` queries:
+
+```sql
+-- Create fulltext index on phone numbers
+CREATE INDEX idx_calling_ft ON telecom.voice_cdr (calling_number) USING FULLTEXT;
+
+-- Query uses index to skip segments that cannot contain matches
+SELECT * FROM telecom.voice_cdr WHERE calling_number LIKE '%254712%';
+```
+
+- Segments without matching n-grams are skipped entirely (100% pruned)
+- Case-insensitive by default
+- Ideal for phone number searches, partial string matching
+
+### DROP INDEX
+
+```sql
+DROP INDEX index_name ON [database.]table_name;
+DROP INDEX IF EXISTS index_name ON [database.]table_name;
+```
+
+**Example:**
+```sql
+DROP INDEX idx_email ON mydb.users;
+DROP INDEX IF EXISTS idx_old ON mydb.events;
+```
+
+### SHOW INDEXES
+
+```sql
+SHOW INDEXES IN [database.]table_name;
+```
+
+**Example:**
+```sql
+SHOW INDEXES IN mydb.users;
+```
+
 ---
 
 ## DML Statements

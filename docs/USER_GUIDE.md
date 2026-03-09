@@ -410,6 +410,9 @@ CREATE UNIQUE INDEX idx_users_email_unique ON mydb.users (email);
 -- Create hash index (for equality lookups)
 CREATE INDEX idx_users_id ON mydb.users (id) USING HASH;
 
+-- Create fulltext index (for LIKE '%pattern%' searches)
+CREATE INDEX idx_phone ON mydb.users (phone_number) USING FULLTEXT;
+
 -- Create composite index
 CREATE INDEX idx_orders_user_date ON mydb.orders (user_id, order_date);
 
@@ -1286,9 +1289,22 @@ CREATE INDEX idx_timestamp ON analytics.events (timestamp) USING BTREE;
 -- Bloom filter for existence checks
 CREATE INDEX idx_email ON analytics.users (email) USING BLOOM;
 
+-- Fulltext index for substring searches (LIKE '%pattern%')
+CREATE INDEX idx_phone ON telecom.cdr (calling_number) USING FULLTEXT;
+
 -- Composite index for common query patterns
 CREATE INDEX idx_user_time ON analytics.events (user_id, timestamp);
 ```
+
+**Index Types:**
+
+| Type | Best For | Example Query |
+|------|----------|---------------|
+| `BTREE` | Range queries, ORDER BY | `WHERE timestamp > '2024-01-01'` |
+| `HASH` | Equality lookups | `WHERE user_id = 123` |
+| `BLOOM` | Existence checks, high-cardinality | `WHERE email = 'user@example.com'` |
+| `BITMAP` | Low-cardinality columns | `WHERE status IN ('active', 'pending')` |
+| `FULLTEXT` | Substring search | `WHERE phone LIKE '%254712%'` |
 
 ### Automatic Index Recommendations
 

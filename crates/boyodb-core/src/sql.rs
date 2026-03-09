@@ -5190,6 +5190,7 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
                 Some("HASH") => IndexType::Hash,
                 Some("BLOOM") => IndexType::Bloom,
                 Some("BITMAP") => IndexType::Bitmap,
+                Some("FULLTEXT") => IndexType::Fulltext,
                 Some(other) => {
                     return Err(EngineError::InvalidArgument(format!(
                         "unsupported index type: {other}"

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Existing data is preserved during upgrade without manual intervention
 
 ### Added
+- **Fulltext Index**: N-gram based index for efficient `LIKE '%pattern%'` substring searches
+  - `CREATE INDEX idx_phone ON cdr (calling_number) USING FULLTEXT`
+  - Segment pruning skips segments without matching n-grams
+  - Ideal for phone number searches, partial string matching
+  - Case-insensitive by default with 3-gram tokenization
 - **EXPLAIN ANALYZE**: Visual query plan with actual execution statistics
 - **Parallel Aggregation**: Segment-level partial aggregates merged for billion-row scale
 - **Fast COUNT(*)**: Metadata-based counting without loading segment data
