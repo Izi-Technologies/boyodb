@@ -2217,6 +2217,10 @@ impl StreamRegistry {
 
 impl Drop for Db {
     fn drop(&mut self) {
+        // CRITICAL: Flush all memtables FIRST to ensure segment files exist on disk.
+        // Without this, manifest could reference segments that were never written.
+        let _ = self.flush_all_memtables();
+
         // Flush WAL to ensure all entries are written to disk
         if let Ok(mut wal) = self.wal.lock() {
             let _ = wal.flush_sync();
@@ -3622,6 +3626,12 @@ impl Db {
                 manifest.version
             };
             if current_version > last_persisted {
+                // CRITICAL: Flush all memtables BEFORE persisting manifest.
+                // This ensures segment files exist on disk before manifest references them.
+                // Without this, a crash after manifest persist but before memtable flush
+                // would result in missing segments (manifest has entries, files don't exist).
+                self.flush_all_memtables()?;
+
                 let manifest_snapshot = {
                     let manifest = self
                         .manifest
