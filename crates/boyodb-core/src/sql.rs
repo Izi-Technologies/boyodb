@@ -5,7 +5,7 @@ use sqlparser::ast::{
     JoinConstraint, JoinOperator, ObjectName, OrderByExpr, Query, Select, SelectItem, SetExpr,
     SetOperator, SetQuantifier, Statement, TableFactor, UnaryOperator, Value, With,
 };
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 /// Parsed SQL query representation
@@ -957,7 +957,7 @@ pub enum DdlCommand {
     ShowMaterializedViews {
         database: Option<String>,
     },
-    /// CREATE INDEX [IF NOT EXISTS] index_name ON table (columns) [USING method]
+    /// CREATE INDEX [IF NOT EXISTS] index_name ON table [USING method] (columns)
     CreateIndex {
         database: String,
         table: String,
@@ -1754,7 +1754,7 @@ pub fn parse_sql(sql: &str) -> Result<SqlStatement, EngineError> {
         return Ok(SqlStatement::Ddl(ddl_cmd));
     }
 
-    let dialect = GenericDialect {};
+    let dialect = PostgreSqlDialect {};
     let statements = match Parser::parse_sql(&dialect, sql) {
         Ok(s) => s,
         Err(e) => {
@@ -8704,6 +8704,79 @@ mod tests {
                 assert_eq!(table, Some("mytable".to_string()));
             }
             _ => panic!("expected ShowDamagedSegments"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_using_fulltext() {
+        // PostgreSQL syntax: USING comes BEFORE columns
+        let sql = "CREATE INDEX idx_phone_ft ON airtel_cdr.voice_cdr USING FULLTEXT (calling_number)";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::CreateIndex {
+                database,
+                table,
+                index_name,
+                columns,
+                index_type,
+                if_not_exists,
+            }) => {
+                assert_eq!(database, "airtel_cdr");
+                assert_eq!(table, "voice_cdr");
+                assert_eq!(index_name, "idx_phone_ft");
+                assert_eq!(columns, vec!["calling_number".to_string()]);
+                assert_eq!(index_type, IndexType::Fulltext);
+                assert!(!if_not_exists);
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_using_btree() {
+        // PostgreSQL syntax: USING comes BEFORE columns
+        let sql = "CREATE INDEX idx_name ON mydb.users USING BTREE (name)";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::CreateIndex {
+                index_type, ..
+            }) => {
+                assert_eq!(index_type, IndexType::BTree);
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_default_btree() {
+        // No USING clause defaults to BTree
+        let sql = "CREATE INDEX idx_id ON mydb.users (id)";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::CreateIndex {
+                index_type, ..
+            }) => {
+                assert_eq!(index_type, IndexType::BTree);
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_if_not_exists() {
+        // PostgreSQL syntax: USING comes BEFORE columns
+        let sql = "CREATE INDEX IF NOT EXISTS idx_phone ON telecom.cdr USING FULLTEXT (phone)";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Ddl(DdlCommand::CreateIndex {
+                if_not_exists,
+                index_type,
+                ..
+            }) => {
+                assert!(if_not_exists);
+                assert_eq!(index_type, IndexType::Fulltext);
+            }
+            _ => panic!("expected CreateIndex"),
         }
     }
 }

@@ -189,10 +189,10 @@ SELECT * FROM top_users WHERE spent > 1000;
 CREATE INDEX idx_email ON mydb.users (email);
 
 -- Hash index (equality lookups)
-CREATE INDEX idx_id ON mydb.users (id) USING HASH;
+CREATE INDEX idx_id ON mydb.users USING HASH (id);
 
 -- Fulltext index (substring search)
-CREATE INDEX idx_phone ON mydb.users (phone) USING FULLTEXT;
+CREATE INDEX idx_phone ON mydb.users USING FULLTEXT (phone);
 
 -- Unique index
 CREATE UNIQUE INDEX idx_email ON mydb.users (email);

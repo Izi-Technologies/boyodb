@@ -224,12 +224,40 @@ impl Wal {
         wal_path.with_extension("lsn")
     }
 
-    /// Persist the current LSN to metadata file
+    /// Persist the current LSN to metadata file atomically
+    /// Uses temp-file + rename pattern to prevent corruption on crash
     pub fn persist_lsn(&self) -> Result<(), EngineError> {
         let metadata_path = Self::lsn_metadata_path(&self.path);
+        let tmp_path = metadata_path.with_extension("lsn.tmp");
         let lsn = self.current_lsn();
-        std::fs::write(&metadata_path, lsn.to_string())
-            .map_err(|e| EngineError::Io(format!("Failed to persist LSN: {}", e)))?;
+
+        // Ensure parent directory exists (defensive - may not exist in all code paths)
+        if let Some(parent) = tmp_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| EngineError::Io(format!("Failed to create LSN dir: {}", e)))?;
+        }
+
+        // Write to temp file first
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| EngineError::Io(format!("Failed to open LSN tmp file: {}", e)))?;
+            use std::io::Write;
+            write!(file, "{}", lsn)
+                .map_err(|e| EngineError::Io(format!("Failed to write LSN tmp: {}", e)))?;
+            file.sync_all()
+                .map_err(|e| EngineError::Io(format!("Failed to fsync LSN tmp: {}", e)))?;
+        }
+
+        // Atomic rename
+        std::fs::rename(&tmp_path, &metadata_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            EngineError::Io(format!("Failed to rename LSN file: {}", e))
+        })?;
+
         Ok(())
     }
 

@@ -5,6 +5,19 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-03-09
+
+### Fixed
+- **WAL LSN Atomic Persist**: Fixed directory creation issue in WAL LSN atomic persist that could cause "No such file or directory" errors
+- **Manifest Race Condition**: Fixed atomic manifest rename to never fall back to truncating live manifest
+- **S3 Upload Error Handling**: Enhanced error logging when corrupt S3 segment deletion fails after checksum mismatch
+- **SQL Parser Dialect**: Switched to PostgreSqlDialect for proper `USING` clause support in CREATE INDEX
+
+### Improved
+- **CREATE INDEX Syntax**: Now follows PostgreSQL standard with USING before columns
+  - `CREATE INDEX idx_phone ON cdr USING FULLTEXT (calling_number)`
+- **Corruption Prevention**: Enhanced atomic file operations across WAL, manifest, and segment persistence
+
 ## [0.2.4] - 2026-03-08
 
 ### Fixed
@@ -15,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Fulltext Index**: N-gram based index for efficient `LIKE '%pattern%'` substring searches
-  - `CREATE INDEX idx_phone ON cdr (calling_number) USING FULLTEXT`
+  - `CREATE INDEX idx_phone ON cdr USING FULLTEXT (calling_number)`
   - Segment pruning skips segments without matching n-grams
   - Ideal for phone number searches, partial string matching
   - Case-insensitive by default with 3-gram tokenization

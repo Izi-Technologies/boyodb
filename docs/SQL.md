@@ -172,7 +172,7 @@ ALTER TABLE users DROP COLUMN legacy_field;
 ### CREATE INDEX
 
 ```sql
-CREATE INDEX index_name ON [database.]table_name (column1, column2, ...) [USING type];
+CREATE INDEX index_name ON [database.]table_name [USING type] (column1, column2, ...);
 CREATE UNIQUE INDEX index_name ON [database.]table_name (column);
 ```
 
@@ -192,13 +192,13 @@ CREATE UNIQUE INDEX index_name ON [database.]table_name (column);
 CREATE INDEX idx_timestamp ON events (timestamp);
 
 -- Hash index for equality lookups
-CREATE INDEX idx_user_id ON events (user_id) USING HASH;
+CREATE INDEX idx_user_id ON events USING HASH (user_id);
 
 -- Bloom filter for existence checks
-CREATE INDEX idx_email ON users (email) USING BLOOM;
+CREATE INDEX idx_email ON users USING BLOOM (email);
 
 -- Fulltext index for substring searches
-CREATE INDEX idx_phone ON cdr (calling_number) USING FULLTEXT;
+CREATE INDEX idx_phone ON cdr USING FULLTEXT (calling_number);
 
 -- Unique constraint
 CREATE UNIQUE INDEX idx_email ON users (email);
@@ -213,7 +213,7 @@ The fulltext index uses n-gram tokenization (default: 3-grams) to enable efficie
 
 ```sql
 -- Create fulltext index on phone numbers
-CREATE INDEX idx_calling_ft ON telecom.voice_cdr (calling_number) USING FULLTEXT;
+CREATE INDEX idx_calling_ft ON telecom.voice_cdr USING FULLTEXT (calling_number);
 
 -- Query uses index to skip segments that cannot contain matches
 SELECT * FROM telecom.voice_cdr WHERE calling_number LIKE '%254712%';

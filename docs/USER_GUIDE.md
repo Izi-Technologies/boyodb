@@ -408,10 +408,10 @@ CREATE INDEX idx_users_email ON mydb.users (email);
 CREATE UNIQUE INDEX idx_users_email_unique ON mydb.users (email);
 
 -- Create hash index (for equality lookups)
-CREATE INDEX idx_users_id ON mydb.users (id) USING HASH;
+CREATE INDEX idx_users_id ON mydb.users USING HASH (id);
 
 -- Create fulltext index (for LIKE '%pattern%' searches)
-CREATE INDEX idx_phone ON mydb.users (phone_number) USING FULLTEXT;
+CREATE INDEX idx_phone ON mydb.users USING FULLTEXT (phone_number);
 
 -- Create composite index
 CREATE INDEX idx_orders_user_date ON mydb.orders (user_id, order_date);
@@ -1281,16 +1281,16 @@ MODE OnCompaction;
 
 ```sql
 -- Hash index for equality lookups
-CREATE INDEX idx_user_id ON analytics.events (user_id) USING HASH;
+CREATE INDEX idx_user_id ON analytics.events USING HASH (user_id);
 
 -- B-tree index for range queries
-CREATE INDEX idx_timestamp ON analytics.events (timestamp) USING BTREE;
+CREATE INDEX idx_timestamp ON analytics.events USING BTREE (timestamp);
 
 -- Bloom filter for existence checks
-CREATE INDEX idx_email ON analytics.users (email) USING BLOOM;
+CREATE INDEX idx_email ON analytics.users USING BLOOM (email);
 
 -- Fulltext index for substring searches (LIKE '%pattern%')
-CREATE INDEX idx_phone ON telecom.cdr (calling_number) USING FULLTEXT;
+CREATE INDEX idx_phone ON telecom.cdr USING FULLTEXT (calling_number);
 
 -- Composite index for common query patterns
 CREATE INDEX idx_user_time ON analytics.events (user_id, timestamp);
@@ -1525,7 +1525,7 @@ CREATE TABLE analytics.events (
 );
 
 -- Create hash index for user lookups
-CREATE INDEX idx_user ON analytics.events (user_id) USING HASH;
+CREATE INDEX idx_user ON analytics.events USING HASH (user_id);
 
 -- Create index for time-range queries
 CREATE INDEX idx_time ON analytics.events (timestamp);

@@ -151,10 +151,10 @@ REFRESH MATERIALIZED VIEW daily_stats;
 CREATE INDEX idx_timestamp ON events (timestamp);
 
 -- Hash index for equality lookups
-CREATE INDEX idx_user_id ON events (user_id) USING HASH;
+CREATE INDEX idx_user_id ON events USING HASH (user_id);
 
 -- Fulltext index for substring searches (LIKE '%pattern%')
-CREATE INDEX idx_phone ON calls (phone_number) USING FULLTEXT;
+CREATE INDEX idx_phone ON calls USING FULLTEXT (phone_number);
 
 -- Unique constraint
 CREATE UNIQUE INDEX idx_email ON users (email);

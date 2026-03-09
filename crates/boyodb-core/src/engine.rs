@@ -17111,23 +17111,18 @@ pub(crate) fn persist_manifest(path: &Path, manifest: &Manifest) -> Result<(), E
             .map_err(|e| EngineError::Io(format!("fsync manifest tmp failed: {e}")))?;
     }
 
-    if let Err(e) = fs::rename(&tmp, &binary_path) {
-        if e.kind() == ErrorKind::NotFound {
-            // Fallback for rare filesystem races: write directly to final path.
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&binary_path)
-                .map_err(|e| EngineError::Io(format!("open manifest final failed: {e}")))?;
-            file.write_all(&bytes)
-                .map_err(|e| EngineError::Io(format!("write manifest final failed: {e}")))?;
-            file.sync_all()
-                .map_err(|e| EngineError::Io(format!("fsync manifest final failed: {e}")))?;
-        } else {
-            return Err(EngineError::Io(format!("rename manifest failed: {e}")));
-        }
-    }
+    // Atomic rename - NEVER fall back to truncating live manifest
+    // The old fallback could corrupt the manifest during concurrent writes
+    fs::rename(&tmp, &binary_path).map_err(|e| {
+        // Clean up temp file on failure
+        let _ = fs::remove_file(&tmp);
+        EngineError::Io(format!(
+            "atomic manifest rename failed (tmp={}, target={}): {}",
+            tmp.display(),
+            binary_path.display(),
+            e
+        ))
+    })?;
 
     // Also write JSON for backward compatibility and debugging (can be disabled for production)
     #[cfg(debug_assertions)]
@@ -17164,6 +17159,9 @@ fn snapshot_manifest(snapshot_path: &Path, manifest_path: &Path) -> Result<(), E
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
+    // Check for duplicate segment IDs (corruption indicator)
+    let mut seen_segments: HashSet<&str> = HashSet::new();
+
     for db in &manifest.databases {
         if !is_valid_ident(&db.name) {
             return Err(EngineError::InvalidArgument(
@@ -17183,6 +17181,13 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
             return Err(EngineError::InvalidArgument(
                 "manifest entry missing segment_id".into(),
             ));
+        }
+        // Check for duplicate segment IDs
+        if !seen_segments.insert(&entry.segment_id) {
+            return Err(EngineError::InvalidArgument(format!(
+                "manifest contains duplicate segment_id: {} (corruption detected)",
+                entry.segment_id
+            )));
         }
         if entry.size_bytes == 0 {
             return Err(EngineError::InvalidArgument(
@@ -17207,7 +17212,23 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
                 )));
             }
         }
+        // Validate size is reasonable (< 10GB per segment)
+        if entry.size_bytes > 10_000_000_000 {
+            tracing::warn!(
+                "manifest entry {} has suspiciously large size: {} bytes (possible corruption)",
+                entry.segment_id, entry.size_bytes
+            );
+        }
     }
+
+    // Validate manifest version is reasonable
+    if manifest.version > 1_000_000_000 {
+        tracing::warn!(
+            "manifest version {} is suspiciously high (possible corruption)",
+            manifest.version
+        );
+    }
+
     Ok(())
 }
 

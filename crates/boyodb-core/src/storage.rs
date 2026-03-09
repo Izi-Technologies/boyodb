@@ -234,8 +234,14 @@ impl TieredStorage {
                     // Verify checksum
                     let actual_checksum = crate::engine::compute_checksum(&bytes);
                     if actual_checksum != expected_checksum {
-                        // Delete the corrupt upload
-                        let _ = remote.delete(&path).await;
+                        // Delete the corrupt upload - log error if delete fails
+                        if let Err(del_err) = remote.delete(&path).await {
+                            tracing::error!(
+                                "CRITICAL: Failed to delete corrupt S3 segment {} after checksum mismatch: {}. \
+                                 Manual cleanup required at path: {}",
+                                segment_id, del_err, path
+                            );
+                        }
                         return Err(EngineError::Io(format!(
                             "s3 upload verification failed for {}: checksum mismatch (expected {:016x}, got {:016x})",
                             segment_id, expected_checksum, actual_checksum
