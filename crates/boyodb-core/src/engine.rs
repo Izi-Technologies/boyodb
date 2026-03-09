@@ -5064,8 +5064,9 @@ impl Db {
                     }
                 }
 
-                // Build COUNT(*) result
-                let schema = Arc::new(Schema::new(vec![Field::new("count", DataType::UInt64, false)]));
+                // Build COUNT(*) result - use alias if provided, otherwise default to "count"
+                let col_name = agg_plan.aggs[0].output_name();
+                let schema = Arc::new(Schema::new(vec![Field::new(&col_name, DataType::UInt64, false)]));
                 let count_array = UInt64Array::from(vec![total_count]);
                 let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(count_array)])
                     .map_err(|e| EngineError::Internal(format!("count result: {e}")))?;
