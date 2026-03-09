@@ -4,7 +4,7 @@ use crate::replication::{
 };
 use crate::sql::SelectExpr;
 use crate::sql::SqlValue;
-use crate::wal::{search_wal_for_segment, Wal};
+use crate::wal::{search_wal_for_segment, GroupCommitConfig, Wal};
 use arrow::compute::kernels::aggregate;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
@@ -427,6 +427,21 @@ pub struct EngineConfig {
     /// Sync parent directory after file creation (ensures directory entry is persisted)
     pub sync_parent_dirs: bool,
 
+    // --- Fast Transactional Writes ---
+    /// Enable group commit for WAL (batches multiple writes before fsync)
+    /// Dramatically improves throughput for many small writes at the cost of
+    /// slightly increased latency. Each write waits up to group_commit_delay_ms
+    /// for other writes to batch together.
+    pub group_commit_enabled: bool,
+    /// Maximum delay in milliseconds before flushing a group commit batch
+    /// Lower values = lower latency but fewer batched writes
+    pub group_commit_delay_ms: u64,
+    /// Maximum number of writes to batch in a single group commit
+    /// When this threshold is reached, the batch is flushed immediately
+    pub group_commit_max_writes: usize,
+    /// Maximum bytes to batch in a single group commit
+    pub group_commit_max_bytes: u64,
+
     // --- Enhanced Fault Tolerance ---
     /// Validate schema hash on every segment load (catches schema corruption)
     pub validate_schema_on_load: bool,
@@ -541,6 +556,11 @@ impl EngineConfig {
             min_free_disk_bytes: 1024 * 1024 * 1024, // 1GB minimum free space
             check_disk_space: true,            // Check disk space before writes
             sync_parent_dirs: true,            // Sync parent dirs after file creation
+            // Fast transactional writes defaults (optimized for throughput)
+            group_commit_enabled: true,        // Enable group commit by default
+            group_commit_delay_ms: 5,          // 5ms max delay (good balance)
+            group_commit_max_writes: 1000,     // Flush after 1000 writes
+            group_commit_max_bytes: 16 * 1024 * 1024, // 16MB max batch size
             // Enhanced fault tolerance defaults
             validate_schema_on_load: true,     // Validate schema hash on every load
             deep_scrub_validate_ipc: true,     // Validate IPC format during deep scrub
@@ -616,6 +636,30 @@ impl EngineConfig {
 
     pub fn with_plan_cache_ttl_secs(mut self, ttl: u64) -> Self {
         self.plan_cache_ttl_secs = ttl;
+        self
+    }
+
+    /// Configure group commit for fast transactional writes
+    ///
+    /// Group commit batches multiple small writes together before fsyncing,
+    /// dramatically improving throughput for workloads with many small writes.
+    ///
+    /// # Arguments
+    /// * `enabled` - Whether to enable group commit
+    /// * `delay_ms` - Maximum delay before flushing (lower = lower latency, higher = more batching)
+    /// * `max_writes` - Maximum writes to batch before flushing
+    /// * `max_bytes` - Maximum bytes to batch before flushing
+    pub fn with_group_commit(
+        mut self,
+        enabled: bool,
+        delay_ms: u64,
+        max_writes: usize,
+        max_bytes: u64,
+    ) -> Self {
+        self.group_commit_enabled = enabled;
+        self.group_commit_delay_ms = delay_ms;
+        self.group_commit_max_writes = max_writes;
+        self.group_commit_max_bytes = max_bytes;
         self
     }
 
@@ -2681,6 +2725,23 @@ impl Db {
 
         let mut wal = Wal::open(&cfg.wal_path)?;
         wal.set_max_segments(cfg.wal_max_segments);
+
+        // Enable group commit for fast transactional writes
+        if cfg.group_commit_enabled {
+            wal.enable_group_commit(GroupCommitConfig {
+                enabled: true,
+                max_delay_ms: cfg.group_commit_delay_ms,
+                max_writes: cfg.group_commit_max_writes,
+                max_bytes: cfg.group_commit_max_bytes,
+            });
+            tracing::info!(
+                "Group commit enabled: max_delay={}ms, max_writes={}, max_bytes={}",
+                cfg.group_commit_delay_ms,
+                cfg.group_commit_max_writes,
+                cfg.group_commit_max_bytes
+            );
+        }
+
         wal.replay(&storage, &cfg.manifest_path)?;
         let mut manifest = load_manifest(&cfg.manifest_path).or_else(|_| {
             if cfg.manifest_snapshot_path.exists() {
@@ -3378,16 +3439,26 @@ impl Db {
         // CRITICAL: WAL must be synced BEFORE manifest is persisted.
         // This ensures we can always recover from WAL if crash occurs after manifest update.
         // Order: segment file -> WAL sync -> manifest persist
+        //
+        // With group commit enabled, multiple writes are batched together for a single fsync.
+        // This dramatically improves throughput for workloads with many small writes.
         {
             let mut wal = self
                 .wal
                 .lock()
                 .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
-            wal.append_segment(&entry, &stored_payload)?;
+
+            // Use group commit if enabled, otherwise direct write
+            let _group_seq = wal.append_segment_grouped(&entry, &stored_payload)?;
 
             // Force sync WAL before manifest persist to ensure crash consistency
             if should_persist {
+                // Flush all pending group commit writes
+                wal.flush_group_commit()?;
                 wal.flush_sync()?;
+            } else if self.cfg.group_commit_enabled {
+                // With group commit, batch writes and flush when thresholds are met
+                wal.maybe_flush_group_commit()?;
             } else {
                 wal.maybe_sync(self.cfg.wal_sync_bytes, self.cfg.wal_sync_interval_ms)?;
             }
@@ -3438,6 +3509,257 @@ impl Db {
         );
 
         Ok(())
+    }
+
+    /// Ingest multiple batches in a single call (optimized for frequent small updates)
+    ///
+    /// This is more efficient than calling `ingest_ipc` multiple times because:
+    /// 1. Single manifest lock acquisition for all batches
+    /// 2. Single WAL fsync for all batches (with group commit)
+    /// 3. Reduced per-call overhead
+    ///
+    /// Returns the number of successfully ingested batches.
+    /// If any batch fails validation, all batches are rejected (atomic).
+    pub fn ingest_ipc_batch(&self, batches: Vec<IngestBatch>) -> Result<usize, EngineError> {
+        if batches.is_empty() {
+            return Ok(0);
+        }
+
+        // Pre-flight disk space check for all batches
+        let total_bytes: u64 = batches.iter().map(|b| b.payload_ipc.len() as u64).sum();
+        self.check_disk_space(total_bytes + 4096 * batches.len() as u64)?;
+
+        // Collect validated entries and payloads
+        let mut validated_entries: Vec<(
+            ManifestEntry,
+            Vec<u8>,  // stored_payload
+            String,   // db_name
+            String,   // table_name
+            u16,      // shard_id
+            u64,      // row_count
+        )> = Vec::with_capacity(batches.len());
+
+        // Phase 1: Validate all batches (no locks held yet)
+        for batch in &batches {
+            if batch.payload_ipc.is_empty() {
+                return Err(EngineError::InvalidArgument(
+                    "empty ingest payload in batch".to_string(),
+                ));
+            }
+
+            let db_name = batch
+                .database
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default");
+            let table_name = batch
+                .table
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default");
+
+            validate_identifier(db_name, "database")?;
+            validate_identifier(table_name, "table")?;
+
+            // Look up existing schema
+            let existing_table = {
+                let manifest = self
+                    .manifest
+                    .read()
+                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                manifest
+                    .tables
+                    .iter()
+                    .find(|t| t.database == db_name && t.name == table_name)
+                    .cloned()
+            };
+
+            // Validate and get stats
+            let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
+            let stats = validated.stats;
+
+            // Get row count
+            let row_count = stats
+                .column_stats
+                .values()
+                .next()
+                .map(|cs| cs.row_count)
+                .unwrap_or(0);
+
+            // Compression and encoding
+            let table_compression = normalize_compression(
+                existing_table
+                    .as_ref()
+                    .and_then(|t| t.compression.clone())
+                    .or_else(|| self.cfg.tier_hot_compression.clone()),
+            )?;
+            let stored_payload = compress_payload(&batch.payload_ipc, table_compression.as_deref())?;
+
+            // Choose shard
+            let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
+            let global_shard_id = if let Some(hint) = batch.shard_override {
+                self.shard_map.read().unwrap().get_shard_id(hint)
+            } else if let Some(tid) = stats.tenant_id_min {
+                self.shard_map.read().unwrap().get_shard_id(tid)
+            } else {
+                (seq % self.shard_map.read().unwrap().total_shards.max(1) as u64) as u16
+            };
+
+            let segment_id = format!("seg-{global_shard_id}-{seq}");
+            let manifest_entry = ManifestEntry {
+                segment_id,
+                shard_id: global_shard_id,
+                version_added: 0,
+                size_bytes: stored_payload.len() as u64,
+                checksum: compute_checksum(&stored_payload),
+                tier: SegmentTier::Hot,
+                database: db_name.to_string(),
+                table: table_name.to_string(),
+                compression: table_compression.clone(),
+                watermark_micros: batch.watermark_micros,
+                event_time_min: stats.event_time_min,
+                event_time_max: stats.event_time_max,
+                tenant_id_min: stats.tenant_id_min,
+                tenant_id_max: stats.tenant_id_max,
+                route_id_min: stats.route_id_min,
+                route_id_max: stats.route_id_max,
+                bloom_tenant: stats.bloom_tenant,
+                bloom_route: stats.bloom_route,
+                column_stats: if stats.column_stats.is_empty() {
+                    None
+                } else {
+                    Some(stats.column_stats)
+                },
+                schema_hash: Some(validated.schema_hash),
+                created_txn: None,
+                deleted_txn: None,
+                deleted_version: None,
+            };
+
+            validated_entries.push((
+                manifest_entry,
+                stored_payload,
+                db_name.to_string(),
+                table_name.to_string(),
+                global_shard_id,
+                row_count,
+            ));
+        }
+
+        let count = validated_entries.len();
+        let use_memtable = self.cfg.memtable_max_bytes > 0 && self.cfg.memtable_max_entries > 0;
+
+        // Phase 2: Persist segments (if not using memtable)
+        if !use_memtable {
+            for (entry, payload, _, _, _, _) in &validated_entries {
+                persist_segment_ipc(&self.storage, &entry.segment_id, payload)?;
+            }
+        }
+
+        // Phase 3: Update manifest (single lock acquisition for all entries)
+        let entries_for_wal: Vec<(ManifestEntry, Vec<u8>)>;
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            entries_for_wal = validated_entries
+                .iter()
+                .map(|(entry, payload, db_name, table_name, _, _)| {
+                    // Ensure database exists
+                    if !manifest.databases.iter().any(|d| d.name == db_name.as_str()) {
+                        manifest.databases.push(crate::replication::DatabaseMeta {
+                            name: db_name.clone(),
+                        });
+                    }
+
+                    // Ensure table exists
+                    if !manifest.tables.iter().any(|t| {
+                        t.database == db_name.as_str() && t.name == table_name.as_str()
+                    }) {
+                        manifest.tables.push(crate::replication::TableMeta {
+                            database: db_name.clone(),
+                            name: table_name.clone(),
+                            schema_json: None,
+                            compression: None,
+                            deduplication: None,
+                            constraints: Vec::new(),
+                            retention_policy: None,
+                            partition_config: None,
+                        });
+                    }
+
+                    manifest.bump_version();
+                    let mut entry = entry.clone();
+                    entry.version_added = manifest.version;
+                    let entry_index = manifest.entries.len();
+                    manifest.entries.push(entry.clone());
+
+                    // Update index
+                    let mut index = self.manifest_index.write().unwrap();
+                    index.add_entry(entry_index, &entry);
+
+                    (entry, payload.clone())
+                })
+                .collect();
+        }
+
+        // Phase 4: WAL writes (single fsync for all entries with group commit)
+        {
+            let mut wal = self
+                .wal
+                .lock()
+                .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+
+            // Write all entries to WAL
+            for (entry, payload) in &entries_for_wal {
+                wal.append_segment_grouped(entry, payload)?;
+            }
+
+            // Single flush for all writes
+            if self.cfg.group_commit_enabled {
+                wal.flush_group_commit()?;
+            }
+            wal.flush_sync()?;
+            wal.maybe_rotate(self.cfg.wal_max_bytes)?;
+        }
+
+        // Phase 5: Buffer in memtable if enabled
+        if use_memtable {
+            for (entry, payload, db_name, table_name, shard_id, _) in &validated_entries {
+                let local_shard_idx = (*shard_id as usize) % self.shards.len();
+                let shard = self.shards.get(local_shard_idx).unwrap();
+                self.buffer_memtable_entry(
+                    db_name,
+                    table_name,
+                    shard.id,
+                    MemtableEntry {
+                        entry: entry.clone(),
+                        payload: payload.clone(),
+                    },
+                )?;
+            }
+        }
+
+        // Phase 6: Invalidate caches and update metrics
+        {
+            let mut cache = self.query_cache.lock();
+            for (entry, _, _, _, _, _) in &validated_entries {
+                cache.invalidate_table(&entry.database, &entry.table);
+            }
+        }
+
+        let total_bytes: u64 = validated_entries.iter().map(|(e, _, _, _, _, _)| e.size_bytes).sum();
+        self.metrics.ingests_total.fetch_add(count as u64, Ordering::Relaxed);
+        self.metrics.ingests_bytes.fetch_add(total_bytes, Ordering::Relaxed);
+
+        // Track rows for auto-stats
+        for (_, _, db_name, table_name, _, row_count) in validated_entries {
+            self.track_rows_and_maybe_update_stats(&db_name, &table_name, row_count);
+        }
+
+        Ok(count)
     }
 
     /// Ingest data within a transaction context

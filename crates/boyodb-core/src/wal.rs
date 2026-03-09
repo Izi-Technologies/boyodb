@@ -9,8 +9,165 @@ use std::collections::HashSet;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+/// Configuration for group commit
+#[derive(Debug, Clone)]
+pub struct GroupCommitConfig {
+    /// Enable group commit (batching writes before fsync)
+    pub enabled: bool,
+    /// Maximum delay before flushing batch (milliseconds)
+    pub max_delay_ms: u64,
+    /// Maximum writes before flushing batch
+    pub max_writes: usize,
+    /// Maximum bytes before flushing batch
+    pub max_bytes: u64,
+}
+
+impl Default for GroupCommitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_delay_ms: 5,
+            max_writes: 1000,
+            max_bytes: 16 * 1024 * 1024, // 16MB
+        }
+    }
+}
+
+/// A pending write waiting for group commit
+pub(crate) struct PendingWrite {
+    /// The WAL record to write
+    pub(crate) record_bytes: Vec<u8>,
+    /// Unique sequence number for this write
+    pub(crate) seq: u64,
+}
+
+/// Group commit buffer for batching WAL writes
+///
+/// This dramatically improves throughput for workloads with many small writes
+/// by batching multiple writes into a single fsync call.
+pub struct GroupCommitBuffer {
+    /// Pending writes waiting to be flushed
+    pending: StdMutex<Vec<PendingWrite>>,
+    /// Condition variable for waiting writers
+    flush_complete: Condvar,
+    /// Last flushed sequence number (all writes <= this are durable)
+    last_flushed_seq: AtomicU64,
+    /// Next sequence number to assign
+    next_seq: AtomicU64,
+    /// Current pending bytes
+    pending_bytes: AtomicU64,
+    /// Configuration
+    config: GroupCommitConfig,
+    /// Time of last flush
+    last_flush_time: StdMutex<Instant>,
+}
+
+impl GroupCommitBuffer {
+    pub fn new(config: GroupCommitConfig) -> Self {
+        Self {
+            pending: StdMutex::new(Vec::with_capacity(config.max_writes)),
+            flush_complete: Condvar::new(),
+            last_flushed_seq: AtomicU64::new(0),
+            next_seq: AtomicU64::new(1),
+            pending_bytes: AtomicU64::new(0),
+            config,
+            last_flush_time: StdMutex::new(Instant::now()),
+        }
+    }
+
+    /// Add a write to the buffer and return its sequence number
+    pub fn add_write(&self, record_bytes: Vec<u8>) -> u64 {
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        let bytes_len = record_bytes.len() as u64;
+
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.push(PendingWrite { record_bytes, seq });
+        }
+
+        self.pending_bytes.fetch_add(bytes_len, Ordering::SeqCst);
+        seq
+    }
+
+    /// Check if the buffer should be flushed
+    pub fn should_flush(&self) -> bool {
+        if !self.config.enabled {
+            return true; // Always flush immediately if group commit disabled
+        }
+
+        let pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            return false;
+        }
+
+        // Flush if we hit write count threshold
+        if pending.len() >= self.config.max_writes {
+            return true;
+        }
+
+        // Flush if we hit byte threshold
+        if self.pending_bytes.load(Ordering::SeqCst) >= self.config.max_bytes {
+            return true;
+        }
+
+        // Flush if we hit time threshold
+        let last_flush = self.last_flush_time.lock().unwrap();
+        if last_flush.elapsed() >= Duration::from_millis(self.config.max_delay_ms) {
+            return true;
+        }
+
+        false
+    }
+
+    /// Take all pending writes for flushing
+    pub(crate) fn take_pending(&self) -> Vec<PendingWrite> {
+        let mut pending = self.pending.lock().unwrap();
+        let writes = std::mem::take(&mut *pending);
+        self.pending_bytes.store(0, Ordering::SeqCst);
+        *self.last_flush_time.lock().unwrap() = Instant::now();
+        writes
+    }
+
+    /// Mark a sequence as flushed and wake up waiting writers
+    pub fn mark_flushed(&self, max_seq: u64) {
+        self.last_flushed_seq.store(max_seq, Ordering::SeqCst);
+        self.flush_complete.notify_all();
+    }
+
+    /// Wait until a specific sequence number has been flushed
+    pub fn wait_for_flush(&self, seq: u64, timeout: Duration) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        let deadline = Instant::now() + timeout;
+
+        while self.last_flushed_seq.load(Ordering::SeqCst) < seq {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false; // Timeout
+            }
+            let (lock, timeout_result) = self.flush_complete.wait_timeout(pending, remaining).unwrap();
+            pending = lock;
+            if timeout_result.timed_out() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get the number of pending writes
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap().len()
+    }
+
+    /// Get the pending bytes
+    pub fn pending_bytes(&self) -> u64 {
+        self.pending_bytes.load(Ordering::SeqCst)
+    }
+}
 
 /// Header for each WAL record with LSN and timestamp for PITR
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +240,8 @@ pub struct Wal {
     file_start_timestamp: u64,
     /// Archive callback for PITR support
     archive_callback: Option<std::sync::Arc<ArchiveCallback>>,
+    /// Group commit buffer for batching writes (optional)
+    group_commit: Option<Arc<GroupCommitBuffer>>,
 }
 
 impl std::fmt::Debug for Wal {
@@ -94,6 +253,7 @@ impl std::fmt::Debug for Wal {
             .field("current_lsn", &self.current_lsn)
             .field("file_start_lsn", &self.file_start_lsn)
             .field("archive_callback", &self.archive_callback.is_some())
+            .field("group_commit_enabled", &self.group_commit.is_some())
             .finish()
     }
 }
@@ -142,7 +302,34 @@ impl Wal {
             file_start_lsn,
             file_start_timestamp: now_micros,
             archive_callback: None,
+            group_commit: None,
         })
+    }
+
+    /// Open WAL with group commit configuration for fast transactional writes
+    pub fn open_with_group_commit(
+        path: &Path,
+        group_commit_config: GroupCommitConfig,
+    ) -> Result<Self, EngineError> {
+        let mut wal = Self::open(path)?;
+        if group_commit_config.enabled {
+            wal.group_commit = Some(Arc::new(GroupCommitBuffer::new(group_commit_config)));
+            debug!("WAL group commit enabled");
+        }
+        Ok(wal)
+    }
+
+    /// Enable group commit on an existing WAL
+    pub fn enable_group_commit(&mut self, config: GroupCommitConfig) {
+        if config.enabled {
+            self.group_commit = Some(Arc::new(GroupCommitBuffer::new(config)));
+            debug!("WAL group commit enabled");
+        }
+    }
+
+    /// Get a reference to the group commit buffer (if enabled)
+    pub fn group_commit_buffer(&self) -> Option<&Arc<GroupCommitBuffer>> {
+        self.group_commit.as_ref()
     }
 
     /// Scan WAL files to recover the highest LSN
@@ -431,6 +618,104 @@ impl Wal {
         // Persist LSN to metadata file for recovery
         let _ = self.persist_lsn();
         Ok(())
+    }
+
+    /// Serialize a segment record to bytes (for group commit batching)
+    fn serialize_segment_record(entry: &ManifestEntry, payload: &[u8]) -> Result<Vec<u8>, EngineError> {
+        let rec = WalRecord::Segment {
+            entry: entry.clone(),
+            payload: payload.to_vec(),
+        };
+        let bytes = serde_json::to_vec(&rec)
+            .map_err(|e| EngineError::Internal(format!("wal encode: {e}")))?;
+        let checksum = xxhash_rust::xxh64::xxh64(&bytes, 0);
+        let header = format!("{} {:016x} ", bytes.len(), checksum);
+        let mut result = Vec::with_capacity(header.len() + bytes.len() + 1);
+        result.extend_from_slice(header.as_bytes());
+        result.extend_from_slice(&bytes);
+        result.push(b'\n');
+        Ok(result)
+    }
+
+    /// Add a segment to the group commit buffer (if enabled) or write directly
+    /// Returns a sequence number that can be used to wait for the write to be durable
+    pub fn append_segment_grouped(
+        &mut self,
+        entry: &ManifestEntry,
+        payload: &[u8],
+    ) -> Result<Option<u64>, EngineError> {
+        if let Some(ref group_commit) = self.group_commit {
+            // Serialize the record
+            let record_bytes = Self::serialize_segment_record(entry, payload)?;
+            // Add to group commit buffer
+            let seq = group_commit.add_write(record_bytes);
+            Ok(Some(seq))
+        } else {
+            // No group commit, write directly
+            self.append_segment(entry, payload)?;
+            Ok(None)
+        }
+    }
+
+    /// Flush all pending group commit writes
+    /// Returns the number of writes flushed
+    pub fn flush_group_commit(&mut self) -> Result<usize, EngineError> {
+        let group_commit = match &self.group_commit {
+            Some(gc) => gc.clone(),
+            None => return Ok(0),
+        };
+
+        let pending = group_commit.take_pending();
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let count = pending.len();
+        let mut max_seq = 0u64;
+
+        // Write all pending records
+        for write in pending {
+            self.writer
+                .write_all(&write.record_bytes)
+                .map_err(|e| EngineError::Io(format!("wal group write failed: {e}")))?;
+            self.pending_bytes += write.record_bytes.len();
+            max_seq = max_seq.max(write.seq);
+        }
+
+        // Single fsync for all writes
+        self.flush_sync()?;
+
+        // Mark all writes as flushed
+        group_commit.mark_flushed(max_seq);
+
+        debug!("Group commit flushed {} writes", count);
+        Ok(count)
+    }
+
+    /// Check if group commit should be flushed and flush if needed
+    pub fn maybe_flush_group_commit(&mut self) -> Result<usize, EngineError> {
+        if let Some(ref gc) = self.group_commit {
+            if gc.should_flush() {
+                return self.flush_group_commit();
+            }
+        }
+        Ok(0)
+    }
+
+    /// Wait for a specific group commit sequence to be durable
+    pub fn wait_for_group_commit(&self, seq: u64, timeout: Duration) -> bool {
+        if let Some(ref gc) = self.group_commit {
+            gc.wait_for_flush(seq, timeout)
+        } else {
+            true // No group commit, writes are immediately durable
+        }
+    }
+
+    /// Get group commit statistics
+    pub fn group_commit_stats(&self) -> Option<(usize, u64)> {
+        self.group_commit.as_ref().map(|gc| {
+            (gc.pending_count(), gc.pending_bytes())
+        })
     }
 
     pub fn replay(
@@ -1213,5 +1498,114 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("wal.log."))
             .count();
         assert_eq!(rotated_count, 0);
+    }
+
+    #[test]
+    fn test_group_commit_buffer() {
+        let config = GroupCommitConfig {
+            enabled: true,
+            max_delay_ms: 100,
+            max_writes: 5,
+            max_bytes: 1024 * 1024,
+        };
+        let buffer = GroupCommitBuffer::new(config);
+
+        // Add some writes
+        let seq1 = buffer.add_write(vec![1, 2, 3]);
+        let seq2 = buffer.add_write(vec![4, 5, 6]);
+        let seq3 = buffer.add_write(vec![7, 8, 9]);
+
+        assert_eq!(buffer.pending_count(), 3);
+        assert_eq!(buffer.pending_bytes(), 9);
+        assert!(seq1 < seq2);
+        assert!(seq2 < seq3);
+
+        // Should not flush yet (not at threshold)
+        assert!(!buffer.should_flush());
+
+        // Add more writes to hit threshold
+        buffer.add_write(vec![10, 11]);
+        buffer.add_write(vec![12, 13]);
+
+        // Now should flush (5 writes = max_writes)
+        assert!(buffer.should_flush());
+
+        // Take pending
+        let pending = buffer.take_pending();
+        assert_eq!(pending.len(), 5);
+        assert_eq!(buffer.pending_count(), 0);
+
+        // Mark as flushed
+        let max_seq = pending.iter().map(|p| p.seq).max().unwrap();
+        buffer.mark_flushed(max_seq);
+
+        // Wait should succeed immediately
+        assert!(buffer.wait_for_flush(seq1, Duration::from_millis(10)));
+        assert!(buffer.wait_for_flush(seq3, Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn test_group_commit_wal_integration() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+
+        // Open WAL with group commit enabled
+        let config = GroupCommitConfig {
+            enabled: true,
+            max_delay_ms: 1000, // Long delay so we control flushing
+            max_writes: 100,
+            max_bytes: 1024 * 1024,
+        };
+        let mut wal = Wal::open_with_group_commit(&wal_path, config).unwrap();
+
+        // Add entries using group commit
+        let payload1 = build_payload(vec![1u64, 2u64]);
+        let entry1 = build_entry("seg-gc-1", &payload1);
+        let seq1 = wal.append_segment_grouped(&entry1, &payload1).unwrap();
+        assert!(seq1.is_some());
+
+        let payload2 = build_payload(vec![3u64, 4u64]);
+        let entry2 = build_entry("seg-gc-2", &payload2);
+        let seq2 = wal.append_segment_grouped(&entry2, &payload2).unwrap();
+        assert!(seq2.is_some());
+
+        // Check stats
+        let stats = wal.group_commit_stats().unwrap();
+        assert_eq!(stats.0, 2); // 2 pending writes
+        assert!(stats.1 > 0); // Some pending bytes
+
+        // Flush
+        let flushed = wal.flush_group_commit().unwrap();
+        assert_eq!(flushed, 2);
+
+        // Stats should be zero now
+        let stats = wal.group_commit_stats().unwrap();
+        assert_eq!(stats.0, 0);
+        assert_eq!(stats.1, 0);
+
+        // Verify WAL file has content
+        let wal_len = std::fs::metadata(&wal_path).unwrap().len();
+        assert!(wal_len > 0, "WAL file should have content");
+    }
+
+    #[test]
+    fn test_group_commit_disabled() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("wal.log");
+
+        // Open WAL without group commit
+        let mut wal = Wal::open(&wal_path).unwrap();
+
+        // Group commit should return None (not enabled)
+        let payload = build_payload(vec![1u64]);
+        let entry = build_entry("seg-no-gc", &payload);
+        let seq = wal.append_segment_grouped(&entry, &payload).unwrap();
+        assert!(seq.is_none());
+
+        // Stats should also be None
+        assert!(wal.group_commit_stats().is_none());
+
+        // Flush should return 0
+        assert_eq!(wal.flush_group_commit().unwrap(), 0);
     }
 }

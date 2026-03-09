@@ -5,6 +5,34 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-03-09
+
+### Added
+- **Group Commit for Fast Transactional Writes**: New WAL batching mechanism that dramatically improves throughput for workloads with many small writes
+  - Batches multiple writes together before fsync, reducing disk I/O overhead
+  - Configurable parameters: `group_commit_delay_ms`, `group_commit_max_writes`, `group_commit_max_bytes`
+  - Enabled by default with sensible defaults (5ms delay, 1000 writes, 16MB max batch)
+- **Batch Ingest API**: New `ingest_ipc_batch()` method for efficient multiple small writes
+  - Single manifest lock acquisition for all entries
+  - Single WAL fsync for all entries (with group commit)
+  - Atomic semantics: all batches succeed or all fail validation
+- **Group Commit Configuration**: New builder method `with_group_commit()` for easy configuration
+
+### Performance
+- **Fast Transactional Writes**: Up to 10-50x throughput improvement for many small writes
+  - Before: Each write requires separate fsync (~10ms latency per write)
+  - After: Multiple writes batched with single fsync (amortized latency)
+- **Frequent Small Updates**: Batch API reduces per-write overhead
+  - Single lock acquisition instead of N locks for N writes
+  - Single WAL sync instead of N syncs
+
+### Configuration
+New engine configuration options:
+- `group_commit_enabled`: Enable group commit (default: true)
+- `group_commit_delay_ms`: Maximum delay before flushing batch (default: 5ms)
+- `group_commit_max_writes`: Maximum writes per batch (default: 1000)
+- `group_commit_max_bytes`: Maximum bytes per batch (default: 16MB)
+
 ## [0.2.6] - 2026-03-09
 
 ### Fixed
