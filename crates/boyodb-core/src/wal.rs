@@ -763,6 +763,7 @@ impl Wal {
         // Collect all new entries and persist segments
         let mut new_entries = Vec::new();
         let mut seen_in_replay: HashSet<String> = HashSet::new();
+        let mut segments_processed = 0u64;
 
         for result in results {
             let entries = result?;
@@ -779,6 +780,12 @@ impl Wal {
                 // Only add to manifest if not already present
                 if !existing_ids.contains(&entry.segment_id) {
                     new_entries.push(entry);
+                }
+
+                // Throttle recovery to reduce CPU usage (yield every 100 segments)
+                segments_processed += 1;
+                if segments_processed % 100 == 0 {
+                    std::thread::yield_now();
                 }
             }
         }

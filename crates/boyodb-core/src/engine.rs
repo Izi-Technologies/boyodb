@@ -443,6 +443,14 @@ pub struct EngineConfig {
     /// Maximum bytes to batch in a single group commit
     pub group_commit_max_bytes: u64,
 
+    // --- Recovery/Scrubbing Performance ---
+    /// Maximum parallel threads for recovery operations (0 = use all cores)
+    /// Set to 1-2 to reduce CPU usage during WAL replay and scrubbing
+    pub recovery_max_threads: usize,
+    /// Delay in milliseconds between segment operations during recovery
+    /// Adds throttling to reduce CPU spikes (0 = no delay)
+    pub recovery_throttle_ms: u64,
+
     // --- Enhanced Fault Tolerance ---
     /// Validate schema hash on every segment load (catches schema corruption)
     pub validate_schema_on_load: bool,
@@ -562,6 +570,9 @@ impl EngineConfig {
             group_commit_delay_ms: 5,          // 5ms max delay (good balance)
             group_commit_max_writes: 1000,     // Flush after 1000 writes
             group_commit_max_bytes: 16 * 1024 * 1024, // 16MB max batch size
+            // Recovery/scrubbing performance defaults
+            recovery_max_threads: 0,           // 0 = use all cores (set to 1-2 to reduce CPU)
+            recovery_throttle_ms: 0,           // 0 = no throttling (set to 10-50 to reduce CPU)
             // Enhanced fault tolerance defaults
             validate_schema_on_load: true,     // Validate schema hash on every load
             deep_scrub_validate_ipc: true,     // Validate IPC format during deep scrub
@@ -16758,6 +16769,12 @@ impl Db {
                     corrupted.push(segment_id);
                 }
             }
+
+            // Throttle to reduce CPU usage during scrub
+            std::thread::yield_now();
+            if self.cfg.recovery_throttle_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(self.cfg.recovery_throttle_ms));
+            }
         }
 
         if !corrupted.is_empty() {
@@ -16903,6 +16920,12 @@ impl Db {
                     tracing::warn!("Deep scrub: failed to read segment {}: {}", entry.segment_id, e);
                     result.read_errors.push(entry.segment_id.clone());
                 }
+            }
+
+            // Throttle to reduce CPU usage during deep scrub
+            std::thread::yield_now();
+            if self.cfg.recovery_throttle_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(self.cfg.recovery_throttle_ms));
             }
         }
 
