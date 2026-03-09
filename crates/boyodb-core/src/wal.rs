@@ -521,9 +521,28 @@ impl Wal {
         self.writer
             .flush()
             .map_err(|e| EngineError::Io(format!("wal flush failed: {e}")))?;
-        let len = std::fs::metadata(&self.path)
-            .map_err(|e| EngineError::Io(format!("wal metadata failed: {e}")))?
-            .len();
+
+        // Ensure WAL directory exists (might have been cleaned up)
+        if let Some(parent) = self.path.parent() {
+            create_dir_all(parent)
+                .map_err(|e| EngineError::Io(format!("create wal dir failed: {e}")))?;
+        }
+
+        let len = match std::fs::metadata(&self.path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File doesn't exist, recreate it
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&self.path)
+                    .map_err(|e| EngineError::Io(format!("wal recreate failed: {e}")))?;
+                self.writer = BufWriter::new(file);
+                return Ok(());
+            }
+            Err(e) => return Err(EngineError::Io(format!("wal metadata failed: {e}"))),
+        };
         if len <= max_bytes {
             return Ok(());
         }

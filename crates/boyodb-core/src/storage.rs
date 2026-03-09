@@ -17,10 +17,18 @@ pub struct TieredStorage {
 
 impl TieredStorage {
     pub fn new(cfg: &EngineConfig) -> Result<Self, EngineError> {
-        // We capture the handle of the runtime creating the DB (should be a Tokio runtime)
-        let runtime = Some(Handle::try_current().map_err(|_| {
-            EngineError::Internal("TieredStorage must be initialized within a Tokio runtime".into())
-        })?);
+        // Only require Tokio runtime if S3 is configured
+        let has_s3_config = cfg.s3_bucket.is_some() && cfg.s3_region.is_some();
+
+        let runtime = if has_s3_config {
+            // S3 operations require a Tokio runtime
+            Some(Handle::try_current().map_err(|_| {
+                EngineError::Internal("TieredStorage with S3 must be initialized within a Tokio runtime".into())
+            })?)
+        } else {
+            // Local-only storage doesn't need a runtime
+            Handle::try_current().ok()
+        };
 
         let remote = if let (Some(bucket), Some(region)) = (&cfg.s3_bucket, &cfg.s3_region) {
             let mut builder = AmazonS3Builder::new()

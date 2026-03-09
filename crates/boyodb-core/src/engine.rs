@@ -17093,7 +17093,8 @@ pub(crate) fn persist_manifest(path: &Path, manifest: &Manifest) -> Result<(), E
     let bytes = crate::replication::serialize_manifest_binary(manifest)
         .map_err(|e| EngineError::Internal(format!("serialize manifest failed: {e}")))?;
 
-    if let Some(parent) = path.parent() {
+    // Ensure parent directory exists for both original and binary paths
+    if let Some(parent) = binary_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| EngineError::Io(format!("create manifest dir failed: {e}")))?;
     }
