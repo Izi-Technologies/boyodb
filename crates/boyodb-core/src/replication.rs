@@ -47,7 +47,7 @@ struct ManifestV2 {
     #[serde(default)]
     pub databases: Vec<DatabaseMeta>,
     #[serde(default)]
-    pub tables: Vec<TableMeta>,
+    pub tables: Vec<TableMetaV4Old>,
     #[serde(default)]
     pub views: Vec<ViewMeta>,
     #[serde(default)]
@@ -66,13 +66,144 @@ impl ManifestV2 {
             format_version: MANIFEST_FORMAT_VERSION,
             version: self.version,
             databases: self.databases,
-            tables: self.tables,
+            tables: self.tables.into_iter().map(|t| t.to_current()).collect(),
             views: self.views,
             materialized_views: self.materialized_views,
             indexes: self.indexes,
             sequences: self.sequences,
             entries: self.entries,
             table_stats: Vec::new(), // V2 doesn't have table_stats
+        }
+    }
+}
+
+/// Old V4 manifest structure (without retention_policy, partition_config, correlations, most_common_values)
+/// Used for backward compatibility when reading manifests written before these fields were added
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestV4Old {
+    #[serde(default)]
+    pub format_version: u32,
+    pub version: u64,
+    #[serde(default)]
+    pub databases: Vec<DatabaseMeta>,
+    #[serde(default)]
+    pub tables: Vec<TableMetaV4Old>,
+    #[serde(default)]
+    pub views: Vec<ViewMeta>,
+    #[serde(default)]
+    pub materialized_views: Vec<MaterializedViewMeta>,
+    #[serde(default)]
+    pub indexes: Vec<IndexMeta>,
+    #[serde(default)]
+    pub sequences: Vec<SequenceMeta>,
+    pub entries: Vec<ManifestEntry>,
+    #[serde(default)]
+    pub table_stats: Vec<TableStatsMetaV4Old>,
+}
+
+impl ManifestV4Old {
+    fn to_current(self) -> Manifest {
+        Manifest {
+            format_version: MANIFEST_FORMAT_VERSION,
+            version: self.version,
+            databases: self.databases,
+            tables: self.tables.into_iter().map(|t| t.to_current()).collect(),
+            views: self.views,
+            materialized_views: self.materialized_views,
+            indexes: self.indexes,
+            sequences: self.sequences,
+            entries: self.entries,
+            table_stats: self.table_stats.into_iter().map(|s| s.to_current()).collect(),
+        }
+    }
+}
+
+/// Old TableMeta without retention_policy and partition_config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TableMetaV4Old {
+    pub database: String,
+    pub name: String,
+    pub schema_json: Option<String>,
+    #[serde(default)]
+    pub compression: Option<String>,
+    #[serde(default)]
+    pub deduplication: Option<crate::sql::DeduplicationConfig>,
+    #[serde(default)]
+    pub constraints: Vec<crate::sql::TableConstraint>,
+}
+
+impl TableMetaV4Old {
+    fn to_current(self) -> TableMeta {
+        TableMeta {
+            database: self.database,
+            name: self.name,
+            schema_json: self.schema_json,
+            compression: self.compression,
+            deduplication: self.deduplication,
+            constraints: self.constraints,
+            retention_policy: None,
+            partition_config: None,
+        }
+    }
+}
+
+/// Old TableStatsMeta without correlations
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct TableStatsMetaV4Old {
+    pub database: String,
+    pub table: String,
+    pub row_count: u64,
+    pub size_bytes: u64,
+    pub segment_count: u64,
+    #[serde(default)]
+    pub columns: HashMap<String, ColumnStatsMetaV4Old>,
+    pub last_updated: u64,
+    pub sample_rate: f64,
+}
+
+impl TableStatsMetaV4Old {
+    fn to_current(self) -> TableStatsMeta {
+        TableStatsMeta {
+            database: self.database,
+            table: self.table,
+            row_count: self.row_count,
+            size_bytes: self.size_bytes,
+            segment_count: self.segment_count,
+            columns: self.columns.into_iter().map(|(k, v)| (k, v.to_current())).collect(),
+            last_updated: self.last_updated,
+            sample_rate: self.sample_rate,
+            correlations: HashMap::new(),
+        }
+    }
+}
+
+/// Old ColumnStatsMeta without most_common_values
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ColumnStatsMetaV4Old {
+    pub distinct_count: u64,
+    pub null_count: u64,
+    pub non_null_count: u64,
+    #[serde(default)]
+    pub min_value: Option<String>,
+    #[serde(default)]
+    pub max_value: Option<String>,
+    #[serde(default)]
+    pub avg_length: Option<f64>,
+    #[serde(default)]
+    pub histogram: Option<HistogramMeta>,
+}
+
+impl ColumnStatsMetaV4Old {
+    fn to_current(self) -> ColumnStatsMeta {
+        ColumnStatsMeta {
+            distinct_count: self.distinct_count,
+            null_count: self.null_count,
+            non_null_count: self.non_null_count,
+            min_value: self.min_value,
+            max_value: self.max_value,
+            avg_length: self.avg_length,
+            histogram: self.histogram,
+            most_common_values: None,
         }
     }
 }
@@ -145,10 +276,22 @@ pub fn deserialize_manifest_binary(data: &[u8]) -> Result<Manifest, String> {
     }
 
     // Deserialize the verified payload
-    let manifest: Manifest = bincode::deserialize(payload)
-        .map_err(|e| format!("bincode deserialize v4 failed: {}", e))?;
-
-    Ok(manifest)
+    // Try current format first, then fall back to old V4 format for backward compatibility
+    match bincode::deserialize::<Manifest>(payload) {
+        Ok(manifest) => return Ok(manifest),
+        Err(e) => {
+            // Try old V4 format (before retention_policy, partition_config, correlations, most_common_values)
+            match bincode::deserialize::<ManifestV4Old>(payload) {
+                Ok(old_manifest) => {
+                    eprintln!("NOTE: Migrated manifest from old V4 format to current format");
+                    return Ok(old_manifest.to_current());
+                }
+                Err(_) => {
+                    return Err(format!("bincode deserialize v4 failed: {}", e));
+                }
+            }
+        }
+    }
 }
 
 /// Check if data is binary manifest format

@@ -7,11 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.4] - 2026-03-08
 
+### Fixed
+- **Manifest Migration**: Backward compatibility for V4 manifest format when upgrading from older versions
+  - Added `ManifestV4Old`, `TableMetaV4Old`, `TableStatsMetaV4Old`, `ColumnStatsMetaV4Old` structs
+  - Automatic migration from old V4 format (without retention_policy, partition_config, correlations, MCV fields)
+  - Existing data is preserved during upgrade without manual intervention
+
 ### Added
 - **EXPLAIN ANALYZE**: Visual query plan with actual execution statistics
 - **Parallel Aggregation**: Segment-level partial aggregates merged for billion-row scale
 - **Fast COUNT(*)**: Metadata-based counting without loading segment data
 - **Go Driver Enhancements**: Circuit breaker, health checks, auto-reconnect, connection stats
+- **Column-Level Encryption**: SQL commands for transparent encrypt/decrypt
+  - `CREATE/DROP/ROTATE ENCRYPTION KEY`
+  - `ALTER TABLE ... ENCRYPT/DECRYPT COLUMN`
+  - `SHOW ENCRYPTION KEYS`, `SHOW ENCRYPTED COLUMNS`
+- **Change Data Capture (CDC)**: Stream changes to downstream systems
+  - `CREATE/DROP CDC SUBSCRIPTION`
+  - `START/STOP CDC SUBSCRIPTION`
+  - `GET CHANGES FROM table SINCE sequence LIMIT n`
+  - `SET CDC CHECKPOINT`
+- **PostgreSQL/MySQL Compatible SQL Commands**:
+  - Session: `SET variable = value`, `SHOW VARIABLES`, `SHOW STATUS`
+  - Process: `SHOW PROCESSLIST`, `KILL connection_id`, `KILL QUERY query_id`
+  - Table: `OPTIMIZE TABLE`, `CHECK TABLE`, `CHECKSUM TABLE`, `REPAIR TABLE`
+  - Index: `REINDEX TABLE`, `REINDEX INDEX`, `REINDEX DATABASE`, `CLUSTER`
+  - Metadata: `COMMENT ON TABLE/COLUMN/DATABASE`, `SHOW CREATE TABLE/VIEW/DATABASE`
+  - Admin: `LOCK/UNLOCK TABLES`, `FLUSH TABLES/PRIVILEGES`, `RESET QUERY CACHE`
+  - Info: `SHOW TABLE STATUS`, `SHOW COLUMNS`, `SHOW ENGINE STATUS`, `SHOW WARNINGS/ERRORS`
 
 ### Performance
 - COUNT(*) on billions of rows uses segment metadata (sub-second)

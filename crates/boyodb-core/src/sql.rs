@@ -1234,6 +1234,293 @@ pub enum DdlCommand {
     ShowStreamStatus { name: String },
     /// SHOW REPAIR STATUS - Display auto-repair status and statistics
     ShowRepairStatus,
+
+    // ============================================================================
+    // Column-Level Encryption Commands
+    // ============================================================================
+
+    /// CREATE ENCRYPTION KEY key_name [ALGORITHM AES256GCM|CHACHA20] [EXPIRES timestamp]
+    CreateEncryptionKey {
+        key_name: String,
+        algorithm: EncryptionAlgorithmType,
+        expires_at: Option<u64>,
+    },
+    /// DROP ENCRYPTION KEY [IF EXISTS] key_name
+    DropEncryptionKey {
+        key_name: String,
+        if_exists: bool,
+    },
+    /// ROTATE ENCRYPTION KEY key_name
+    RotateEncryptionKey {
+        key_name: String,
+    },
+    /// SHOW ENCRYPTION KEYS
+    ShowEncryptionKeys,
+    /// ALTER TABLE ... ENCRYPT COLUMN column_name WITH KEY key_name
+    EncryptColumn {
+        database: String,
+        table: String,
+        column: String,
+        key_name: String,
+        algorithm: Option<EncryptionAlgorithmType>,
+    },
+    /// ALTER TABLE ... DECRYPT COLUMN column_name
+    DecryptColumn {
+        database: String,
+        table: String,
+        column: String,
+    },
+    /// SHOW ENCRYPTED COLUMNS [FROM database.table]
+    ShowEncryptedColumns {
+        database: Option<String>,
+        table: Option<String>,
+    },
+
+    // ============================================================================
+    // Change Data Capture (CDC) Commands
+    // ============================================================================
+
+    /// CREATE CDC SUBSCRIPTION name ON database.table [TO target] [WITH options]
+    CreateCdcSubscription {
+        name: String,
+        database: String,
+        table: String,
+        target_type: CdcTargetType,
+        target_config: Option<String>,
+        include_before: bool,
+    },
+    /// DROP CDC SUBSCRIPTION [IF EXISTS] name
+    DropCdcSubscription {
+        name: String,
+        if_exists: bool,
+    },
+    /// START CDC SUBSCRIPTION name
+    StartCdcSubscription {
+        name: String,
+    },
+    /// STOP CDC SUBSCRIPTION name
+    StopCdcSubscription {
+        name: String,
+    },
+    /// SHOW CDC SUBSCRIPTIONS
+    ShowCdcSubscriptions,
+    /// SHOW CDC STATUS name
+    ShowCdcStatus {
+        name: String,
+    },
+    /// GET CHANGES FROM database.table [SINCE sequence] [LIMIT n]
+    GetChanges {
+        database: String,
+        table: String,
+        since_sequence: Option<u64>,
+        limit: Option<usize>,
+    },
+    /// SET CDC CHECKPOINT name TO sequence
+    SetCdcCheckpoint {
+        name: String,
+        sequence: u64,
+    },
+
+    // ============================================================================
+    // Session & Server Management Commands (PostgreSQL/MySQL compatible)
+    // ============================================================================
+
+    /// SET variable = value - Set session variable
+    SetVariable {
+        name: String,
+        value: String,
+        /// LOCAL = transaction-scoped, SESSION = session-scoped (default)
+        scope: VariableScope,
+    },
+    /// SHOW variable - Show a session variable value
+    ShowVariable {
+        name: String,
+    },
+    /// SHOW VARIABLES [LIKE pattern] - Show all session variables
+    ShowVariables {
+        pattern: Option<String>,
+    },
+    /// SHOW STATUS [LIKE pattern] - Show server status counters
+    ShowStatus {
+        pattern: Option<String>,
+    },
+    /// SHOW PROCESSLIST / SHOW FULL PROCESSLIST - Show running queries
+    ShowProcesslist {
+        full: bool,
+    },
+    /// KILL connection_id - Terminate a connection
+    KillConnection {
+        connection_id: u64,
+    },
+    /// KILL QUERY query_id - Terminate a specific query
+    KillQuery {
+        query_id: u64,
+    },
+    /// COMMENT ON TABLE database.table IS 'comment'
+    CommentOnTable {
+        database: String,
+        table: String,
+        comment: Option<String>,
+    },
+    /// COMMENT ON COLUMN database.table.column IS 'comment'
+    CommentOnColumn {
+        database: String,
+        table: String,
+        column: String,
+        comment: Option<String>,
+    },
+    /// COMMENT ON DATABASE database IS 'comment'
+    CommentOnDatabase {
+        database: String,
+        comment: Option<String>,
+    },
+    /// CLUSTER [VERBOSE] table USING index_name - Reorder table by index
+    ClusterTable {
+        database: String,
+        table: String,
+        index_name: String,
+        verbose: bool,
+    },
+    /// CLUSTER - Cluster all previously-clustered tables
+    ClusterAll,
+    /// REINDEX TABLE database.table - Rebuild all indexes on a table
+    ReindexTable {
+        database: String,
+        table: String,
+    },
+    /// REINDEX INDEX index_name - Rebuild a specific index
+    ReindexIndex {
+        database: String,
+        table: String,
+        index_name: String,
+    },
+    /// REINDEX DATABASE database_name - Rebuild all indexes in a database
+    ReindexDatabase {
+        database: String,
+    },
+    /// LOCK TABLES table1 [READ|WRITE], table2 [READ|WRITE], ...
+    LockTables {
+        locks: Vec<TableLock>,
+    },
+    /// UNLOCK TABLES - Release all table locks
+    UnlockTables,
+    /// OPTIMIZE TABLE database.table - Reclaim space and defragment
+    OptimizeTable {
+        database: String,
+        table: String,
+    },
+    /// FLUSH TABLES - Close all open tables
+    FlushTables,
+    /// FLUSH PRIVILEGES - Reload privilege tables
+    FlushPrivileges,
+    /// RESET QUERY CACHE - Clear the query cache
+    ResetQueryCache,
+    /// SHOW TABLE STATUS [FROM database] [LIKE pattern]
+    ShowTableStatus {
+        database: Option<String>,
+        pattern: Option<String>,
+    },
+    /// SHOW CREATE TABLE database.table - Show CREATE TABLE statement
+    ShowCreateTable {
+        database: String,
+        table: String,
+    },
+    /// SHOW CREATE VIEW database.view - Show CREATE VIEW statement
+    ShowCreateView {
+        database: String,
+        view: String,
+    },
+    /// SHOW CREATE DATABASE database_name
+    ShowCreateDatabase {
+        database: String,
+    },
+    /// SHOW COLUMNS FROM database.table [LIKE pattern]
+    ShowColumns {
+        database: String,
+        table: String,
+        pattern: Option<String>,
+    },
+    /// SHOW WARNINGS - Show warnings from last statement
+    ShowWarnings,
+    /// SHOW ERRORS - Show errors from last statement
+    ShowErrors,
+    /// SHOW ENGINE STATUS - Show storage engine status
+    ShowEngineStatus,
+    /// CHECKSUM TABLE database.table - Calculate table checksum
+    ChecksumTable {
+        database: String,
+        table: String,
+    },
+    /// CHECK TABLE database.table - Check table for errors
+    CheckTable {
+        database: String,
+        table: String,
+    },
+    /// REPAIR TABLE database.table - Repair a corrupted table
+    RepairTable {
+        database: String,
+        table: String,
+    },
+}
+
+/// Variable scope for SET commands
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum VariableScope {
+    /// Session-scoped (default)
+    #[default]
+    Session,
+    /// Transaction-scoped (PostgreSQL LOCAL)
+    Local,
+    /// Global (affects all sessions)
+    Global,
+}
+
+/// Table lock mode for LOCK TABLES
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TableLock {
+    pub database: String,
+    pub table: String,
+    pub mode: LockMode,
+}
+
+/// Lock mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum LockMode {
+    /// READ lock - allows concurrent reads
+    #[default]
+    Read,
+    /// WRITE lock - exclusive lock
+    Write,
+    /// READ LOCAL - allows concurrent inserts (MySQL-specific)
+    ReadLocal,
+    /// LOW PRIORITY WRITE (MySQL-specific)
+    LowPriorityWrite,
+}
+
+/// Encryption algorithm types for column encryption
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum EncryptionAlgorithmType {
+    /// AES-256-GCM (default, authenticated encryption)
+    #[default]
+    Aes256Gcm,
+    /// ChaCha20-Poly1305
+    ChaCha20Poly1305,
+    /// Deterministic AES-256 (allows equality search but less secure)
+    DeterministicAes256,
+}
+
+/// CDC target types
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum CdcTargetType {
+    /// In-memory buffer (for polling via GET CHANGES)
+    #[default]
+    Buffer,
+    /// Kafka topic
+    Kafka,
+    /// Webhook URL
+    Webhook,
+    /// Another BoyoDB table
+    Table,
 }
 
 /// Function parameter definition
@@ -2081,7 +2368,926 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         return parse_create_stream(sql);
     }
 
+    // ========================================================================
+    // Column-Level Encryption Commands
+    // ========================================================================
+
+    // CREATE ENCRYPTION KEY key_name [ALGORITHM AES256GCM|CHACHA20] [EXPIRES timestamp]
+    if upper_trimmed.starts_with("CREATE ENCRYPTION KEY ") {
+        return parse_create_encryption_key(sql);
+    }
+
+    // DROP ENCRYPTION KEY [IF EXISTS] key_name
+    if upper_trimmed.starts_with("DROP ENCRYPTION KEY ") {
+        let rest = &upper_trimmed["DROP ENCRYPTION KEY ".len()..];
+        let if_exists = rest.starts_with("IF EXISTS ");
+        let name_part = if if_exists {
+            &rest["IF EXISTS ".len()..]
+        } else {
+            rest
+        };
+        let name = name_part.trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("DROP ENCRYPTION KEY requires a key name".into()));
+        }
+        return Ok(Some(DdlCommand::DropEncryptionKey {
+            key_name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // ROTATE ENCRYPTION KEY key_name
+    if upper_trimmed.starts_with("ROTATE ENCRYPTION KEY ") {
+        let name = upper_trimmed["ROTATE ENCRYPTION KEY ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("ROTATE ENCRYPTION KEY requires a key name".into()));
+        }
+        return Ok(Some(DdlCommand::RotateEncryptionKey {
+            key_name: name.to_string(),
+        }));
+    }
+
+    // SHOW ENCRYPTION KEYS
+    if upper_trimmed == "SHOW ENCRYPTION KEYS" {
+        return Ok(Some(DdlCommand::ShowEncryptionKeys));
+    }
+
+    // SHOW ENCRYPTED COLUMNS [FROM database.table]
+    if upper_trimmed == "SHOW ENCRYPTED COLUMNS" {
+        return Ok(Some(DdlCommand::ShowEncryptedColumns {
+            database: None,
+            table: None,
+        }));
+    }
+    if upper_trimmed.starts_with("SHOW ENCRYPTED COLUMNS FROM ") {
+        let table_name = upper_trimmed["SHOW ENCRYPTED COLUMNS FROM ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ShowEncryptedColumns {
+            database: Some(database),
+            table: Some(table),
+        }));
+    }
+
+    // ALTER TABLE ... ENCRYPT COLUMN column_name WITH KEY key_name
+    if upper_trimmed.starts_with("ALTER TABLE ") && upper_trimmed.contains(" ENCRYPT COLUMN ") {
+        return parse_encrypt_column(sql);
+    }
+
+    // ALTER TABLE ... DECRYPT COLUMN column_name
+    if upper_trimmed.starts_with("ALTER TABLE ") && upper_trimmed.contains(" DECRYPT COLUMN ") {
+        return parse_decrypt_column(sql);
+    }
+
+    // ========================================================================
+    // Change Data Capture (CDC) Commands
+    // ========================================================================
+
+    // CREATE CDC SUBSCRIPTION name ON database.table [TO target] [WITH options]
+    if upper_trimmed.starts_with("CREATE CDC SUBSCRIPTION ") {
+        return parse_create_cdc_subscription(sql);
+    }
+
+    // DROP CDC SUBSCRIPTION [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP CDC SUBSCRIPTION ") {
+        let rest = &upper_trimmed["DROP CDC SUBSCRIPTION ".len()..];
+        let if_exists = rest.starts_with("IF EXISTS ");
+        let name_part = if if_exists {
+            &rest["IF EXISTS ".len()..]
+        } else {
+            rest
+        };
+        let name = name_part.trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("DROP CDC SUBSCRIPTION requires a name".into()));
+        }
+        return Ok(Some(DdlCommand::DropCdcSubscription {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // START CDC SUBSCRIPTION name
+    if upper_trimmed.starts_with("START CDC SUBSCRIPTION ") {
+        let name = upper_trimmed["START CDC SUBSCRIPTION ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("START CDC SUBSCRIPTION requires a name".into()));
+        }
+        return Ok(Some(DdlCommand::StartCdcSubscription { name: name.to_string() }));
+    }
+
+    // STOP CDC SUBSCRIPTION name
+    if upper_trimmed.starts_with("STOP CDC SUBSCRIPTION ") {
+        let name = upper_trimmed["STOP CDC SUBSCRIPTION ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("STOP CDC SUBSCRIPTION requires a name".into()));
+        }
+        return Ok(Some(DdlCommand::StopCdcSubscription { name: name.to_string() }));
+    }
+
+    // SHOW CDC SUBSCRIPTIONS
+    if upper_trimmed == "SHOW CDC SUBSCRIPTIONS" {
+        return Ok(Some(DdlCommand::ShowCdcSubscriptions));
+    }
+
+    // SHOW CDC STATUS name
+    if upper_trimmed.starts_with("SHOW CDC STATUS ") {
+        let name = upper_trimmed["SHOW CDC STATUS ".len()..].trim().trim_end_matches(';');
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument("SHOW CDC STATUS requires a subscription name".into()));
+        }
+        return Ok(Some(DdlCommand::ShowCdcStatus { name: name.to_string() }));
+    }
+
+    // GET CHANGES FROM database.table [SINCE sequence] [LIMIT n]
+    if upper_trimmed.starts_with("GET CHANGES FROM ") {
+        return parse_get_changes(sql);
+    }
+
+    // SET CDC CHECKPOINT name TO sequence
+    if upper_trimmed.starts_with("SET CDC CHECKPOINT ") {
+        return parse_set_cdc_checkpoint(sql);
+    }
+
+    // ========================================================================
+    // Session & Server Management Commands (PostgreSQL/MySQL compatible)
+    // ========================================================================
+
+    // SET [SESSION|LOCAL|GLOBAL] variable = value
+    if upper_trimmed.starts_with("SET ") && !upper_trimmed.starts_with("SET CDC ") {
+        return parse_set_variable(sql);
+    }
+
+    // SHOW variable (single variable)
+    // Note: This must come after other SHOW commands to avoid conflicts
+    if upper_trimmed.starts_with("SHOW ") && !upper_trimmed.contains(' ')
+        && upper_trimmed != "SHOW"
+    {
+        let var_name = upper_trimmed["SHOW ".len()..].trim().trim_end_matches(';');
+        if !var_name.is_empty() {
+            return Ok(Some(DdlCommand::ShowVariable {
+                name: var_name.to_string()
+            }));
+        }
+    }
+
+    // SHOW VARIABLES [LIKE pattern]
+    if upper_trimmed == "SHOW VARIABLES" || upper_trimmed == "SHOW ALL" {
+        return Ok(Some(DdlCommand::ShowVariables { pattern: None }));
+    }
+    if upper_trimmed.starts_with("SHOW VARIABLES LIKE ") {
+        let pattern = extract_like_pattern(&sql["SHOW VARIABLES LIKE ".len()..]);
+        return Ok(Some(DdlCommand::ShowVariables { pattern: Some(pattern) }));
+    }
+
+    // SHOW STATUS [LIKE pattern] / SHOW SESSION STATUS / SHOW GLOBAL STATUS
+    if upper_trimmed == "SHOW STATUS" || upper_trimmed == "SHOW SESSION STATUS" || upper_trimmed == "SHOW GLOBAL STATUS" {
+        return Ok(Some(DdlCommand::ShowStatus { pattern: None }));
+    }
+    if upper_trimmed.starts_with("SHOW STATUS LIKE ") {
+        let pattern = extract_like_pattern(&sql["SHOW STATUS LIKE ".len()..]);
+        return Ok(Some(DdlCommand::ShowStatus { pattern: Some(pattern) }));
+    }
+
+    // SHOW PROCESSLIST / SHOW FULL PROCESSLIST
+    if upper_trimmed == "SHOW PROCESSLIST" {
+        return Ok(Some(DdlCommand::ShowProcesslist { full: false }));
+    }
+    if upper_trimmed == "SHOW FULL PROCESSLIST" {
+        return Ok(Some(DdlCommand::ShowProcesslist { full: true }));
+    }
+
+    // KILL connection_id / KILL CONNECTION connection_id
+    if upper_trimmed.starts_with("KILL CONNECTION ") {
+        let id_str = upper_trimmed["KILL CONNECTION ".len()..].trim().trim_end_matches(';');
+        let connection_id = id_str.parse::<u64>().map_err(|_| {
+            EngineError::InvalidArgument(format!("Invalid connection ID: {}", id_str))
+        })?;
+        return Ok(Some(DdlCommand::KillConnection { connection_id }));
+    }
+    if upper_trimmed.starts_with("KILL QUERY ") {
+        let id_str = upper_trimmed["KILL QUERY ".len()..].trim().trim_end_matches(';');
+        let query_id = id_str.parse::<u64>().map_err(|_| {
+            EngineError::InvalidArgument(format!("Invalid query ID: {}", id_str))
+        })?;
+        return Ok(Some(DdlCommand::KillQuery { query_id }));
+    }
+    if upper_trimmed.starts_with("KILL ") && !upper_trimmed.starts_with("KILL CONNECTION ") && !upper_trimmed.starts_with("KILL QUERY ") {
+        let id_str = upper_trimmed["KILL ".len()..].trim().trim_end_matches(';');
+        let connection_id = id_str.parse::<u64>().map_err(|_| {
+            EngineError::InvalidArgument(format!("Invalid connection ID: {}", id_str))
+        })?;
+        return Ok(Some(DdlCommand::KillConnection { connection_id }));
+    }
+
+    // COMMENT ON TABLE database.table IS 'comment'
+    if upper_trimmed.starts_with("COMMENT ON TABLE ") {
+        return parse_comment_on_table(sql);
+    }
+
+    // COMMENT ON COLUMN database.table.column IS 'comment'
+    if upper_trimmed.starts_with("COMMENT ON COLUMN ") {
+        return parse_comment_on_column(sql);
+    }
+
+    // COMMENT ON DATABASE database IS 'comment'
+    if upper_trimmed.starts_with("COMMENT ON DATABASE ") {
+        return parse_comment_on_database(sql);
+    }
+
+    // CLUSTER [VERBOSE] table USING index_name
+    if upper_trimmed.starts_with("CLUSTER ") && upper_trimmed.contains(" USING ") {
+        return parse_cluster_table(sql);
+    }
+    // CLUSTER (all tables)
+    if upper_trimmed == "CLUSTER" {
+        return Ok(Some(DdlCommand::ClusterAll));
+    }
+
+    // REINDEX TABLE database.table
+    if upper_trimmed.starts_with("REINDEX TABLE ") {
+        let table_name = upper_trimmed["REINDEX TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ReindexTable { database, table }));
+    }
+
+    // REINDEX INDEX database.table.index_name
+    if upper_trimmed.starts_with("REINDEX INDEX ") {
+        return parse_reindex_index(sql);
+    }
+
+    // REINDEX DATABASE database_name
+    if upper_trimmed.starts_with("REINDEX DATABASE ") {
+        let database = upper_trimmed["REINDEX DATABASE ".len()..].trim().trim_end_matches(';');
+        return Ok(Some(DdlCommand::ReindexDatabase { database: database.to_string() }));
+    }
+
+    // LOCK TABLES table1 [READ|WRITE], table2 [READ|WRITE], ...
+    if upper_trimmed.starts_with("LOCK TABLES ") || upper_trimmed.starts_with("LOCK TABLE ") {
+        return parse_lock_tables(sql);
+    }
+
+    // UNLOCK TABLES
+    if upper_trimmed == "UNLOCK TABLES" || upper_trimmed == "UNLOCK TABLE" {
+        return Ok(Some(DdlCommand::UnlockTables));
+    }
+
+    // OPTIMIZE TABLE database.table
+    if upper_trimmed.starts_with("OPTIMIZE TABLE ") {
+        let table_name = upper_trimmed["OPTIMIZE TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::OptimizeTable { database, table }));
+    }
+
+    // FLUSH TABLES
+    if upper_trimmed == "FLUSH TABLES" {
+        return Ok(Some(DdlCommand::FlushTables));
+    }
+
+    // FLUSH PRIVILEGES
+    if upper_trimmed == "FLUSH PRIVILEGES" {
+        return Ok(Some(DdlCommand::FlushPrivileges));
+    }
+
+    // RESET QUERY CACHE
+    if upper_trimmed == "RESET QUERY CACHE" {
+        return Ok(Some(DdlCommand::ResetQueryCache));
+    }
+
+    // SHOW TABLE STATUS [FROM database] [LIKE pattern]
+    if upper_trimmed == "SHOW TABLE STATUS" {
+        return Ok(Some(DdlCommand::ShowTableStatus { database: None, pattern: None }));
+    }
+    if upper_trimmed.starts_with("SHOW TABLE STATUS ") {
+        return parse_show_table_status(sql);
+    }
+
+    // SHOW CREATE TABLE database.table
+    if upper_trimmed.starts_with("SHOW CREATE TABLE ") {
+        let table_name = upper_trimmed["SHOW CREATE TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ShowCreateTable { database, table }));
+    }
+
+    // SHOW CREATE VIEW database.view
+    if upper_trimmed.starts_with("SHOW CREATE VIEW ") {
+        let view_name = upper_trimmed["SHOW CREATE VIEW ".len()..].trim().trim_end_matches(';');
+        let (database, view) = parse_table_name(view_name)?;
+        return Ok(Some(DdlCommand::ShowCreateView { database, view }));
+    }
+
+    // SHOW CREATE DATABASE database_name
+    if upper_trimmed.starts_with("SHOW CREATE DATABASE ") {
+        let database = upper_trimmed["SHOW CREATE DATABASE ".len()..].trim().trim_end_matches(';');
+        return Ok(Some(DdlCommand::ShowCreateDatabase { database: database.to_string() }));
+    }
+
+    // SHOW COLUMNS FROM database.table [LIKE pattern]
+    if upper_trimmed.starts_with("SHOW COLUMNS FROM ") || upper_trimmed.starts_with("SHOW FIELDS FROM ") {
+        return parse_show_columns(sql);
+    }
+
+    // SHOW WARNINGS
+    if upper_trimmed == "SHOW WARNINGS" {
+        return Ok(Some(DdlCommand::ShowWarnings));
+    }
+
+    // SHOW ERRORS
+    if upper_trimmed == "SHOW ERRORS" {
+        return Ok(Some(DdlCommand::ShowErrors));
+    }
+
+    // SHOW ENGINE STATUS
+    if upper_trimmed == "SHOW ENGINE STATUS" || upper_trimmed == "SHOW ENGINE BOYODB STATUS" {
+        return Ok(Some(DdlCommand::ShowEngineStatus));
+    }
+
+    // CHECKSUM TABLE database.table
+    if upper_trimmed.starts_with("CHECKSUM TABLE ") {
+        let table_name = upper_trimmed["CHECKSUM TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::ChecksumTable { database, table }));
+    }
+
+    // CHECK TABLE database.table
+    if upper_trimmed.starts_with("CHECK TABLE ") {
+        let table_name = upper_trimmed["CHECK TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::CheckTable { database, table }));
+    }
+
+    // REPAIR TABLE database.table (not the same as REPAIR SEGMENTS)
+    if upper_trimmed.starts_with("REPAIR TABLE ") {
+        let table_name = upper_trimmed["REPAIR TABLE ".len()..].trim().trim_end_matches(';');
+        let (database, table) = parse_table_name(table_name)?;
+        return Ok(Some(DdlCommand::RepairTable { database, table }));
+    }
+
     Ok(None)
+}
+
+/// Parse CREATE ENCRYPTION KEY command
+fn parse_create_encryption_key(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["CREATE ENCRYPTION KEY ".len()..].trim_end_matches(';');
+
+    // Parse key name
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Err(EngineError::InvalidArgument("CREATE ENCRYPTION KEY requires a key name".into()));
+    }
+    let key_name = tokens[0].to_string();
+
+    // Parse optional ALGORITHM
+    let mut algorithm = EncryptionAlgorithmType::Aes256Gcm;
+    if let Some(algo_pos) = upper.find(" ALGORITHM ") {
+        let algo_rest = &upper[algo_pos + " ALGORITHM ".len()..];
+        let algo_token = algo_rest.split_whitespace().next().unwrap_or("");
+        algorithm = match algo_token.trim_end_matches(';') {
+            "AES256GCM" | "AES-256-GCM" => EncryptionAlgorithmType::Aes256Gcm,
+            "CHACHA20" | "CHACHA20POLY1305" => EncryptionAlgorithmType::ChaCha20Poly1305,
+            "DETERMINISTIC" | "DETERMINISTIC_AES256" => EncryptionAlgorithmType::DeterministicAes256,
+            other => return Err(EngineError::InvalidArgument(format!(
+                "Unknown encryption algorithm: {}. Use AES256GCM, CHACHA20, or DETERMINISTIC", other
+            ))),
+        };
+    }
+
+    // Parse optional EXPIRES
+    let expires_at = if let Some(exp_pos) = upper.find(" EXPIRES ") {
+        let exp_rest = &upper[exp_pos + " EXPIRES ".len()..];
+        let exp_token = exp_rest.split_whitespace().next().unwrap_or("");
+        exp_token.trim_end_matches(';').parse::<u64>().ok()
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::CreateEncryptionKey {
+        key_name,
+        algorithm,
+        expires_at,
+    }))
+}
+
+/// Parse ALTER TABLE ... ENCRYPT COLUMN command
+fn parse_encrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Extract table name (after ALTER TABLE, before ENCRYPT)
+    let after_alter = &upper["ALTER TABLE ".len()..];
+    let encrypt_pos = after_alter.find(" ENCRYPT COLUMN ").ok_or_else(|| {
+        EngineError::InvalidArgument("Expected ENCRYPT COLUMN clause".into())
+    })?;
+    let table_name = &sql["ALTER TABLE ".len()..]["ALTER TABLE ".len() + encrypt_pos..];
+    let table_name = sql["ALTER TABLE ".len()..encrypt_pos + "ALTER TABLE ".len()].trim();
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Extract column name (after ENCRYPT COLUMN, before WITH KEY)
+    let after_encrypt = &upper["ALTER TABLE ".len() + encrypt_pos + " ENCRYPT COLUMN ".len()..];
+    let with_key_pos = after_encrypt.find(" WITH KEY ").ok_or_else(|| {
+        EngineError::InvalidArgument("ENCRYPT COLUMN requires WITH KEY clause".into())
+    })?;
+    let column = after_encrypt[..with_key_pos].trim().to_string();
+
+    // Extract key name
+    let after_with_key = &after_encrypt[with_key_pos + " WITH KEY ".len()..];
+    let key_end = after_with_key.find(' ').unwrap_or(after_with_key.len());
+    let key_name = after_with_key[..key_end].trim().trim_end_matches(';').to_string();
+
+    // Parse optional ALGORITHM
+    let algorithm = if let Some(algo_pos) = upper.find(" ALGORITHM ") {
+        let algo_rest = &upper[algo_pos + " ALGORITHM ".len()..];
+        let algo_token = algo_rest.split_whitespace().next().unwrap_or("");
+        Some(match algo_token.trim_end_matches(';') {
+            "AES256GCM" | "AES-256-GCM" => EncryptionAlgorithmType::Aes256Gcm,
+            "CHACHA20" | "CHACHA20POLY1305" => EncryptionAlgorithmType::ChaCha20Poly1305,
+            "DETERMINISTIC" | "DETERMINISTIC_AES256" => EncryptionAlgorithmType::DeterministicAes256,
+            _ => EncryptionAlgorithmType::Aes256Gcm,
+        })
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::EncryptColumn {
+        database,
+        table,
+        column,
+        key_name,
+        algorithm,
+    }))
+}
+
+/// Parse ALTER TABLE ... DECRYPT COLUMN command
+fn parse_decrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Extract table name
+    let after_alter = &upper["ALTER TABLE ".len()..];
+    let decrypt_pos = after_alter.find(" DECRYPT COLUMN ").ok_or_else(|| {
+        EngineError::InvalidArgument("Expected DECRYPT COLUMN clause".into())
+    })?;
+    let table_name = sql["ALTER TABLE ".len()..decrypt_pos + "ALTER TABLE ".len()].trim();
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Extract column name
+    let after_decrypt = &after_alter[decrypt_pos + " DECRYPT COLUMN ".len()..];
+    let column = after_decrypt.split_whitespace().next()
+        .unwrap_or("").trim_end_matches(';').to_string();
+
+    if column.is_empty() {
+        return Err(EngineError::InvalidArgument("DECRYPT COLUMN requires a column name".into()));
+    }
+
+    Ok(Some(DdlCommand::DecryptColumn {
+        database,
+        table,
+        column,
+    }))
+}
+
+/// Parse CREATE CDC SUBSCRIPTION command
+fn parse_create_cdc_subscription(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["CREATE CDC SUBSCRIPTION ".len()..];
+
+    // Extract subscription name (before ON)
+    let on_pos = rest.find(" ON ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE CDC SUBSCRIPTION requires ON clause".into())
+    })?;
+    let name = rest[..on_pos].trim().to_string();
+
+    // Extract table name (after ON)
+    let after_on = &rest[on_pos + " ON ".len()..];
+    let table_end = after_on.find(" TO ")
+        .or_else(|| after_on.find(" WITH "))
+        .or_else(|| after_on.find(" INCLUDE "))
+        .unwrap_or(after_on.trim_end_matches(';').len());
+    let table_name = after_on[..table_end].trim().trim_end_matches(';');
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Parse optional TO target
+    let mut target_type = CdcTargetType::Buffer;
+    let mut target_config = None;
+    if let Some(to_pos) = upper.find(" TO ") {
+        let after_to = &upper[to_pos + " TO ".len()..];
+        let target_end = after_to.find(' ').unwrap_or(after_to.len());
+        let target = after_to[..target_end].trim().trim_end_matches(';');
+        target_type = match target {
+            "KAFKA" => CdcTargetType::Kafka,
+            "WEBHOOK" => CdcTargetType::Webhook,
+            "TABLE" => CdcTargetType::Table,
+            _ => CdcTargetType::Buffer,
+        };
+
+        // Extract config if present (quoted string after target)
+        let after_target = &sql[to_pos + " TO ".len() + target_end..];
+        if after_target.trim().starts_with('\'') || after_target.trim().starts_with('"') {
+            let quote = after_target.trim().chars().next().unwrap();
+            let start = after_target.find(quote).unwrap() + 1;
+            let end = after_target[start..].find(quote).map(|p| start + p);
+            if let Some(e) = end {
+                target_config = Some(after_target[start..e].to_string());
+            }
+        }
+    }
+
+    // Parse optional INCLUDE BEFORE
+    let include_before = upper.contains(" INCLUDE BEFORE");
+
+    Ok(Some(DdlCommand::CreateCdcSubscription {
+        name,
+        database,
+        table,
+        target_type,
+        target_config,
+        include_before,
+    }))
+}
+
+/// Parse GET CHANGES FROM database.table command
+fn parse_get_changes(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["GET CHANGES FROM ".len()..];
+
+    // Extract table name
+    let table_end = rest.find(" SINCE ")
+        .or_else(|| rest.find(" LIMIT "))
+        .unwrap_or(rest.trim_end_matches(';').len());
+    let table_name = rest[..table_end].trim().trim_end_matches(';');
+    let (database, table) = parse_table_name(table_name)?;
+
+    // Parse optional SINCE sequence
+    let since_sequence = if let Some(since_pos) = upper.find(" SINCE ") {
+        let after_since = &upper[since_pos + " SINCE ".len()..];
+        let seq_end = after_since.find(' ').unwrap_or(after_since.len());
+        after_since[..seq_end].trim().trim_end_matches(';').parse::<u64>().ok()
+    } else {
+        None
+    };
+
+    // Parse optional LIMIT n
+    let limit = if let Some(limit_pos) = upper.find(" LIMIT ") {
+        let after_limit = &upper[limit_pos + " LIMIT ".len()..];
+        let lim_end = after_limit.find(' ').unwrap_or(after_limit.len());
+        after_limit[..lim_end].trim().trim_end_matches(';').parse::<usize>().ok()
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::GetChanges {
+        database,
+        table,
+        since_sequence,
+        limit,
+    }))
+}
+
+/// Parse SET CDC CHECKPOINT command
+fn parse_set_cdc_checkpoint(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["SET CDC CHECKPOINT ".len()..];
+
+    // Extract subscription name (before TO)
+    let to_pos = rest.find(" TO ").ok_or_else(|| {
+        EngineError::InvalidArgument("SET CDC CHECKPOINT requires TO clause".into())
+    })?;
+    let name = rest[..to_pos].trim().to_string();
+
+    // Extract sequence number
+    let after_to = &rest[to_pos + " TO ".len()..];
+    let sequence = after_to.trim().trim_end_matches(';').parse::<u64>().map_err(|_| {
+        EngineError::InvalidArgument("SET CDC CHECKPOINT requires a valid sequence number".into())
+    })?;
+
+    Ok(Some(DdlCommand::SetCdcCheckpoint { name, sequence }))
+}
+
+// ============================================================================
+// Helper functions for PostgreSQL/MySQL compatible commands
+// ============================================================================
+
+/// Extract a LIKE pattern from a string (handles quoted patterns)
+fn extract_like_pattern(s: &str) -> String {
+    let s = s.trim().trim_end_matches(';');
+    // Handle quoted patterns
+    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+        s[1..s.len()-1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Parse SET [SESSION|LOCAL|GLOBAL] variable = value
+fn parse_set_variable(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["SET ".len()..].trim_end_matches(';');
+
+    // Parse scope
+    let (scope, var_start) = if rest.starts_with("SESSION ") {
+        (VariableScope::Session, "SESSION ".len())
+    } else if rest.starts_with("LOCAL ") {
+        (VariableScope::Local, "LOCAL ".len())
+    } else if rest.starts_with("GLOBAL ") {
+        (VariableScope::Global, "GLOBAL ".len())
+    } else {
+        (VariableScope::Session, 0)
+    };
+
+    let rest = &rest[var_start..];
+
+    // Find = or TO
+    let eq_pos = rest.find('=').or_else(|| {
+        // PostgreSQL uses TO
+        rest.find(" TO ").map(|p| p + 1)
+    });
+
+    let (name, value) = if let Some(pos) = eq_pos {
+        let name = rest[..pos].trim();
+        let value_start = if rest[pos..].starts_with('=') {
+            pos + 1
+        } else {
+            pos + 3 // " TO " - skip space before TO
+        };
+        let value = rest[value_start..].trim();
+        (name.to_string(), value.to_string())
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "SET requires variable = value syntax".into()
+        ));
+    };
+
+    // Handle quoted values (preserve original case)
+    let original_sql = &sql["SET ".len() + var_start..];
+    let value = if let Some(eq_pos) = original_sql.find('=') {
+        original_sql[eq_pos + 1..].trim().trim_end_matches(';').to_string()
+    } else if let Some(to_pos) = original_sql.to_uppercase().find(" TO ") {
+        original_sql[to_pos + 4..].trim().trim_end_matches(';').to_string()
+    } else {
+        value
+    };
+
+    Ok(Some(DdlCommand::SetVariable {
+        name,
+        value,
+        scope,
+    }))
+}
+
+/// Parse COMMENT ON TABLE database.table IS 'comment'
+fn parse_comment_on_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &sql["COMMENT ON TABLE ".len()..];
+
+    // Find IS keyword
+    let is_pos = upper.find(" IS ").ok_or_else(|| {
+        EngineError::InvalidArgument("COMMENT ON TABLE requires IS clause".into())
+    })?;
+
+    let table_part = &rest[..is_pos - "COMMENT ON TABLE ".len()];
+    let (database, table) = parse_table_name(table_part.trim())?;
+
+    // Extract comment (may be NULL or quoted string)
+    let comment_part = &rest[is_pos - "COMMENT ON TABLE ".len() + " IS ".len()..].trim();
+    let comment_part = comment_part.trim_end_matches(';');
+
+    let comment = if comment_part.to_uppercase() == "NULL" {
+        None
+    } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
+        || (comment_part.starts_with('"') && comment_part.ends_with('"'))
+    {
+        Some(comment_part[1..comment_part.len()-1].to_string())
+    } else {
+        Some(comment_part.to_string())
+    };
+
+    Ok(Some(DdlCommand::CommentOnTable { database, table, comment }))
+}
+
+/// Parse COMMENT ON COLUMN database.table.column IS 'comment'
+fn parse_comment_on_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &sql["COMMENT ON COLUMN ".len()..];
+
+    // Find IS keyword
+    let is_pos = upper.find(" IS ").ok_or_else(|| {
+        EngineError::InvalidArgument("COMMENT ON COLUMN requires IS clause".into())
+    })?;
+
+    let col_part = &rest[..is_pos - "COMMENT ON COLUMN ".len()];
+
+    // Parse database.table.column
+    let parts: Vec<&str> = col_part.trim().split('.').collect();
+    let (database, table, column) = match parts.len() {
+        3 => (
+            parts[0].trim().trim_matches('"').trim_matches('`').to_string(),
+            parts[1].trim().trim_matches('"').trim_matches('`').to_string(),
+            parts[2].trim().trim_matches('"').trim_matches('`').to_string(),
+        ),
+        2 => (
+            "default".to_string(),
+            parts[0].trim().trim_matches('"').trim_matches('`').to_string(),
+            parts[1].trim().trim_matches('"').trim_matches('`').to_string(),
+        ),
+        _ => return Err(EngineError::InvalidArgument(
+            "COMMENT ON COLUMN requires table.column or database.table.column".into()
+        )),
+    };
+
+    // Extract comment
+    let comment_part = &rest[is_pos - "COMMENT ON COLUMN ".len() + " IS ".len()..].trim();
+    let comment_part = comment_part.trim_end_matches(';');
+
+    let comment = if comment_part.to_uppercase() == "NULL" {
+        None
+    } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
+        || (comment_part.starts_with('"') && comment_part.ends_with('"'))
+    {
+        Some(comment_part[1..comment_part.len()-1].to_string())
+    } else {
+        Some(comment_part.to_string())
+    };
+
+    Ok(Some(DdlCommand::CommentOnColumn { database, table, column, comment }))
+}
+
+/// Parse COMMENT ON DATABASE database IS 'comment'
+fn parse_comment_on_database(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &sql["COMMENT ON DATABASE ".len()..];
+
+    // Find IS keyword
+    let is_pos = upper.find(" IS ").ok_or_else(|| {
+        EngineError::InvalidArgument("COMMENT ON DATABASE requires IS clause".into())
+    })?;
+
+    let database = rest[..is_pos - "COMMENT ON DATABASE ".len()].trim()
+        .trim_matches('"').trim_matches('`').to_string();
+
+    // Extract comment
+    let comment_part = &rest[is_pos - "COMMENT ON DATABASE ".len() + " IS ".len()..].trim();
+    let comment_part = comment_part.trim_end_matches(';');
+
+    let comment = if comment_part.to_uppercase() == "NULL" {
+        None
+    } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
+        || (comment_part.starts_with('"') && comment_part.ends_with('"'))
+    {
+        Some(comment_part[1..comment_part.len()-1].to_string())
+    } else {
+        Some(comment_part.to_string())
+    };
+
+    Ok(Some(DdlCommand::CommentOnDatabase { database, comment }))
+}
+
+/// Parse CLUSTER [VERBOSE] table USING index_name
+fn parse_cluster_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let binding = upper["CLUSTER ".len()..].trim_end_matches(';').to_string();
+    let rest: &str = &binding;
+
+    // Check for VERBOSE
+    let (verbose, rest): (bool, &str) = if rest.starts_with("VERBOSE ") {
+        (true, &rest["VERBOSE ".len()..])
+    } else {
+        (false, rest)
+    };
+
+    // Find USING keyword
+    let using_pos = rest.find(" USING ").ok_or_else(|| {
+        EngineError::InvalidArgument("CLUSTER requires USING clause".into())
+    })?;
+
+    let table_name = rest[..using_pos].trim();
+    let (database, table) = parse_table_name(table_name)?;
+
+    let index_name = rest[using_pos + " USING ".len()..].trim().to_string();
+
+    Ok(Some(DdlCommand::ClusterTable { database, table, index_name, verbose }))
+}
+
+/// Parse REINDEX INDEX database.table.index_name
+fn parse_reindex_index(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let binding = upper["REINDEX INDEX ".len()..].trim_end_matches(';').to_string();
+    let rest: &str = &binding;
+
+    // Parse database.table.index_name
+    let parts: Vec<&str> = rest.split('.').collect();
+    let (database, table, index_name) = match parts.len() {
+        3 => (
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+            parts[2].trim().to_string(),
+        ),
+        2 => (
+            "default".to_string(),
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+        ),
+        _ => return Err(EngineError::InvalidArgument(
+            "REINDEX INDEX requires table.index_name or database.table.index_name".into()
+        )),
+    };
+
+    Ok(Some(DdlCommand::ReindexIndex { database, table, index_name }))
+}
+
+/// Parse LOCK TABLES table1 [READ|WRITE], table2 [READ|WRITE], ...
+fn parse_lock_tables(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = if upper.starts_with("LOCK TABLES ") {
+        &sql["LOCK TABLES ".len()..]
+    } else {
+        &sql["LOCK TABLE ".len()..]
+    };
+    let rest = rest.trim_end_matches(';');
+
+    let mut locks = Vec::new();
+
+    // Split by comma and parse each table lock
+    for part in rest.split(',') {
+        let part = part.trim();
+        let part_upper = part.to_uppercase();
+
+        // Find lock mode
+        let (table_part, mode) = if part_upper.ends_with(" READ LOCAL") {
+            (&part[..part.len() - " READ LOCAL".len()], LockMode::ReadLocal)
+        } else if part_upper.ends_with(" LOW_PRIORITY WRITE") {
+            (&part[..part.len() - " LOW_PRIORITY WRITE".len()], LockMode::LowPriorityWrite)
+        } else if part_upper.ends_with(" WRITE") {
+            (&part[..part.len() - " WRITE".len()], LockMode::Write)
+        } else if part_upper.ends_with(" READ") {
+            (&part[..part.len() - " READ".len()], LockMode::Read)
+        } else {
+            // Default to READ lock
+            (part, LockMode::Read)
+        };
+
+        let (database, table) = parse_table_name(table_part.trim())?;
+        locks.push(TableLock { database, table, mode });
+    }
+
+    if locks.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "LOCK TABLES requires at least one table".into()
+        ));
+    }
+
+    Ok(Some(DdlCommand::LockTables { locks }))
+}
+
+/// Parse SHOW TABLE STATUS [FROM database] [LIKE pattern]
+fn parse_show_table_status(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = &upper["SHOW TABLE STATUS ".len()..].trim_end_matches(';');
+
+    let mut database = None;
+    let mut pattern = None;
+
+    // Parse FROM database
+    if rest.starts_with("FROM ") || rest.starts_with("IN ") {
+        let keyword_len = if rest.starts_with("FROM ") { 5 } else { 3 };
+        let after_from = &rest[keyword_len..];
+        let db_end = after_from.find(" LIKE ").unwrap_or(after_from.len());
+        database = Some(after_from[..db_end].trim().to_string());
+
+        // Check for LIKE pattern after database
+        if let Some(like_pos) = after_from.find(" LIKE ") {
+            let pattern_str = &sql["SHOW TABLE STATUS ".len() + keyword_len + like_pos + " LIKE ".len()..];
+            pattern = Some(extract_like_pattern(pattern_str));
+        }
+    } else if rest.starts_with("LIKE ") {
+        let pattern_str = &sql["SHOW TABLE STATUS LIKE ".len()..];
+        pattern = Some(extract_like_pattern(pattern_str));
+    }
+
+    Ok(Some(DdlCommand::ShowTableStatus { database, pattern }))
+}
+
+/// Parse SHOW COLUMNS FROM database.table [LIKE pattern]
+fn parse_show_columns(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let keyword = if upper.starts_with("SHOW COLUMNS FROM ") {
+        "SHOW COLUMNS FROM "
+    } else {
+        "SHOW FIELDS FROM "
+    };
+    let binding = sql[keyword.len()..].trim_end_matches(';').to_string();
+    let rest: &str = &binding;
+    let rest_upper = rest.to_uppercase();
+
+    // Find LIKE if present
+    let (table_part, pattern): (&str, Option<String>) = if let Some(like_pos) = rest_upper.find(" LIKE ") {
+        let table_part = &rest[..like_pos];
+        let pattern_str = &rest[like_pos + " LIKE ".len()..];
+        (table_part, Some(extract_like_pattern(pattern_str)))
+    } else {
+        (rest, None)
+    };
+
+    let (database, table) = parse_table_name(table_part.trim())?;
+
+    Ok(Some(DdlCommand::ShowColumns { database, table, pattern }))
 }
 
 /// Parse CREATE STREAM command
