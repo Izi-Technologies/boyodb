@@ -2,17 +2,17 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.4-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.5-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
-## What's New in v0.2.4
+## What's New in v0.2.5
 
-- **Sub-Second Billion-Row Queries**: Parallel aggregation with segment-level partial results
-- **Fast COUNT(*)**: Metadata-based counting without loading segment data
-- **EXPLAIN ANALYZE**: Visual query plans with actual execution statistics
-- **Go Driver Circuit Breaker**: Health checks, auto-reconnect, connection pool stats
-- **Parallel Aggregation**: SUM/AVG/MIN/MAX computed in parallel across segments
+- **Enhanced Data Integrity**: Atomic file operations for WAL, manifest, and segment persistence
+- **Corruption Prevention**: Fixed manifest race conditions and WAL LSN atomic persist
+- **PostgreSQL-Compatible Syntax**: CREATE INDEX now uses standard PostgreSQL USING clause
+- **Fulltext Index**: N-gram based indexing for efficient `LIKE '%pattern%'` queries
+- **S3 Upload Verification**: Read-back verification with checksum validation
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 
@@ -354,6 +354,30 @@ LIMIT 10;
 - **Bloom Filters**: Fast segment pruning
 - **Deduplication**: Configurable key-based deduplication
 - **Sharded Caches**: 64-shard segment cache, 32-shard batch cache for parallel access
+
+### Data Integrity & Corruption Prevention
+
+BoyoDB implements multiple layers of protection against data corruption:
+
+- **Atomic File Operations**: All critical writes use temp-file + rename pattern
+- **Write Verification**: Read-back verification with checksum validation
+- **Manifest Protection**: Atomic manifest updates prevent corruption on crash
+- **WAL Integrity**: Atomic LSN persistence with directory-safe temp files
+- **S3 Upload Verification**: Cold tier uploads verified with checksum comparison
+- **Segment Checksums**: xxHash64 checksums for all segment data
+- **IPC Format Validation**: Deep validation of Arrow IPC format during loads
+- **Schema Hash Validation**: Schema verification during segment loads
+
+```sql
+-- Check segment integrity
+CHECK TABLE mydb.mytable;
+
+-- Deep scrub with IPC validation
+SHOW DAMAGED SEGMENTS FROM mydb.mytable;
+
+-- Repair corrupted segments
+REPAIR TABLE mydb.mytable;
+```
 
 ### Resource Governance
 

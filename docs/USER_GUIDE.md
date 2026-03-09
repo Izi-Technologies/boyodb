@@ -1234,6 +1234,31 @@ This catches:
 - S3 eventual consistency issues
 - Network transmission errors
 
+### Atomic File Operations
+
+BoyoDB uses atomic file operations to prevent corruption during writes:
+
+**Temp-File + Rename Pattern:**
+All critical files (manifest, WAL LSN, segments) are written using this pattern:
+1. Write to temporary file (.tmp)
+2. Sync to disk (fsync)
+3. Atomic rename to final location
+4. Sync parent directory
+
+This ensures that files are either fully written or not present at all - no partial writes.
+
+**Protected Operations:**
+- **Manifest updates**: Never truncate live manifest; always atomic rename
+- **WAL LSN persistence**: Atomic temp file + rename with directory creation
+- **Segment persistence**: Write-verify-rename pattern with checksum validation
+- **S3 cold tier uploads**: Upload, verify via read-back, then update manifest
+
+**Benefits:**
+- No partial files after crash or power failure
+- Manifest is always consistent
+- WAL LSN recovery is reliable
+- No orphaned or corrupt segments
+
 ### Retry Configuration
 
 Configure retry behavior for transient failures:
