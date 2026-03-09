@@ -5,6 +5,21 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-03-09
+
+### Fixed
+- **Missing Segments Bug**: Critical fix for segments being lost when memtable buffering is enabled
+  - Root cause: Manifest was persisted before memtable segments were flushed to disk
+  - Fix: Now flushes all memtables BEFORE persisting manifest
+  - Also fixed in Drop impl to flush memtables on DB shutdown
+- **Repair Tool Runtime**: Fixed repair tool to work without Tokio runtime for local-only storage
+- **WAL Rotation**: Handle missing WAL file gracefully during rotation, recreate if needed
+- **Manifest Directory**: Ensure binary manifest parent directory exists before atomic rename
+
+### Invariant Enforced
+- Segment files MUST exist on disk BEFORE manifest references them
+- Prevents any future missing segments from manifest/memtable race conditions
+
 ## [0.2.5] - 2026-03-09
 
 ### Fixed

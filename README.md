@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.5-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.2.6-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
