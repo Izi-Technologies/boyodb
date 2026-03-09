@@ -8,7 +8,8 @@ use crate::wal::{search_wal_for_segment, GroupCommitConfig, Wal};
 use arrow::compute::kernels::aggregate;
 use arrow::compute::kernels::boolean::and;
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
-use arrow::compute::{filter as arrow_filter, like, nlike};
+use arrow::compute::{filter as arrow_filter, ilike, like, nilike, nlike};
+use arrow::util::display::array_value_to_string;
 use arrow_array::builder::{
     BooleanBuilder, Float64Builder, Int32Builder, Int64Builder, StringBuilder, UInt64Builder,
 };
@@ -22285,6 +22286,7 @@ fn has_row_filters(filter: &QueryFilter) -> bool {
         || !filter.float_eq_filters.is_empty()
         || !filter.bool_eq_filters.is_empty()
         || !filter.like_filters.is_empty()
+        || !filter.ilike_filters.is_empty()
         || !filter.null_filters.is_empty()
         || !filter.string_eq_filters.is_empty()
         || !filter.string_in_filters.is_empty()
@@ -22457,22 +22459,69 @@ pub fn filter_ipc_batches(
             }
         }
 
-        // Apply LIKE filters
+        // Apply LIKE filters (supports both String and numeric columns)
         for (col_name, pattern, negate) in &filter.like_filters {
             if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
                 let col = batch.column(col_idx);
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    let pattern_scalar = StringArray::new_scalar(pattern);
-                    let cmp = if *negate {
-                        nlike(arr, &pattern_scalar)
-                            .map_err(|e| EngineError::Internal(format!("nlike error: {}", e)))?
-                    } else {
-                        like(arr, &pattern_scalar)
-                            .map_err(|e| EngineError::Internal(format!("like error: {}", e)))?
-                    };
-                    mask = and(&mask, &cmp)
-                        .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
-                }
+                // Convert column to StringArray if needed for LIKE comparison
+                let str_arr: StringArray = if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                    arr.clone()
+                } else {
+                    // Convert numeric/other types to string for LIKE pattern matching
+                    let str_values: Vec<Option<String>> = (0..col.len())
+                        .map(|i| {
+                            if col.is_null(i) {
+                                None
+                            } else {
+                                array_value_to_string(col.as_ref(), i).ok()
+                            }
+                        })
+                        .collect();
+                    StringArray::from(str_values)
+                };
+                let pattern_scalar = StringArray::new_scalar(pattern);
+                let cmp = if *negate {
+                    nlike(&str_arr, &pattern_scalar)
+                        .map_err(|e| EngineError::Internal(format!("nlike error: {}", e)))?
+                } else {
+                    like(&str_arr, &pattern_scalar)
+                        .map_err(|e| EngineError::Internal(format!("like error: {}", e)))?
+                };
+                mask = and(&mask, &cmp)
+                    .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+            }
+        }
+
+        // Apply ILIKE filters (case-insensitive LIKE, supports both String and numeric columns)
+        for (col_name, pattern, negate) in &filter.ilike_filters {
+            if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
+                let col = batch.column(col_idx);
+                // Convert column to StringArray if needed for ILIKE comparison
+                let str_arr: StringArray = if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                    arr.clone()
+                } else {
+                    // Convert numeric/other types to string for ILIKE pattern matching
+                    let str_values: Vec<Option<String>> = (0..col.len())
+                        .map(|i| {
+                            if col.is_null(i) {
+                                None
+                            } else {
+                                array_value_to_string(col.as_ref(), i).ok()
+                            }
+                        })
+                        .collect();
+                    StringArray::from(str_values)
+                };
+                let pattern_scalar = StringArray::new_scalar(pattern);
+                let cmp = if *negate {
+                    nilike(&str_arr, &pattern_scalar)
+                        .map_err(|e| EngineError::Internal(format!("nilike error: {}", e)))?
+                } else {
+                    ilike(&str_arr, &pattern_scalar)
+                        .map_err(|e| EngineError::Internal(format!("ilike error: {}", e)))?
+                };
+                mask = and(&mask, &cmp)
+                    .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
             }
         }
 
@@ -25408,18 +25457,45 @@ pub fn build_match_mask(
     let mut mask = vec![true; num_rows];
 
     // Apply LIKE filters - tuple of (column, pattern, negate)
+    // Supports both String and numeric columns (converts to string for matching)
     for (column, pattern, negate) in &filter.like_filters {
         if let Ok(col_idx) = batch.schema().index_of(column) {
             let col = batch.column(col_idx);
-            if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
-                for i in 0..num_rows {
-                    if mask[i] && !str_arr.is_null(i) {
-                        let val = str_arr.value(i);
-                        let matches = matches_like_pattern(val, pattern);
-                        mask[i] = if *negate { !matches } else { matches };
-                    } else if str_arr.is_null(i) {
-                        mask[i] = false;
-                    }
+            for i in 0..num_rows {
+                if mask[i] && !col.is_null(i) {
+                    // Get string value - either directly or by converting
+                    let val = if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
+                        str_arr.value(i).to_string()
+                    } else {
+                        array_value_to_string(col.as_ref(), i).unwrap_or_default()
+                    };
+                    let matches = matches_like_pattern(&val, pattern);
+                    mask[i] = if *negate { !matches } else { matches };
+                } else if col.is_null(i) {
+                    mask[i] = false;
+                }
+            }
+        }
+    }
+
+    // Apply ILIKE filters (case-insensitive) - tuple of (column, pattern, negate)
+    // Supports both String and numeric columns (converts to string for matching)
+    for (column, pattern, negate) in &filter.ilike_filters {
+        if let Ok(col_idx) = batch.schema().index_of(column) {
+            let col = batch.column(col_idx);
+            for i in 0..num_rows {
+                if mask[i] && !col.is_null(i) {
+                    // Get string value - either directly or by converting
+                    let val = if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
+                        str_arr.value(i).to_lowercase()
+                    } else {
+                        array_value_to_string(col.as_ref(), i).unwrap_or_default().to_lowercase()
+                    };
+                    // Convert pattern to lowercase for case-insensitive match
+                    let matches = matches_like_pattern(&val, &pattern.to_lowercase());
+                    mask[i] = if *negate { !matches } else { matches };
+                } else if col.is_null(i) {
+                    mask[i] = false;
                 }
             }
         }
