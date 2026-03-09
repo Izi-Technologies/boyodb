@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boyodb"
-version = "0.2.2"
+version = "0.2.5"
 description = "Python driver for boyodb-server - a high-performance columnar database"
 readme = "README.md"
 license = {text = "Apache-2.0"}
