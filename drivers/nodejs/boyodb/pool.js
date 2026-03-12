@@ -608,6 +608,408 @@ class PooledClient {
       throw new Error(`Failed to parse Arrow IPC: ${err.message}`);
     }
   }
+
+  // Health and Metadata Operations
+
+  /**
+   * Check server health.
+   * @returns {Promise<void>}
+   */
+  async health() {
+    if (!this._initialized) {
+      await this.connect();
+    }
+    await this._pool.health();
+  }
+
+  /**
+   * Create a new database.
+   * @param {string} name
+   * @returns {Promise<void>}
+   */
+  async createDatabase(name) {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({ op: 'createdatabase', name });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Create database failed');
+    }
+  }
+
+  /**
+   * Create a new table.
+   * @param {string} database
+   * @param {string} table
+   * @returns {Promise<void>}
+   */
+  async createTable(database, table) {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({
+      op: 'createtable',
+      database,
+      table,
+    });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Create table failed');
+    }
+  }
+
+  /**
+   * List all databases.
+   * @returns {Promise<string[]>}
+   */
+  async listDatabases() {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({ op: 'listdatabases' });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'List databases failed');
+    }
+    return response.databases || [];
+  }
+
+  /**
+   * List tables, optionally filtered by database.
+   * @param {string} [database]
+   * @returns {Promise<Object[]>}
+   */
+  async listTables(database = null) {
+    if (!this._initialized) await this.connect();
+    const request = { op: 'listtables' };
+    if (database) {
+      request.database = database;
+    }
+    const response = await this._pool.sendRequest(request);
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'List tables failed');
+    }
+    return response.tables || [];
+  }
+
+  /**
+   * Get query execution plan.
+   * @param {string} sql
+   * @returns {Promise<Object>}
+   */
+  async explain(sql) {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({ op: 'explain', sql });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Explain failed');
+    }
+    return response.explain_plan || {};
+  }
+
+  /**
+   * Get server metrics.
+   * @returns {Promise<Object>}
+   */
+  async metrics() {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({ op: 'metrics' });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Metrics failed');
+    }
+    return response.metrics || {};
+  }
+
+  // Data Ingestion
+
+  /**
+   * Ingest CSV data into a table.
+   * @param {string} database
+   * @param {string} table
+   * @param {Buffer|string} csvData
+   * @param {boolean} [hasHeader=true]
+   * @param {string} [delimiter]
+   * @returns {Promise<void>}
+   */
+  async ingestCsv(database, table, csvData, hasHeader = true, delimiter = null) {
+    if (!this._initialized) await this.connect();
+    const payload = Buffer.isBuffer(csvData) ? csvData : Buffer.from(csvData, 'utf8');
+    const request = {
+      op: 'ingestcsv',
+      database,
+      table,
+      payload_base64: payload.toString('base64'),
+      has_header: hasHeader,
+    };
+    if (delimiter) {
+      request.delimiter = delimiter;
+    }
+    const response = await this._pool.sendRequest(request);
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Ingest CSV failed');
+    }
+  }
+
+  /**
+   * Ingest Arrow IPC data into a table.
+   * @param {string} database
+   * @param {string} table
+   * @param {Buffer} ipcData
+   * @returns {Promise<void>}
+   */
+  async ingestIpc(database, table, ipcData) {
+    if (!this._initialized) await this.connect();
+    const response = await this._pool.sendRequest({
+      op: 'ingestipc',
+      database,
+      table,
+      payload_base64: ipcData.toString('base64'),
+    });
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Ingest IPC failed');
+    }
+  }
+
+  // Prepared Statements
+
+  /**
+   * Prepare a SELECT query and return a prepared ID.
+   * @param {string} sql
+   * @param {string} [database]
+   * @returns {Promise<string>}
+   */
+  async prepare(sql, database = null) {
+    if (!this._initialized) await this.connect();
+    const request = { op: 'prepare', sql };
+    if (database || this._config.database) {
+      request.database = database || this._config.database;
+    }
+    const response = await this._pool.sendRequest(request);
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Prepare failed');
+    }
+    if (!response.prepared_id) {
+      throw new Error('Missing prepared_id in response');
+    }
+    return response.prepared_id;
+  }
+
+  /**
+   * Execute a prepared statement using binary IPC.
+   * @param {string} preparedId
+   * @param {Object} [options={}]
+   * @returns {Promise<Object>}
+   */
+  async executePreparedBinary(preparedId, options = {}) {
+    if (!this._initialized) await this.connect();
+    const timeout = options.timeout || this._config.queryTimeout;
+    const request = {
+      op: 'execute_prepared_binary',
+      id: preparedId,
+      timeout_millis: timeout,
+      stream: true,
+    };
+    const response = await this._pool.sendRequest(request);
+    if (response.status !== 'ok') {
+      throw new Error(response.message || 'Execute prepared failed');
+    }
+
+    let rows = [];
+    let columns = [];
+
+    if (response.ipc_bytes) {
+      const parsed = this._parseArrowIPC(response.ipc_bytes);
+      rows = parsed.rows;
+      columns = parsed.columns;
+    } else if (response.ipc_base64) {
+      const ipcData = Buffer.from(response.ipc_base64, 'base64');
+      const parsed = this._parseArrowIPC(ipcData);
+      rows = parsed.rows;
+      columns = parsed.columns;
+    }
+
+    return {
+      rows,
+      columns,
+      rowCount: rows.length,
+      segmentsScanned: response.segments_scanned || 0,
+      dataSkippedBytes: response.data_skipped_bytes || 0,
+    };
+  }
+
+  // Transaction Support
+
+  /**
+   * Start a transaction.
+   * @param {string} [isolationLevel]
+   * @param {boolean} [readOnly=false]
+   * @returns {Promise<void>}
+   */
+  async begin(isolationLevel = null, readOnly = false) {
+    let sql;
+    if (isolationLevel) {
+      sql = `START TRANSACTION ISOLATION LEVEL ${isolationLevel}`;
+      if (readOnly) {
+        sql += ' READ ONLY';
+      }
+    } else if (readOnly) {
+      sql = 'START TRANSACTION READ ONLY';
+    } else {
+      sql = 'BEGIN';
+    }
+    await this.exec(sql);
+  }
+
+  /**
+   * Commit the current transaction.
+   * @returns {Promise<void>}
+   */
+  async commit() {
+    await this.exec('COMMIT');
+  }
+
+  /**
+   * Rollback the current transaction.
+   * @param {string} [savepoint] - If provided, rollback to this savepoint
+   * @returns {Promise<void>}
+   */
+  async rollback(savepoint = null) {
+    if (savepoint) {
+      await this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    } else {
+      await this.exec('ROLLBACK');
+    }
+  }
+
+  /**
+   * Create a savepoint.
+   * @param {string} name
+   * @returns {Promise<void>}
+   */
+  async savepoint(name) {
+    await this.exec(`SAVEPOINT ${name}`);
+  }
+
+  /**
+   * Release a savepoint.
+   * @param {string} name
+   * @returns {Promise<void>}
+   */
+  async releaseSavepoint(name) {
+    await this.exec(`RELEASE SAVEPOINT ${name}`);
+  }
+
+  /**
+   * Execute a function within a transaction.
+   * @param {Function} fn - Async function to execute
+   * @returns {Promise<*>}
+   */
+  async inTransaction(fn) {
+    await this.begin();
+    try {
+      const result = await fn();
+      await this.commit();
+      return result;
+    } catch (err) {
+      await this.rollback();
+      throw err;
+    }
+  }
+
+  // Configuration
+
+  /**
+   * Set the default database.
+   * @param {string} database
+   */
+  setDatabase(database) {
+    this._config.database = database;
+  }
+
+  // Vector Search Support
+
+  /**
+   * Perform vector similarity search.
+   * @param {number[]} queryVector
+   * @param {string} table
+   * @param {Object} [options={}]
+   * @returns {Promise<Object>}
+   */
+  async vectorSearch(queryVector, table, options = {}) {
+    const vectorColumn = options.vectorColumn || 'embedding';
+    const idColumn = options.idColumn || 'id';
+    const metric = options.metric || 'cosine';
+    const limit = options.limit || 10;
+    const filterClause = options.filterClause;
+    const selectColumns = options.selectColumns;
+
+    const vectorStr = this._formatVector(queryVector);
+
+    const cols = [idColumn];
+    if (selectColumns && selectColumns.length > 0) {
+      cols.push(...selectColumns);
+    }
+    const selectList = cols.join(', ');
+
+    let sql;
+    let order;
+    if (metric === 'cosine') {
+      sql = `SELECT ${selectList}, vector_similarity(${vectorColumn}, ${vectorStr}) AS score FROM ${table}`;
+      order = 'DESC';
+    } else {
+      sql = `SELECT ${selectList}, vector_distance(${vectorColumn}, ${vectorStr}, '${metric}') AS score FROM ${table}`;
+      order = 'ASC';
+    }
+
+    if (filterClause) {
+      sql += ` WHERE ${filterClause}`;
+    }
+
+    sql += ` ORDER BY score ${order} LIMIT ${limit}`;
+
+    return this.query(sql);
+  }
+
+  /**
+   * Perform hybrid search combining vector similarity and text search.
+   * @param {number[]} queryVector
+   * @param {string} textQuery
+   * @param {string} table
+   * @param {Object} [options={}]
+   * @returns {Promise<Object>}
+   */
+  async hybridSearch(queryVector, textQuery, table, options = {}) {
+    const vectorColumn = options.vectorColumn || 'embedding';
+    const textColumn = options.textColumn || 'content';
+    const idColumn = options.idColumn || 'id';
+    const vectorWeight = options.vectorWeight || 0.5;
+    const textWeight = options.textWeight || 0.5;
+    const limit = options.limit || 10;
+    const filterClause = options.filterClause;
+    const selectColumns = options.selectColumns;
+
+    const vectorStr = this._formatVector(queryVector);
+    const escapedText = textQuery.replace(/'/g, "''");
+
+    const cols = [idColumn];
+    if (selectColumns && selectColumns.length > 0) {
+      cols.push(...selectColumns);
+    }
+    const selectList = cols.join(', ');
+
+    let sql = `
+      SELECT ${selectList},
+             vector_similarity(${vectorColumn}, ${vectorStr}) * ${vectorWeight} AS vector_score,
+             COALESCE(match_score(${textColumn}, '${escapedText}'), 0) * ${textWeight} AS text_score,
+             vector_similarity(${vectorColumn}, ${vectorStr}) * ${vectorWeight} +
+             COALESCE(match_score(${textColumn}, '${escapedText}'), 0) * ${textWeight} AS combined_score
+      FROM ${table}
+    `;
+
+    if (filterClause) {
+      sql += ` WHERE ${filterClause}`;
+    }
+
+    sql += ` ORDER BY combined_score DESC LIMIT ${limit}`;
+
+    return this.query(sql);
+  }
+
+  _formatVector(vector) {
+    const values = vector.join(',');
+    return `ARRAY[${values}]`;
+  }
 }
 
 module.exports = { PoolConfig, ConnectionPool, PooledClient };

@@ -656,6 +656,215 @@ class Client
         $this->config->token = $token;
     }
 
+    // Transaction Support
+
+    /**
+     * Begin a transaction.
+     *
+     * @param string|null $isolationLevel Optional isolation level
+     * @param bool $readOnly Whether transaction is read-only
+     * @throws QueryException
+     */
+    public function begin(?string $isolationLevel = null, bool $readOnly = false): void
+    {
+        if ($isolationLevel !== null) {
+            $sql = "START TRANSACTION ISOLATION LEVEL $isolationLevel";
+            if ($readOnly) {
+                $sql .= " READ ONLY";
+            }
+        } elseif ($readOnly) {
+            $sql = "START TRANSACTION READ ONLY";
+        } else {
+            $sql = "BEGIN";
+        }
+        $this->exec($sql);
+    }
+
+    /**
+     * Commit the current transaction.
+     *
+     * @throws QueryException
+     */
+    public function commit(): void
+    {
+        $this->exec("COMMIT");
+    }
+
+    /**
+     * Rollback the current transaction or to a savepoint.
+     *
+     * @param string|null $savepoint If provided, rollback to this savepoint
+     * @throws QueryException
+     */
+    public function rollback(?string $savepoint = null): void
+    {
+        if ($savepoint !== null) {
+            $this->exec("ROLLBACK TO SAVEPOINT $savepoint");
+        } else {
+            $this->exec("ROLLBACK");
+        }
+    }
+
+    /**
+     * Create a savepoint.
+     *
+     * @throws QueryException
+     */
+    public function savepoint(string $name): void
+    {
+        $this->exec("SAVEPOINT $name");
+    }
+
+    /**
+     * Release a savepoint.
+     *
+     * @throws QueryException
+     */
+    public function releaseSavepoint(string $name): void
+    {
+        $this->exec("RELEASE SAVEPOINT $name");
+    }
+
+    /**
+     * Execute a callable within a transaction.
+     *
+     * @param callable $fn Function to execute
+     * @return mixed Return value of the function
+     * @throws \Throwable
+     */
+    public function inTransaction(callable $fn): mixed
+    {
+        $this->begin();
+        try {
+            $result = $fn();
+            $this->commit();
+            return $result;
+        } catch (\Throwable $e) {
+            $this->rollback();
+            throw $e;
+        }
+    }
+
+    // Vector Search Support
+
+    /**
+     * Perform vector similarity search.
+     *
+     * @param array<float> $queryVector Query embedding vector
+     * @param string $table Table to search
+     * @param string $vectorColumn Column containing embeddings
+     * @param string $idColumn Column containing row IDs
+     * @param string $metric Distance metric: "cosine", "euclidean", "dot", "manhattan"
+     * @param int $limit Maximum number of results
+     * @param string|null $filterClause Optional SQL WHERE clause
+     * @param array<string>|null $selectColumns Additional columns to return
+     * @return QueryResult
+     * @throws QueryException
+     */
+    public function vectorSearch(
+        array $queryVector,
+        string $table,
+        string $vectorColumn = 'embedding',
+        string $idColumn = 'id',
+        string $metric = 'cosine',
+        int $limit = 10,
+        ?string $filterClause = null,
+        ?array $selectColumns = null
+    ): QueryResult {
+        $vectorStr = $this->formatVector($queryVector);
+
+        $cols = [$idColumn];
+        if ($selectColumns !== null) {
+            $cols = array_merge($cols, $selectColumns);
+        }
+        $selectList = implode(', ', $cols);
+
+        if ($metric === 'cosine') {
+            $sql = "SELECT $selectList, vector_similarity($vectorColumn, $vectorStr) AS score FROM $table";
+            $order = 'DESC';
+        } else {
+            $sql = "SELECT $selectList, vector_distance($vectorColumn, $vectorStr, '$metric') AS score FROM $table";
+            $order = 'ASC';
+        }
+
+        if ($filterClause !== null) {
+            $sql .= " WHERE $filterClause";
+        }
+
+        $sql .= " ORDER BY score $order LIMIT $limit";
+
+        return $this->query($sql);
+    }
+
+    /**
+     * Perform hybrid search combining vector similarity and text search.
+     *
+     * @param array<float> $queryVector Query embedding vector
+     * @param string $textQuery Text query for BM25 search
+     * @param string $table Table to search
+     * @param string $vectorColumn Column containing embeddings
+     * @param string $textColumn Column containing text
+     * @param string $idColumn Column containing row IDs
+     * @param float $vectorWeight Weight for vector similarity (0.0-1.0)
+     * @param float $textWeight Weight for text relevance (0.0-1.0)
+     * @param int $limit Maximum number of results
+     * @param string|null $filterClause Optional SQL WHERE clause
+     * @param array<string>|null $selectColumns Additional columns to return
+     * @return QueryResult
+     * @throws QueryException
+     */
+    public function hybridSearch(
+        array $queryVector,
+        string $textQuery,
+        string $table,
+        string $vectorColumn = 'embedding',
+        string $textColumn = 'content',
+        string $idColumn = 'id',
+        float $vectorWeight = 0.5,
+        float $textWeight = 0.5,
+        int $limit = 10,
+        ?string $filterClause = null,
+        ?array $selectColumns = null
+    ): QueryResult {
+        $vectorStr = $this->formatVector($queryVector);
+        $escapedText = str_replace("'", "''", $textQuery);
+
+        $cols = [$idColumn];
+        if ($selectColumns !== null) {
+            $cols = array_merge($cols, $selectColumns);
+        }
+        $selectList = implode(', ', $cols);
+
+        $sql = <<<SQL
+            SELECT $selectList,
+                   vector_similarity($vectorColumn, $vectorStr) * $vectorWeight AS vector_score,
+                   COALESCE(match_score($textColumn, '$escapedText'), 0) * $textWeight AS text_score,
+                   vector_similarity($vectorColumn, $vectorStr) * $vectorWeight +
+                   COALESCE(match_score($textColumn, '$escapedText'), 0) * $textWeight AS combined_score
+            FROM $table
+            SQL;
+
+        if ($filterClause !== null) {
+            $sql .= " WHERE $filterClause";
+        }
+
+        $sql .= " ORDER BY combined_score DESC LIMIT $limit";
+
+        return $this->query($sql);
+    }
+
+    /**
+     * Format a vector as a SQL array literal.
+     *
+     * @param array<float> $vector
+     * @return string
+     */
+    private function formatVector(array $vector): string
+    {
+        $values = implode(',', array_map('strval', $vector));
+        return "ARRAY[$values]";
+    }
+
     /**
      * Parse Arrow IPC data (simplified parser).
      * For production use, consider using a PHP Arrow library.

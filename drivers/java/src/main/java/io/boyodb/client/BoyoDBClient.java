@@ -760,6 +760,208 @@ public class BoyoDBClient implements AutoCloseable {
         this.defaultDatabase = database;
     }
 
+    // Prepared Statements
+
+    /**
+     * Prepare a SELECT query and return a prepared ID.
+     *
+     * @param sql SQL query
+     * @param database Database to use
+     * @return Prepared statement ID
+     * @throws BoyoDBException if preparation fails
+     */
+    public String prepare(String sql, String database) throws BoyoDBException {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("op", "prepare");
+        request.put("sql", sql);
+        if (database != null) {
+            request.put("database", database);
+        }
+
+        JsonNode response = sendRequest(request);
+        if (!"ok".equals(response.path("status").asText())) {
+            throw new BoyoDBException("Prepare failed: " + response.path("message").asText());
+        }
+
+        String preparedId = response.path("prepared_id").asText();
+        if (preparedId == null || preparedId.isEmpty()) {
+            throw new BoyoDBException("Missing prepared_id in response");
+        }
+        return preparedId;
+    }
+
+    /**
+     * Execute a prepared statement using binary IPC.
+     *
+     * @param preparedId Prepared statement ID
+     * @param timeoutMillis Query timeout in milliseconds
+     * @return Query result
+     * @throws BoyoDBException if execution fails
+     */
+    public QueryResult executePreparedBinary(String preparedId, long timeoutMillis) throws BoyoDBException {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("op", "execute_prepared_binary");
+        request.put("id", preparedId);
+        request.put("timeout_millis", timeoutMillis);
+        request.put("stream", true);
+
+        JsonNode response = sendRequest(request);
+        if (!"ok".equals(response.path("status").asText())) {
+            throw new BoyoDBException("Execute prepared failed: " + response.path("message").asText());
+        }
+
+        QueryResult result = new QueryResult();
+        result.setSegmentsScanned(response.path("segments_scanned").asInt(0));
+        result.setDataSkippedBytes(response.path("data_skipped_bytes").asLong(0));
+
+        if (response.has("ipc_bytes_data")) {
+            byte[] ipcBytes = (byte[]) ((ObjectNode) response).get("ipc_bytes_data").binaryValue();
+            parseArrowIPC(ipcBytes, result);
+        } else if (response.has("ipc_base64")) {
+            byte[] ipcBytes = Base64.getDecoder().decode(response.get("ipc_base64").asText());
+            parseArrowIPC(ipcBytes, result);
+        }
+
+        return result;
+    }
+
+    // Vector Search Support
+
+    /**
+     * Perform vector similarity search.
+     *
+     * @param queryVector Query embedding vector
+     * @param table Table to search
+     * @param vectorColumn Column containing embeddings
+     * @param idColumn Column containing row IDs
+     * @param metric Distance metric: "cosine", "euclidean", "dot", "manhattan"
+     * @param limit Maximum number of results
+     * @param filter Optional SQL WHERE clause
+     * @param selectColumns Additional columns to return
+     * @return Query result with matches
+     * @throws BoyoDBException if search fails
+     */
+    public QueryResult vectorSearch(
+            float[] queryVector,
+            String table,
+            String vectorColumn,
+            String idColumn,
+            String metric,
+            int limit,
+            String filter,
+            List<String> selectColumns) throws BoyoDBException {
+
+        if (vectorColumn == null) vectorColumn = "embedding";
+        if (idColumn == null) idColumn = "id";
+        if (metric == null) metric = "cosine";
+        if (limit <= 0) limit = 10;
+
+        StringBuilder selectCols = new StringBuilder(idColumn);
+        if (selectColumns != null && !selectColumns.isEmpty()) {
+            selectCols.append(", ").append(String.join(", ", selectColumns));
+        }
+
+        String vectorStr = formatVector(queryVector);
+
+        String sql;
+        String order;
+        if ("cosine".equals(metric)) {
+            sql = String.format("SELECT %s, vector_similarity(%s, %s) AS score FROM %s",
+                    selectCols, vectorColumn, vectorStr, table);
+            order = "DESC";
+        } else {
+            sql = String.format("SELECT %s, vector_distance(%s, %s, '%s') AS score FROM %s",
+                    selectCols, vectorColumn, vectorStr, metric, table);
+            order = "ASC";
+        }
+
+        if (filter != null && !filter.isEmpty()) {
+            sql += " WHERE " + filter;
+        }
+
+        sql += " ORDER BY score " + order + " LIMIT " + limit;
+
+        return query(sql);
+    }
+
+    /**
+     * Perform hybrid search combining vector similarity and text search.
+     *
+     * @param queryVector Query embedding vector
+     * @param textQuery Text query for BM25 search
+     * @param table Table to search
+     * @param vectorColumn Column containing embeddings
+     * @param textColumn Column containing text
+     * @param idColumn Column containing row IDs
+     * @param vectorWeight Weight for vector similarity (0.0-1.0)
+     * @param textWeight Weight for text relevance (0.0-1.0)
+     * @param limit Maximum number of results
+     * @param filter Optional SQL WHERE clause
+     * @param selectColumns Additional columns to return
+     * @return Query result with combined scores
+     * @throws BoyoDBException if search fails
+     */
+    public QueryResult hybridSearch(
+            float[] queryVector,
+            String textQuery,
+            String table,
+            String vectorColumn,
+            String textColumn,
+            String idColumn,
+            double vectorWeight,
+            double textWeight,
+            int limit,
+            String filter,
+            List<String> selectColumns) throws BoyoDBException {
+
+        if (vectorColumn == null) vectorColumn = "embedding";
+        if (textColumn == null) textColumn = "content";
+        if (idColumn == null) idColumn = "id";
+        if (vectorWeight <= 0) vectorWeight = 0.5;
+        if (textWeight <= 0) textWeight = 0.5;
+        if (limit <= 0) limit = 10;
+
+        StringBuilder selectCols = new StringBuilder(idColumn);
+        if (selectColumns != null && !selectColumns.isEmpty()) {
+            selectCols.append(", ").append(String.join(", ", selectColumns));
+        }
+
+        String vectorStr = formatVector(queryVector);
+        String escapedText = textQuery.replace("'", "''");
+
+        String sql = String.format("""
+                SELECT %s,
+                       vector_similarity(%s, %s) * %.2f AS vector_score,
+                       COALESCE(match_score(%s, '%s'), 0) * %.2f AS text_score,
+                       vector_similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
+                FROM %s
+                """,
+                selectCols,
+                vectorColumn, vectorStr, vectorWeight,
+                textColumn, escapedText, textWeight,
+                vectorColumn, vectorStr, vectorWeight,
+                textColumn, escapedText, textWeight,
+                table);
+
+        if (filter != null && !filter.isEmpty()) {
+            sql += " WHERE " + filter;
+        }
+
+        sql += " ORDER BY combined_score DESC LIMIT " + limit;
+
+        return query(sql);
+    }
+
+    private String formatVector(float[] vector) {
+        StringBuilder sb = new StringBuilder("ARRAY[");
+        for (int i = 0; i < vector.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(vector[i]);
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
     private boolean isSelectLike(String sql) {
         String trimmed = sql.trim().toLowerCase();
         return trimmed.startsWith("select ") || trimmed.startsWith("with ");

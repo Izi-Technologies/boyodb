@@ -654,6 +654,445 @@ public class PooledClient : IDisposable
         _pool.Dispose();
     }
 
+    // Health and Metadata Operations
+
+    /// <summary>
+    /// Check server health.
+    /// </summary>
+    public async Task HealthAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        await _pool.HealthAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Create a new database.
+    /// </summary>
+    public async Task CreateDatabaseAsync(string name, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?> { ["op"] = "createdatabase", ["name"] = name },
+            cancellationToken);
+        CheckStatus(response, "Create database failed");
+    }
+
+    /// <summary>
+    /// Create a new table.
+    /// </summary>
+    public async Task CreateTableAsync(string database, string table, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?>
+            {
+                ["op"] = "createtable",
+                ["database"] = database,
+                ["table"] = table
+            },
+            cancellationToken);
+        CheckStatus(response, "Create table failed");
+    }
+
+    /// <summary>
+    /// List all databases.
+    /// </summary>
+    public async Task<List<string>> ListDatabasesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?> { ["op"] = "listdatabases" },
+            cancellationToken);
+        CheckStatus(response, "List databases failed");
+
+        var databases = new List<string>();
+        if (response.RootElement.TryGetProperty("databases", out var dbArray))
+        {
+            foreach (var item in dbArray.EnumerateArray())
+            {
+                var name = item.GetString();
+                if (name != null) databases.Add(name);
+            }
+        }
+        return databases;
+    }
+
+    /// <summary>
+    /// List tables, optionally filtered by database.
+    /// </summary>
+    public async Task<List<TableInfo>> ListTablesAsync(string? database = null, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        var request = new Dictionary<string, object?> { ["op"] = "listtables" };
+        if (!string.IsNullOrEmpty(database))
+        {
+            request["database"] = database;
+        }
+
+        using var response = await _pool.SendRequestAsync(request, cancellationToken);
+        CheckStatus(response, "List tables failed");
+
+        var tables = new List<TableInfo>();
+        if (response.RootElement.TryGetProperty("tables", out var tableArray))
+        {
+            foreach (var item in tableArray.EnumerateArray())
+            {
+                var tableInfo = new TableInfo
+                {
+                    Database = item.TryGetProperty("database", out var dbProp) ? dbProp.GetString() ?? "" : "",
+                    Name = item.TryGetProperty("name", out var nameProp) ? nameProp.GetString() ?? "" : ""
+                };
+                tables.Add(tableInfo);
+            }
+        }
+        return tables;
+    }
+
+    /// <summary>
+    /// Get query execution plan.
+    /// </summary>
+    public async Task<string> ExplainAsync(string sql, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?> { ["op"] = "explain", ["sql"] = sql },
+            cancellationToken);
+        CheckStatus(response, "Explain failed");
+
+        if (response.RootElement.TryGetProperty("explain_plan", out var planElement))
+        {
+            return planElement.GetRawText();
+        }
+        return "{}";
+    }
+
+    /// <summary>
+    /// Get server metrics.
+    /// </summary>
+    public async Task<string> MetricsAsync(CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?> { ["op"] = "metrics" },
+            cancellationToken);
+        CheckStatus(response, "Metrics failed");
+
+        if (response.RootElement.TryGetProperty("metrics", out var metricsElement))
+        {
+            return metricsElement.GetRawText();
+        }
+        return "{}";
+    }
+
+    // Data Ingestion
+
+    /// <summary>
+    /// Ingest CSV data into a table.
+    /// </summary>
+    public async Task IngestCsvAsync(string database, string table, byte[] csvData, bool hasHeader = true, string? delimiter = null, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        var request = new Dictionary<string, object?>
+        {
+            ["op"] = "ingestcsv",
+            ["database"] = database,
+            ["table"] = table,
+            ["payload_base64"] = Convert.ToBase64String(csvData),
+            ["has_header"] = hasHeader
+        };
+        if (!string.IsNullOrEmpty(delimiter))
+        {
+            request["delimiter"] = delimiter;
+        }
+
+        using var response = await _pool.SendRequestAsync(request, cancellationToken);
+        CheckStatus(response, "Ingest CSV failed");
+    }
+
+    /// <summary>
+    /// Ingest Arrow IPC data into a table.
+    /// </summary>
+    public async Task IngestIpcAsync(string database, string table, byte[] ipcData, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        using var response = await _pool.SendRequestAsync(
+            new Dictionary<string, object?>
+            {
+                ["op"] = "ingestipc",
+                ["database"] = database,
+                ["table"] = table,
+                ["payload_base64"] = Convert.ToBase64String(ipcData)
+            },
+            cancellationToken);
+        CheckStatus(response, "Ingest IPC failed");
+    }
+
+    // Prepared Statements
+
+    /// <summary>
+    /// Prepare a SELECT query and return a prepared ID.
+    /// </summary>
+    public async Task<string> PrepareAsync(string sql, string? database = null, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        var request = new Dictionary<string, object?> { ["op"] = "prepare", ["sql"] = sql };
+        var db = database ?? _config.Database;
+        if (!string.IsNullOrEmpty(db))
+        {
+            request["database"] = db;
+        }
+
+        using var response = await _pool.SendRequestAsync(request, cancellationToken);
+        CheckStatus(response, "Prepare failed");
+
+        if (response.RootElement.TryGetProperty("prepared_id", out var idElement))
+        {
+            return idElement.GetString() ?? throw new QueryException("Missing prepared_id in response");
+        }
+        throw new QueryException("Missing prepared_id in response");
+    }
+
+    /// <summary>
+    /// Execute a prepared statement using binary IPC.
+    /// </summary>
+    public async Task<QueryResult> ExecutePreparedBinaryAsync(string preparedId, int? timeout = null, CancellationToken cancellationToken = default)
+    {
+        if (!_initialized) await ConnectAsync(cancellationToken);
+        var request = new Dictionary<string, object?>
+        {
+            ["op"] = "execute_prepared_binary",
+            ["id"] = preparedId,
+            ["timeout_millis"] = timeout ?? _config.QueryTimeout,
+            ["stream"] = true
+        };
+
+        var (response, ipcBytes) = await _pool.SendRequestWithIpcAsync(request, cancellationToken);
+        using (response)
+        {
+            CheckStatus(response, "Execute prepared failed");
+
+            var result = new QueryResult();
+            if (response.RootElement.TryGetProperty("segments_scanned", out var segmentsElement))
+            {
+                result.SegmentsScanned = segmentsElement.GetInt32();
+            }
+            if (response.RootElement.TryGetProperty("data_skipped_bytes", out var skippedElement))
+            {
+                result.DataSkippedBytes = skippedElement.GetInt64();
+            }
+
+            if (ipcBytes != null)
+            {
+                ParseArrowIpc(ipcBytes, result);
+            }
+            else if (response.RootElement.TryGetProperty("ipc_base64", out var ipcElement))
+            {
+                var ipcBase64 = ipcElement.GetString();
+                if (!string.IsNullOrEmpty(ipcBase64))
+                {
+                    var ipcData = Convert.FromBase64String(ipcBase64);
+                    ParseArrowIpc(ipcData, result);
+                }
+            }
+
+            return result;
+        }
+    }
+
+    // Transaction Support
+
+    /// <summary>
+    /// Start a transaction.
+    /// </summary>
+    public async Task BeginAsync(string? isolationLevel = null, bool readOnly = false, CancellationToken cancellationToken = default)
+    {
+        string sql;
+        if (!string.IsNullOrEmpty(isolationLevel))
+        {
+            sql = $"START TRANSACTION ISOLATION LEVEL {isolationLevel}";
+            if (readOnly) sql += " READ ONLY";
+        }
+        else if (readOnly)
+        {
+            sql = "START TRANSACTION READ ONLY";
+        }
+        else
+        {
+            sql = "BEGIN";
+        }
+        await ExecAsync(sql, null, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Commit the current transaction.
+    /// </summary>
+    public async Task CommitAsync(CancellationToken cancellationToken = default)
+    {
+        await ExecAsync("COMMIT", null, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Rollback the current transaction.
+    /// </summary>
+    public async Task RollbackAsync(string? savepoint = null, CancellationToken cancellationToken = default)
+    {
+        if (!string.IsNullOrEmpty(savepoint))
+        {
+            await ExecAsync($"ROLLBACK TO SAVEPOINT {savepoint}", null, null, cancellationToken);
+        }
+        else
+        {
+            await ExecAsync("ROLLBACK", null, null, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Create a savepoint.
+    /// </summary>
+    public async Task SavepointAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await ExecAsync($"SAVEPOINT {name}", null, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Release a savepoint.
+    /// </summary>
+    public async Task ReleaseSavepointAsync(string name, CancellationToken cancellationToken = default)
+    {
+        await ExecAsync($"RELEASE SAVEPOINT {name}", null, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Execute a function within a transaction.
+    /// </summary>
+    public async Task<T> InTransactionAsync<T>(Func<Task<T>> fn, CancellationToken cancellationToken = default)
+    {
+        await BeginAsync(null, false, cancellationToken);
+        try
+        {
+            var result = await fn();
+            await CommitAsync(cancellationToken);
+            return result;
+        }
+        catch
+        {
+            await RollbackAsync(null, cancellationToken);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Execute a function within a transaction.
+    /// </summary>
+    public async Task InTransactionAsync(Func<Task> fn, CancellationToken cancellationToken = default)
+    {
+        await BeginAsync(null, false, cancellationToken);
+        try
+        {
+            await fn();
+            await CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await RollbackAsync(null, cancellationToken);
+            throw;
+        }
+    }
+
+    // Vector Search Support
+
+    /// <summary>
+    /// Perform vector similarity search.
+    /// </summary>
+    public async Task<QueryResult> VectorSearchAsync(
+        float[] queryVector,
+        string table,
+        string vectorColumn = "embedding",
+        string idColumn = "id",
+        string metric = "cosine",
+        int limit = 10,
+        string? filterClause = null,
+        string[]? selectColumns = null,
+        CancellationToken cancellationToken = default)
+    {
+        var vectorStr = FormatVector(queryVector);
+
+        var cols = new List<string> { idColumn };
+        if (selectColumns != null) cols.AddRange(selectColumns);
+        var selectList = string.Join(", ", cols);
+
+        string sql;
+        string order;
+        if (metric == "cosine")
+        {
+            sql = $"SELECT {selectList}, vector_similarity({vectorColumn}, {vectorStr}) AS score FROM {table}";
+            order = "DESC";
+        }
+        else
+        {
+            sql = $"SELECT {selectList}, vector_distance({vectorColumn}, {vectorStr}, '{metric}') AS score FROM {table}";
+            order = "ASC";
+        }
+
+        if (!string.IsNullOrEmpty(filterClause))
+        {
+            sql += $" WHERE {filterClause}";
+        }
+
+        sql += $" ORDER BY score {order} LIMIT {limit}";
+
+        return await QueryAsync(sql, null, null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Perform hybrid search combining vector similarity and text search.
+    /// </summary>
+    public async Task<QueryResult> HybridSearchAsync(
+        float[] queryVector,
+        string textQuery,
+        string table,
+        string vectorColumn = "embedding",
+        string textColumn = "content",
+        string idColumn = "id",
+        double vectorWeight = 0.5,
+        double textWeight = 0.5,
+        int limit = 10,
+        string? filterClause = null,
+        string[]? selectColumns = null,
+        CancellationToken cancellationToken = default)
+    {
+        var vectorStr = FormatVector(queryVector);
+        var escapedText = textQuery.Replace("'", "''");
+
+        var cols = new List<string> { idColumn };
+        if (selectColumns != null) cols.AddRange(selectColumns);
+        var selectList = string.Join(", ", cols);
+
+        var sql = $@"
+            SELECT {selectList},
+                   vector_similarity({vectorColumn}, {vectorStr}) * {vectorWeight} AS vector_score,
+                   COALESCE(match_score({textColumn}, '{escapedText}'), 0) * {textWeight} AS text_score,
+                   vector_similarity({vectorColumn}, {vectorStr}) * {vectorWeight} +
+                   COALESCE(match_score({textColumn}, '{escapedText}'), 0) * {textWeight} AS combined_score
+            FROM {table}
+        ";
+
+        if (!string.IsNullOrEmpty(filterClause))
+        {
+            sql += $" WHERE {filterClause}";
+        }
+
+        sql += $" ORDER BY combined_score DESC LIMIT {limit}";
+
+        return await QueryAsync(sql, null, null, cancellationToken);
+    }
+
+    private static string FormatVector(float[] vector)
+    {
+        var values = string.Join(",", vector);
+        return $"ARRAY[{values}]";
+    }
+
     private static bool IsSelectLike(string sql)
     {
         var trimmed = sql.TrimStart().ToLowerInvariant();
@@ -681,4 +1120,20 @@ public class PooledClient : IDisposable
         // Simplified parsing - use Apache.Arrow NuGet for production
         // This is a placeholder that matches the Client.cs implementation
     }
+}
+
+/// <summary>
+/// Table metadata.
+/// </summary>
+public class TableInfo
+{
+    /// <summary>
+    /// Database name.
+    /// </summary>
+    public string Database { get; set; } = "";
+
+    /// <summary>
+    /// Table name.
+    /// </summary>
+    public string Name { get; set; } = "";
 }

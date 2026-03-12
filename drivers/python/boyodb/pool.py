@@ -10,7 +10,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .errors import ConnectionError, QueryError, TimeoutError
 
@@ -451,3 +451,400 @@ class PooledClient:
         client = Client.__new__(Client)
         parsed = client._parse_arrow_ipc(data)
         return parsed.get("rows", [])
+
+    # Health and Metadata Operations
+
+    def health(self) -> None:
+        """Check server health."""
+        self._pool.health()
+
+    def create_database(self, name: str) -> None:
+        """Create a new database."""
+        with self._pool.connection() as ctx:
+            response = ctx._send({"op": "createdatabase", "name": name})
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Create database failed"))
+
+    def create_table(self, database: str, table: str) -> None:
+        """Create a new table."""
+        with self._pool.connection() as ctx:
+            response = ctx._send({
+                "op": "createtable",
+                "database": database,
+                "table": table
+            })
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Create table failed"))
+
+    def list_databases(self) -> List[str]:
+        """List all databases."""
+        with self._pool.connection() as ctx:
+            response = ctx._send({"op": "listdatabases"})
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "List databases failed"))
+        return response.get("databases", [])
+
+    def list_tables(self, database: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List tables, optionally filtered by database."""
+        request: Dict[str, Any] = {"op": "listtables"}
+        if database:
+            request["database"] = database
+        with self._pool.connection() as ctx:
+            response = ctx._send(request)
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "List tables failed"))
+        return response.get("tables", [])
+
+    def explain(self, sql: str) -> Dict[str, Any]:
+        """Get query execution plan."""
+        with self._pool.connection() as ctx:
+            response = ctx._send({"op": "explain", "sql": sql})
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Explain failed"))
+        return response.get("explain_plan", {})
+
+    def metrics(self) -> Dict[str, Any]:
+        """Get server metrics."""
+        with self._pool.connection() as ctx:
+            response = ctx._send({"op": "metrics"})
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Metrics failed"))
+        return response.get("metrics", {})
+
+    # Data Ingestion
+
+    def ingest_csv(
+        self,
+        database: str,
+        table: str,
+        csv_data: bytes,
+        has_header: bool = True,
+        delimiter: Optional[str] = None,
+    ) -> None:
+        """Ingest CSV data into a table."""
+        import base64
+        request: Dict[str, Any] = {
+            "op": "ingestcsv",
+            "database": database,
+            "table": table,
+            "payload_base64": base64.b64encode(csv_data).decode("ascii"),
+            "has_header": has_header,
+        }
+        if delimiter:
+            request["delimiter"] = delimiter
+        with self._pool.connection() as ctx:
+            response = ctx._send(request)
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Ingest CSV failed"))
+
+    def ingest_ipc(self, database: str, table: str, ipc_data: bytes) -> None:
+        """Ingest Arrow IPC data into a table."""
+        import base64
+        with self._pool.connection() as ctx:
+            response = ctx._send({
+                "op": "ingestipc",
+                "database": database,
+                "table": table,
+                "payload_base64": base64.b64encode(ipc_data).decode("ascii"),
+            })
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Ingest IPC failed"))
+
+    # Prepared Statements
+
+    def prepare(self, sql: str, database: Optional[str] = None) -> str:
+        """Prepare a SELECT query on the server and return a prepared id."""
+        db = database or self._config.database
+        request: Dict[str, Any] = {"op": "prepare", "sql": sql}
+        if db:
+            request["database"] = db
+        with self._pool.connection() as ctx:
+            response = ctx._send(request)
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Prepare failed"))
+        prepared_id = response.get("prepared_id")
+        if not prepared_id:
+            raise QueryError("missing prepared_id in response")
+        return prepared_id
+
+    def execute_prepared_binary(
+        self,
+        prepared_id: str,
+        timeout: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Execute a prepared statement using binary IPC responses."""
+        timeout_ms = timeout or self._config.query_timeout
+        request: Dict[str, Any] = {
+            "op": "execute_prepared_binary",
+            "id": prepared_id,
+            "timeout_millis": timeout_ms,
+            "stream": True,
+        }
+        with self._pool.connection() as ctx:
+            response = ctx._send(request)
+        if response.get("status") != "ok":
+            raise QueryError(response.get("message", "Execute prepared failed"))
+
+        ipc_bytes = response.get("ipc_bytes")
+        if ipc_bytes:
+            return self._parse_arrow_ipc(ipc_bytes)
+
+        ipc_base64 = response.get("ipc_base64")
+        if ipc_base64:
+            import base64
+            ipc_data = base64.b64decode(ipc_base64)
+            return self._parse_arrow_ipc(ipc_data)
+
+        return []
+
+    # Transaction Support
+
+    def begin(self, isolation_level: Optional[str] = None, read_only: bool = False) -> None:
+        """
+        Start a new transaction.
+
+        Args:
+            isolation_level: Optional isolation level. One of:
+                - "READ UNCOMMITTED"
+                - "READ COMMITTED"
+                - "REPEATABLE READ"
+                - "SERIALIZABLE"
+            read_only: If True, start a read-only transaction
+        """
+        if isolation_level:
+            sql = f"START TRANSACTION ISOLATION LEVEL {isolation_level}"
+            if read_only:
+                sql += " READ ONLY"
+        elif read_only:
+            sql = "START TRANSACTION READ ONLY"
+        else:
+            sql = "BEGIN"
+        self.exec(sql)
+
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        self.exec("COMMIT")
+
+    def rollback(self, savepoint: Optional[str] = None) -> None:
+        """
+        Rollback the current transaction or to a savepoint.
+
+        Args:
+            savepoint: If provided, rollback to this savepoint
+        """
+        if savepoint:
+            self.exec(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        else:
+            self.exec("ROLLBACK")
+
+    def savepoint(self, name: str) -> None:
+        """Create a savepoint with the given name."""
+        self.exec(f"SAVEPOINT {name}")
+
+    def release_savepoint(self, name: str) -> None:
+        """Release a savepoint."""
+        self.exec(f"RELEASE SAVEPOINT {name}")
+
+    def transaction(self, isolation_level: Optional[str] = None, read_only: bool = False):
+        """
+        Context manager for transactions.
+
+        Usage:
+            with client.transaction():
+                client.exec("INSERT INTO ...")
+                client.exec("UPDATE ...")
+            # Automatically committed
+
+        Args:
+            isolation_level: Optional isolation level
+            read_only: If True, start a read-only transaction
+
+        Returns:
+            Transaction context manager
+        """
+        return PooledTransactionContext(self, isolation_level, read_only)
+
+    def in_transaction(self, fn) -> Any:
+        """
+        Execute a function within a transaction.
+
+        If the function returns successfully, the transaction is committed.
+        If an exception is raised, the transaction is rolled back.
+
+        Args:
+            fn: Function to execute (takes no arguments)
+
+        Returns:
+            Return value of the function
+        """
+        self.begin()
+        try:
+            result = fn()
+            self.commit()
+            return result
+        except Exception:
+            self.rollback()
+            raise
+
+    # Configuration
+
+    def set_database(self, database: str) -> None:
+        """Set the default database."""
+        self._config.database = database
+
+    # Vector Search Support
+
+    def vector_search(
+        self,
+        query_vector: List[float],
+        table: str,
+        *,
+        vector_column: str = "embedding",
+        id_column: str = "id",
+        metric: str = "cosine",
+        limit: int = 10,
+        filter_clause: Optional[str] = None,
+        select_columns: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform vector similarity search.
+
+        Args:
+            query_vector: Query embedding vector
+            table: Table to search
+            vector_column: Column containing embeddings (default: "embedding")
+            id_column: Column containing row IDs (default: "id")
+            metric: Distance metric: "cosine", "euclidean", "dot", "manhattan"
+            limit: Maximum number of results
+            filter_clause: Optional SQL WHERE clause for filtering
+            select_columns: Additional columns to return
+
+        Returns:
+            List of result dictionaries with id, score, and requested columns
+        """
+        vector_str = self._format_vector(query_vector)
+
+        cols = [id_column]
+        if select_columns:
+            cols.extend(select_columns)
+        select_list = ", ".join(cols)
+
+        if metric == "cosine":
+            sql = f"SELECT {select_list}, vector_similarity({vector_column}, {vector_str}) AS score FROM {table}"
+            order = "DESC"
+        else:
+            sql = f"SELECT {select_list}, vector_distance({vector_column}, {vector_str}, '{metric}') AS score FROM {table}"
+            order = "ASC"
+
+        if filter_clause:
+            sql += f" WHERE {filter_clause}"
+
+        sql += f" ORDER BY score {order} LIMIT {limit}"
+
+        return self.query(sql)
+
+    def hybrid_search(
+        self,
+        query_vector: List[float],
+        text_query: str,
+        table: str,
+        *,
+        vector_column: str = "embedding",
+        text_column: str = "content",
+        id_column: str = "id",
+        vector_weight: float = 0.5,
+        text_weight: float = 0.5,
+        limit: int = 10,
+        filter_clause: Optional[str] = None,
+        select_columns: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform hybrid search combining vector similarity and text search.
+
+        Args:
+            query_vector: Query embedding vector
+            text_query: Text query for BM25 search
+            table: Table to search
+            vector_column: Column containing embeddings
+            text_column: Column containing text for full-text search
+            id_column: Column containing row IDs
+            vector_weight: Weight for vector similarity (0.0-1.0)
+            text_weight: Weight for text relevance (0.0-1.0)
+            limit: Maximum number of results
+            filter_clause: Optional SQL WHERE clause
+            select_columns: Additional columns to return
+
+        Returns:
+            List of result dictionaries with combined scores
+        """
+        vector_str = self._format_vector(query_vector)
+        escaped_text = text_query.replace("'", "''")
+
+        cols = [id_column]
+        if select_columns:
+            cols.extend(select_columns)
+        select_list = ", ".join(cols)
+
+        sql = f"""
+            SELECT {select_list},
+                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} AS vector_score,
+                   COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS text_score,
+                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} +
+                   COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS combined_score
+            FROM {table}
+        """
+
+        if filter_clause:
+            sql += f" WHERE {filter_clause}"
+
+        sql += f" ORDER BY combined_score DESC LIMIT {limit}"
+
+        return self.query(sql)
+
+    def _format_vector(self, vector: List[float]) -> str:
+        """Format a vector as a SQL array literal."""
+        values = ",".join(str(v) for v in vector)
+        return f"ARRAY[{values}]"
+
+
+class PooledTransactionContext:
+    """Context manager for pooled client transactions."""
+
+    def __init__(self, client: PooledClient, isolation_level: Optional[str], read_only: bool):
+        self._client = client
+        self._isolation_level = isolation_level
+        self._read_only = read_only
+        self._rolled_back = False
+
+    def __enter__(self) -> "PooledTransactionContext":
+        self._client.begin(self._isolation_level, self._read_only)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if exc_type is not None:
+            try:
+                self._client.rollback()
+            except Exception:
+                pass
+            return False
+
+        if not self._rolled_back:
+            self._client.commit()
+        return False
+
+    def rollback(self) -> None:
+        """Explicitly rollback the transaction."""
+        self._client.rollback()
+        self._rolled_back = True
+
+    def savepoint(self, name: str) -> None:
+        """Create a savepoint."""
+        self._client.savepoint(name)
+
+    def rollback_to_savepoint(self, name: str) -> None:
+        """Rollback to a savepoint."""
+        self._client.rollback(name)
+
+    def release_savepoint(self, name: str) -> None:
+        """Release a savepoint."""
+        self._client.release_savepoint(name)

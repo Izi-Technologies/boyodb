@@ -24,9 +24,6 @@
 //	}
 package boyodb
 
-// Version is the current version of the boyodb Go driver.
-const Version = "0.9.4"
-
 import (
 	"crypto/tls"
 	"crypto/x509"
@@ -38,10 +35,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
-	"strings"
 )
+
+// Version is the current version of the boyodb Go driver.
+const Version = "0.9.4"
 
 // Security note: This driver includes an InsecureSkipVerify option for TLS.
 // This option should NEVER be used in production as it disables certificate

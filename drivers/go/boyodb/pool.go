@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -1084,6 +1085,252 @@ func (c *PooledClient) InTransaction(fn func() error) error {
 	}
 
 	return nil
+}
+
+// BeginWithOptions starts a new transaction with the specified isolation level.
+// isolationLevel can be: "READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"
+// If empty, the default isolation level is used.
+func (c *PooledClient) BeginWithOptions(isolationLevel string, readOnly bool) error {
+	sql := "BEGIN"
+	if isolationLevel != "" {
+		sql = "START TRANSACTION ISOLATION LEVEL " + isolationLevel
+	}
+	if readOnly {
+		if isolationLevel != "" {
+			sql += " READ ONLY"
+		} else {
+			sql = "START TRANSACTION READ ONLY"
+		}
+	}
+	return c.Exec(sql)
+}
+
+// Savepoint creates a savepoint with the given name.
+func (c *PooledClient) Savepoint(name string) error {
+	return c.Exec("SAVEPOINT " + name)
+}
+
+// RollbackToSavepoint rolls back to the specified savepoint.
+func (c *PooledClient) RollbackToSavepoint(name string) error {
+	return c.Exec("ROLLBACK TO SAVEPOINT " + name)
+}
+
+// ReleaseSavepoint releases the specified savepoint.
+func (c *PooledClient) ReleaseSavepoint(name string) error {
+	return c.Exec("RELEASE SAVEPOINT " + name)
+}
+
+// Prepared Statements
+
+// Prepare registers a server-side prepared statement and returns its id.
+func (c *PooledClient) Prepare(sql, database string) (string, error) {
+	req := map[string]interface{}{
+		"op":  "prepare",
+		"sql": sql,
+	}
+	if database != "" {
+		req["database"] = database
+	}
+	resp, err := c.pool.sendRequest(req)
+	if err != nil {
+		return "", err
+	}
+	if resp.Status != "ok" {
+		return "", fmt.Errorf("prepare failed: %s", resp.Message)
+	}
+	if resp.PreparedID == "" {
+		return "", errors.New("missing prepared_id in response")
+	}
+	return resp.PreparedID, nil
+}
+
+// ExecutePreparedBinary executes a prepared statement and returns results using binary IPC.
+func (c *PooledClient) ExecutePreparedBinary(preparedID string, timeoutMillis uint32) (*Result, error) {
+	req := map[string]interface{}{
+		"op":             "execute_prepared_binary",
+		"id":             preparedID,
+		"timeout_millis": timeoutMillis,
+		"stream":         true,
+	}
+	resp, err := c.pool.sendRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("execute prepared failed: %s", resp.Message)
+	}
+
+	result := &Result{
+		segmentsScanned:  resp.SegmentsScanned,
+		dataSkippedBytes: resp.DataSkippedBytes,
+	}
+
+	if len(resp.IPCBytes) > 0 {
+		result.ipcData = resp.IPCBytes
+		if err := result.parseIPC(); err != nil {
+			return nil, fmt.Errorf("failed to parse IPC data: %w", err)
+		}
+	} else if resp.IPCBase64 != "" {
+		ipcData, err := decodeBase64(resp.IPCBase64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode IPC data: %w", err)
+		}
+		result.ipcData = ipcData
+		if err := result.parseIPC(); err != nil {
+			return nil, fmt.Errorf("failed to parse IPC data: %w", err)
+		}
+	}
+
+	return result, nil
+}
+
+// CreateTableWithSchema creates a new table with a schema definition.
+func (c *PooledClient) CreateTableWithSchema(database, table string, schema []map[string]interface{}) error {
+	resp, err := c.pool.sendRequest(map[string]interface{}{
+		"op":       "createtable",
+		"database": database,
+		"table":    table,
+		"schema":   schema,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Status != "ok" {
+		return fmt.Errorf("create table failed: %s", resp.Message)
+	}
+	return nil
+}
+
+// Vector Search Support
+
+// VectorSearch performs similarity search on vector embeddings.
+func (c *PooledClient) VectorSearch(queryVector []float32, opts *VectorSearchOptions) (*Result, error) {
+	if opts == nil {
+		return nil, errors.New("VectorSearchOptions is required")
+	}
+	if opts.Table == "" {
+		return nil, errors.New("Table is required")
+	}
+
+	// Set defaults
+	vectorCol := opts.VectorColumn
+	if vectorCol == "" {
+		vectorCol = "embedding"
+	}
+	idCol := opts.IDColumn
+	if idCol == "" {
+		idCol = "id"
+	}
+	metric := opts.Metric
+	if metric == "" {
+		metric = "cosine"
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	// Build the query
+	selectCols := idCol
+	if len(opts.SelectColumns) > 0 {
+		selectCols = idCol + ", " + strings.Join(opts.SelectColumns, ", ")
+	}
+
+	// Format vector as array literal
+	vectorStr := formatVector(queryVector)
+
+	var sql string
+	if metric == "cosine" {
+		sql = fmt.Sprintf(
+			"SELECT %s, vector_similarity(%s, %s) AS score FROM %s",
+			selectCols, vectorCol, vectorStr, opts.Table,
+		)
+	} else {
+		sql = fmt.Sprintf(
+			"SELECT %s, vector_distance(%s, %s, '%s') AS score FROM %s",
+			selectCols, vectorCol, vectorStr, metric, opts.Table,
+		)
+	}
+
+	if opts.Filter != "" {
+		sql += " WHERE " + opts.Filter
+	}
+
+	if metric == "cosine" {
+		sql += " ORDER BY score DESC"
+	} else {
+		sql += " ORDER BY score ASC"
+	}
+	sql += fmt.Sprintf(" LIMIT %d", limit)
+
+	return c.Query(sql)
+}
+
+// HybridSearch performs combined vector similarity and full-text search.
+func (c *PooledClient) HybridSearch(queryVector []float32, textQuery string, opts *HybridSearchOptions) (*Result, error) {
+	if opts == nil {
+		return nil, errors.New("HybridSearchOptions is required")
+	}
+	if opts.Table == "" {
+		return nil, errors.New("Table is required")
+	}
+
+	// Set defaults
+	vectorCol := opts.VectorColumn
+	if vectorCol == "" {
+		vectorCol = "embedding"
+	}
+	textCol := opts.TextColumn
+	if textCol == "" {
+		textCol = "content"
+	}
+	idCol := opts.IDColumn
+	if idCol == "" {
+		idCol = "id"
+	}
+	vectorWeight := opts.VectorWeight
+	if vectorWeight <= 0 {
+		vectorWeight = 0.5
+	}
+	textWeight := opts.TextWeight
+	if textWeight <= 0 {
+		textWeight = 0.5
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	selectCols := idCol
+	if len(opts.SelectColumns) > 0 {
+		selectCols = idCol + ", " + strings.Join(opts.SelectColumns, ", ")
+	}
+
+	vectorStr := formatVector(queryVector)
+
+	// Build hybrid search query using weighted combination
+	sql := fmt.Sprintf(`
+		SELECT %s,
+		       vector_similarity(%s, %s) * %.2f AS vector_score,
+		       COALESCE(match_score(%s, '%s'), 0) * %.2f AS text_score,
+		       vector_similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
+		FROM %s
+	`, selectCols,
+		vectorCol, vectorStr, vectorWeight,
+		textCol, escapeString(textQuery), textWeight,
+		vectorCol, vectorStr, vectorWeight,
+		textCol, escapeString(textQuery), textWeight,
+		opts.Table,
+	)
+
+	if opts.Filter != "" {
+		sql += " WHERE " + opts.Filter
+	}
+
+	sql += " ORDER BY combined_score DESC"
+	sql += fmt.Sprintf(" LIMIT %d", limit)
+
+	return c.Query(sql)
 }
 
 // PoolStats returns statistics about the connection pool.
