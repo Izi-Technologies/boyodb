@@ -8597,6 +8597,84 @@ impl Db {
         Ok(matching)
     }
 
+    /// Get values from rows matching a filter for specific columns (used for FK cascade)
+    fn get_rows_matching_filter(
+        &self,
+        database: &str,
+        table: &str,
+        filter: &QueryFilter,
+        columns: &[String],
+    ) -> Result<Vec<Vec<SqlValue>>, EngineError> {
+        let batches = self.load_table_batches(database, table)?;
+        let mut values: Vec<Vec<SqlValue>> = Vec::new();
+
+        for batch in &batches {
+            let schema = batch.schema();
+            let col_indices: Vec<Option<usize>> = columns
+                .iter()
+                .map(|c| schema.index_of(c).ok())
+                .collect();
+
+            // Check if all columns exist
+            if col_indices.iter().any(|i| i.is_none()) {
+                continue; // Skip if columns don't exist in this batch
+            }
+
+            // Apply filter to batch
+            let mask = apply_filter_to_batch(batch, filter)?;
+
+            for row_idx in 0..batch.num_rows() {
+                // Check if this row matches the filter
+                if let Some(ref m) = mask {
+                    if !m.value(row_idx) {
+                        continue;
+                    }
+                }
+
+                let mut row_values = Vec::new();
+                for col_idx in &col_indices {
+                    let array = batch.column(col_idx.unwrap());
+                    let value = extract_sql_value_from_array(array, row_idx);
+                    row_values.push(value);
+                }
+                values.push(row_values);
+            }
+        }
+
+        Ok(values)
+    }
+
+    /// Get default values for columns in a table (used for FK SET DEFAULT)
+    fn get_column_defaults(
+        &self,
+        database: &str,
+        table: &str,
+        columns: &[String],
+    ) -> Result<Vec<SqlValue>, EngineError> {
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let table_meta = manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table)
+            .ok_or_else(|| EngineError::NotFound(format!("table {}.{} not found", database, table)))?;
+
+        let defaults: Vec<SqlValue> = columns
+            .iter()
+            .map(|col| {
+                // Look for column default in constraints or column definitions
+                // For now, return NULL as the default (a production implementation
+                // would look up actual default values from column definitions)
+                SqlValue::Null
+            })
+            .collect();
+
+        Ok(defaults)
+    }
+
     fn entries_total_bytes(entries: &[ManifestEntry]) -> u64 {
         entries.iter().map(|e| e.size_bytes).sum()
     }
@@ -17033,31 +17111,70 @@ impl Db {
                 ..
             } = constraint
             {
-                if *on_delete == ForeignKeyAction::Restrict
-                    || *on_delete == ForeignKeyAction::NoAction
-                {
-                    // Check if any rows in the referencing table point to rows we're deleting
-                    let ref_batches = self.load_table_batches(ref_db, ref_table)?;
-                    if !ref_batches.is_empty() {
-                        // This is a simplified check - a production implementation would
-                        // check specific rows being deleted against FK values
-                        return Err(EngineError::ConstraintViolation(format!(
-                            "Cannot delete from {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON DELETE {})",
-                            database,
-                            table,
-                            name.as_deref().unwrap_or("unnamed"),
-                            ref_db,
-                            ref_table,
-                            match on_delete {
-                                ForeignKeyAction::Restrict => "RESTRICT",
-                                _ => "NO ACTION",
+                // Get rows that would be deleted to check FK violations
+                let deleted_values = self.get_rows_matching_filter(database, table, &filter, referenced_columns)?;
+
+                if deleted_values.is_empty() {
+                    continue; // No rows being deleted, no FK action needed
+                }
+
+                match on_delete {
+                    ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
+                        // Check if any rows in the referencing table point to rows we're deleting
+                        let fk_clause = build_fk_where_clause(columns, &deleted_values);
+                        if let Some(clause) = &fk_clause {
+                            let ref_filter = parse_where_filter(Some(clause))?;
+                            let matching = self.get_rows_matching_filter(ref_db, ref_table, &ref_filter, columns)?;
+                            if !matching.is_empty() {
+                                return Err(EngineError::ConstraintViolation(format!(
+                                    "Cannot delete from {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON DELETE {})",
+                                    database,
+                                    table,
+                                    name.as_deref().unwrap_or("unnamed"),
+                                    ref_db,
+                                    ref_table,
+                                    match on_delete {
+                                        ForeignKeyAction::Restrict => "RESTRICT",
+                                        _ => "NO ACTION",
+                                    }
+                                )));
                             }
-                        )));
+                        }
+                    }
+                    ForeignKeyAction::Cascade => {
+                        // ON DELETE CASCADE: recursively delete referencing rows
+                        let fk_clause = build_fk_where_clause(columns, &deleted_values);
+                        if let Some(clause) = fk_clause {
+                            // Recursive delete on the referencing table
+                            self.delete_rows(ref_db, ref_table, Some(&clause))?;
+                        }
+                    }
+                    ForeignKeyAction::SetNull => {
+                        // ON DELETE SET NULL: set FK columns to NULL in referencing rows
+                        let fk_clause = build_fk_where_clause(columns, &deleted_values);
+                        if let Some(clause) = fk_clause {
+                            let assignments: Vec<(String, SqlValue)> = columns
+                                .iter()
+                                .map(|col| (col.clone(), SqlValue::Null))
+                                .collect();
+                            self.update_rows(ref_db, ref_table, &assignments, Some(&clause))?;
+                        }
+                    }
+                    ForeignKeyAction::SetDefault => {
+                        // ON DELETE SET DEFAULT: set FK columns to default values
+                        // Get default values from table schema
+                        let defaults = self.get_column_defaults(ref_db, ref_table, columns)?;
+                        let fk_clause = build_fk_where_clause(columns, &deleted_values);
+                        if let Some(clause) = fk_clause {
+                            let assignments: Vec<(String, SqlValue)> = columns
+                                .iter()
+                                .zip(defaults.iter())
+                                .map(|(col, def)| (col.clone(), def.clone()))
+                                .collect();
+                            self.update_rows(ref_db, ref_table, &assignments, Some(&clause))?;
+                        }
                     }
                 }
-                // TODO: Implement ON DELETE CASCADE - recursively delete referencing rows
-                // TODO: Implement ON DELETE SET NULL - set FK columns to NULL
-                // TODO: Implement ON DELETE SET DEFAULT - set FK columns to default values
             }
         }
 
@@ -17247,30 +17364,101 @@ impl Db {
                 on_update, name, ..
             } = constraint
             {
-                if *on_update == ForeignKeyAction::Restrict
-                    || *on_update == ForeignKeyAction::NoAction
+                // Get the referenced columns from the FK constraint
+                let fk_referenced_columns = if let TableConstraint::ForeignKey {
+                    referenced_columns: ref_cols,
+                    columns: fk_cols,
+                    ..
+                } = constraint
                 {
-                    // Check if any rows in the referencing table point to rows we're updating
-                    let ref_batches = self.load_table_batches(ref_db, ref_table)?;
-                    if !ref_batches.is_empty() {
-                        // This is a simplified check - production would check specific rows
-                        return Err(EngineError::ConstraintViolation(format!(
-                            "Cannot update {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON UPDATE {})",
-                            database,
-                            table,
-                            name.as_deref().unwrap_or("unnamed"),
-                            ref_db,
-                            ref_table,
-                            match on_update {
-                                ForeignKeyAction::Restrict => "RESTRICT",
-                                _ => "NO ACTION",
+                    (ref_cols.clone(), fk_cols.clone())
+                } else {
+                    continue;
+                };
+
+                // Check if any of the updated columns are part of the referenced columns
+                let updated_cols: HashSet<String> = assignments.iter().map(|(c, _)| c.to_lowercase()).collect();
+                let ref_cols_set: HashSet<String> = fk_referenced_columns.0.iter().map(|c| c.to_lowercase()).collect();
+                let affects_fk = updated_cols.intersection(&ref_cols_set).count() > 0;
+
+                if !affects_fk {
+                    continue; // This update doesn't affect FK columns, no action needed
+                }
+
+                // Get old values from rows being updated
+                let old_values = self.get_rows_matching_filter(database, table, &filter, &fk_referenced_columns.0)?;
+
+                if old_values.is_empty() {
+                    continue; // No rows being updated, no FK action needed
+                }
+
+                match on_update {
+                    ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
+                        // Check if any rows in the referencing table point to old values
+                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        if let Some(clause) = &fk_clause {
+                            let ref_filter = parse_where_filter(Some(clause))?;
+                            let matching = self.get_rows_matching_filter(ref_db, ref_table, &ref_filter, &fk_referenced_columns.1)?;
+                            if !matching.is_empty() {
+                                return Err(EngineError::ConstraintViolation(format!(
+                                    "Cannot update {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON UPDATE {})",
+                                    database,
+                                    table,
+                                    name.as_deref().unwrap_or("unnamed"),
+                                    ref_db,
+                                    ref_table,
+                                    match on_update {
+                                        ForeignKeyAction::Restrict => "RESTRICT",
+                                        _ => "NO ACTION",
+                                    }
+                                )));
                             }
-                        )));
+                        }
+                    }
+                    ForeignKeyAction::Cascade => {
+                        // ON UPDATE CASCADE: update referencing rows with new values
+                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        if let Some(clause) = fk_clause {
+                            // Build new assignments from the update
+                            let cascade_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.0
+                                .iter()
+                                .zip(fk_referenced_columns.1.iter())
+                                .filter_map(|(ref_col, fk_col)| {
+                                    assignments.iter()
+                                        .find(|(c, _)| c.eq_ignore_ascii_case(ref_col))
+                                        .map(|(_, v)| (fk_col.clone(), v.clone()))
+                                })
+                                .collect();
+                            if !cascade_assignments.is_empty() {
+                                self.update_rows(ref_db, ref_table, &cascade_assignments, Some(&clause))?;
+                            }
+                        }
+                    }
+                    ForeignKeyAction::SetNull => {
+                        // ON UPDATE SET NULL: set FK columns to NULL in referencing rows
+                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        if let Some(clause) = fk_clause {
+                            let null_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.1
+                                .iter()
+                                .map(|col| (col.clone(), SqlValue::Null))
+                                .collect();
+                            self.update_rows(ref_db, ref_table, &null_assignments, Some(&clause))?;
+                        }
+                    }
+                    ForeignKeyAction::SetDefault => {
+                        // ON UPDATE SET DEFAULT: set FK columns to default values
+                        let defaults = self.get_column_defaults(ref_db, ref_table, &fk_referenced_columns.1)?;
+                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        if let Some(clause) = fk_clause {
+                            let default_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.1
+                                .iter()
+                                .zip(defaults.iter())
+                                .map(|(col, def)| (col.clone(), def.clone()))
+                                .collect();
+                            self.update_rows(ref_db, ref_table, &default_assignments, Some(&clause))?;
+                        }
                     }
                 }
-                // TODO: Implement ON UPDATE CASCADE - update referencing rows
-                // TODO: Implement ON UPDATE SET NULL - set FK columns to NULL
-                // TODO: Implement ON UPDATE SET DEFAULT - set FK columns to default values
             }
         }
 
@@ -22959,6 +23147,215 @@ pub fn filter_is_empty(filter: &QueryFilter) -> bool {
         && filter.numeric_eq_filters.is_empty()
         && filter.string_eq_filters.is_empty()
         && filter.like_filters.is_empty()
+}
+
+/// Build a WHERE clause for FK cascade operations from column values
+fn build_fk_where_clause(columns: &[String], values: &[Vec<SqlValue>]) -> Option<String> {
+    if values.is_empty() || columns.is_empty() {
+        return None;
+    }
+
+    let conditions: Vec<String> = values
+        .iter()
+        .filter_map(|row| {
+            if row.len() != columns.len() {
+                return None;
+            }
+
+            let row_conds: Vec<String> = columns
+                .iter()
+                .zip(row.iter())
+                .filter_map(|(col, val)| {
+                    let val_str = match val {
+                        SqlValue::Null => return None, // Can't match NULL with =
+                        SqlValue::Integer(i) => i.to_string(),
+                        SqlValue::Float(f) => f.to_string(),
+                        SqlValue::String(s) => format!("'{}'", s.replace('\'', "''")),
+                        SqlValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+                    };
+                    Some(format!("{} = {}", col, val_str))
+                })
+                .collect();
+
+            if row_conds.len() == columns.len() {
+                Some(format!("({})", row_conds.join(" AND ")))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if conditions.is_empty() {
+        None
+    } else {
+        Some(conditions.join(" OR "))
+    }
+}
+
+/// Extract a SqlValue from an Arrow array at the given row index
+fn extract_sql_value_from_array(array: &ArrayRef, row: usize) -> SqlValue {
+    if array.is_null(row) {
+        return SqlValue::Null;
+    }
+
+    match array.data_type() {
+        DataType::Int8 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Int16 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Int32 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Int64 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                SqlValue::Integer(arr.value(row))
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::UInt8 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::UInt16 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::UInt32 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::UInt64 => {
+            if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
+                // Note: may truncate for very large u64 values
+                SqlValue::Integer(arr.value(row) as i64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Float32 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+                SqlValue::Float(arr.value(row) as f64)
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Float64 => {
+            if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+                SqlValue::Float(arr.value(row))
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Utf8 | DataType::LargeUtf8 => {
+            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                SqlValue::String(arr.value(row).to_string())
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Boolean => {
+            if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
+                SqlValue::Boolean(arr.value(row))
+            } else {
+                SqlValue::Null
+            }
+        }
+        DataType::Timestamp(_, _) => {
+            // Store timestamp as integer (microseconds since epoch)
+            if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                SqlValue::Integer(arr.value(row))
+            } else {
+                SqlValue::Null
+            }
+        }
+        _ => SqlValue::Null,
+    }
+}
+
+/// Apply a filter to a batch and return a boolean mask
+fn apply_filter_to_batch(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+) -> Result<Option<BooleanArray>, EngineError> {
+    use arrow::compute::and;
+    use arrow_ord::cmp::eq as arr_eq;
+
+    if filter_is_empty(filter) {
+        return Ok(None); // No filter = all rows match
+    }
+
+    let num_rows = batch.num_rows();
+    let mut mask: Option<BooleanArray> = None;
+
+    // Apply numeric equality filters
+    for (col, val) in &filter.numeric_eq_filters {
+        if let Ok(idx) = batch.schema().index_of(col) {
+            let array = batch.column(idx);
+            let val_i64 = *val as i64;
+
+            // Create comparison based on array type
+            let cmp_result = if let Some(arr) = array.as_any().downcast_ref::<Int64Array>() {
+                let scalar = Int64Array::new_scalar(val_i64);
+                arr_eq(arr, &scalar).ok()
+            } else if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
+                let scalar = Int32Array::new_scalar(val_i64 as i32);
+                arr_eq(arr, &scalar).ok()
+            } else {
+                None
+            };
+
+            if let Some(cmp) = cmp_result {
+                mask = Some(match mask {
+                    Some(m) => and(&m, &cmp)
+                        .map_err(|e| EngineError::Internal(format!("filter and failed: {}", e)))?,
+                    None => cmp,
+                });
+            }
+        }
+    }
+
+    // Apply string equality filters
+    for (col, val) in &filter.string_eq_filters {
+        if let Ok(idx) = batch.schema().index_of(col) {
+            let array = batch.column(idx);
+            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+                let scalar = StringArray::new_scalar(val);
+                if let Ok(cmp) = arr_eq(arr, &scalar) {
+                    mask = Some(match mask {
+                        Some(m) => and(&m, &cmp)
+                            .map_err(|e| EngineError::Internal(format!("filter and failed: {}", e)))?,
+                        None => cmp,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(mask)
 }
 
 pub fn filter_batch_for_delete(

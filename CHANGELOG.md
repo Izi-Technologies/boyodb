@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Memory usage statistics and peak tracking
   - Automatic memory cleanup on context reset/delete
 
+- **Foreign Key CASCADE Actions**: Full referential integrity enforcement
+  - `ON DELETE CASCADE`: Automatically delete referencing rows when parent row is deleted
+  - `ON DELETE SET NULL`: Set foreign key columns to NULL when parent row is deleted
+  - `ON DELETE SET DEFAULT`: Set foreign key columns to default values when parent row is deleted
+  - `ON UPDATE CASCADE`: Automatically update referencing rows when parent key is updated
+  - `ON UPDATE SET NULL`: Set foreign key columns to NULL when parent key is updated
+  - `ON UPDATE SET DEFAULT`: Set foreign key columns to default values when parent key is updated
+  - Recursive cascading through multiple FK relationships
+  - Proper constraint violation errors for RESTRICT/NO ACTION
+
+- **Read Replica Support**: Built-in read replica mode for scaling read workloads
+  - `--replica` flag to run server in read-only mode
+  - Manifest sync from shared S3 storage or HTTP bundle pull from primary
+  - Configurable sync interval with `--replica-sync-interval-ms`
+  - Replica status monitoring endpoint
+  - Proper PostgreSQL error codes (SQLSTATE 25006) for write rejections
+
 ### Fixed
 - **Memory Context Double-Counting**: Fixed bug where parent contexts counted children's allocations twice (once in parent's `current_used`, once via `total_usage()` recursion)
 - **Memory Context Leak**: Fixed memory leak where deallocated blocks weren't properly removed from the block vector

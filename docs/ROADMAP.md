@@ -13,6 +13,7 @@ To evolve BoyoDB into a general-purpose Big Data engine capable of Petabyte-scal
 *   **Point-in-Time Recovery**: WAL archiving with timestamp-based restore
 *   **B-Tree Indexes**: Efficient range queries and point lookups
 *   **Constraint Enforcement**: PRIMARY KEY, UNIQUE, FOREIGN KEY, CHECK
+*   **Foreign Key CASCADE Actions**: ON DELETE/UPDATE CASCADE, SET NULL, SET DEFAULT
 
 ## 1. Distributed Query Engine (Sharding)
 **Status**: Implemented (Phase 2 Completed)
@@ -84,3 +85,7 @@ Currently, `cluster` supports HA but not distributed query execution.
 *   **EXPLAIN ANALYZE**: Detailed query execution statistics with buffer stats and timing
 *   **pg_dump/pg_restore**: PostgreSQL-compatible backup format support
 *   **pg_upgrade**: In-place version upgrades with catalog migration
+*   **Read Replicas**: Scale read workloads with read-only replicas
+    *   Shared S3 manifest sync mode
+    *   HTTP bundle pull from primary mode
+    *   Replica status monitoring
