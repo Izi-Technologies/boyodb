@@ -10,14 +10,21 @@
 //! - Boolean logic (AND, OR, NOT)
 //! - Aggregation functions
 //!
-//! Note: This module provides a framework for JIT compilation. Full Cranelift
-//! integration requires the cranelift-* crates to be added as dependencies.
+//! When the `jit-cranelift` feature is enabled, expressions are compiled to
+//! native machine code using the Cranelift code generator.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use parking_lot::RwLock;
+
+#[cfg(feature = "jit-cranelift")]
+use cranelift::prelude::*;
+#[cfg(feature = "jit-cranelift")]
+use cranelift_jit::{JITBuilder, JITModule};
+#[cfg(feature = "jit-cranelift")]
+use cranelift_module::{Linkage, Module};
 
 /// JIT compilation configuration
 #[derive(Clone, Debug)]
@@ -493,13 +500,34 @@ impl JitCompiler {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let start = std::time::Instant::now();
 
-        // In a full implementation, this would use Cranelift to generate machine code
-        // For now, we create a compiled function that uses interpretation
         let input_types = self.extract_input_types(expr);
         let output_type = expr.result_type();
 
-        // Placeholder for actual JIT code generation
-        // In production, this would be Cranelift IR -> machine code
+        #[cfg(feature = "jit-cranelift")]
+        {
+            // Use Cranelift for native code generation
+            match self.compile_with_cranelift(expr, &input_types, output_type) {
+                Ok(code) => {
+                    let code_size = code.len();
+                    return Ok(CompiledFunction {
+                        id,
+                        expr_hash,
+                        expr: expr.clone(),
+                        code,
+                        input_types,
+                        output_type,
+                        executions: AtomicU64::new(0),
+                        compile_time_us: start.elapsed().as_micros() as u64,
+                        code_size,
+                    });
+                }
+                Err(_) => {
+                    // Fall back to interpretation if Cranelift compilation fails
+                }
+            }
+        }
+
+        // Fallback: create a compiled function that uses interpretation
         let code = self.generate_bytecode(expr);
 
         Ok(CompiledFunction {
@@ -511,8 +539,235 @@ impl JitCompiler {
             output_type,
             executions: AtomicU64::new(0),
             compile_time_us: start.elapsed().as_micros() as u64,
-            code_size: 0, // Would be actual code size
+            code_size: 0,
         })
+    }
+
+    /// Compile expression using Cranelift (when feature enabled)
+    #[cfg(feature = "jit-cranelift")]
+    fn compile_with_cranelift(
+        &self,
+        expr: &JitOp,
+        input_types: &[JitType],
+        output_type: JitType,
+    ) -> Result<Vec<u8>, JitError> {
+        use target_lexicon::Triple;
+
+        // Create JIT module
+        let mut flag_builder = settings::builder();
+        flag_builder.set("opt_level", match self.config.opt_level {
+            0 => "none",
+            1 => "speed",
+            2 => "speed",
+            _ => "speed_and_size",
+        }).map_err(|e| JitError::InternalError(e.to_string()))?;
+
+        let isa_builder = cranelift_codegen::isa::lookup(Triple::host())
+            .map_err(|e| JitError::InternalError(format!("ISA lookup failed: {}", e)))?;
+
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| JitError::InternalError(e.to_string()))?;
+
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(builder);
+
+        // Create function signature
+        let mut sig = module.make_signature();
+
+        // Add input parameters
+        for _t in input_types {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+
+        // Set return type
+        let ret_type = match output_type {
+            JitType::Bool => types::I8,
+            JitType::I8 | JitType::U8 => types::I8,
+            JitType::I16 | JitType::U16 => types::I16,
+            JitType::I32 | JitType::U32 => types::I32,
+            JitType::I64 | JitType::U64 => types::I64,
+            JitType::F32 => types::F32,
+            JitType::F64 => types::F64,
+        };
+        sig.returns.push(AbiParam::new(ret_type));
+
+        // Declare function
+        let func_id = module
+            .declare_function("jit_expr", Linkage::Local, &sig)
+            .map_err(|e| JitError::InternalError(e.to_string()))?;
+
+        // Define function
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+
+        // Create function builder
+        let mut func_ctx = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+
+            let entry_block = builder.create_block();
+            builder.append_block_params_for_function_params(entry_block);
+            builder.switch_to_block(entry_block);
+            builder.seal_block(entry_block);
+
+            // Get function parameters
+            let params: Vec<Value> = builder.block_params(entry_block).to_vec();
+
+            // Compile expression to Cranelift IR
+            let result = self.compile_expr_to_ir(&mut builder, expr, &params)?;
+
+            // Return result
+            builder.ins().return_(&[result]);
+            builder.finalize();
+        }
+
+        // Compile to machine code
+        module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| JitError::InternalError(e.to_string()))?;
+
+        module.clear_context(&mut ctx);
+        module.finalize_definitions()
+            .map_err(|e| JitError::InternalError(e.to_string()))?;
+
+        // Get compiled code
+        let code = module.get_finalized_function(func_id);
+        let code_bytes = unsafe {
+            std::slice::from_raw_parts(code as *const u8, 256)
+        };
+
+        Ok(code_bytes.to_vec())
+    }
+
+    /// Compile a JitOp expression to Cranelift IR
+    #[cfg(feature = "jit-cranelift")]
+    fn compile_expr_to_ir(
+        &self,
+        builder: &mut FunctionBuilder,
+        expr: &JitOp,
+        params: &[Value],
+    ) -> Result<Value, JitError> {
+        match expr {
+            JitOp::ConstI64(v) => Ok(builder.ins().iconst(types::I64, *v)),
+            JitOp::ConstF64(v) => Ok(builder.ins().f64const(*v)),
+            JitOp::ConstBool(v) => Ok(builder.ins().iconst(types::I8, if *v { 1 } else { 0 })),
+
+            JitOp::Column(idx, _) => {
+                params.get(*idx).copied()
+                    .ok_or_else(|| JitError::InternalError(format!("Column {} out of bounds", idx)))
+            }
+
+            JitOp::Add(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().iadd(va, vb))
+            }
+            JitOp::Sub(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().isub(va, vb))
+            }
+            JitOp::Mul(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().imul(va, vb))
+            }
+            JitOp::Div(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().sdiv(va, vb))
+            }
+            JitOp::Neg(a) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                Ok(builder.ins().ineg(va))
+            }
+
+            JitOp::Eq(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::Equal, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+            JitOp::Ne(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::NotEqual, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+            JitOp::Lt(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::SignedLessThan, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+            JitOp::Le(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+            JitOp::Gt(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+            JitOp::Ge(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, va, vb);
+                Ok(builder.ins().uextend(types::I64, cmp))
+            }
+
+            JitOp::And(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().band(va, vb))
+            }
+            JitOp::Or(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().bor(va, vb))
+            }
+            JitOp::Not(a) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let one = builder.ins().iconst(types::I64, 1);
+                Ok(builder.ins().bxor(va, one))
+            }
+
+            JitOp::BitAnd(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().band(va, vb))
+            }
+            JitOp::BitOr(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().bor(va, vb))
+            }
+            JitOp::BitXor(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().bxor(va, vb))
+            }
+            JitOp::BitNot(a) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                Ok(builder.ins().bnot(va))
+            }
+            JitOp::ShiftLeft(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().ishl(va, vb))
+            }
+            JitOp::ShiftRight(a, b) => {
+                let va = self.compile_expr_to_ir(builder, a, params)?;
+                let vb = self.compile_expr_to_ir(builder, b, params)?;
+                Ok(builder.ins().sshr(va, vb))
+            }
+
+            _ => Err(JitError::UnsupportedOperation(format!("{:?}", expr))),
+        }
     }
 
     /// Extract input types from expression

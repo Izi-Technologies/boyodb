@@ -121,6 +121,7 @@ pub struct ForeignColumn {
     pub name: String,
     pub data_type: ForeignDataType,
     pub nullable: bool,
+    pub default_value: Option<String>,
     pub options: HashMap<String, String>,
 }
 
@@ -884,15 +885,7 @@ impl FdwHandler for PostgresFdwHandler {
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(PostgresConnection {
-            host,
-            port,
-            database: dbname,
-            user,
-            password,
-            connected_at: Instant::now(),
-            is_valid: true,
-        }))
+        Ok(Box::new(PostgresConnection::new(host, port, dbname, user, password)?))
     }
 
     fn validate_server_options(&self, options: &HashMap<String, String>) -> Result<(), FdwError> {
@@ -916,7 +909,7 @@ impl FdwHandler for PostgresFdwHandler {
     }
 }
 
-/// PostgreSQL Connection (stub implementation)
+/// PostgreSQL Connection with real tokio-postgres support
 struct PostgresConnection {
     host: String,
     port: u16,
@@ -926,13 +919,102 @@ struct PostgresConnection {
     password: String,
     connected_at: Instant,
     is_valid: bool,
+    /// Tokio runtime handle for async operations
+    #[cfg(feature = "fdw-postgres")]
+    runtime: Option<tokio::runtime::Handle>,
+    /// Real PostgreSQL client connection
+    #[cfg(feature = "fdw-postgres")]
+    client: Option<std::sync::Arc<tokio::sync::Mutex<tokio_postgres::Client>>>,
+    /// Server version from connection
+    server_version: String,
+}
+
+impl PostgresConnection {
+    /// Create a new PostgreSQL connection
+    fn new(
+        host: String,
+        port: u16,
+        database: String,
+        user: String,
+        password: String,
+    ) -> Result<Self, FdwError> {
+        let connected_at = Instant::now();
+
+        #[cfg(feature = "fdw-postgres")]
+        {
+            use tokio::runtime::Handle;
+
+            let runtime = Handle::try_current().ok();
+
+            if let Some(ref rt) = runtime {
+                // Build connection string
+                let conn_str = format!(
+                    "host={} port={} dbname={} user={} password={}",
+                    host, port, database, user, password
+                );
+
+                // Connect synchronously using block_on
+                let (client, connection) = rt
+                    .block_on(async {
+                        tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await
+                    })
+                    .map_err(|e| FdwError::ConnectionFailed(format!("PostgreSQL connection failed: {}", e)))?;
+
+                // Spawn the connection task
+                let rt_clone = rt.clone();
+                rt_clone.spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::error!("PostgreSQL connection error: {}", e);
+                    }
+                });
+
+                // Get server version
+                let server_version = rt
+                    .block_on(async {
+                        let row = client.query_one("SELECT version()", &[]).await?;
+                        let version: String = row.get(0);
+                        Ok::<_, tokio_postgres::Error>(version)
+                    })
+                    .unwrap_or_else(|_| "PostgreSQL".to_string());
+
+                return Ok(Self {
+                    host,
+                    port,
+                    database,
+                    user,
+                    password,
+                    connected_at,
+                    is_valid: true,
+                    runtime: Some(rt.clone()),
+                    client: Some(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
+                    server_version,
+                });
+            }
+        }
+
+        // Fallback when feature not enabled or no runtime
+        Ok(Self {
+            host,
+            port,
+            database,
+            user,
+            password,
+            connected_at,
+            is_valid: true,
+            #[cfg(feature = "fdw-postgres")]
+            runtime: None,
+            #[cfg(feature = "fdw-postgres")]
+            client: None,
+            server_version: "PostgreSQL (not connected)".to_string(),
+        })
+    }
 }
 
 impl FdwConnection for PostgresConnection {
     fn info(&self) -> ConnectionInfo {
         ConnectionInfo {
             server_type: "PostgreSQL".to_string(),
-            server_version: "15.0".to_string(),
+            server_version: self.server_version.clone(),
             connected_at: self.connected_at,
             remote_address: format!("{}:{}", self.host, self.port),
             database: Some(self.database.clone()),
@@ -944,32 +1026,102 @@ impl FdwConnection for PostgresConnection {
     }
 
     fn ping(&self) -> Result<Duration, FdwError> {
-        // Would actually ping the server
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let start = Instant::now();
+            let client = client.clone();
+            rt.block_on(async {
+                let c = client.lock().await;
+                c.query_one("SELECT 1", &[]).await
+            })
+            .map_err(|e| FdwError::ConnectionFailed(format!("Ping failed: {}", e)))?;
+            return Ok(start.elapsed());
+        }
+
         Ok(Duration::from_millis(1))
     }
 
     fn close(&mut self) -> Result<(), FdwError> {
         self.is_valid = false;
+        #[cfg(feature = "fdw-postgres")]
+        {
+            self.client = None;
+        }
         Ok(())
     }
 
     fn begin_transaction(&mut self) -> Result<(), FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            rt.block_on(async {
+                let c = client.lock().await;
+                c.execute("BEGIN", &[]).await
+            })
+            .map_err(|e| FdwError::QueryFailed(format!("BEGIN failed: {}", e)))?;
+        }
         Ok(())
     }
 
     fn commit(&mut self) -> Result<(), FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            rt.block_on(async {
+                let c = client.lock().await;
+                c.execute("COMMIT", &[]).await
+            })
+            .map_err(|e| FdwError::QueryFailed(format!("COMMIT failed: {}", e)))?;
+        }
         Ok(())
     }
 
     fn rollback(&mut self) -> Result<(), FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            rt.block_on(async {
+                let c = client.lock().await;
+                c.execute("ROLLBACK", &[]).await
+            })
+            .map_err(|e| FdwError::QueryFailed(format!("ROLLBACK failed: {}", e)))?;
+        }
         Ok(())
     }
 
-    fn execute_query(&mut self, _query: &str) -> Result<Box<dyn FdwCursor>, FdwError> {
+    fn execute_query(&mut self, query: &str) -> Result<Box<dyn FdwCursor>, FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            let query = query.to_string();
+            let rows = rt
+                .block_on(async {
+                    let c = client.lock().await;
+                    c.query(&query, &[]).await
+                })
+                .map_err(|e| FdwError::QueryFailed(format!("Query failed: {}", e)))?;
+
+            return Ok(Box::new(PostgresCursor::new(rows)));
+        }
+
         Ok(Box::new(StubCursor::default()))
     }
 
-    fn execute_modify(&mut self, _query: &str) -> Result<u64, FdwError> {
+    fn execute_modify(&mut self, query: &str) -> Result<u64, FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            let query = query.to_string();
+            let rows_affected = rt
+                .block_on(async {
+                    let c = client.lock().await;
+                    c.execute(&query, &[]).await
+                })
+                .map_err(|e| FdwError::QueryFailed(format!("Modify failed: {}", e)))?;
+
+            return Ok(rows_affected);
+        }
+
         Ok(0)
     }
 
@@ -982,21 +1134,210 @@ impl FdwConnection for PostgresConnection {
             aggregate: true,
             group_by: true,
             join: true,
-            functions: vec!["count".into(), "sum".into(), "avg".into()],
-            operators: vec!["=".into(), "<>".into(), "<".into(), ">".into()],
+            functions: vec!["count".into(), "sum".into(), "avg".into(), "min".into(), "max".into()],
+            operators: vec!["=".into(), "<>".into(), "<".into(), ">".into(), "<=".into(), ">=".into(), "LIKE".into(), "IN".into()],
         }
     }
 
     fn import_schema(
         &self,
-        _remote_schema: &str,
+        remote_schema: &str,
         _options: &HashMap<String, String>,
     ) -> Result<Vec<ForeignTable>, FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            let schema = remote_schema.to_string();
+
+            let tables = rt
+                .block_on(async {
+                    let c = client.lock().await;
+                    let query = "
+                        SELECT table_name, column_name, data_type, is_nullable
+                        FROM information_schema.columns
+                        WHERE table_schema = $1
+                        ORDER BY table_name, ordinal_position
+                    ";
+                    c.query(query, &[&schema]).await
+                })
+                .map_err(|e| FdwError::QueryFailed(format!("Schema import failed: {}", e)))?;
+
+            let mut result: HashMap<String, Vec<ForeignColumn>> = HashMap::new();
+            for row in tables {
+                let table_name: String = row.get(0);
+                let column_name: String = row.get(1);
+                let data_type: String = row.get(2);
+                let is_nullable: String = row.get(3);
+
+                let col = ForeignColumn {
+                    name: column_name,
+                    data_type: map_pg_type_to_fdw(&data_type),
+                    nullable: is_nullable == "YES",
+                    default_value: None,
+                    options: HashMap::new(),
+                };
+
+                result.entry(table_name).or_default().push(col);
+            }
+
+            return Ok(result
+                .into_iter()
+                .map(|(name, columns)| ForeignTable {
+                    name,
+                    server_name: String::new(), // Will be set by caller
+                    schema: Some(schema.clone()),
+                    columns,
+                    options: HashMap::new(),
+                })
+                .collect());
+        }
+
         Ok(vec![])
     }
 
-    fn get_stats(&self, _table: &str) -> Result<ForeignTableStats, FdwError> {
+    fn get_stats(&self, table: &str) -> Result<ForeignTableStats, FdwError> {
+        #[cfg(feature = "fdw-postgres")]
+        if let (Some(ref rt), Some(ref client)) = (&self.runtime, &self.client) {
+            let client = client.clone();
+            let table = table.to_string();
+
+            let stats = rt
+                .block_on(async {
+                    let c = client.lock().await;
+                    let query = "
+                        SELECT reltuples::bigint, relpages::bigint
+                        FROM pg_class
+                        WHERE relname = $1
+                    ";
+                    c.query_opt(query, &[&table]).await
+                })
+                .map_err(|e| FdwError::QueryFailed(format!("Stats query failed: {}", e)))?;
+
+            if let Some(row) = stats {
+                let row_count: i64 = row.get(0);
+                let page_count: i64 = row.get(1);
+                return Ok(ForeignTableStats {
+                    row_count: Some(row_count as u64),
+                    total_bytes: Some((page_count * 8192) as u64), // 8KB pages
+                    ..Default::default()
+                });
+            }
+        }
+
         Ok(ForeignTableStats::default())
+    }
+}
+
+/// PostgreSQL cursor for iterating query results
+#[cfg(feature = "fdw-postgres")]
+struct PostgresCursor {
+    rows: Vec<tokio_postgres::Row>,
+    position: usize,
+    column_names: Vec<String>,
+    column_types: Vec<ForeignDataType>,
+}
+
+#[cfg(feature = "fdw-postgres")]
+impl PostgresCursor {
+    fn new(rows: Vec<tokio_postgres::Row>) -> Self {
+        let (column_names, column_types) = if let Some(first_row) = rows.first() {
+            let columns = first_row.columns();
+            let names: Vec<String> = columns.iter().map(|c| c.name().to_string()).collect();
+            let types: Vec<ForeignDataType> = columns
+                .iter()
+                .map(|c| map_pg_type_to_fdw(c.type_().name()))
+                .collect();
+            (names, types)
+        } else {
+            (vec![], vec![])
+        };
+        Self {
+            rows,
+            position: 0,
+            column_names,
+            column_types,
+        }
+    }
+
+    fn fetch_next(&mut self) -> Option<FdwRow> {
+        if self.position >= self.rows.len() {
+            return None;
+        }
+
+        let row = &self.rows[self.position];
+        self.position += 1;
+
+        let mut values = Vec::new();
+        for i in 0..row.len() {
+            let value = if let Ok(v) = row.try_get::<_, Option<String>>(i) {
+                v.map(FdwValue::String).unwrap_or(FdwValue::Null)
+            } else if let Ok(v) = row.try_get::<_, Option<i64>>(i) {
+                v.map(FdwValue::Int64).unwrap_or(FdwValue::Null)
+            } else if let Ok(v) = row.try_get::<_, Option<f64>>(i) {
+                v.map(FdwValue::Float64).unwrap_or(FdwValue::Null)
+            } else if let Ok(v) = row.try_get::<_, Option<bool>>(i) {
+                v.map(FdwValue::Bool).unwrap_or(FdwValue::Null)
+            } else {
+                FdwValue::Null
+            };
+            values.push(value);
+        }
+
+        Some(FdwRow { values })
+    }
+}
+
+#[cfg(feature = "fdw-postgres")]
+impl FdwCursor for PostgresCursor {
+    fn columns(&self) -> Vec<String> {
+        self.column_names.clone()
+    }
+
+    fn column_types(&self) -> Vec<ForeignDataType> {
+        self.column_types.clone()
+    }
+
+    fn fetch_batch(&mut self, batch_size: usize) -> Result<Vec<FdwRow>, FdwError> {
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            if let Some(row) = self.fetch_next() {
+                batch.push(row);
+            } else {
+                break;
+            }
+        }
+        Ok(batch)
+    }
+
+    fn has_more(&self) -> bool {
+        self.position < self.rows.len()
+    }
+
+    fn close(&mut self) -> Result<(), FdwError> {
+        self.rows.clear();
+        self.position = 0;
+        Ok(())
+    }
+}
+
+/// Map PostgreSQL types to FDW types
+#[cfg(feature = "fdw-postgres")]
+fn map_pg_type_to_fdw(pg_type: &str) -> ForeignDataType {
+    match pg_type.to_lowercase().as_str() {
+        "integer" | "int" | "int4" | "smallint" | "int2" => ForeignDataType::Int32,
+        "bigint" | "int8" => ForeignDataType::Int64,
+        "real" | "float4" => ForeignDataType::Float32,
+        "double precision" | "float8" => ForeignDataType::Float64,
+        "boolean" | "bool" => ForeignDataType::Boolean,
+        "text" | "varchar" | "character varying" | "char" | "character" => ForeignDataType::String,
+        "timestamp" | "timestamp without time zone" => ForeignDataType::Timestamp,
+        "timestamp with time zone" | "timestamptz" => ForeignDataType::TimestampTz,
+        "date" => ForeignDataType::Date,
+        "time" | "time without time zone" => ForeignDataType::Time,
+        "bytea" => ForeignDataType::Binary,
+        "json" | "jsonb" => ForeignDataType::Json,
+        "uuid" => ForeignDataType::Uuid,
+        _ => ForeignDataType::String, // Default to string for unknown types
     }
 }
 
@@ -1749,12 +2090,14 @@ mod tests {
                         name: "id".to_string(),
                         data_type: ForeignDataType::Int64,
                         nullable: false,
+                        default_value: None,
                         options: HashMap::new(),
                     },
                     ForeignColumn {
                         name: "name".to_string(),
                         data_type: ForeignDataType::String,
                         nullable: true,
+                        default_value: None,
                         options: HashMap::new(),
                     },
                 ],

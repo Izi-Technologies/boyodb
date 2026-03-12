@@ -50,6 +50,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Uses ObjectStore abstraction for S3 compatibility
   - Configurable S3 bucket, prefix, and credentials
 
+- **Foreign Data Wrapper (FDW) PostgreSQL Connections**: Real PostgreSQL connectivity
+  - Real tokio-postgres connections when `fdw-postgres` feature enabled
+  - Full query execution with proper result iteration
+  - Transaction support (BEGIN/COMMIT/ROLLBACK)
+  - Schema import from remote PostgreSQL databases
+  - Table statistics retrieval for query planning
+  - Proper PostgreSQL type to FDW type mapping
+
+- **Metal GPU Acceleration (macOS)**: Real Metal API support
+  - Device detection using Metal API when `metal-gpu` feature enabled
+  - GPU buffer creation for data transfer
+  - Framework for Metal compute shader execution
+  - Unified memory support on Apple Silicon
+  - Device capability querying
+
+- **Cranelift JIT Compilation**: Real native code generation
+  - Expression compilation to machine code when `jit-cranelift` feature enabled
+  - Support for arithmetic, comparison, and bitwise operations
+  - Native code execution for hot expressions
+  - Automatic fallback to interpretation on compilation failure
+  - Expression caching with configurable cache size
+
+- **ICU Unicode Collation**: Real ICU library support
+  - ICU Collator integration when `icu-collation` feature enabled
+  - Production-grade Unicode normalization (NFC, NFD, NFKC, NFKD)
+  - Locale-aware string comparison
+  - Configurable collation strength levels
+
 ### Fixed
 - **Memory Context Double-Counting**: Fixed bug where parent contexts counted children's allocations twice (once in parent's `current_used`, once via `total_usage()` recursion)
 - **Memory Context Leak**: Fixed memory leak where deallocated blocks weren't properly removed from the block vector

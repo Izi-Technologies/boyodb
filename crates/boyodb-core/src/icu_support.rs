@@ -6,9 +6,19 @@
 // - Normalization forms (NFC, NFD, NFKC, NFKD)
 // - Unicode character properties
 // - Transliteration support
+//
+// When the `icu-collation` feature is enabled, this module uses the
+// actual ICU libraries for production-grade Unicode support.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+
+#[cfg(feature = "icu-collation")]
+use icu_collator::{Collator, CollatorOptions, Strength};
+#[cfg(feature = "icu-collation")]
+use icu_locid::Locale;
+#[cfg(feature = "icu-collation")]
+use icu_normalizer::{ComposingNormalizer, DecomposingNormalizer};
 
 // ============================================================================
 // Unicode Normalization
@@ -30,6 +40,29 @@ pub enum NormalizationForm {
 
 /// Normalize a string using specified form
 pub fn normalize(s: &str, form: NormalizationForm) -> String {
+    #[cfg(feature = "icu-collation")]
+    {
+        match form {
+            NormalizationForm::Nfc => {
+                let normalizer = ComposingNormalizer::new_nfc();
+                normalizer.normalize(s)
+            }
+            NormalizationForm::Nfd => {
+                let normalizer = DecomposingNormalizer::new_nfd();
+                normalizer.normalize(s)
+            }
+            NormalizationForm::Nfkc => {
+                let normalizer = ComposingNormalizer::new_nfkc();
+                normalizer.normalize(s)
+            }
+            NormalizationForm::Nfkd => {
+                let normalizer = DecomposingNormalizer::new_nfkd();
+                normalizer.normalize(s)
+            }
+        }
+    }
+
+    #[cfg(not(feature = "icu-collation"))]
     match form {
         NormalizationForm::Nfc => nfc_normalize(s),
         NormalizationForm::Nfd => nfd_normalize(s),
@@ -290,6 +323,9 @@ pub struct UcaCollator {
     case_first: CaseFirst,
     /// Normalization mode
     normalization: bool,
+    /// ICU Collator (when feature enabled)
+    #[cfg(feature = "icu-collation")]
+    icu_collator: Option<Collator>,
 }
 
 /// Collator strength level
@@ -367,6 +403,8 @@ impl UcaCollator {
             variable_weighting: VariableWeighting::NonIgnorable,
             case_first: CaseFirst::Off,
             normalization: true,
+            #[cfg(feature = "icu-collation")]
+            icu_collator: Self::create_icu_collator("root", CollatorStrength::Tertiary),
         };
         collator.initialize_ducet();
         collator
@@ -377,6 +415,25 @@ impl UcaCollator {
         let mut collator = Self::new();
         collator.set_locale(locale);
         collator
+    }
+
+    /// Create ICU collator for a locale
+    #[cfg(feature = "icu-collation")]
+    fn create_icu_collator(locale: &str, strength: CollatorStrength) -> Option<Collator> {
+        let locale_id: Locale = locale.parse().unwrap_or_else(|_| "und".parse().unwrap());
+
+        let icu_strength = match strength {
+            CollatorStrength::Primary => Strength::Primary,
+            CollatorStrength::Secondary => Strength::Secondary,
+            CollatorStrength::Tertiary => Strength::Tertiary,
+            CollatorStrength::Quaternary => Strength::Quaternary,
+            CollatorStrength::Identical => Strength::Identical,
+        };
+
+        let mut options = CollatorOptions::new();
+        options.strength = Some(icu_strength);
+
+        Collator::try_new(&locale_id.into(), options).ok()
     }
 
     /// Initialize DUCET (Default Unicode Collation Element Table)
@@ -447,6 +504,11 @@ impl UcaCollator {
     pub fn set_locale(&mut self, locale: &str) {
         self.locale = locale.to_string();
         self.apply_locale_tailorings(locale);
+
+        #[cfg(feature = "icu-collation")]
+        {
+            self.icu_collator = Self::create_icu_collator(locale, self.strength);
+        }
     }
 
     /// Apply locale-specific tailorings
@@ -520,10 +582,22 @@ impl UcaCollator {
     /// Set strength level
     pub fn set_strength(&mut self, strength: CollatorStrength) {
         self.strength = strength;
+
+        #[cfg(feature = "icu-collation")]
+        {
+            self.icu_collator = Self::create_icu_collator(&self.locale, strength);
+        }
     }
 
     /// Compare two strings
     pub fn compare(&self, a: &str, b: &str) -> Ordering {
+        // Use ICU collator if available
+        #[cfg(feature = "icu-collation")]
+        if let Some(ref collator) = self.icu_collator {
+            return collator.compare(a, b);
+        }
+
+        // Fallback to built-in implementation
         // Normalize if enabled
         let (a, b) = if self.normalization {
             (normalize(a, NormalizationForm::Nfc), normalize(b, NormalizationForm::Nfc))
