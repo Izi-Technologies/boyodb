@@ -35,7 +35,7 @@ from .errors import (
     TimeoutError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.9.4"
 __all__ = [
     # Single connection client
     "Client",

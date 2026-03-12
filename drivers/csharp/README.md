@@ -19,7 +19,7 @@ dotnet add package Boyodb
 Or add to your project file:
 
 ```xml
-<PackageReference Include="Boyodb" Version="0.1.0" />
+<PackageReference Include="Boyodb" Version="0.9.4" />
 ```
 
 ## Quick Start

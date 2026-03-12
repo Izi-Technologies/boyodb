@@ -25,7 +25,7 @@
 package boyodb
 
 // Version is the current version of the boyodb Go driver.
-const Version = "0.2.7"
+const Version = "0.9.4"
 
 import (
 	"crypto/tls"

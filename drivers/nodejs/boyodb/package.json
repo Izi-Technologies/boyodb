@@ -1,6 +1,6 @@
 {
   "name": "boyodb",
-  "version": "0.2.7",
+  "version": "0.9.4",
   "description": "Node.js driver for boyodb-server",
   "main": "index.js",
   "types": "index.d.ts",

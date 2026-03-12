@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>Boyodb</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.9.4</Version>
     <Authors>BoyoDB Team</Authors>
     <Description>C# client driver for boyodb-server - a high-performance columnar database</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

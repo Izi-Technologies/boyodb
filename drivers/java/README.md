@@ -19,14 +19,14 @@ High-performance Java client for BoyoDB analytical database.
 <dependency>
     <groupId>io.boyodb</groupId>
     <artifactId>boyodb-client</artifactId>
-    <version>0.1.0</version>
+    <version>0.9.4</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.boyodb:boyodb-client:0.1.0'
+implementation 'io.boyodb:boyodb-client:0.9.4'
 ```
 
 ## Quick Start
