@@ -66,3 +66,21 @@ Currently, `cluster` supports HA but not distributed query execution.
 
 *   **RBAC V2**: Fine-grained column-level permissioning.
 *   **Audit Logging**: tamper-evident query logs.
+
+## 6. Operational Excellence
+**Status**: Implemented (Phase 32)
+**Priority**: High
+
+*   **Connection Pooler**: Built-in PgBouncer-compatible connection pooling
+    *   Transaction, Session, and Statement pool modes
+    *   MD5 password authentication
+    *   Admin console (SHOW STATS/POOLS/CLIENTS/SERVERS)
+    *   Dynamic configuration (PAUSE/RESUME/RELOAD/SET)
+    *   PgBouncer-style INI configuration files
+*   **Memory Context Management**: PostgreSQL-style hierarchical memory tracking
+    *   Per-context limits and statistics
+    *   Efficient slot-reuse allocator
+    *   Automatic cleanup on context reset
+*   **EXPLAIN ANALYZE**: Detailed query execution statistics with buffer stats and timing
+*   **pg_dump/pg_restore**: PostgreSQL-compatible backup format support
+*   **pg_upgrade**: In-place version upgrades with catalog migration

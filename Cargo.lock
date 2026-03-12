@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-bench"
-version = "0.2.7"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "arrow 54.2.1",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-cli"
-version = "0.2.7"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "arrow-array 54.2.1",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-core"
-version = "0.2.7"
+version = "0.9.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1319,6 +1319,7 @@ dependencies = [
  "libm",
  "lru",
  "lz4_flex",
+ "memmap2",
  "object_store 0.13.1",
  "ordered-float 4.6.0",
  "parking_lot",
@@ -1343,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-node"
-version = "0.2.7"
+version = "0.9.4"
 dependencies = [
  "boyodb-core",
  "napi",
@@ -1353,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-server"
-version = "0.2.7"
+version = "0.9.4"
 dependencies = [
  "arrow-array 54.2.1",
  "arrow-csv 54.2.1",
@@ -2413,7 +2414,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3414,6 +3415,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3512,7 +3522,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4126,7 +4136,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4429,7 +4439,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5011,7 +5021,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5760,7 +5770,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

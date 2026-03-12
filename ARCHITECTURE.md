@@ -115,6 +115,8 @@ BoyoDB is organized into 17 feature phases, each adding enterprise capabilities:
 | 22 | `optimizer_integration.rs` | Cost-based query optimizer |
 | 23 | `cluster/distributed_recovery.rs` | Cross-node crash recovery |
 | 24 | `pitr.rs`, `wal_archive.rs` | Point-in-time recovery |
+| 25-28 | `range_types.rs`, `network_types.rs` | Advanced data types |
+| 29-32 | `sync_replication.rs`, `connection_pooler.rs` | Replication, Operational Excellence |
 
 ## Core Components
 
@@ -924,3 +926,145 @@ pub fn persist_segment_cold_with_verify(
 | Transactions | Full ACID with MVCC and snapshot isolation |
 | Recovery | Point-in-time recovery with WAL archiving |
 | Fault Tolerance | Multi-layer checksums, auto-repair, S3 verification |
+
+## Connection Pooler (`connection_pooler.rs`)
+
+BoyoDB includes a built-in connection pooler similar to PgBouncer for efficient connection management.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Connection Pooler                           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌──────────┐ │
+│  │  Client   │  │   Pool    │  │  Server   │  │  Admin   │ │
+│  │ Tracking  │  │  Manager  │  │ Connections│  │ Console  │ │
+│  └───────────┘  └───────────┘  └───────────┘  └──────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Pool Modes
+
+```rust
+pub enum PoolMode {
+    Transaction,  // Return to pool after each transaction (default)
+    Session,      // Hold connection for entire client session
+    Statement,    // Return to pool after each statement (most aggressive)
+}
+```
+
+### Authentication
+
+- **MD5 Password**: PostgreSQL-compatible `md5(md5(password + user) + salt)` hash
+- **Plain Text**: Simple password verification (not recommended)
+- **Trust**: No authentication required
+
+```rust
+pub fn compute_md5_password(password: &str, user: &str, salt: &[u8; 4]) -> String {
+    // PostgreSQL MD5 authentication
+}
+```
+
+### Admin Commands
+
+| Command | Description |
+|---------|-------------|
+| `SHOW STATS` | Global pooler statistics |
+| `SHOW POOLS` | Per-database/user pool info |
+| `SHOW CLIENTS` | Connected client list |
+| `SHOW SERVERS` | Backend connection list |
+| `SHOW CONFIG` | Current configuration |
+| `SHOW PAUSED` | Paused databases |
+| `PAUSE <db>` | Stop new connections to database |
+| `RESUME <db>` | Resume connections to database |
+| `WAIT <db>` | Wait for active queries to finish |
+| `KILL <db>` | Close all connections to database |
+| `RELOAD` | Reload configuration from file |
+| `SET param = value` | Change runtime parameter |
+
+### Configuration
+
+PgBouncer-compatible INI format:
+
+```ini
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+max_client_conn = 1000
+default_pool_size = 20
+pool_mode = transaction
+
+[databases]
+mydb = host=localhost port=5432 dbname=mydb
+```
+
+## Memory Context (`memory_context.rs`)
+
+PostgreSQL-style hierarchical memory allocation tracking for efficient resource management.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                Memory Context Hierarchy                      │
+├─────────────────────────────────────────────────────────────┤
+│  TopLevel                                                    │
+│  ├── Query (per query)                                       │
+│  │   ├── Sort (work_mem limited)                            │
+│  │   ├── Hash (work_mem limited)                            │
+│  │   └── Aggregate                                           │
+│  ├── Transaction (per transaction)                          │
+│  └── Cache (long-lived)                                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Context Types
+
+```rust
+pub enum MemoryContextType {
+    TopLevel,     // Global context
+    Query,        // Per-query allocations
+    Transaction,  // Transaction-scoped memory
+    Expression,   // Expression evaluation
+    Operation,    // Sort/hash operations (work_mem limited)
+    Cache,        // Long-lived cached data
+    Temporary,    // Short-lived allocations
+}
+```
+
+### Memory Tracking
+
+- **Atomic allocation**: Thread-safe memory tracking with compare-and-swap
+- **Limit enforcement**: Per-context memory limits with automatic rejection
+- **Slot reuse**: Efficient slab-style allocator that reuses freed slots
+- **Statistics**: Total allocated, current used, peak usage, allocation counts
+
+```rust
+pub struct MemoryContext {
+    name: String,
+    context_type: MemoryContextType,
+    limit: AtomicUsize,
+    stats: MemoryContextStats,
+    blocks: RwLock<Vec<Option<MemoryBlock>>>,
+    free_slots: RwLock<Vec<usize>>,
+}
+```
+
+### Usage Pattern
+
+```rust
+// Create query context with work_mem limit
+let query_ctx = manager.create_query_context();
+query_ctx.context().set_limit(64 * 1024 * 1024);
+
+// Allocate in sort sub-context
+let sort_ctx = query_ctx.sort_context();
+let ptr = sort_ctx.alloc(1024)?;
+
+// Free individual allocations
+sort_ctx.dealloc(ptr);
+
+// Reset entire context (frees all allocations)
+query_ctx.reset();
+```

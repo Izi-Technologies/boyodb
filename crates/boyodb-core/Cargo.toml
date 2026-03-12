@@ -1,6 +1,6 @@
 [package]
 name = "boyodb-core"
-version = "0.2.7"
+version = "0.9.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "High-performance columnar database engine for real-time analytics"
@@ -64,6 +64,7 @@ aws-credential-types = "1.1"
 ordered-float = { version = "4.2", features = ["serde"] }   # For ordered floats in B-Tree keys
 xxhash-rust = { version = "0.8", features = ["xxh64"] }     # Fast hashing for checksums
 libc = "0.2"                                                 # For disk space checking (statvfs)
+memmap2 = "0.9"                                              # Memory-mapped file access for large segments
 
 [features]
 default = []

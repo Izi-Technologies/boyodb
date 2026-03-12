@@ -5,6 +5,35 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-03-11
+
+### Added
+- **Built-in Connection Pooler (PgBouncer-compatible)**: Enterprise-grade connection pooling
+  - Transaction, Session, and Statement pooling modes
+  - MD5 password authentication support
+  - Real TCP connections with PostgreSQL startup handshake
+  - Admin commands: `SHOW STATS/POOLS/CLIENTS/SERVERS/CONFIG/PAUSED`
+  - Dynamic configuration: `SET param = value`, `RELOAD`
+  - Database management: `PAUSE/RESUME/ENABLE/DISABLE/WAIT/KILL <database>`
+  - PgBouncer-style INI configuration file support
+  - Per-database/user connection pools with automatic scaling
+  - Connection health checks and automatic reset
+
+- **Memory Context Manager**: PostgreSQL-style memory allocation tracking
+  - Hierarchical memory contexts (TopLevel, Query, Transaction, Expression, Operation)
+  - Per-context memory limits with atomic enforcement
+  - Efficient slab-style allocator with slot reuse
+  - Memory usage statistics and peak tracking
+  - Automatic memory cleanup on context reset/delete
+
+### Fixed
+- **Memory Context Double-Counting**: Fixed bug where parent contexts counted children's allocations twice (once in parent's `current_used`, once via `total_usage()` recursion)
+- **Memory Context Leak**: Fixed memory leak where deallocated blocks weren't properly removed from the block vector
+
+### Improved
+- **Connection Pooler Race Condition**: Fixed TOCTOU race in `accept_client()` using atomic fetch_add with rollback pattern
+- **Sync Replication**: Fixed non-eligible replicas not being reset to Async state when they become ineligible
+
 ## [0.2.7] - 2026-03-09
 
 ### Added
@@ -244,6 +273,12 @@ New engine configuration options:
 - Tiered storage (hot/warm/cold)
 - Compression (Zstd, LZ4, Snappy)
 
+[0.9.4]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.7...v0.9.4
+[0.2.7]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.6...v0.2.7
+[0.2.6]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.5...v0.2.6
+[0.2.5]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Izi-Technologies/boyodb/compare/v0.1.5...v0.2.0

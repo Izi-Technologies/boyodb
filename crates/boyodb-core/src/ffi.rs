@@ -726,6 +726,7 @@ fn status_from_error(err: EngineError) -> BoyodbStatus {
         EngineError::Configuration(_) => BoyodbStatus::Internal,
         EngineError::ConstraintViolation(_) => BoyodbStatus::InvalidArgument,
         EngineError::Backpressure(_) => BoyodbStatus::Backpressure,
+        EngineError::ReadOnlyReplica(_) => BoyodbStatus::InvalidArgument,
     }
 }
 

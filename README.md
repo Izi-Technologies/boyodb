@@ -2,17 +2,17 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.2.6-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.4-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
-## What's New in v0.2.5
+## What's New in v0.9.4
 
-- **Enhanced Data Integrity**: Atomic file operations for WAL, manifest, and segment persistence
-- **Corruption Prevention**: Fixed manifest race conditions and WAL LSN atomic persist
-- **PostgreSQL-Compatible Syntax**: CREATE INDEX now uses standard PostgreSQL USING clause
-- **Fulltext Index**: N-gram based indexing for efficient `LIKE '%pattern%'` queries
-- **S3 Upload Verification**: Read-back verification with checksum validation
+- **Built-in Connection Pooler**: PgBouncer-compatible pooling with Transaction/Session/Statement modes
+- **Memory Context Manager**: PostgreSQL-style hierarchical memory allocation tracking
+- **Dynamic Configuration**: Runtime parameter changes via SET/RELOAD commands
+- **Enhanced Admin Console**: PAUSE/RESUME/WAIT/KILL database management commands
+- **Bug Fixes**: Fixed memory leaks and race conditions in pooling layer
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 

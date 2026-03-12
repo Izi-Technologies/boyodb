@@ -1,13 +1,26 @@
 pub mod auth;
 pub mod bloom_utils;
 pub mod cluster;
+pub mod connection_pool;
 pub mod engine;
 pub mod fts;
 pub mod geospatial;
 pub mod hnsw;
+pub mod http_api;
+pub mod incremental_backup;
+pub mod io_uring;
+pub mod jit;
 pub mod ffi;
+pub mod query_hints;
+pub mod index_advisor;
+pub mod column_masking;
+pub mod lakehouse;
+pub mod vector_quantization;
+pub mod cdc_sink;
+pub mod auto_tuner;
 pub mod replication;
 pub mod replication_worker;
+pub mod replica_sync;
 pub use replication::{BundlePayload, BundleSegment};
 pub mod analytics;
 pub mod compression;
@@ -35,11 +48,14 @@ pub mod security;
 pub mod sql;
 pub mod storage;
 pub mod streaming;
+pub mod telemetry;
 pub mod tiering;
+pub mod time_travel;
 pub mod tooling;
 pub mod types;
 pub mod vector;
 pub mod vectorized;
+pub mod vectorized_join;
 pub mod wal;
 
 // --- Financial-Grade ACID Transaction Support (New Modules) ---
@@ -53,6 +69,92 @@ pub mod undo_log;
 pub mod wal_archive;
 pub mod optimizer_integration;
 
+// --- Enterprise Features (Phase 20) ---
+pub mod procedures;
+pub mod triggers;
+pub mod two_phase_commit;
+pub mod enterprise_auth;
+pub mod plan_cache;
+pub mod stats_functions;
+
+// --- Production Stability Features (Phase 21) ---
+pub mod partitioning;
+pub mod fdw;
+pub mod logical_replication;
+pub mod online_ddl;
+pub mod cross_db;
+pub mod user_types;
+pub mod extensions;
+
+// --- SQL Compatibility Features (Phase 22) ---
+pub mod sequences;
+pub mod generated_columns;
+pub mod pubsub;
+pub mod advisory_locks;
+pub mod lateral_joins;
+
+// --- Production Hardening Features (Phase 23) ---
+pub mod replica_mode;
+pub mod connection_management;
+pub mod query_safety;
+pub mod pg_stat;
+pub mod data_integrity;
+
+// --- Operational Features (Phase 24) ---
+pub mod graceful_shutdown;
+pub mod advanced_indexes;
+pub mod query_enhancements;
+pub mod deadlock_detection;
+pub mod monitoring_endpoints;
+pub mod protocol_security;
+pub mod bulk_operations;
+
+// --- Query Execution & Maintenance (Phase 25) ---
+pub mod cursor_support;
+pub mod parallel_query;
+pub mod vacuum_analyze;
+pub mod planner_hints;
+
+// --- Advanced SQL Features (Phase 26) ---
+pub mod table_inheritance;
+pub mod domain_types;
+pub mod event_triggers;
+pub mod rules_system;
+
+// --- Storage & Replication (Phase 27) ---
+pub mod tablespaces;
+pub mod physical_backup;
+pub mod logical_decoding;
+pub mod large_objects;
+
+// --- Internationalization & Search (Phase 28) ---
+pub mod collation;
+pub mod fts_enhanced;
+pub mod icu_support;
+
+// --- Advanced Data Types (Phase 29) ---
+pub mod range_types;
+pub mod network_types;
+pub mod geometric_types;
+pub mod xml_support;
+
+// --- Performance Optimizations (Phase 30) ---
+pub mod hot_updates;
+pub mod index_only_scans;
+pub mod parallel_index;
+pub mod memory_context;
+
+// --- Replication Enhancements (Phase 31) ---
+pub mod subscription;
+pub mod sync_replication;
+pub mod conflict_resolution;
+
+// --- Operational Excellence (Phase 32) ---
+pub mod pg_dump;
+pub mod pg_upgrade;
+pub mod connection_pooler;
+pub mod query_explain;
+
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
@@ -60,13 +162,17 @@ pub use auth::{
 pub use engine::{
     apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
     merge_cte_results, start_auto_repair_task, validate_identifier, AutoRepairConfig,
-    AutoRepairState, AutoRepairStats, ComputedValue, CteContext, Db, EngineConfig, EvalContext,
-    ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats, QueryRequest,
-    QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState, TableDescription,
-    UdfRegistry, UserDefinedFunction, VacuumResult,
+    AutoRepairState, AutoRepairStats, ComputedValue, CteContext, Db, EngineConfig, EngineError,
+    EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
+    QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
+    TableDescription, UdfRegistry, UserDefinedFunction, VacuumResult,
 };
 pub use replication::{
     BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,
+};
+pub use replica_sync::{
+    spawn_replica_sync_worker, ReplicaSyncConfig, ReplicaSyncMetrics, ReplicaSyncMetricsSnapshot,
+    ReplicaSyncWorker,
 };
 pub use sql::{
     parse_ctes, parse_expr, parse_select_items_extended, parse_sql, AuthCommand, CteDefinition,

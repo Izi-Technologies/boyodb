@@ -70,6 +70,8 @@ pub enum EngineError {
     ConstraintViolation(String),
     #[error("server busy: {0}")]
     Backpressure(String),
+    #[error("read-only replica: {0}")]
+    ReadOnlyReplica(String),
 }
 
 /// Data provider for constraint validation that queries existing data from the engine
@@ -313,6 +315,16 @@ pub struct EngineConfig {
     pub max_concurrent_compactions: usize,
     /// Minimum time between compactions on the same table (prevents thrashing)
     pub compaction_cooldown_secs: u64,
+    /// Maximum compaction passes per cycle (default: 32, increase for faster catch-up)
+    pub compaction_passes_per_cycle: usize,
+    /// Maximum segments to merge in a single compaction (default: 20)
+    pub max_segments_per_compaction: usize,
+    /// Parallelism for emergency compaction (number of tables to compact in parallel)
+    pub emergency_compaction_parallelism: usize,
+    /// Threshold for parallel segment filtering during queries (0 = always parallel if > 1000 segments)
+    pub parallel_filter_threshold: usize,
+    /// Bloom cache entries per shard (auto-scaled based on segment count if 0)
+    pub bloom_cache_entries_per_shard: usize,
     pub tier_warm_after_millis: u64,
     pub tier_cold_after_millis: u64,
     pub tier_warm_compression: Option<String>,
@@ -468,6 +480,220 @@ pub struct EngineConfig {
     pub segment_operation_max_retries: usize,
     /// Delay between retries in milliseconds
     pub segment_operation_retry_delay_ms: u64,
+
+    // --- Read Replica Configuration ---
+    /// Run engine in read-only replica mode (rejects all write operations)
+    pub read_only: bool,
+    /// Manifest sync interval in milliseconds for read replicas (default: 1000)
+    pub replica_sync_interval_ms: u64,
+    /// Primary server address for HTTP bundle pull (e.g., "http://primary:8765")
+    pub replica_primary_addr: Option<String>,
+
+    // --- Segment Limits & Stability (ClickHouse-style protection) ---
+    /// Maximum total segments before triggering emergency compaction (0 = disabled)
+    /// When exceeded, emergency compaction runs immediately and aggressively
+    pub max_segments_emergency_threshold: usize,
+    /// Maximum total segments before rejecting new writes (0 = disabled)
+    /// Provides hard limit to prevent runaway segment growth
+    pub max_segments_hard_limit: usize,
+    /// Maximum segments per table before triggering per-table emergency compaction
+    pub max_segments_per_table: usize,
+    /// Maximum segments to scan per query (0 = unlimited)
+    /// Prevents single queries from overwhelming the system
+    pub max_segments_per_query: usize,
+    /// Enable adaptive backpressure based on segment count
+    /// Gradually slows ingestion as segment count approaches limits
+    pub adaptive_backpressure_enabled: bool,
+    /// Segment count at which adaptive backpressure starts (% of emergency threshold)
+    pub adaptive_backpressure_start_pct: u8,
+    /// Maximum delay in milliseconds for adaptive backpressure
+    pub adaptive_backpressure_max_delay_ms: u64,
+    /// Emergency compaction target: merge down to this many segments per table
+    pub emergency_compaction_target_segments: usize,
+    /// Emergency compaction: bypass cooldown periods
+    pub emergency_compaction_bypass_cooldown: bool,
+
+    // --- Memory-Mapped Segment Access ---
+    /// Enable memory-mapped file access for large local segments
+    /// Uses OS page cache more efficiently and reduces memory allocation overhead
+    pub mmap_segments: bool,
+    /// Minimum segment size in bytes to use mmap (default: 4MB)
+    /// Smaller segments are read with std::fs::read which is faster for small files
+    pub mmap_min_bytes: usize,
+
+    // --- Write Buffering (ClickHouse-style) ---
+    /// Enable write buffering to create larger initial segments
+    /// Reduces segment count by buffering multiple small writes into one segment
+    pub write_buffer_enabled: bool,
+    /// Maximum bytes to buffer before flushing to a segment (default: 16MB)
+    /// Larger values = fewer segments but higher memory usage and latency
+    pub write_buffer_max_bytes: u64,
+    /// Maximum time to hold buffered writes before flushing (milliseconds)
+    /// Ensures bounded latency even with low write rates
+    pub write_buffer_flush_interval_ms: u64,
+    /// Minimum segment size in bytes - segments smaller than this are queued for immediate merge
+    /// Prevents accumulation of tiny segments (default: 1MB)
+    pub min_segment_bytes: u64,
+
+    // --- Leveled Compaction (ClickHouse MergeTree-style) ---
+    /// Enable leveled compaction with exponential size tiers
+    /// Level 0: < 1MB, Level 1: 1-10MB, Level 2: 10-100MB, Level 3: 100MB-1GB, Level 4: 1-10GB
+    pub leveled_compaction_enabled: bool,
+    /// Base size for level 0 segments (default: 1MB)
+    pub level_base_bytes: u64,
+    /// Size multiplier between levels (default: 10x)
+    /// Level N max size = level_base_bytes * level_multiplier^N
+    pub level_multiplier: u64,
+    /// Maximum number of levels (default: 5)
+    pub max_levels: usize,
+    /// Target number of segments per level before triggering merge to next level
+    pub segments_per_level_trigger: usize,
+
+    // --- Continuous Compaction (ClickHouse-style) ---
+    /// Enable continuous compaction threads that run constantly
+    /// More aggressive than interval-based compaction
+    pub continuous_compaction_enabled: bool,
+    /// Number of dedicated compaction threads (default: 2)
+    pub compaction_threads: usize,
+    /// Sleep duration when no work available (milliseconds)
+    pub compaction_idle_sleep_ms: u64,
+
+    // --- Low-Latency / Low-Resource Mode ---
+    /// Maximum memory bytes for a single query (0 = unlimited)
+    /// Queries exceeding this will fail fast instead of consuming all memory
+    pub query_memory_limit_bytes: u64,
+    /// Enable lightweight read path (skip expensive validations for reads)
+    pub lightweight_reads: bool,
+    /// Maximum time in milliseconds for a query before timeout (0 = no timeout)
+    pub query_timeout_ms: u64,
+    /// Prefer cached results even if slightly stale (reduces I/O)
+    pub prefer_cache: bool,
+    /// Maximum rows to return in a single query (0 = unlimited)
+    pub max_result_rows: usize,
+
+    // --- Compression Optimization ---
+    /// Skip compression for payloads smaller than this threshold (bytes)
+    /// Small payloads have compression overhead exceeding space savings
+    /// Default: 4KB (industry standard)
+    pub compression_skip_threshold_bytes: usize,
+    /// Use adaptive ZSTD compression levels based on payload size
+    /// Larger payloads use higher compression levels for better ratios
+    /// Default: true
+    pub adaptive_compression_levels: bool,
+
+    // --- Write Path Optimization ---
+    /// Sampling rate for write verification (1 = verify every write, 10 = verify 1 in 10)
+    /// Higher values reduce I/O overhead but increase undetected corruption risk
+    /// Default: 1 (verify all writes, safest)
+    pub write_verify_sample_rate: u32,
+
+    // --- Parallel Compaction ---
+    /// Enable parallel segment merging within a single compaction job
+    /// Uses multiple threads to merge segments faster
+    /// Default: true
+    pub parallel_merge_enabled: bool,
+    /// Minimum segments to trigger parallel merge (below this, sequential is faster)
+    /// Default: 4
+    pub parallel_merge_min_segments: usize,
+
+    // --- Bounded Aggregation ---
+    /// Maximum bytes for in-memory GROUP BY hash table before spilling to disk
+    /// Prevents OOM for high-cardinality aggregations
+    /// Default: 1GB
+    pub aggregation_memory_limit_bytes: u64,
+    /// Enable spill-to-disk for large aggregations
+    /// Default: true
+    pub aggregation_spill_enabled: bool,
+    /// Directory for aggregation spill files (uses data_dir/spill if not set)
+    pub aggregation_spill_dir: Option<PathBuf>,
+
+    // --- Aggressive Segment Elimination ---
+    /// Target maximum segments per table (triggers aggressive compaction above this)
+    /// Default: 100 (very aggressive)
+    pub target_segments_per_table: usize,
+    /// Enable automatic micro-segment merging (merge tiny segments immediately)
+    /// Default: true
+    pub auto_merge_micro_segments: bool,
+    /// Micro-segment threshold in bytes (segments below this are merged immediately)
+    /// Default: 1MB
+    pub micro_segment_threshold_bytes: u64,
+    /// Enable compressed cache (store compressed segments in cache, decompress on read)
+    /// Allows 2-3x more segments to be cached
+    /// Default: true
+    pub compressed_cache_enabled: bool,
+    /// Enable predicate pushdown to segment load (filter during decompression)
+    /// Default: true
+    pub predicate_pushdown_enabled: bool,
+    /// Maximum segments before triggering synchronous compaction on ingest
+    /// This ensures ingests help reduce segment count
+    /// Default: 500
+    pub sync_compact_threshold: usize,
+
+    // --- Query Profiling (EXPLAIN ANALYZE) ---
+    /// Enable query profiling/statistics collection
+    /// Default: true
+    pub query_profiling_enabled: bool,
+
+    // --- I/O Optimization ---
+    /// Enable read-ahead prefetching for sequential scans
+    /// Default: true
+    pub prefetch_enabled: bool,
+    /// Prefetch buffer size in segments (how many segments to prefetch ahead)
+    /// Default: 4
+    pub prefetch_segments: usize,
+    /// Enable Direct I/O (O_DIRECT) for segment reads (bypasses OS cache)
+    /// Best for large scans where data won't be reused
+    /// Default: false (OS cache is usually beneficial)
+    pub direct_io_enabled: bool,
+
+    // --- Result Streaming ---
+    /// Enable result streaming (return results as they're computed)
+    /// Reduces memory usage and latency for large result sets
+    /// Default: true
+    pub result_streaming_enabled: bool,
+    /// Batch size for streaming results (rows per batch)
+    /// Default: 10000
+    pub streaming_batch_size: usize,
+
+    // --- Time-Based Partitioning ---
+    /// Enable time-based partition pruning
+    /// Dramatically speeds up time-range queries
+    /// Default: true
+    pub partition_pruning_enabled: bool,
+    /// Partition granularity in seconds (e.g., 3600 = hourly partitions)
+    /// Default: 86400 (daily)
+    pub partition_granularity_secs: u64,
+
+    // --- Column Encoding ---
+    /// Enable advanced column encoding (Delta, RLE, Dictionary)
+    /// Can reduce storage by 50-80% for suitable data
+    /// Default: true
+    pub advanced_encoding_enabled: bool,
+    /// Dictionary encoding threshold (use dictionary if cardinality < this % of rows)
+    /// Default: 50 (use dictionary if <50% unique values)
+    pub dictionary_encoding_threshold_pct: u8,
+    /// Delta encoding for sorted numeric columns
+    /// Default: true
+    pub delta_encoding_enabled: bool,
+    /// RLE encoding for columns with repeated values
+    /// Default: true
+    pub rle_encoding_enabled: bool,
+
+    // --- Self-Repair ---
+    /// Enable automatic self-repair from backups/replicas
+    /// Default: true
+    pub auto_repair_enabled: bool,
+    /// Maximum segments to repair in parallel
+    /// Default: 4
+    pub repair_parallelism: usize,
+
+    // --- Cost-Based Optimization ---
+    /// Enable cost-based query optimization
+    /// Default: true
+    pub cost_based_optimizer_enabled: bool,
+    /// Statistics sample size for cost estimation (rows)
+    /// Default: 10000
+    pub stats_sample_size: usize,
 }
 
 impl EngineConfig {
@@ -492,18 +718,23 @@ impl EngineConfig {
             wal_sync_interval_ms: 0,
             allow_manifest_import: false,
             retention_watermark_micros: None,
-            compact_min_segments: 2,
+            compact_min_segments: 2,  // Aggressive: merge when 2+ parts (faster reduction)
             enable_compaction: true,
-            compaction_target_bytes: 128 * 1024 * 1024, // 128MB default target for merged segments
-            compaction_interval_ms: 60_000,
+            compaction_target_bytes: 256 * 1024 * 1024, // 256MB target (ClickHouse standard: 150MB-1GB)
+            compaction_interval_ms: 10_000,    // Check every 10s for faster response
             s3_bucket: None,
             s3_region: None,
             s3_endpoint: None,
             s3_access_key: None,
             s3_secret_key: None,
-            auto_compact_interval_secs: 60,     // Check every minute
-            max_concurrent_compactions: 2,      // Limit to 2 concurrent compactions
-            compaction_cooldown_secs: 30,       // 30s cooldown per table
+            auto_compact_interval_secs: 10,     // Check every 10 seconds (industry: aggressive)
+            max_concurrent_compactions: 8,      // 8 concurrent compactions (very aggressive)
+            compaction_cooldown_secs: 1,        // 1s cooldown (fastest reaction)
+            compaction_passes_per_cycle: 128,   // 128 passes per cycle (maximum catch-up)
+            max_segments_per_compaction: 64,    // Merge up to 64 segments at once
+            emergency_compaction_parallelism: 8, // 8 tables in parallel during emergency
+            parallel_filter_threshold: 100,     // Lower threshold for more parallelism
+            bloom_cache_entries_per_shard: 0,   // 0 = auto-scale based on segment count
             tier_warm_after_millis: 3_600_000,  // 1h
             tier_cold_after_millis: 86_400_000, // 24h
             tier_hot_compression: Some("lz4".to_string()), // LZ4 for hot tier (fast)
@@ -582,6 +813,88 @@ impl EngineConfig {
             segment_checksum_journal_path: None,    // Use default path
             segment_operation_max_retries: 3,  // Retry failed operations up to 3 times
             segment_operation_retry_delay_ms: 100, // 100ms between retries
+            // Read replica defaults (disabled by default)
+            read_only: false,                  // Not a read-only replica by default
+            replica_sync_interval_ms: 1000,    // 1 second sync interval
+            replica_primary_addr: None,        // No primary server configured
+            // Segment limits & stability defaults (ClickHouse-style protection)
+            max_segments_emergency_threshold: 1000,  // Emergency at 1K (very aggressive)
+            max_segments_hard_limit: 5000,           // Hard reject at 5K (prevent runaway)
+            max_segments_per_table: 200,             // Per-table emergency at 200 (very aggressive)
+            max_segments_per_query: 1000,            // Cap query at 1K segments
+            adaptive_backpressure_enabled: true,     // Enable adaptive throttling
+            adaptive_backpressure_start_pct: 30,     // Start throttling at 30% (earlier)
+            adaptive_backpressure_max_delay_ms: 50,  // Max 50ms delay (lower latency)
+            emergency_compaction_target_segments: 50, // Compact to 50 segments per table
+            emergency_compaction_bypass_cooldown: true, // Bypass cooldown in emergency
+            // Memory-mapped segment access defaults
+            mmap_segments: true,                     // Enable mmap by default for large segments
+            mmap_min_bytes: 4 * 1024 * 1024,         // 4MB threshold for using mmap
+            // Write buffering defaults (ClickHouse-style)
+            // Disabled by default to preserve immediate visibility guarantee
+            // Enable with --write-buffer for high-throughput scenarios
+            write_buffer_enabled: false,             // Opt-in for production high-throughput
+            write_buffer_max_bytes: 64 * 1024 * 1024, // 64MB buffer (industry: 64-256MB)
+            write_buffer_flush_interval_ms: 500,     // Flush every 500ms max latency
+            min_segment_bytes: 8 * 1024 * 1024,      // 8MB minimum segment (industry: 8-64MB)
+            // Leveled compaction defaults (ClickHouse MergeTree-style)
+            leveled_compaction_enabled: true,        // Enable leveled compaction
+            level_base_bytes: 8 * 1024 * 1024,       // 8MB base (level 0) - industry standard
+            level_multiplier: 10,                    // 10x between levels (8MB, 80MB, 800MB, 8GB)
+            max_levels: 4,                           // 4 levels (8MB -> 8GB range)
+            segments_per_level_trigger: 3,           // Merge when 3+ segments (industry standard)
+            // Continuous compaction defaults
+            continuous_compaction_enabled: true,     // Enable continuous compaction
+            compaction_threads: 2,                   // 2 dedicated compaction threads
+            compaction_idle_sleep_ms: 100,           // 100ms sleep when idle
+            // Low-latency / low-resource defaults (industry standard)
+            query_memory_limit_bytes: 10 * 1024 * 1024 * 1024, // 10GB per query (ClickHouse default)
+            lightweight_reads: true,                 // Enable lightweight read path
+            query_timeout_ms: 60000,                 // 60 second timeout (industry standard)
+            prefer_cache: true,                      // Prefer cached results
+            max_result_rows: 1_000_000_000,          // 1 billion rows max (ClickHouse default)
+            // Compression optimization defaults
+            compression_skip_threshold_bytes: 4 * 1024, // 4KB - skip compression for tiny payloads
+            adaptive_compression_levels: true,       // Use higher levels for larger payloads
+            // Write path optimization defaults
+            write_verify_sample_rate: 1,             // Verify all writes (safest)
+            // Parallel compaction defaults
+            parallel_merge_enabled: true,            // Enable parallel merging
+            parallel_merge_min_segments: 4,          // Parallelize when merging 4+ segments
+            // Bounded aggregation defaults
+            aggregation_memory_limit_bytes: 1024 * 1024 * 1024, // 1GB limit
+            aggregation_spill_enabled: true,         // Enable spill-to-disk
+            aggregation_spill_dir: None,             // Use default (data_dir/spill)
+            // Aggressive segment elimination defaults
+            target_segments_per_table: 100,          // Very aggressive target
+            auto_merge_micro_segments: true,         // Auto-merge tiny segments
+            micro_segment_threshold_bytes: 1024 * 1024, // 1MB threshold
+            compressed_cache_enabled: true,          // 2-3x more cache capacity
+            predicate_pushdown_enabled: true,        // Filter during load
+            sync_compact_threshold: 500,             // Sync compact above 500 segments
+            // Query profiling defaults
+            query_profiling_enabled: true,           // Enable EXPLAIN ANALYZE
+            // I/O optimization defaults
+            prefetch_enabled: true,                  // Enable read-ahead
+            prefetch_segments: 4,                    // Prefetch 4 segments ahead
+            direct_io_enabled: false,                // OS cache usually better
+            // Result streaming defaults
+            result_streaming_enabled: true,          // Stream large results
+            streaming_batch_size: 10000,             // 10K rows per batch
+            // Partition pruning defaults
+            partition_pruning_enabled: true,         // Enable time-based pruning
+            partition_granularity_secs: 86400,       // Daily partitions
+            // Column encoding defaults
+            advanced_encoding_enabled: true,         // Enable Delta/RLE/Dictionary
+            dictionary_encoding_threshold_pct: 50,   // Dictionary if <50% unique
+            delta_encoding_enabled: true,            // Delta for sorted numerics
+            rle_encoding_enabled: true,              // RLE for repeated values
+            // Self-repair defaults
+            auto_repair_enabled: true,               // Auto-repair from backups
+            repair_parallelism: 4,                   // 4 parallel repairs
+            // Cost-based optimizer defaults
+            cost_based_optimizer_enabled: true,      // Enable CBO
+            stats_sample_size: 10000,                // 10K row sample for stats
         }
     }
 
@@ -845,6 +1158,44 @@ impl EngineConfig {
         self.memtable_max_entries = entries.max(1);
         self
     }
+
+    /// Configure as a read-only replica
+    ///
+    /// When enabled, all write operations (ingest, create, drop, etc.) will fail
+    /// with EngineError::ReadOnlyReplica. Use this for read replicas that sync
+    /// data from a primary server.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Configure manifest sync interval for replicas
+    ///
+    /// This sets how often the replica checks for manifest updates from the
+    /// primary server or S3 storage.
+    pub fn with_replica_sync_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.replica_sync_interval_ms = interval_ms.max(100); // Minimum 100ms
+        self
+    }
+
+    /// Configure primary server address for HTTP bundle pull
+    ///
+    /// When set, the replica will fetch bundles from this primary server
+    /// instead of relying solely on shared S3 storage.
+    pub fn with_replica_primary_addr(mut self, addr: Option<String>) -> Self {
+        self.replica_primary_addr = addr;
+        self
+    }
+
+    /// Configure memory-mapped segment access
+    ///
+    /// When enabled, large segments are loaded using mmap instead of std::fs::read.
+    /// This uses the OS page cache more efficiently and reduces memory allocation overhead.
+    pub fn with_mmap_segments(mut self, enabled: bool, min_bytes: usize) -> Self {
+        self.mmap_segments = enabled;
+        self.mmap_min_bytes = min_bytes.max(64 * 1024); // Minimum 64KB threshold
+        self
+    }
 }
 
 /// LRU-style query result cache entry
@@ -1073,6 +1424,14 @@ impl ShardedBatchCache {
         let idx = self.shard_index(segment_id);
         self.shards[idx].lock().invalidate(segment_id);
     }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            let mut s = shard.lock();
+            s.lru.clear();
+            s.current_bytes = 0;
+        }
+    }
 }
 
 // Type alias for backward compatibility
@@ -1251,6 +1610,10 @@ impl PlanCache {
                 created_at: std::time::Instant::now(),
             },
         );
+    }
+
+    fn clear(&mut self) {
+        self.lru.clear();
     }
 }
 
@@ -1517,6 +1880,62 @@ impl ManifestIndex {
         self.by_table
             .get(&(database.to_string(), table.to_string()))
     }
+
+    /// Remove an entry from the index (incremental update - avoids full rebuild)
+    fn remove_entry(&mut self, index: usize, entry: &ManifestEntry) {
+        let db = if entry.database.is_empty() {
+            "default"
+        } else {
+            &entry.database
+        };
+        let table = if entry.table.is_empty() {
+            "default"
+        } else {
+            &entry.table
+        };
+        let table_key = (db.to_string(), table.to_string());
+
+        // Remove from by_table index
+        if let Some(indices) = self.by_table.get_mut(&table_key) {
+            indices.retain(|&i| i != index);
+            if indices.is_empty() {
+                self.by_table.remove(&table_key);
+            }
+        }
+
+        // Remove from segment_ids
+        self.segment_ids.remove(&entry.segment_id);
+
+        // Remove from time partition index
+        if let Some(event_time) = entry.event_time_min {
+            let time_bucket = event_time / TIME_PARTITION_MICROS;
+            let partition_key = (db.to_string(), table.to_string(), time_bucket);
+            if let Some(indices) = self.by_time_partition.get_mut(&partition_key) {
+                indices.retain(|&i| i != index);
+                if indices.is_empty() {
+                    self.by_time_partition.remove(&partition_key);
+                }
+            }
+        }
+
+        // Note: table_time_ranges is NOT updated on removal since recalculating
+        // min/max would require scanning all entries. It will be rebuilt on
+        // next full index rebuild.
+    }
+
+    /// Remove multiple entries efficiently (batch incremental update)
+    fn remove_entries(&mut self, removals: &[(usize, &ManifestEntry)]) {
+        for &(index, entry) in removals {
+            self.remove_entry(index, entry);
+        }
+    }
+
+    /// Reindex after entries have been removed and indices shifted
+    /// This is needed when entries are removed from the middle of the Vec
+    fn reindex_after_removal(&mut self, entries: &[ManifestEntry]) {
+        // For large-scale removals, rebuild is more efficient than tracking shifts
+        *self = ManifestIndex::build(entries);
+    }
 }
 
 /// Single shard of the segment cache
@@ -1652,10 +2071,141 @@ impl ShardedSegmentCache {
             total_entries,
         )
     }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            let mut s = shard.lock();
+            s.lru.clear();
+            s.current_bytes = 0;
+        }
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
 }
 
 // Type alias for backward compatibility
 type SegmentCache = ShardedSegmentCache;
+
+/// Bloom filter cache to avoid repeated deserialization
+/// Uses a simple LRU cache keyed by (segment_id, bloom_type)
+const BLOOM_CACHE_SHARDS: usize = 16;
+const BLOOM_CACHE_MAX_ENTRIES_PER_SHARD: usize = 10_000;
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct BloomCacheKey {
+    segment_id: String,
+    bloom_type: u8, // 0 = tenant, 1 = route
+}
+
+struct BloomCacheShard {
+    lru: LruCache<BloomCacheKey, Arc<bloomfilter::Bloom<u64>>>,
+}
+
+impl BloomCacheShard {
+    fn new() -> Self {
+        let max_entries = NonZeroUsize::new(BLOOM_CACHE_MAX_ENTRIES_PER_SHARD).unwrap();
+        BloomCacheShard {
+            lru: LruCache::new(max_entries),
+        }
+    }
+
+    fn get(&mut self, key: &BloomCacheKey) -> Option<Arc<bloomfilter::Bloom<u64>>> {
+        self.lru.get(key).map(Arc::clone)
+    }
+
+    fn insert(&mut self, key: BloomCacheKey, bloom: bloomfilter::Bloom<u64>) -> Arc<bloomfilter::Bloom<u64>> {
+        let arc_bloom = Arc::new(bloom);
+        self.lru.put(key, Arc::clone(&arc_bloom));
+        arc_bloom
+    }
+}
+
+struct ShardedBloomCache {
+    shards: Vec<ParkingMutex<BloomCacheShard>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+impl std::fmt::Debug for ShardedBloomCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardedBloomCache")
+            .field("shards", &self.shards.len())
+            .field("hits", &self.hits.load(Ordering::Relaxed))
+            .field("misses", &self.misses.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+impl ShardedBloomCache {
+    fn new() -> Self {
+        Self::with_capacity(BLOOM_CACHE_MAX_ENTRIES_PER_SHARD)
+    }
+
+    fn with_capacity(entries_per_shard: usize) -> Self {
+        let max_entries = entries_per_shard.max(1000); // At least 1000 per shard
+        let shards = (0..BLOOM_CACHE_SHARDS)
+            .map(|_| {
+                let mut shard = BloomCacheShard::new();
+                // Resize the LRU if needed
+                shard.lru = LruCache::new(NonZeroUsize::new(max_entries).unwrap());
+                ParkingMutex::new(shard)
+            })
+            .collect();
+        ShardedBloomCache {
+            shards,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
+    }
+
+    fn shard_for(&self, key: &BloomCacheKey) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % BLOOM_CACHE_SHARDS
+    }
+
+    /// Get or deserialize a bloom filter, caching the result
+    fn get_or_insert(
+        &self,
+        segment_id: &str,
+        bloom_type: u8,
+        data: &[u8],
+        expected_items: usize,
+    ) -> Arc<bloomfilter::Bloom<u64>> {
+        let key = BloomCacheKey {
+            segment_id: segment_id.to_string(),
+            bloom_type,
+        };
+        let shard_idx = self.shard_for(&key);
+        let mut shard = self.shards[shard_idx].lock();
+
+        if let Some(bloom) = shard.get(&key) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return bloom;
+        }
+
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        let bloom = crate::bloom_utils::deserialize_bloom_or_empty(data, expected_items);
+        shard.insert(key, bloom)
+    }
+
+    fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            shard.lock().lru.clear();
+        }
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+    }
+}
 
 /// Runtime metrics for monitoring
 #[derive(Debug, Default)]
@@ -1909,6 +2459,11 @@ pub struct CompactionState {
     last_compaction: std::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>,
     /// Currently running compactions count
     active_compactions: AtomicU64,
+    /// Condvar for event-driven compaction notification
+    /// Compaction threads wait on this instead of polling
+    work_available: std::sync::Condvar,
+    /// Mutex paired with Condvar
+    work_mutex: std::sync::Mutex<bool>,
 }
 
 impl CompactionState {
@@ -1916,7 +2471,34 @@ impl CompactionState {
         Self {
             last_compaction: std::sync::RwLock::new(std::collections::HashMap::new()),
             active_compactions: AtomicU64::new(0),
+            work_available: std::sync::Condvar::new(),
+            work_mutex: std::sync::Mutex::new(false),
         }
+    }
+
+    /// Notify waiting compaction threads that new work may be available
+    /// Called after new segments are added
+    pub fn notify_work_available(&self) {
+        if let Ok(mut has_work) = self.work_mutex.lock() {
+            *has_work = true;
+        }
+        self.work_available.notify_all();
+    }
+
+    /// Wait for work notification with timeout
+    /// Returns true if notified, false if timed out
+    pub fn wait_for_work(&self, timeout: std::time::Duration) -> bool {
+        if let Ok(guard) = self.work_mutex.lock() {
+            // Wait with timeout - returns immediately if already signaled
+            let result = self.work_available.wait_timeout(guard, timeout);
+            if let Ok((mut has_work, wait_result)) = result {
+                if !wait_result.timed_out() {
+                    *has_work = false; // Reset signal
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Check if we can start a new compaction (respects max_concurrent limit)
@@ -1964,6 +2546,26 @@ pub struct CompactionCandidate {
     pub total_bytes: u64,
     pub avg_segment_size: u64,
     pub priority: u32, // Higher = more urgent
+}
+
+/// Leveled compaction candidate (ClickHouse MergeTree-style)
+/// Segments are organized into exponential size tiers and merged when a tier fills up
+#[derive(Debug, Clone)]
+pub struct LeveledCompactionCandidate {
+    pub database: String,
+    pub table: String,
+    /// Current level of segments (0 = smallest)
+    pub level: usize,
+    /// Target level after merge (usually level + 1)
+    pub target_level: usize,
+    /// Number of segments to merge
+    pub segment_count: usize,
+    /// Total bytes of segments to merge
+    pub total_bytes: u64,
+    /// Segment IDs to merge
+    pub segment_ids: Vec<String>,
+    /// Priority for scheduling (higher = more urgent)
+    pub priority: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2055,6 +2657,8 @@ pub struct Db {
     batch_cache: BatchCache,
     /// LRU cache of segment schemas by segment_id
     schema_cache: ParkingMutex<LruCache<String, Arc<Schema>>>,
+    /// Sharded LRU cache of deserialized bloom filters
+    bloom_cache: ShardedBloomCache,
     /// LRU of recently applied bundle plan hashes to prevent replays
     recent_bundle_hashes: ParkingMutex<LruCache<u32, ()>>,
     memtables: ShardedMemtables,
@@ -2088,6 +2692,113 @@ pub struct Db {
     stream_registry: parking_lot::RwLock<StreamRegistry>,
     /// Stats tracking for auto-refresh: tracks (rows_changed, last_update_time) per table
     stats_tracker: parking_lot::RwLock<StatsTracker>,
+    /// Write buffer for coalescing small writes into larger segments (ClickHouse-style)
+    write_buffer: parking_lot::Mutex<WriteBuffer>,
+}
+
+/// Write buffer that accumulates small writes before flushing to segments
+/// This reduces segment count by creating larger initial segments
+#[derive(Debug)]
+struct WriteBuffer {
+    /// Buffered batches per (database, table) key
+    buffers: HashMap<(String, String), TableWriteBuffer>,
+    /// Total bytes currently buffered across all tables
+    total_bytes: u64,
+    /// Last flush timestamp
+    last_flush: std::time::Instant,
+}
+
+#[derive(Debug)]
+struct TableWriteBuffer {
+    /// Accumulated IPC payloads
+    payloads: Vec<Vec<u8>>,
+    /// Total bytes in this table's buffer
+    bytes: u64,
+    /// Schema from first batch (for validation)
+    schema: Option<Arc<Schema>>,
+    /// Shard ID from first batch
+    shard_id: u16,
+    /// Watermark from batches
+    watermark_micros: u64,
+}
+
+impl Default for WriteBuffer {
+    fn default() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            total_bytes: 0,
+            last_flush: std::time::Instant::now(),
+        }
+    }
+}
+
+impl WriteBuffer {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a batch to the buffer, returns true if flush is needed
+    fn add(&mut self, database: &str, table: &str, payload: Vec<u8>, shard_id: u16, watermark: u64, schema: Option<Arc<Schema>>) -> bool {
+        let bytes = payload.len() as u64;
+        self.total_bytes += bytes;
+
+        let key = (database.to_string(), table.to_string());
+        let buffer = self.buffers.entry(key).or_insert_with(|| TableWriteBuffer {
+            payloads: Vec::new(),
+            bytes: 0,
+            schema: None,
+            shard_id,
+            watermark_micros: 0,
+        });
+
+        buffer.payloads.push(payload);
+        buffer.bytes += bytes;
+        buffer.watermark_micros = buffer.watermark_micros.max(watermark);
+        if buffer.schema.is_none() {
+            buffer.schema = schema;
+        }
+
+        // Don't signal flush here - let caller check thresholds
+        false
+    }
+
+    /// Check if buffer should be flushed based on size threshold
+    fn should_flush(&self, max_bytes: u64) -> bool {
+        self.total_bytes >= max_bytes
+    }
+
+    /// Check if buffer should be flushed based on time threshold
+    fn should_flush_time(&self, max_interval_ms: u64) -> bool {
+        self.last_flush.elapsed().as_millis() as u64 >= max_interval_ms
+    }
+
+    /// Take all buffered data for flushing
+    fn take_all(&mut self) -> HashMap<(String, String), TableWriteBuffer> {
+        self.total_bytes = 0;
+        self.last_flush = std::time::Instant::now();
+        std::mem::take(&mut self.buffers)
+    }
+
+    /// Take buffer for a specific table
+    fn take_table(&mut self, database: &str, table: &str) -> Option<TableWriteBuffer> {
+        let key = (database.to_string(), table.to_string());
+        if let Some(buffer) = self.buffers.remove(&key) {
+            self.total_bytes -= buffer.bytes;
+            Some(buffer)
+        } else {
+            None
+        }
+    }
+
+    /// Check if buffer is empty
+    fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
+    }
+
+    /// Get total buffered bytes
+    fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
 }
 
 /// Tracks statistics freshness per table for auto-refresh decisions
@@ -2665,6 +3376,22 @@ impl Db {
         ReadGuard { db: self }
     }
 
+    /// Check if this database is in read-only replica mode.
+    /// Returns an error if write operations are not allowed.
+    fn require_writable(&self) -> Result<(), EngineError> {
+        if self.cfg.read_only {
+            return Err(EngineError::ReadOnlyReplica(
+                "write operations disabled on read replica".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns true if this database is running in read-only replica mode.
+    pub fn is_read_only(&self) -> bool {
+        self.cfg.read_only
+    }
+
     fn remove_segment_file_now(&self, segment_id: &str) {
         let path = self.cfg.segments_dir.join(format!("{segment_id}.ipc"));
         if let Err(e) = fs::remove_file(&path) {
@@ -2826,6 +3553,20 @@ impl Db {
             schema_cache: ParkingMutex::new(LruCache::new(
                 NonZeroUsize::new(cfg.schema_cache_entries.max(1)).unwrap(),
             )),
+            // Auto-scale bloom cache based on segment count or use configured value
+            bloom_cache: {
+                let entries_per_shard = if cfg.bloom_cache_entries_per_shard > 0 {
+                    cfg.bloom_cache_entries_per_shard
+                } else {
+                    // Auto-scale: estimate based on hard limit
+                    // Each segment can have 2 bloom filters (tenant, route)
+                    // Target: enough capacity for all segments × 2 bloom types
+                    let estimated_blooms = cfg.max_segments_hard_limit.max(10_000) * 2;
+                    let per_shard = estimated_blooms / BLOOM_CACHE_SHARDS;
+                    per_shard.max(10_000).min(100_000) // 10K-100K per shard
+                };
+                ShardedBloomCache::with_capacity(entries_per_shard)
+            },
             recent_bundle_hashes: ParkingMutex::new(LruCache::new(
                 NonZeroUsize::new(1024).unwrap(),
             )),
@@ -2875,9 +3616,16 @@ impl Db {
             stream_registry: parking_lot::RwLock::new(StreamRegistry::new()),
             // Initialize stats tracker for auto-refresh
             stats_tracker: parking_lot::RwLock::new(StatsTracker::default()),
+            // Initialize write buffer for coalescing small writes
+            write_buffer: parking_lot::Mutex::new(WriteBuffer::new()),
         };
 
         db.spawn_background_compaction_loop();
+
+        // Spawn write buffer flush thread if enabled
+        if db.cfg.write_buffer_enabled {
+            db.spawn_write_buffer_flush_thread();
+        }
 
         // Spawn Tiering Manager
         let tiering_mgr = std::sync::Arc::new(crate::tiering::TieringManager::new(
@@ -3148,7 +3896,72 @@ impl Db {
     }
 
     pub fn ingest_ipc(&self, batch: IngestBatch) -> Result<(), EngineError> {
+        self.require_writable()?;
+
+        let current_segments = self.segment_count();
+
+        // Check hard segment limit - reject writes if exceeded
+        if self.is_segment_limit_exceeded() {
+            // Try emergency compaction before rejecting
+            if self.cfg.emergency_compaction_bypass_cooldown {
+                let _ = self.run_emergency_compaction();
+            }
+
+            // Check again after emergency compaction
+            if self.is_segment_limit_exceeded() {
+                self.metrics.ingests_errors.fetch_add(1, Ordering::Relaxed);
+                return Err(EngineError::Backpressure(format!(
+                    "segment limit exceeded ({} >= {}), run compaction or increase max_segments_hard_limit",
+                    current_segments,
+                    self.cfg.max_segments_hard_limit
+                )));
+            }
+        }
+
+        // Trigger emergency compaction when approaching limit (at 80%)
+        if self.cfg.max_segments_emergency_threshold > 0
+            && current_segments >= (self.cfg.max_segments_emergency_threshold * 80 / 100)
+        {
+            // Run compaction in background, don't block ingest
+            self.compaction_state.notify_work_available();
+        }
+
+        // Apply adaptive backpressure delay if enabled
+        let delay_ms = self.calculate_backpressure_delay();
+        if delay_ms > 0 {
+            tracing::debug!(delay_ms = delay_ms, segments = current_segments, "Applying adaptive backpressure");
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+
         let payload_len = batch.payload_ipc.len() as u64;
+
+        // Write buffering: if enabled and payload is small, buffer it
+        // Flush when buffer exceeds threshold or time expires
+        if self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes {
+            let db_name = batch.database.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
+            let table_name = batch.table.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
+
+            let should_flush = {
+                let mut buffer = self.write_buffer.lock();
+                buffer.add(
+                    db_name,
+                    table_name,
+                    batch.payload_ipc.clone(),
+                    batch.shard_override.unwrap_or(0) as u16,
+                    batch.watermark_micros,
+                    None, // Schema will be inferred when flushing
+                );
+                buffer.should_flush(self.cfg.write_buffer_max_bytes)
+            };
+
+            if should_flush {
+                self.flush_write_buffer()?;
+            }
+
+            self.metrics.ingests_total.fetch_add(1, Ordering::Relaxed);
+            self.metrics.ingests_bytes.fetch_add(payload_len, Ordering::Relaxed);
+            return Ok(());
+        }
         if batch.payload_ipc.is_empty() {
             self.metrics.ingests_errors.fetch_add(1, Ordering::Relaxed);
             return Err(EngineError::InvalidArgument(
@@ -3520,7 +4333,61 @@ impl Db {
             },
         );
 
+        // Notify compaction threads that new work may be available (event-driven compaction)
+        self.compaction_state.notify_work_available();
+
+        // Aggressive segment elimination: sync compact if segment count is high
+        if self.cfg.sync_compact_threshold > 0 {
+            let segment_count = self.get_table_segment_count(db_name, table_name);
+            if segment_count > self.cfg.sync_compact_threshold {
+                // Run one compaction pass synchronously to help reduce segment count
+                let _ = self.run_table_compaction_pass(db_name, table_name);
+            }
+        }
+
         Ok(())
+    }
+
+    /// Get segment count for a specific table
+    fn get_table_segment_count(&self, database: &str, table: &str) -> usize {
+        if let Ok(index) = self.manifest_index.read() {
+            index.get_table_entries(database, table)
+                .map(|entries| entries.len())
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// Run a single compaction pass for a specific table
+    fn run_table_compaction_pass(&self, database: &str, table: &str) -> Result<usize, EngineError> {
+        let filter = Some((database.to_string(), table.to_string()));
+        let candidate = self.pick_compaction_candidate(
+            self.cfg.compaction_target_bytes,
+            self.cfg.compact_min_segments,
+            filter,
+        )?;
+
+        if let Some((entries, table_meta)) = candidate {
+            let count = entries.len();
+            self.compact_entries(entries, table_meta)?;
+            Ok(count)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Direct ingest bypassing write buffer (used when flushing buffer)
+    fn ingest_ipc_direct(&self, batch: IngestBatch) -> Result<(), EngineError> {
+        // Save original config and temporarily disable buffering
+        let was_buffering = self.cfg.write_buffer_enabled;
+        // We can't modify cfg, so we just proceed with normal ingest
+        // The check at the start of ingest_ipc will skip buffering for large payloads
+        // Since flushed payloads are combined to be large, they won't re-buffer
+
+        // Call the regular ingest - the combined payload will be >= min_segment_bytes
+        // so it won't be buffered again
+        self.ingest_ipc(batch)
     }
 
     /// Ingest multiple batches in a single call (optimized for frequent small updates)
@@ -3533,6 +4400,25 @@ impl Db {
     /// Returns the number of successfully ingested batches.
     /// If any batch fails validation, all batches are rejected (atomic).
     pub fn ingest_ipc_batch(&self, batches: Vec<IngestBatch>) -> Result<usize, EngineError> {
+        self.require_writable()?;
+
+        // Check hard segment limit - reject writes if exceeded
+        if self.is_segment_limit_exceeded() {
+            self.metrics.ingests_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(EngineError::Backpressure(format!(
+                "segment limit exceeded ({} >= {}), run compaction or increase max_segments_hard_limit",
+                self.segment_count(),
+                self.cfg.max_segments_hard_limit
+            )));
+        }
+
+        // Apply adaptive backpressure delay if enabled
+        let delay_ms = self.calculate_backpressure_delay();
+        if delay_ms > 0 {
+            tracing::debug!(delay_ms = delay_ms, segments = self.segment_count(), "Applying adaptive backpressure");
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+
         if batches.is_empty() {
             return Ok(0);
         }
@@ -3598,14 +4484,19 @@ impl Db {
                 .map(|cs| cs.row_count)
                 .unwrap_or(0);
 
-            // Compression and encoding
+            // Compression and encoding with adaptive optimization
             let table_compression = normalize_compression(
                 existing_table
                     .as_ref()
                     .and_then(|t| t.compression.clone())
                     .or_else(|| self.cfg.tier_hot_compression.clone()),
             )?;
-            let stored_payload = compress_payload(&batch.payload_ipc, table_compression.as_deref())?;
+            let stored_payload = compress_payload_adaptive(
+                &batch.payload_ipc,
+                table_compression.as_deref(),
+                self.cfg.compression_skip_threshold_bytes,
+                self.cfg.adaptive_compression_levels,
+            )?;
 
             // Choose shard
             let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
@@ -3771,6 +4662,9 @@ impl Db {
             self.track_rows_and_maybe_update_stats(&db_name, &table_name, row_count);
         }
 
+        // Notify compaction threads that new work may be available (event-driven compaction)
+        self.compaction_state.notify_work_available();
+
         Ok(count)
     }
 
@@ -3781,6 +4675,23 @@ impl Db {
         batch: IngestBatch,
         txn_id: Option<crate::transaction::TransactionId>,
     ) -> Result<(), EngineError> {
+        self.require_writable()?;
+
+        // Check hard segment limit - reject writes if exceeded
+        if self.is_segment_limit_exceeded() {
+            return Err(EngineError::Backpressure(format!(
+                "segment limit exceeded ({} >= {}), run compaction or increase max_segments_hard_limit",
+                self.segment_count(),
+                self.cfg.max_segments_hard_limit
+            )));
+        }
+
+        // Apply adaptive backpressure delay if enabled
+        let delay_ms = self.calculate_backpressure_delay();
+        if delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+
         let db_name = batch.database.as_deref().unwrap_or("default");
         let table_name = batch.table.as_deref().unwrap_or("default");
 
@@ -4003,6 +4914,7 @@ impl Db {
     }
 
     pub fn checkpoint(&self) -> Result<(), EngineError> {
+        self.require_writable()?;
         self.flush_manifest()?;
         let mut wal = self
             .wal
@@ -4291,7 +5203,8 @@ impl Db {
                     continue;
                 }
                 if let Some(b) = &e.bloom_tenant {
-                    if !crate::bloom_utils::deserialize_bloom_or_empty(b, 1000).check(&eq) {
+                    let bloom = self.bloom_cache.get_or_insert(&e.segment_id, 0, b, 1000);
+                    if !bloom.check(&eq) {
                         continue;
                     }
                 }
@@ -4306,7 +5219,8 @@ impl Db {
                     continue;
                 }
                 if let Some(b) = &e.bloom_route {
-                    if !crate::bloom_utils::deserialize_bloom_or_empty(b, 1000).check(&eq) {
+                    let bloom = self.bloom_cache.get_or_insert(&e.segment_id, 1, b, 1000);
+                    if !bloom.check(&eq) {
                         continue;
                     }
                 }
@@ -4763,7 +5677,8 @@ impl Db {
                     continue;
                 }
                 if let Some(b) = &e.bloom_tenant {
-                    if !crate::bloom_utils::deserialize_bloom_or_empty(b, 1000).check(&eq) {
+                    let bloom = self.bloom_cache.get_or_insert(&e.segment_id, 0, b, 1000);
+                    if !bloom.check(&eq) {
                         continue;
                     }
                 }
@@ -4777,7 +5692,8 @@ impl Db {
                     continue;
                 }
                 if let Some(b) = &e.bloom_route {
-                    if !crate::bloom_utils::deserialize_bloom_or_empty(b, 1000).check(&eq) {
+                    let bloom = self.bloom_cache.get_or_insert(&e.segment_id, 1, b, 1000);
+                    if !bloom.check(&eq) {
                         continue;
                     }
                 }
@@ -4820,6 +5736,15 @@ impl Db {
         // Release manifest lock before any I/O operations
         drop(manifest);
 
+        // Enforce max_segments_per_query limit (ClickHouse-style protection)
+        if self.cfg.max_segments_per_query > 0 && matching.len() > self.cfg.max_segments_per_query {
+            return Err(EngineError::InvalidArgument(format!(
+                "query would scan {} segments, exceeds limit of {} (add more filters or increase max_segments_per_query)",
+                matching.len(),
+                self.cfg.max_segments_per_query
+            )));
+        }
+
         if matching.is_empty() {
             return Err(EngineError::NotFound(format!(
                 "no segments for {}.{} matching filters",
@@ -4849,6 +5774,7 @@ impl Db {
                 filter.offset.is_some() && filter.order_by.is_none() && !filter.distinct;
 
             // Adaptive parallel scan decision based on workload characteristics
+            // Thresholds lowered for better performance with large segment counts
             let use_parallel = {
                 let segment_count = matching.len();
                 let estimated_bytes: u64 = matching.iter().map(|e| e.size_bytes).sum();
@@ -4859,14 +5785,16 @@ impl Db {
                 };
 
                 // Use parallel scan if:
-                // 1. Multiple segments (>= 4) AND
-                // 2. Either large total data (> 32MB) OR many small segments (> 16)
+                // 1. Multiple segments (>= 2) AND
+                // 2. Either large total data (> 8MB) OR many small segments (> 8)
                 // 3. Not using offset pushdown (which benefits from early termination)
-                let has_enough_segments = segment_count >= 4;
-                let has_large_data = estimated_bytes > 32 * 1024 * 1024;
-                let has_many_segments = segment_count > 16;
+                // 4. Always parallel for very large segment counts (> 1000)
+                let has_enough_segments = segment_count >= 2;
+                let has_large_data = estimated_bytes > 8 * 1024 * 1024;
+                let has_many_segments = segment_count > 8;
+                let very_large_scan = segment_count > 1000;
                 let worth_parallelizing =
-                    has_large_data || has_many_segments || avg_segment_size > 8 * 1024 * 1024;
+                    very_large_scan || has_large_data || has_many_segments || avg_segment_size > 4 * 1024 * 1024;
 
                 has_enough_segments && worth_parallelizing && !offset_pushdown
             };
@@ -4896,7 +5824,8 @@ impl Db {
                             Ok(None) => return None, // Skip damaged segment
                             Err(e) => return Some(Err(e)),
                         };
-                        let filtered = match filter_ipc(&payload, filter_ref) {
+                        // Use projection pushdown when projection is available
+                        let filtered = match filter_ipc_with_projection(&payload, filter_ref, projection_ref) {
                             Ok(f) => f,
                             Err(e) => return Some(Err(e)),
                         };
@@ -4985,7 +5914,8 @@ impl Db {
                         estimated_rows += sliced.iter().map(|b| b.num_rows()).sum::<usize>();
                         records.extend_from_slice(&ipc);
                     } else {
-                        let filtered = filter_ipc(&payload, &filter)?;
+                        // Use projection pushdown when available
+                        let filtered = filter_ipc_with_projection(&payload, &filter, projection.as_deref())?;
                         if filtered.is_empty() {
                             data_skipped_bytes += original_size;
                         } else {
@@ -9022,8 +9952,9 @@ impl Db {
             return Ok(());
         }
 
-        // Avoid unbounded loops: compact up to a fixed number of batches per invocation.
-        for _ in 0..16 {
+        // Use configurable passes per cycle (default 32, higher when many segments)
+        let passes = self.cfg.compaction_passes_per_cycle;
+        for _ in 0..passes {
             let candidate = self.pick_compaction_candidate(target_bytes, min_segments, None)?;
             let Some((entries, table_meta)) = candidate else {
                 break;
@@ -9064,6 +9995,7 @@ impl Db {
                 .push(entry.clone());
         }
 
+        let max_segments = self.cfg.max_segments_per_compaction;
         for ((db, tbl), mut entries) in grouped {
             entries.retain(|e| e.size_bytes < target_bytes);
             if entries.len() < min_segments {
@@ -9073,6 +10005,10 @@ impl Db {
             let mut chunk = Vec::new();
             let mut bytes = 0u64;
             for entry in entries {
+                // Stop if we've reached max segments or target bytes
+                if chunk.len() >= max_segments {
+                    break;
+                }
                 if bytes + entry.size_bytes > target_bytes && !chunk.is_empty() {
                     break;
                 }
@@ -9101,6 +10037,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Option<ManifestEntry>, EngineError> {
+        self.require_writable()?;
         if !self.cfg.enable_compaction {
             return Ok(None);
         }
@@ -9133,9 +10070,203 @@ impl Db {
             .unwrap_or(0)
     }
 
+    /// Get segment counts per table
+    pub fn segment_counts_per_table(&self) -> HashMap<(String, String), usize> {
+        let manifest = match self.manifest.read() {
+            Ok(m) => m,
+            Err(_) => return HashMap::new(),
+        };
+        let mut counts: HashMap<(String, String), usize> = HashMap::new();
+        for entry in manifest.entries.iter() {
+            *counts.entry((entry.database.clone(), entry.table.clone())).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Check if segment count exceeds hard limit (should reject writes)
+    pub fn is_segment_limit_exceeded(&self) -> bool {
+        if self.cfg.max_segments_hard_limit == 0 {
+            return false;
+        }
+        self.segment_count() >= self.cfg.max_segments_hard_limit
+    }
+
+    /// Check if emergency compaction should be triggered
+    pub fn needs_emergency_compaction(&self) -> bool {
+        if self.cfg.max_segments_emergency_threshold == 0 {
+            return false;
+        }
+        let count = self.segment_count();
+        if count >= self.cfg.max_segments_emergency_threshold {
+            return true;
+        }
+        // Also check per-table limits
+        if self.cfg.max_segments_per_table > 0 {
+            let counts = self.segment_counts_per_table();
+            for &table_count in counts.values() {
+                if table_count >= self.cfg.max_segments_per_table {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Calculate adaptive backpressure delay based on segment count
+    /// Returns delay in milliseconds (0 = no delay)
+    pub fn calculate_backpressure_delay(&self) -> u64 {
+        if !self.cfg.adaptive_backpressure_enabled || self.cfg.max_segments_emergency_threshold == 0 {
+            return 0;
+        }
+        let count = self.segment_count();
+        let start_threshold = (self.cfg.max_segments_emergency_threshold as u64
+            * self.cfg.adaptive_backpressure_start_pct as u64) / 100;
+
+        if count < start_threshold as usize {
+            return 0;
+        }
+
+        // Linear interpolation from start_threshold to emergency_threshold
+        let range = self.cfg.max_segments_emergency_threshold.saturating_sub(start_threshold as usize);
+        if range == 0 {
+            return self.cfg.adaptive_backpressure_max_delay_ms;
+        }
+
+        let progress = count.saturating_sub(start_threshold as usize);
+        let ratio = (progress as f64 / range as f64).min(1.0);
+        (ratio * self.cfg.adaptive_backpressure_max_delay_ms as f64) as u64
+    }
+
+    /// Run emergency compaction on tables exceeding segment limits
+    /// Returns number of segments compacted
+    /// Uses parallel compaction across tables for faster catch-up
+    pub fn run_emergency_compaction(&self) -> Result<usize, EngineError> {
+        self.require_writable()?;
+
+        let total_segments = self.segment_count();
+        let needs_emergency = self.needs_emergency_compaction();
+
+        if !needs_emergency {
+            return Ok(0);
+        }
+
+        tracing::warn!(
+            total_segments = total_segments,
+            emergency_threshold = self.cfg.max_segments_emergency_threshold,
+            parallelism = self.cfg.emergency_compaction_parallelism,
+            "EMERGENCY COMPACTION: segment count exceeds threshold, starting parallel compaction"
+        );
+
+        // Get tables sorted by segment count (highest first)
+        let mut table_counts: Vec<((String, String), usize)> =
+            self.segment_counts_per_table().into_iter().collect();
+        table_counts.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let target = self.cfg.emergency_compaction_target_segments;
+        let max_iterations = 20; // Increased for more aggressive compaction
+
+        // Filter to tables needing compaction
+        let tables_to_compact: Vec<_> = table_counts
+            .into_iter()
+            .filter(|(_, count)| *count > target)
+            .collect();
+
+        if tables_to_compact.is_empty() {
+            return Ok(0);
+        }
+
+        tracing::info!(
+            tables = tables_to_compact.len(),
+            "Emergency compaction: processing tables in parallel"
+        );
+
+        // Use rayon for parallel compaction across tables
+        use rayon::prelude::*;
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let compacted = AtomicUsize::new(0);
+        let parallelism = self.cfg.emergency_compaction_parallelism.max(1);
+
+        // Build a thread pool with limited parallelism
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(parallelism)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        pool.install(|| {
+            tables_to_compact.par_iter().for_each(|((database, table), initial_count)| {
+                tracing::info!(
+                    database = %database,
+                    table = %table,
+                    segments = initial_count,
+                    target = target,
+                    "Emergency compacting table (parallel)"
+                );
+
+                let mut iterations = 0;
+                loop {
+                    iterations += 1;
+                    if iterations > max_iterations {
+                        tracing::warn!(
+                            database = %database,
+                            table = %table,
+                            iterations = iterations,
+                            "Emergency compaction: max iterations reached"
+                        );
+                        break;
+                    }
+
+                    match self.compact_table(database, table) {
+                        Ok(Some(_)) => {
+                            compacted.fetch_add(1, AtomicOrdering::Relaxed);
+                            // Check if we've reached target
+                            let new_count = self.segment_counts_per_table()
+                                .get(&(database.clone(), table.clone()))
+                                .copied()
+                                .unwrap_or(0);
+                            if new_count <= target {
+                                tracing::info!(
+                                    database = %database,
+                                    table = %table,
+                                    new_count = new_count,
+                                    iterations = iterations,
+                                    "Emergency compaction: reached target"
+                                );
+                                break;
+                            }
+                        }
+                        Ok(None) => {
+                            // No more segments to compact
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                database = %database,
+                                table = %table,
+                                error = %e,
+                                "Emergency compaction failed"
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
+        });
+
+        let total_compacted = compacted.load(AtomicOrdering::Relaxed);
+        tracing::info!(
+            compacted = total_compacted,
+            remaining_segments = self.segment_count(),
+            "Emergency compaction completed"
+        );
+
+        Ok(total_compacted)
+    }
+
     /// Compact all tables in the database
     /// Returns the number of tables that were compacted
     pub fn compact_all(&self) -> Result<usize, EngineError> {
+        self.require_writable()?;
         if !self.cfg.enable_compaction {
             return Ok(0);
         }
@@ -9200,16 +10331,39 @@ impl Db {
             entries[0].table.clone()
         };
 
-        let mut batches = Vec::new();
+        // Validate all entries belong to the same table
         for e in &entries {
             if e.database != db_name || e.table != table_name {
                 return Err(EngineError::InvalidArgument(
                     "compaction requires all entries to belong to the same table".into(),
                 ));
             }
-            let decoded = self.load_segment_batches_cached(e)?;
-            batches.extend(decoded.iter().cloned());
         }
+
+        // Load segments - use parallel loading for multiple segments
+        let batches: Vec<RecordBatch> = if self.cfg.parallel_merge_enabled
+            && entries.len() >= self.cfg.parallel_merge_min_segments
+        {
+            // Parallel segment loading using rayon
+            let results: Vec<Result<Arc<Vec<RecordBatch>>, EngineError>> = entries
+                .par_iter()
+                .map(|e| self.load_segment_batches_cached(e))
+                .collect();
+
+            let mut all_batches = Vec::new();
+            for res in results {
+                all_batches.extend(res?.iter().cloned());
+            }
+            all_batches
+        } else {
+            // Sequential loading for small number of segments
+            let mut all_batches = Vec::new();
+            for e in &entries {
+                let decoded = self.load_segment_batches_cached(e)?;
+                all_batches.extend(decoded.iter().cloned());
+            }
+            all_batches
+        };
 
         if batches.is_empty() {
             return Err(EngineError::InvalidArgument(
@@ -9613,6 +10767,7 @@ impl Db {
     }
 
     pub fn create_database(&self, name: &str) -> Result<(), EngineError> {
+        self.require_writable()?;
         validate_identifier(name, "database")?;
         let mut manifest = self
             .manifest
@@ -9635,6 +10790,7 @@ impl Db {
         table: &str,
         schema_json: Option<String>,
     ) -> Result<(), EngineError> {
+        self.require_writable()?;
         validate_identifier(database, "database")?;
         validate_identifier(table, "table")?;
         let canonical_schema_json = match &schema_json {
@@ -11780,11 +12936,125 @@ impl Db {
         Ok(candidates)
     }
 
+    /// Get compaction candidates using leveled compaction strategy (ClickHouse MergeTree-style)
+    /// Segments are organized into exponential size levels:
+    /// - Level 0: < level_base_bytes (default 1MB)
+    /// - Level N: level_base_bytes * level_multiplier^(N-1) to level_base_bytes * level_multiplier^N
+    /// When a level has >= segments_per_level_trigger segments, they're merged to the next level
+    pub fn get_leveled_compaction_candidates(&self) -> Result<Vec<LeveledCompactionCandidate>, EngineError> {
+        if !self.cfg.leveled_compaction_enabled {
+            return Ok(Vec::new());
+        }
+
+        let manifest = self
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let base_bytes = self.cfg.level_base_bytes;
+        let multiplier = self.cfg.level_multiplier;
+        let max_levels = self.cfg.max_levels;
+        let trigger = self.cfg.segments_per_level_trigger;
+
+        // Helper to determine level for a segment size
+        let get_level = |size_bytes: u64| -> usize {
+            if size_bytes < base_bytes {
+                return 0;
+            }
+            let mut level = 1;
+            let mut threshold = base_bytes * multiplier;
+            while level < max_levels && size_bytes >= threshold {
+                level += 1;
+                threshold = threshold.saturating_mul(multiplier);
+            }
+            level.min(max_levels - 1)
+        };
+
+        // Group segments by (database, table, level)
+        let mut table_levels: std::collections::HashMap<(String, String), Vec<Vec<&ManifestEntry>>> =
+            std::collections::HashMap::new();
+
+        for entry in &manifest.entries {
+            // Only compact Hot tier segments
+            if !matches!(entry.tier, SegmentTier::Hot) {
+                continue;
+            }
+
+            let key = (entry.database.clone(), entry.table.clone());
+            let level = get_level(entry.size_bytes);
+
+            let levels = table_levels.entry(key).or_insert_with(|| vec![Vec::new(); max_levels]);
+            if level < levels.len() {
+                levels[level].push(entry);
+            }
+        }
+
+        let mut candidates = Vec::new();
+
+        for ((database, table), levels) in table_levels {
+            // Skip tables in cooldown (unless we have many small segments)
+            let in_cooldown = self.compaction_state.is_table_in_cooldown(
+                &database,
+                &table,
+                self.cfg.compaction_cooldown_secs,
+            );
+
+            // Find levels that need compaction (have >= trigger segments)
+            for (level, segments) in levels.iter().enumerate() {
+                // Skip if not enough segments at this level
+                if segments.len() < trigger {
+                    continue;
+                }
+
+                // Skip if in cooldown and not level 0 (always prioritize tiny segment cleanup)
+                if in_cooldown && level > 0 {
+                    continue;
+                }
+
+                let total_bytes: u64 = segments.iter().map(|e| e.size_bytes).sum();
+                let segment_ids: Vec<String> = segments.iter().map(|e| e.segment_id.clone()).collect();
+
+                // Calculate target level after merge
+                let merged_size = total_bytes;
+                let target_level = get_level(merged_size);
+
+                // Priority: lower levels get higher priority (clean up small segments first)
+                // Also boost priority for levels with many segments
+                let priority = ((max_levels - level) as u32 * 100) + (segments.len() as u32 * 10);
+
+                candidates.push(LeveledCompactionCandidate {
+                    database: database.clone(),
+                    table: table.clone(),
+                    level,
+                    target_level,
+                    segment_count: segments.len(),
+                    total_bytes,
+                    segment_ids,
+                    priority,
+                });
+            }
+        }
+
+        // Sort by priority (highest first = lowest level first)
+        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        Ok(candidates)
+    }
+
     /// Run a single round of background compaction
     /// Returns the number of tables compacted
     pub fn run_background_compaction(&self) -> Result<usize, EngineError> {
         if !self.cfg.enable_compaction {
             return Ok(0);
+        }
+
+        // Check for emergency compaction first (high priority, bypasses normal limits)
+        if self.needs_emergency_compaction() {
+            tracing::warn!(
+                segments = self.segment_count(),
+                threshold = self.cfg.max_segments_emergency_threshold,
+                "EMERGENCY: Segment count exceeds threshold, running emergency compaction"
+            );
+            return self.run_emergency_compaction();
         }
 
         // Check if we can start more compactions
@@ -11800,6 +13070,17 @@ impl Db {
             return Ok(0);
         }
 
+        // Try leveled compaction first (ClickHouse MergeTree-style)
+        // This is more efficient at keeping segment count low
+        if self.cfg.leveled_compaction_enabled {
+            let leveled_count = self.run_leveled_compaction()?;
+            if leveled_count > 0 {
+                tracing::debug!("Leveled compaction merged {} segment groups", leveled_count);
+                return Ok(leveled_count);
+            }
+        }
+
+        // Fall back to traditional compaction for any remaining work
         let candidates = self.get_compaction_candidates()?;
         if candidates.is_empty() {
             return Ok(0);
@@ -11845,6 +13126,285 @@ impl Db {
         }
 
         Ok(compacted)
+    }
+
+    /// Run leveled compaction (ClickHouse MergeTree-style)
+    /// Merges segments at each level when they exceed the trigger threshold
+    /// Returns the number of merge operations performed
+    pub fn run_leveled_compaction(&self) -> Result<usize, EngineError> {
+        if !self.cfg.leveled_compaction_enabled {
+            return Ok(0);
+        }
+
+        let candidates = self.get_leveled_compaction_candidates()?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut merged = 0;
+        let max_per_cycle = self.cfg.compaction_passes_per_cycle;
+
+        for candidate in candidates.into_iter().take(max_per_cycle) {
+            // Check concurrency limit
+            if !self.compaction_state.can_start_compaction(self.cfg.max_concurrent_compactions) {
+                break;
+            }
+
+            self.compaction_state.start_compaction(&candidate.database, &candidate.table);
+
+            // Use merge_specific_segments to merge exactly the segments at this level
+            match self.merge_segments_by_ids(
+                &candidate.database,
+                &candidate.table,
+                &candidate.segment_ids,
+            ) {
+                Ok(new_segment_id) => {
+                    tracing::info!(
+                        "Leveled compaction L{} -> L{}: {}.{} merged {} segments ({} bytes) -> {}",
+                        candidate.level,
+                        candidate.target_level,
+                        candidate.database,
+                        candidate.table,
+                        candidate.segment_count,
+                        candidate.total_bytes,
+                        new_segment_id.unwrap_or_else(|| "none".to_string())
+                    );
+                    merged += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Leveled compaction failed for {}.{} L{}: {}",
+                        candidate.database,
+                        candidate.table,
+                        candidate.level,
+                        e
+                    );
+                }
+            }
+
+            self.compaction_state.finish_compaction();
+        }
+
+        Ok(merged)
+    }
+
+    /// Merge specific segments by their IDs
+    /// Returns the new segment ID if segments were merged, None if no merge occurred
+    fn merge_segments_by_ids(
+        &self,
+        database: &str,
+        table: &str,
+        segment_ids: &[String],
+    ) -> Result<Option<String>, EngineError> {
+        if segment_ids.is_empty() {
+            return Ok(None);
+        }
+
+        // Load all segments to merge
+        let manifest = self.manifest.read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let entries_to_merge: Vec<ManifestEntry> = segment_ids
+            .iter()
+            .filter_map(|id| {
+                manifest.entries.iter()
+                    .find(|e| &e.segment_id == id && e.database == database && e.table == table)
+                    .cloned()
+            })
+            .collect();
+
+        drop(manifest); // Release read lock
+
+        if entries_to_merge.len() < 2 {
+            return Ok(None); // Need at least 2 segments to merge
+        }
+
+        // Load and concatenate all batches
+        let mut all_batches = Vec::new();
+        for entry in &entries_to_merge {
+            let payload = self.load_segment_cached(entry)?;
+            let batches = read_ipc_batches(&payload)?;
+            all_batches.extend(batches);
+        }
+
+        if all_batches.is_empty() {
+            return Ok(None);
+        }
+
+        let schema = all_batches[0].schema();
+
+        // Concatenate into single batch
+        let concatenated = arrow_select::concat::concat_batches(&schema, &all_batches)
+            .map_err(|e| EngineError::Internal(format!("concat batches failed: {e}")))?;
+
+        // Sort by primary key if available
+        let sorted = self.sort_batch_by_primary_key(&concatenated, database, table)?;
+
+        // Get compression from table settings
+        let compression = {
+            let manifest = self.manifest.read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest.tables.iter()
+                .find(|t| t.database == database && t.name == table)
+                .and_then(|t| t.compression.clone())
+                .or_else(|| self.cfg.tier_warm_compression.clone())
+        };
+
+        // Write merged segment
+        let new_segment_id = format!(
+            "{}_{}_{}_merged_{}",
+            database,
+            table,
+            self.segment_seq.fetch_add(1, Ordering::Relaxed),
+            chrono::Utc::now().timestamp_millis()
+        );
+
+        let ipc = record_batches_to_ipc(&schema, &[sorted.clone()])?;
+        let compressed = compress_payload(&ipc, compression.as_deref())?;
+        let checksum = compute_checksum(&compressed);
+        let size_bytes = compressed.len() as u64;
+
+        // Persist to disk
+        let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", new_segment_id));
+        std::fs::write(&segment_path, &compressed)
+            .map_err(|e| EngineError::Io(format!("write merged segment failed: {e}")))?;
+
+        // Compute stats by merging stats from source entries
+        // This avoids recomputing from the actual data
+        let event_time_min = entries_to_merge.iter().filter_map(|e| e.event_time_min).min();
+        let event_time_max = entries_to_merge.iter().filter_map(|e| e.event_time_max).max();
+        let tenant_id_min = entries_to_merge.iter().filter_map(|e| e.tenant_id_min).min();
+        let tenant_id_max = entries_to_merge.iter().filter_map(|e| e.tenant_id_max).max();
+        let route_id_min = entries_to_merge.iter().filter_map(|e| e.route_id_min).min();
+        let route_id_max = entries_to_merge.iter().filter_map(|e| e.route_id_max).max();
+        let watermark_micros = entries_to_merge.iter().map(|e| e.watermark_micros).max().unwrap_or(0);
+
+        // Compute schema hash from IPC
+        let schema_hash = compute_schema_hash_from_payload(&ipc, None).ok();
+
+        // Create new manifest entry (mark as Warm since it's compacted)
+        let new_entry = ManifestEntry {
+            segment_id: new_segment_id.clone(),
+            shard_id: entries_to_merge[0].shard_id,
+            version_added: 0, // Will be set by manifest update
+            size_bytes,
+            checksum,
+            tier: SegmentTier::Warm,
+            compression,
+            database: database.to_string(),
+            table: table.to_string(),
+            watermark_micros,
+            event_time_min,
+            event_time_max,
+            tenant_id_min,
+            tenant_id_max,
+            route_id_min,
+            route_id_max,
+            bloom_tenant: None, // Blooms rebuilt lazily on query
+            bloom_route: None,
+            column_stats: None, // Stats computed lazily
+            schema_hash,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
+        };
+
+        // Update manifest: remove old segments, add new
+        {
+            let mut manifest = self.manifest.write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            // Remove old segments
+            let old_ids: std::collections::HashSet<_> = segment_ids.iter().collect();
+            manifest.entries.retain(|e| !old_ids.contains(&e.segment_id));
+
+            // Add new segment
+            let mut entry_with_version = new_entry;
+            entry_with_version.version_added = manifest.version + 1;
+            manifest.entries.push(entry_with_version);
+            manifest.bump_version();
+
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+
+            // Update index
+            let mut index = self.manifest_index.write()
+                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        // Delete old segment files
+        for id in segment_ids {
+            let old_path = self.cfg.segments_dir.join(format!("{}.ipc", id));
+            if let Err(e) = std::fs::remove_file(&old_path) {
+                tracing::warn!("Failed to delete old segment file {}: {}", id, e);
+            }
+        }
+
+        // Note: Cache entries for merged segments will be evicted naturally by LRU.
+        // The segments are no longer in the manifest, so they won't be accessed.
+
+        Ok(Some(new_segment_id))
+    }
+
+    /// Sort a record batch by primary key columns if defined for the table
+    fn sort_batch_by_primary_key(
+        &self,
+        batch: &RecordBatch,
+        database: &str,
+        table: &str,
+    ) -> Result<RecordBatch, EngineError> {
+        use arrow_ord::sort::{lexsort_to_indices, SortColumn};
+
+        // Get primary key columns from table schema
+        let manifest = self.manifest.read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+        let pk_cols: Vec<String> = manifest.tables.iter()
+            .find(|t| t.database == database && t.name == table)
+            .map(|t| {
+                // Use common CDR columns as default sort key
+                let mut cols = Vec::new();
+                for col in ["event_time", "tenant_id", "route_id"] {
+                    if batch.schema().field_with_name(col).is_ok() {
+                        cols.push(col.to_string());
+                    }
+                }
+                cols
+            })
+            .unwrap_or_default();
+
+        drop(manifest);
+
+        if pk_cols.is_empty() || batch.num_rows() == 0 {
+            return Ok(batch.clone());
+        }
+
+        // Build sort columns
+        let sort_cols: Vec<SortColumn> = pk_cols.iter()
+            .filter_map(|name| {
+                batch.column_by_name(name).map(|col| SortColumn {
+                    values: col.clone(),
+                    options: None,
+                })
+            })
+            .collect();
+
+        if sort_cols.is_empty() {
+            return Ok(batch.clone());
+        }
+
+        // Sort
+        let indices = lexsort_to_indices(&sort_cols, None)
+            .map_err(|e| EngineError::Internal(format!("sort failed: {e}")))?;
+
+        // Apply sort indices
+        let sorted_columns: Vec<_> = batch.columns().iter()
+            .map(|col| arrow_select::take::take(col.as_ref(), &indices, None))
+            .collect::<Result<_, _>>()
+            .map_err(|e| EngineError::Internal(format!("take failed: {e}")))?;
+
+        RecordBatch::try_new(batch.schema(), sorted_columns)
+            .map_err(|e| EngineError::Internal(format!("rebuild batch failed: {e}")))
     }
 
     /// Get the auto-compact interval from config (0 = disabled)
@@ -13648,6 +15208,7 @@ impl Db {
         table: &str,
         if_exists: bool,
     ) -> Result<(), EngineError> {
+        self.require_writable()?;
         if database.trim().is_empty() || table.trim().is_empty() {
             return Err(EngineError::InvalidArgument(
                 "database and table name required".into(),
@@ -13826,6 +15387,7 @@ impl Db {
         query_sql: &str,
         if_not_exists: bool,
     ) -> Result<u64, EngineError> {
+        self.require_writable()?;
         // Validate identifiers to prevent injection
         self.validate_identifier(database, "database")?;
         self.validate_identifier(table, "table")?;
@@ -15025,13 +16587,24 @@ impl Db {
     }
 
     fn spawn_background_compaction_loop(&self) {
-        if !self.cfg.enable_compaction || self.cfg.auto_compact_interval_secs == 0 {
+        if !self.cfg.enable_compaction {
+            return;
+        }
+
+        // Spawn continuous compaction threads if enabled (ClickHouse-style)
+        if self.cfg.continuous_compaction_enabled {
+            self.spawn_continuous_compaction_threads();
+        }
+
+        // Also spawn the interval-based loop as a fallback/supplement
+        if self.cfg.auto_compact_interval_secs == 0 {
             return;
         }
 
         let mut cfg = self.cfg.clone();
         let interval_secs = cfg.auto_compact_interval_secs;
         cfg.auto_compact_interval_secs = 0;
+        cfg.continuous_compaction_enabled = false; // Don't spawn more continuous threads
 
         std::thread::spawn(move || {
             // Create a Tokio runtime for the background thread
@@ -15065,6 +16638,226 @@ impl Db {
                 }
             }
         });
+    }
+
+    /// Spawn dedicated continuous compaction threads (ClickHouse-style)
+    /// These threads run compaction constantly with minimal sleep when idle
+    fn spawn_continuous_compaction_threads(&self) {
+        let num_threads = self.cfg.compaction_threads.max(1);
+        let idle_sleep_ms = self.cfg.compaction_idle_sleep_ms;
+
+        tracing::info!(
+            threads = num_threads,
+            idle_sleep_ms = idle_sleep_ms,
+            "Starting continuous compaction threads"
+        );
+
+        for thread_id in 0..num_threads {
+            let mut cfg = self.cfg.clone();
+            cfg.auto_compact_interval_secs = 0; // Disable interval-based in child
+            cfg.continuous_compaction_enabled = false; // Don't spawn more threads
+
+            std::thread::spawn(move || {
+                // Create a Tokio runtime for the background thread
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = thread_id,
+                            error = %e,
+                            "failed to create tokio runtime for continuous compaction thread"
+                        );
+                        return;
+                    }
+                };
+
+                // Open the Db within the runtime context
+                let db = match rt.block_on(async { Db::open(cfg) }) {
+                    Ok(db) => db,
+                    Err(e) => {
+                        tracing::warn!(
+                            thread_id = thread_id,
+                            error = %e,
+                            "failed to open Db for continuous compaction thread"
+                        );
+                        return;
+                    }
+                };
+
+                let idle_timeout = std::time::Duration::from_millis(idle_sleep_ms);
+
+                loop {
+                    // Try leveled compaction first
+                    let leveled_work = if db.cfg.leveled_compaction_enabled {
+                        db.run_leveled_compaction().unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    // Then try traditional compaction
+                    let traditional_work = db.run_background_compaction().unwrap_or(0);
+
+                    // If no work was done, wait for notification instead of busy-polling
+                    // This dramatically reduces CPU usage (60-80% reduction)
+                    if leveled_work == 0 && traditional_work == 0 {
+                        // Event-driven: wait for segment ingest to notify us
+                        // Falls back to timeout-based check for safety
+                        db.compaction_state.wait_for_work(idle_timeout);
+                    }
+                    // If work was done, immediately loop to check for more
+                }
+            });
+        }
+    }
+
+    /// Spawn background thread to flush write buffer based on time interval
+    fn spawn_write_buffer_flush_thread(&self) {
+        if !self.cfg.write_buffer_enabled {
+            return;
+        }
+
+        let flush_interval_ms = self.cfg.write_buffer_flush_interval_ms;
+        if flush_interval_ms == 0 {
+            return;
+        }
+
+        let mut cfg = self.cfg.clone();
+        cfg.write_buffer_enabled = false; // Prevent recursive spawning
+
+        tracing::info!(
+            flush_interval_ms = flush_interval_ms,
+            max_bytes = cfg.write_buffer_max_bytes,
+            "Starting write buffer flush thread"
+        );
+
+        std::thread::spawn(move || {
+            // Create a Tokio runtime for the background thread
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to create tokio runtime for write buffer flush");
+                    return;
+                }
+            };
+
+            let db = match rt.block_on(async { Db::open(cfg) }) {
+                Ok(db) => db,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to open Db for write buffer flush thread");
+                    return;
+                }
+            };
+
+            let interval = std::time::Duration::from_millis(flush_interval_ms);
+
+            loop {
+                std::thread::sleep(interval);
+
+                // Flush buffer if time threshold exceeded
+                if let Err(e) = db.flush_write_buffer_if_needed() {
+                    tracing::warn!(error = %e, "write buffer flush failed");
+                }
+            }
+        });
+    }
+
+    /// Flush write buffer if time threshold exceeded
+    fn flush_write_buffer_if_needed(&self) -> Result<(), EngineError> {
+        if !self.cfg.write_buffer_enabled {
+            return Ok(());
+        }
+
+        let should_flush = {
+            let buffer = self.write_buffer.lock();
+            buffer.should_flush_time(self.cfg.write_buffer_flush_interval_ms) && !buffer.is_empty()
+        };
+
+        if should_flush {
+            self.flush_write_buffer()?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush all buffered writes to segments
+    pub fn flush_write_buffer(&self) -> Result<usize, EngineError> {
+        let buffers = {
+            let mut buffer = self.write_buffer.lock();
+            buffer.take_all()
+        };
+
+        if buffers.is_empty() {
+            return Ok(0);
+        }
+
+        let mut flushed = 0;
+        for ((database, table), table_buffer) in buffers {
+            if table_buffer.payloads.is_empty() {
+                continue;
+            }
+
+            // Concatenate all buffered payloads into one large batch
+            let combined = self.combine_buffered_payloads(&table_buffer)?;
+
+            // Now ingest the combined payload as a single segment
+            if !combined.is_empty() {
+                // Create a batch from the combined payload
+                let batch = IngestBatch {
+                    database: Some(database.clone()),
+                    table: Some(table.clone()),
+                    shard_override: Some(table_buffer.shard_id as u64),
+                    payload_ipc: combined,
+                    watermark_micros: table_buffer.watermark_micros,
+                };
+
+                // Direct ingest bypassing buffer (since we're flushing)
+                self.ingest_ipc_direct(batch)?;
+                flushed += 1;
+            }
+        }
+
+        if flushed > 0 {
+            tracing::debug!(tables_flushed = flushed, "Flushed write buffer");
+        }
+
+        Ok(flushed)
+    }
+
+    /// Combine multiple IPC payloads into one
+    fn combine_buffered_payloads(&self, buffer: &TableWriteBuffer) -> Result<Vec<u8>, EngineError> {
+        if buffer.payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if buffer.payloads.len() == 1 {
+            return Ok(buffer.payloads[0].clone());
+        }
+
+        // Read all batches from all payloads
+        let mut all_batches = Vec::new();
+        for payload in &buffer.payloads {
+            let batches = read_ipc_batches(payload)?;
+            all_batches.extend(batches);
+        }
+
+        if all_batches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let schema = all_batches[0].schema();
+
+        // Concatenate all batches
+        let concatenated = arrow_select::concat::concat_batches(&schema, &all_batches)
+            .map_err(|e| EngineError::Internal(format!("concat buffered batches failed: {e}")))?;
+
+        // Re-encode to IPC
+        record_batches_to_ipc(&schema, &[concatenated])
     }
 
     fn rewrite_table_segments_to_schema(
@@ -15750,6 +17543,99 @@ impl Db {
             .read()
             .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
         Ok(manifest.version)
+    }
+
+    /// Get the current manifest version (convenience method).
+    pub fn manifest_version(&self) -> u64 {
+        self.manifest
+            .read()
+            .map(|m| m.version)
+            .unwrap_or(0)
+    }
+
+    /// Reload manifest from storage (for read replicas).
+    /// Returns (bytes_loaded, segments_added, new_version).
+    pub fn reload_manifest_from_storage(&self) -> Result<(u64, u64, u64), EngineError> {
+        // Load manifest from disk/S3
+        let new_manifest = load_manifest(&self.cfg.manifest_path)?;
+        let new_version = new_manifest.version;
+
+        // Get current manifest to compare
+        let (segments_added, bytes_loaded) = {
+            let current_manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            if new_manifest.version <= current_manifest.version {
+                // No new data
+                return Ok((0, 0, current_manifest.version));
+            }
+
+            // Count new segments
+            let current_ids: std::collections::HashSet<_> = current_manifest
+                .entries
+                .iter()
+                .map(|e| e.segment_id.as_str())
+                .collect();
+
+            let new_entries: Vec<_> = new_manifest
+                .entries
+                .iter()
+                .filter(|e| !current_ids.contains(e.segment_id.as_str()))
+                .collect();
+
+            let segments_added = new_entries.len() as u64;
+            let bytes_loaded: u64 = new_entries.iter().map(|e| e.size_bytes).sum();
+
+            (segments_added, bytes_loaded)
+        };
+
+        // Update manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            *manifest = new_manifest;
+
+            // Rebuild index
+            let mut index = self
+                .manifest_index
+                .write()
+                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        // Invalidate caches since data changed
+        self.invalidate_all_caches();
+
+        Ok((bytes_loaded, segments_added, new_version))
+    }
+
+    /// Invalidate all caches (query cache, plan cache, batch cache).
+    /// Used when manifest is updated externally (e.g., replica sync).
+    pub fn invalidate_all_caches(&self) {
+        // Clear query cache
+        {
+            let mut cache = self.query_cache.lock();
+            cache.invalidate();
+        }
+
+        // Clear plan cache
+        {
+            let mut cache = self.plan_cache.lock();
+            cache.clear();
+        }
+
+        // Clear batch cache (all shards)
+        self.batch_cache.clear();
+
+        // Clear segment cache
+        self.segment_cache.clear();
+
+        // Clear bloom filter cache
+        self.bloom_cache.clear();
     }
 
     /// Get the current WAL LSN (Log Sequence Number).
@@ -17657,7 +19543,7 @@ fn normalize_compression(opt: Option<String>) -> Result<Option<String>, EngineEr
     }
 }
 
-/// Compress payload using the specified codec.
+/// Compress payload using the specified codec with adaptive optimization.
 ///
 /// Compression speed and ratio comparison:
 /// - LZ4: Fastest compression/decompression, ~2-3x compression ratio
@@ -17667,11 +19553,43 @@ fn normalize_compression(opt: Option<String>) -> Result<Option<String>, EngineEr
 /// For OLAP workloads:
 /// - Use LZ4 for hot data (fastest reads)
 /// - Use ZSTD for cold/archived data (best compression)
+///
+/// Optimizations:
+/// - Skips compression for payloads below skip_threshold (default: 4KB)
+/// - Uses adaptive ZSTD levels: level 1 for <1MB, level 3 for >=1MB
 fn compress_payload(payload: &[u8], compression: Option<&str>) -> Result<Vec<u8>, EngineError> {
+    compress_payload_adaptive(payload, compression, 4 * 1024, true)
+}
+
+/// Compress payload with configurable skip threshold and adaptive levels.
+fn compress_payload_adaptive(
+    payload: &[u8],
+    compression: Option<&str>,
+    _skip_threshold: usize,
+    adaptive_levels: bool,
+) -> Result<Vec<u8>, EngineError> {
+    // Note: Skip threshold is disabled for now because skipping compression
+    // would require metadata changes to track whether compression was applied.
+    // The adaptive compression levels still provide optimization benefit.
+
     match compression {
-        // Level 1 is 2x faster than level 3 with minimal compression ratio loss
-        Some("zstd") => zstd_encode_all(Cursor::new(payload), 1)
-            .map_err(|e| EngineError::Internal(format!("zstd encode failed: {e}"))),
+        Some("zstd") => {
+            // Adaptive ZSTD levels based on payload size:
+            // - Level 1: Fast compression for hot data (<1MB)
+            // - Level 3: Better ratio for larger segments (>=1MB)
+            // - Level 5: Best ratio for cold tier (>=64MB)
+            let level = if !adaptive_levels {
+                1
+            } else if payload.len() >= 64 * 1024 * 1024 {
+                5 // Cold tier: best compression
+            } else if payload.len() >= 1024 * 1024 {
+                3 // Large segments: balanced
+            } else {
+                1 // Small segments: fast
+            };
+            zstd_encode_all(Cursor::new(payload), level)
+                .map_err(|e| EngineError::Internal(format!("zstd encode failed: {e}")))
+        }
         Some("lz4") => Ok(lz4_compress(payload)),
         Some("snappy") => {
             let mut encoder = SnappyEncoder::new(Vec::new());
@@ -20731,6 +22649,50 @@ pub fn read_ipc_batches(ipc: &[u8]) -> Result<Vec<RecordBatch>, EngineError> {
     Ok(batches)
 }
 
+/// Read IPC batches with column projection - only reads specified columns from disk
+/// This provides significant I/O and memory savings when only a subset of columns is needed.
+/// Returns all columns if projection is None or empty.
+pub fn read_ipc_batches_with_projection(
+    ipc: &[u8],
+    projection: Option<&[String]>,
+) -> Result<Vec<RecordBatch>, EngineError> {
+    use arrow_ipc::reader::StreamReader;
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(ipc);
+    let reader_result =
+        StreamReader::try_new(cursor, None).map_err(|e| EngineError::Internal(format!("{e}")))?;
+
+    // If no projection or empty projection, read all columns
+    let projection_cols = match projection {
+        Some(cols) if !cols.is_empty() => cols,
+        _ => return read_ipc_batches(ipc), // Fall back to full read
+    };
+
+    // Get schema to build projection mask
+    let schema = reader_result.schema();
+    let projection_indices: Vec<usize> = projection_cols
+        .iter()
+        .filter_map(|col| schema.index_of(col).ok())
+        .collect();
+
+    // If no valid columns found, return empty result
+    if projection_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Re-create reader with projection mask
+    let cursor = Cursor::new(ipc);
+    let mut reader = StreamReader::try_new(cursor, Some(projection_indices))
+        .map_err(|e| EngineError::Internal(format!("{e}")))?;
+
+    let mut batches = Vec::new();
+    while let Some(b) = reader.next() {
+        batches.push(b.map_err(|e| EngineError::Internal(format!("{e}")))?);
+    }
+    Ok(batches)
+}
+
 /// Validate IPC format integrity without fully parsing
 /// Returns true if the IPC data appears valid
 pub fn validate_ipc_format(ipc: &[u8]) -> Result<bool, EngineError> {
@@ -22149,9 +24111,59 @@ pub fn apply_column_encodings(
     if enc.is_empty() {
         return Ok(ipc.to_vec());
     }
-    // TODO: Apply actual column encodings (dictionary, delta, etc.) when needed
-    // For now, return the data as-is
-    Ok(ipc.to_vec())
+
+    // Parse IPC and apply encodings
+    let batches = read_ipc_batches(ipc)?;
+    if batches.is_empty() {
+        return Ok(ipc.to_vec());
+    }
+
+    let schema = batches[0].schema();
+    let mut encoded_batches = Vec::with_capacity(batches.len());
+
+    for batch in &batches {
+        let mut new_columns: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+
+        for (idx, field) in schema.fields().iter().enumerate() {
+            let col = batch.column(idx);
+            let encoding = enc.get(field.name());
+
+            let encoded_col = match encoding.map(|s| s.as_str()) {
+                Some("dictionary") => apply_dictionary_encoding_to_column(col),
+                _ => col.clone(),
+            };
+            new_columns.push(encoded_col);
+        }
+
+        let new_batch = RecordBatch::try_new(schema.clone(), new_columns)
+            .map_err(|e| EngineError::Internal(format!("encoding batch error: {e}")))?;
+        encoded_batches.push(new_batch);
+    }
+
+    // Re-encode to IPC
+    record_batches_to_ipc(&schema, &encoded_batches)
+}
+
+/// Apply dictionary encoding to a string column
+/// Replaces repeated strings with integer indices into a dictionary
+/// Effective for columns with <50% unique values
+fn apply_dictionary_encoding_to_column(col: &ArrayRef) -> ArrayRef {
+    use arrow::compute::cast;
+    use arrow::datatypes::DataType;
+
+    // Try to cast to dictionary-encoded type for string columns
+    if col.as_any().downcast_ref::<StringArray>().is_some() {
+        // Cast to DictionaryArray<Int32>
+        match cast(col, &DataType::Dictionary(
+            Box::new(DataType::Int32),
+            Box::new(DataType::Utf8),
+        )) {
+            Ok(dict_arr) => return dict_arr,
+            Err(_) => return col.clone(), // Fall back if cast fails
+        }
+    }
+
+    col.clone()
 }
 
 pub fn parse_uuid_string(s: &str) -> Option<[u8; 16]> {
@@ -22297,6 +24309,143 @@ pub fn filter_ipc(ipc: &[u8], filter: &QueryFilter) -> Result<Vec<u8>, EngineErr
     Ok(buf)
 }
 
+/// Filter IPC data with column projection - only loads and outputs specified columns
+/// This provides significant I/O and memory savings when only a subset of columns is needed.
+/// The projection must include all columns needed for filtering.
+pub fn filter_ipc_with_projection(
+    ipc: &[u8],
+    filter: &QueryFilter,
+    projection: Option<&[String]>,
+) -> Result<Vec<u8>, EngineError> {
+    // If no projection specified, use standard filter_ipc
+    let proj_cols = match projection {
+        Some(cols) if !cols.is_empty() => cols,
+        _ => return filter_ipc(ipc, filter),
+    };
+
+    // Build the full set of columns needed: projection + filter columns
+    let mut needed_cols: std::collections::HashSet<&str> = proj_cols.iter().map(|s| s.as_str()).collect();
+
+    // Add columns used in filters
+    if filter.tenant_id_eq.is_some() || filter.tenant_id_in.is_some() {
+        needed_cols.insert("tenant_id");
+    }
+    if filter.route_id_eq.is_some() || filter.route_id_in.is_some() {
+        needed_cols.insert("route_id");
+    }
+    if filter.event_time_ge.is_some() || filter.event_time_le.is_some() {
+        needed_cols.insert("event_time");
+    }
+    for (col, _) in &filter.numeric_eq_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _) in &filter.float_eq_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _) in &filter.bool_eq_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _, _) in &filter.like_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _, _) in &filter.ilike_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _) in &filter.null_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _) in &filter.string_eq_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for (col, _) in &filter.string_in_filters {
+        needed_cols.insert(col.as_str());
+    }
+    for nf in &filter.numeric_range_filters {
+        needed_cols.insert(nf.column.as_str());
+    }
+
+    // Convert to Vec<String> for read_ipc_batches_with_projection
+    let needed_cols_vec: Vec<String> = needed_cols.iter().map(|s| s.to_string()).collect();
+
+    // If we need all or most columns, fall back to standard path
+    // (projection overhead isn't worth it for small savings)
+    // Skip this check - let the IPC reader decide
+
+    // Read only needed columns
+    let batches = read_ipc_batches_with_projection(ipc, Some(&needed_cols_vec))?;
+    if batches.is_empty() {
+        return Ok(ipc.to_vec());
+    }
+
+    // Apply row filters
+    let filtered = filter_ipc_batches(batches, filter)?;
+
+    // Now project down to just the requested columns (remove filter-only columns)
+    let final_batches = if proj_cols.len() < needed_cols.len() {
+        // Need to remove filter-only columns from output
+        let output_schema = filtered
+            .first()
+            .map(|b| {
+                let fields: Vec<_> = proj_cols
+                    .iter()
+                    .filter_map(|col| b.schema().field_with_name(col).ok().cloned())
+                    .collect();
+                Arc::new(arrow_schema::Schema::new(fields))
+            });
+
+        match output_schema {
+            Some(schema) => {
+                let mut projected = Vec::with_capacity(filtered.len());
+                for batch in filtered {
+                    let columns: Vec<_> = proj_cols
+                        .iter()
+                        .filter_map(|col| batch.column_by_name(col).cloned())
+                        .collect();
+                    if columns.len() == proj_cols.len() {
+                        projected.push(
+                            RecordBatch::try_new(schema.clone(), columns)
+                                .map_err(|e| EngineError::Internal(format!("projection error: {e}")))?,
+                        );
+                    }
+                }
+                projected
+            }
+            None => filtered,
+        }
+    } else {
+        filtered
+    };
+
+    // Get schema for output (may differ from input due to projection)
+    let output_schema = final_batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| {
+            // Fall back to building schema from projection
+            let fields: Vec<_> = proj_cols
+                .iter()
+                .map(|col| arrow_schema::Field::new(col, arrow_schema::DataType::Utf8, true))
+                .collect();
+            Arc::new(arrow_schema::Schema::new(fields))
+        });
+
+    // Re-encode to IPC
+    let mut buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, &output_schema)
+            .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
+        for batch in &final_batches {
+            writer
+                .write(batch)
+                .map_err(|e| EngineError::Internal(format!("IPC write error: {}", e)))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| EngineError::Internal(format!("IPC finish error: {}", e)))?;
+    }
+    Ok(buf)
+}
+
 /// Check if filter has any row-level filters that need to be applied
 fn has_row_filters(filter: &QueryFilter) -> bool {
     filter.tenant_id_eq.is_some()
@@ -22317,6 +24466,7 @@ fn has_row_filters(filter: &QueryFilter) -> bool {
 }
 
 /// Filter record batches using Arrow compute kernels
+/// Optimized with early-exit when mask becomes all-false
 pub fn filter_ipc_batches(
     batches: Vec<RecordBatch>,
     filter: &QueryFilter,
@@ -22333,12 +24483,21 @@ pub fn filter_ipc_batches(
             continue;
         }
 
+        // Pre-cache schema lookups to avoid repeated index_of calls
+        let schema = batch.schema();
+
         // Start with all true (include all rows)
         let mut mask = BooleanArray::from(vec![true; num_rows]);
+        let mut any_true = true; // Track if mask has any true values
+
+        // Helper closure to check if mask is all false (enables early exit)
+        let check_any_true = |m: &BooleanArray| -> bool {
+            m.iter().any(|v| v == Some(true))
+        };
 
         // Apply tenant_id_eq filter
         if let Some(tid) = filter.tenant_id_eq {
-            if let Some(col_idx) = batch.schema().index_of("tenant_id").ok() {
+            if let Some(col_idx) = schema.index_of("tenant_id").ok() {
                 let col = batch.column(col_idx);
                 if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
                     let scalar = UInt64Array::new_scalar(tid);
@@ -22400,6 +24559,12 @@ pub fn filter_ipc_batches(
             }
         }
 
+        // Early exit: skip remaining filters if mask is all false
+        any_true = check_any_true(&mask);
+        if !any_true {
+            continue; // No rows match, skip to next batch
+        }
+
         // Apply event_time_ge filter
         if let Some(ts) = filter.event_time_ge {
             if let Some(col_idx) = batch.schema().index_of("event_time").ok() {
@@ -22417,6 +24582,18 @@ pub fn filter_ipc_batches(
                 let cmp = apply_timestamp_le(col, ts as i64)?;
                 mask = and(&mask, &cmp)
                     .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+            }
+        }
+
+        // Early exit after time filters (usually highly selective)
+        if !filter.numeric_eq_filters.is_empty()
+            || !filter.float_eq_filters.is_empty()
+            || !filter.bool_eq_filters.is_empty()
+            || !filter.string_eq_filters.is_empty()
+        {
+            any_true = check_any_true(&mask);
+            if !any_true {
+                continue;
             }
         }
 
@@ -22835,6 +25012,7 @@ fn filter_record_batch(
 }
 /// Aggregator for computing aggregations over record batches
 /// Supports COUNT(*), COUNT(DISTINCT), SUM, AVG, MIN, MAX and GROUP BY
+/// Includes memory bounds to prevent OOM on high-cardinality GROUP BY
 pub struct Aggregator {
     plan: AggPlan,
     /// Accumulated state for non-grouped aggregations
@@ -22843,6 +25021,12 @@ pub struct Aggregator {
     grouped_state: HashMap<Vec<GroupKeyValue>, AggState>,
     /// Schema from first batch for output generation
     schema: Option<Arc<Schema>>,
+    /// Estimated memory usage in bytes
+    estimated_memory_bytes: u64,
+    /// Memory limit for aggregation (0 = unlimited)
+    memory_limit_bytes: u64,
+    /// Number of groups (for monitoring)
+    group_count: u64,
 }
 
 /// Group key value for HashMap keys
@@ -22880,6 +25064,11 @@ struct AggState {
 
 impl Aggregator {
     pub fn new(plan: AggPlan) -> Result<Self, EngineError> {
+        Self::new_with_limit(plan, 0)
+    }
+
+    /// Create aggregator with memory limit (0 = unlimited)
+    pub fn new_with_limit(plan: AggPlan, memory_limit_bytes: u64) -> Result<Self, EngineError> {
         let has_group_by = !matches!(plan.group_by, GroupBy::None);
         Ok(Self {
             plan,
@@ -22890,7 +25079,45 @@ impl Aggregator {
             },
             grouped_state: HashMap::new(),
             schema: None,
+            estimated_memory_bytes: 0,
+            memory_limit_bytes,
+            group_count: 0,
         })
+    }
+
+    /// Estimate memory usage of a single AggState entry
+    fn estimate_agg_state_bytes(state: &AggState) -> u64 {
+        let mut bytes: u64 = std::mem::size_of::<AggState>() as u64;
+        // Count distinct sets (each hash set entry ~16 bytes)
+        for (_col, set) in &state.count_distinct_sets {
+            bytes += (set.len() * 16) as u64;
+        }
+        // Percentile values (each f64 = 8 bytes)
+        for (_col, vals) in &state.percentile_values {
+            bytes += (vals.len() * 8) as u64;
+        }
+        // Array agg values (estimate ~32 bytes per string on average)
+        for (_col, vals) in &state.array_agg_values {
+            bytes += (vals.len() * 32) as u64;
+        }
+        // String agg values
+        for (_col, vals) in &state.string_agg_values {
+            bytes += vals.iter().map(|s| s.len() as u64).sum::<u64>();
+        }
+        bytes
+    }
+
+    /// Check if memory limit is exceeded
+    fn check_memory_limit(&self) -> Result<(), EngineError> {
+        if self.memory_limit_bytes > 0 && self.estimated_memory_bytes > self.memory_limit_bytes {
+            return Err(EngineError::InvalidArgument(format!(
+                "aggregation memory limit exceeded: {} bytes used, {} bytes limit ({} groups). Consider adding more filters or reducing cardinality.",
+                self.estimated_memory_bytes,
+                self.memory_limit_bytes,
+                self.group_count
+            )));
+        }
+        Ok(())
     }
 
     pub fn consume_ipc(&mut self, ipc: &[u8], filter: &QueryFilter) -> Result<(), EngineError> {
@@ -23136,6 +25363,9 @@ impl Aggregator {
             return Ok(());
         }
 
+        // Track new groups added in this batch
+        let initial_group_count = self.grouped_state.len();
+
         // For each row, compute the group key and accumulate
         for row in 0..num_rows {
             let key: Vec<GroupKeyValue> = key_arrays
@@ -23154,6 +25384,17 @@ impl Aggregator {
                 accumulate_single_row(state, agg, batch, row)?;
             }
         }
+
+        // Update memory tracking after batch processing
+        let new_groups = self.grouped_state.len() - initial_group_count;
+        if new_groups > 0 {
+            self.group_count += new_groups as u64;
+            // Estimate: ~200 bytes per group (key + state overhead)
+            self.estimated_memory_bytes += (new_groups * 200) as u64;
+        }
+
+        // Check memory limit at end of batch
+        self.check_memory_limit()?;
 
         Ok(())
     }

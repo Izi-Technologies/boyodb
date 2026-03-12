@@ -30,6 +30,7 @@ impl BoyodbStatus {
                 BoyodbStatus::InvalidArgument
             }
             Err(crate::engine::EngineError::Backpressure(_)) => BoyodbStatus::Backpressure,
+            Err(crate::engine::EngineError::ReadOnlyReplica(_)) => BoyodbStatus::InvalidArgument,
         }
     }
 }

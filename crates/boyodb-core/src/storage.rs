@@ -1,8 +1,10 @@
 use crate::engine::{EngineConfig, EngineError};
 use crate::replication::{ManifestEntry, SegmentTier};
+use memmap2::Mmap;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjPath;
 use object_store::{GetResult, ObjectStore, ObjectStoreExt};
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -13,6 +15,10 @@ pub struct TieredStorage {
     /// Runtime handle for async S3 operations. None for local-only storage.
     runtime: Option<Handle>,
     local_root: PathBuf,
+    /// Enable mmap for large local segment reads
+    mmap_enabled: bool,
+    /// Minimum segment size in bytes to use mmap (default: 4MB)
+    mmap_min_bytes: usize,
 }
 
 impl TieredStorage {
@@ -107,6 +113,8 @@ impl TieredStorage {
             remote,
             runtime,
             local_root: cfg.segments_dir.clone(),
+            mmap_enabled: cfg.mmap_segments,
+            mmap_min_bytes: cfg.mmap_min_bytes,
         })
     }
 
@@ -121,6 +129,8 @@ impl TieredStorage {
             remote: Some(remote),
             runtime,
             local_root: cfg.segments_dir.clone(),
+            mmap_enabled: cfg.mmap_segments,
+            mmap_min_bytes: cfg.mmap_min_bytes,
         })
     }
 
@@ -136,14 +146,43 @@ impl TieredStorage {
             remote: None,
             runtime: None,
             local_root,
+            mmap_enabled: true,  // Default to enabled for local-only
+            mmap_min_bytes: 4 * 1024 * 1024,  // 4MB default threshold
         }
+    }
+
+    /// Load segment using memory-mapped file access for large local files
+    /// Returns the raw (potentially compressed) segment data
+    fn load_segment_mmap(&self, path: &std::path::Path) -> Result<Vec<u8>, EngineError> {
+        let file = File::open(path).map_err(|e| {
+            EngineError::Io(format!("open segment for mmap failed: {}", e))
+        })?;
+
+        // SAFETY: We're reading the file contents and immediately copying to Vec.
+        // The mmap is dropped after the copy, so there's no concern about
+        // concurrent modification.
+        let mmap = unsafe {
+            Mmap::map(&file).map_err(|e| {
+                EngineError::Io(format!("mmap segment failed: {}", e))
+            })?
+        };
+
+        // Copy to Vec - the benefit is that mmap uses the OS page cache
+        // more efficiently than read() for large files
+        Ok(mmap.to_vec())
     }
 
     pub fn load_segment(&self, entry: &ManifestEntry) -> Result<Vec<u8>, EngineError> {
         match entry.tier {
             SegmentTier::Hot | SegmentTier::Warm => {
-                // Fast path: synchronous local FS read
                 let path = self.local_root.join(format!("{}.ipc", entry.segment_id));
+
+                // Use mmap for large segments if enabled
+                if self.mmap_enabled && entry.size_bytes >= self.mmap_min_bytes as u64 {
+                    return self.load_segment_mmap(&path);
+                }
+
+                // Standard read for small segments
                 std::fs::read(&path).map_err(|e| {
                     EngineError::Io(format!(
                         "read local segment {} failed: {}",
@@ -176,6 +215,12 @@ impl TieredStorage {
                 } else {
                     // Fall back to local storage if S3 not configured (e.g., in tests)
                     let path = self.local_root.join(format!("{}.ipc", entry.segment_id));
+
+                    // Use mmap for large cold segments stored locally
+                    if self.mmap_enabled && entry.size_bytes >= self.mmap_min_bytes as u64 {
+                        return self.load_segment_mmap(&path);
+                    }
+
                     std::fs::read(&path).map_err(|e| {
                         EngineError::Io(format!(
                             "read local segment {} (cold tier fallback) failed: {}",
@@ -301,6 +346,27 @@ impl TieredStorage {
     /// Includes write verification to detect silent data corruption.
     pub fn persist_segment_local(&self, segment_id: &str, data: &[u8]) -> Result<(), EngineError> {
         self.persist_segment_local_with_verify(segment_id, data, true)
+    }
+
+    /// Persist segment with sampling-based verification.
+    /// sample_rate: 1 = verify all, 10 = verify 1 in 10, etc.
+    /// Uses segment_id hash for deterministic sampling (same segment always verified/not).
+    pub fn persist_segment_local_sampled(
+        &self,
+        segment_id: &str,
+        data: &[u8],
+        sample_rate: u32,
+    ) -> Result<(), EngineError> {
+        // Deterministic sampling based on segment_id hash
+        let should_verify = if sample_rate <= 1 {
+            true
+        } else {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            segment_id.hash(&mut hasher);
+            (hasher.finish() % sample_rate as u64) == 0
+        };
+        self.persist_segment_local_with_verify(segment_id, data, should_verify)
     }
 
     /// Persist segment with optional write verification

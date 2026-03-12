@@ -626,6 +626,8 @@ enum Request {
     },
     // Cluster operations
     ClusterStatus,
+    // Replica status
+    ReplicaStatus,
 }
 
 impl Request {
@@ -675,6 +677,7 @@ impl Request {
             Request::ShowRoles => "show_roles",
             Request::ShowGrants { .. } => "show_grants",
             Request::ClusterStatus => "cluster_status",
+            Request::ReplicaStatus => "replica_status",
         }
     }
 }
@@ -826,6 +829,43 @@ struct ServerConfig {
     backup_max_count: usize,
     /// Directory to store backups (defaults to data_dir/backups)
     backup_dir: Option<PathBuf>,
+    // Read replica configuration
+    /// Run as a read-only replica (rejects all write operations)
+    replica_mode: bool,
+    /// Manifest sync interval in milliseconds for read replicas (default: 1000)
+    replica_sync_interval_ms: u64,
+    /// Primary server address for HTTP bundle pull (e.g., "http://primary:8765")
+    replica_primary_addr: Option<String>,
+    // Segment limits & stability (ClickHouse-style protection)
+    /// Maximum total segments before triggering emergency compaction
+    max_segments_emergency_threshold: usize,
+    /// Maximum total segments before rejecting new writes
+    max_segments_hard_limit: usize,
+    /// Maximum segments per table before per-table emergency compaction
+    max_segments_per_table: usize,
+    /// Maximum segments to scan per query (prevents single query from overwhelming system)
+    max_segments_per_query: usize,
+    /// Enable adaptive backpressure based on segment count
+    adaptive_backpressure_enabled: bool,
+    /// Compaction passes per cycle (default: 32)
+    compaction_passes_per_cycle: usize,
+    /// Maximum segments to merge per compaction (default: 20)
+    max_segments_per_compaction: usize,
+    /// Parallelism for emergency compaction (default: 4)
+    emergency_compaction_parallelism: usize,
+    // ClickHouse-style optimizations
+    /// Enable leveled compaction with exponential size tiers
+    leveled_compaction_enabled: bool,
+    /// Enable continuous compaction threads
+    continuous_compaction_enabled: bool,
+    /// Number of dedicated compaction threads (default: 2)
+    compaction_threads: usize,
+    /// Sleep duration when no compaction work (milliseconds)
+    compaction_idle_sleep_ms: u64,
+    /// Enable write buffering to create larger segments
+    write_buffer_enabled: bool,
+    /// Write buffer size in bytes (default: 16MB)
+    write_buffer_max_bytes: u64,
 }
 
 pub mod server_pg;
@@ -879,6 +919,8 @@ struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     cluster_status: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    replica_status: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     table_description: Option<boyodb_core::TableDescription>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prepared_id: Option<String>,
@@ -910,6 +952,7 @@ impl Default for Response {
             roles: None,
             grants: None,
             cluster_status: None,
+            replica_status: None,
             table_description: None,
             prepared_id: None,
         }
@@ -1095,7 +1138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        eprintln!("Usage: boyodb-server <data_dir> [bind_addr] [--token <token>] [--auth] [--max-ipc-bytes <bytes>] [--max-conns <n>] [--workers <n>] [--io-timeout-ms <ms>] [--max-frame-bytes <bytes>] [--max-query-len <bytes>] [--query-cache-bytes <bytes>] [--plan-cache-size <n>] [--plan-cache-ttl-secs <n>] [--prepared-cache-size <n>] [--prepared-cache-ttl-secs <n>] [--segment-cache <n>] [--batch-cache-bytes <bytes>] [--schema-cache-entries <n>] [--log-requests] [--wal-dir <path>] [--wal-max-bytes <bytes>] [--wal-max-segments <n>] [--allow-manifest-import] [--retention-watermark <micros>] [--compact-min-segments <n>] [--maintenance-interval-ms <ms>] [--index-granularity-rows <n>] [--tier-warm-compression <algo>] [--tier-cold-compression <algo>] [--cache-hot-segments|--no-cache-hot-segments] [--cache-warm-segments|--no-cache-warm-segments] [--cache-cold-segments|--no-cache-cold-segments] [--tls-cert <path> --tls-key <path> --tls-ca <path>]");
+        eprintln!("Usage: boyodb-server <data_dir> [bind_addr] [--token <token>] [--auth] [--max-ipc-bytes <bytes>] [--max-conns <n>] [--workers <n>] [--io-timeout-ms <ms>] [--max-frame-bytes <bytes>] [--max-query-len <bytes>] [--query-cache-bytes <bytes>] [--plan-cache-size <n>] [--plan-cache-ttl-secs <n>] [--prepared-cache-size <n>] [--prepared-cache-ttl-secs <n>] [--segment-cache <n>] [--batch-cache-bytes <bytes>] [--schema-cache-entries <n>] [--log-requests] [--wal-dir <path>] [--wal-max-bytes <bytes>] [--wal-max-segments <n>] [--allow-manifest-import] [--retention-watermark <micros>] [--compact-min-segments <n>] [--maintenance-interval-ms <ms>] [--index-granularity-rows <n>] [--tier-warm-compression <algo>] [--tier-cold-compression <algo>] [--cache-hot-segments|--no-cache-hot-segments] [--cache-warm-segments|--no-cache-warm-segments] [--cache-cold-segments|--no-cache-cold-segments] [--tls-cert <path> --tls-key <path> --tls-ca <path>] [--replica] [--replica-sync-interval-ms <ms>] [--primary <addr>] [--max-segments-emergency <n>] [--max-segments-hard-limit <n>] [--max-segments-per-table <n>] [--max-segments-per-query <n>] [--no-adaptive-backpressure]");
         std::process::exit(1);
     }
 
@@ -1185,6 +1228,31 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut backup_interval_hours: u64 = 0; // 0 = disabled
     let mut backup_max_count: usize = 0; // 0 = unlimited
     let mut backup_dir: Option<PathBuf> = None;
+
+    // Read replica configuration
+    let mut replica_mode = false;
+    let mut replica_sync_interval_ms: u64 = 1000;
+    let mut replica_primary_addr: Option<String> = None;
+
+    // Segment limits & stability configuration (ClickHouse-style protection)
+    let mut max_segments_emergency_threshold: usize = 10000;
+    let mut max_segments_hard_limit: usize = 50000;
+    let mut max_segments_per_table: usize = 2000;
+    let mut max_segments_per_query: usize = 5000;
+    let mut adaptive_backpressure_enabled: bool = true;
+
+    // Compaction performance tuning
+    let mut compaction_passes_per_cycle: usize = 32;
+    let mut max_segments_per_compaction: usize = 20;
+    let mut emergency_compaction_parallelism: usize = 4;
+
+    // ClickHouse-style optimizations
+    let mut leveled_compaction_enabled: bool = true;
+    let mut continuous_compaction_enabled: bool = true;
+    let mut compaction_threads: usize = 2;
+    let mut compaction_idle_sleep_ms: u64 = 100;
+    let mut write_buffer_enabled: bool = true;
+    let mut write_buffer_max_bytes: u64 = 16 * 1024 * 1024;
 
     let mut i = 1;
     while i < args.len() {
@@ -1571,6 +1639,119 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                     i += 1;
                 }
             }
+            // Read replica options
+            "--replica" => {
+                replica_mode = true;
+            }
+            "--replica-sync-interval-ms" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        replica_sync_interval_ms = v.max(100);
+                    }
+                    i += 1;
+                }
+            }
+            "--primary" => {
+                if let Some(val) = args.get(i + 1) {
+                    replica_primary_addr = Some(val.clone());
+                    i += 1;
+                }
+            }
+            // Segment limits & stability options (ClickHouse-style protection)
+            "--max-segments-emergency" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        max_segments_emergency_threshold = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--max-segments-hard-limit" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        max_segments_hard_limit = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--max-segments-per-table" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        max_segments_per_table = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--max-segments-per-query" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        max_segments_per_query = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--no-adaptive-backpressure" => {
+                adaptive_backpressure_enabled = false;
+            }
+            // Compaction performance tuning
+            "--compaction-passes" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        compaction_passes_per_cycle = v.max(1);
+                    }
+                    i += 1;
+                }
+            }
+            "--max-segments-per-compaction" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        max_segments_per_compaction = v.max(2);
+                    }
+                    i += 1;
+                }
+            }
+            "--emergency-compaction-parallelism" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        emergency_compaction_parallelism = v.max(1);
+                    }
+                    i += 1;
+                }
+            }
+            // ClickHouse-style optimization flags
+            "--no-leveled-compaction" => {
+                leveled_compaction_enabled = false;
+            }
+            "--no-continuous-compaction" => {
+                continuous_compaction_enabled = false;
+            }
+            "--compaction-threads" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<usize>() {
+                        compaction_threads = v.max(1);
+                    }
+                    i += 1;
+                }
+            }
+            "--compaction-idle-sleep-ms" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        compaction_idle_sleep_ms = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--no-write-buffer" => {
+                write_buffer_enabled = false;
+            }
+            "--write-buffer-bytes" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        write_buffer_max_bytes = v.max(1024 * 1024); // Min 1MB
+                    }
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1646,6 +1827,23 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         backup_interval_hours,
         backup_max_count,
         backup_dir,
+        replica_mode,
+        replica_sync_interval_ms,
+        replica_primary_addr,
+        max_segments_emergency_threshold,
+        max_segments_hard_limit,
+        max_segments_per_table,
+        max_segments_per_query,
+        adaptive_backpressure_enabled,
+        compaction_passes_per_cycle,
+        max_segments_per_compaction,
+        emergency_compaction_parallelism,
+        leveled_compaction_enabled,
+        continuous_compaction_enabled,
+        compaction_threads,
+        compaction_idle_sleep_ms,
+        write_buffer_enabled,
+        write_buffer_max_bytes,
     })
 }
 
@@ -1668,15 +1866,50 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         .with_index_granularity_rows(cfg.index_granularity_rows)
         .with_cache_hot_segments(cfg.cache_hot_segments)
         .with_cache_warm_segments(cfg.cache_warm_segments)
-        .with_cache_cold_segments(cfg.cache_cold_segments);
+        .with_cache_cold_segments(cfg.cache_cold_segments)
+        .with_read_only(cfg.replica_mode)
+        .with_replica_sync_interval_ms(cfg.replica_sync_interval_ms)
+        .with_replica_primary_addr(cfg.replica_primary_addr.clone());
     engine_cfg.allow_manifest_import = cfg.allow_manifest_import;
     engine_cfg.retention_watermark_micros = cfg.retention_watermark;
     engine_cfg.compact_min_segments = cfg.compact_min_segments;
     engine_cfg.segment_cache_capacity = cfg.segment_cache_capacity;
+    // Segment limits & stability (ClickHouse-style protection)
+    engine_cfg.max_segments_emergency_threshold = cfg.max_segments_emergency_threshold;
+    engine_cfg.max_segments_hard_limit = cfg.max_segments_hard_limit;
+    engine_cfg.max_segments_per_table = cfg.max_segments_per_table;
+    engine_cfg.max_segments_per_query = cfg.max_segments_per_query;
+    engine_cfg.adaptive_backpressure_enabled = cfg.adaptive_backpressure_enabled;
+    // Compaction performance tuning
+    engine_cfg.compaction_passes_per_cycle = cfg.compaction_passes_per_cycle;
+    engine_cfg.max_segments_per_compaction = cfg.max_segments_per_compaction;
+    engine_cfg.emergency_compaction_parallelism = cfg.emergency_compaction_parallelism;
+    // ClickHouse-style optimizations
+    engine_cfg.leveled_compaction_enabled = cfg.leveled_compaction_enabled;
+    engine_cfg.continuous_compaction_enabled = cfg.continuous_compaction_enabled;
+    engine_cfg.compaction_threads = cfg.compaction_threads;
+    engine_cfg.compaction_idle_sleep_ms = cfg.compaction_idle_sleep_ms;
+    engine_cfg.write_buffer_enabled = cfg.write_buffer_enabled;
+    engine_cfg.write_buffer_max_bytes = cfg.write_buffer_max_bytes;
     let db = Arc::new(Db::open(engine_cfg).map_err(|e| format!("db open failed: {e}"))?);
 
+    // Log replica mode
+    if cfg.replica_mode {
+        info!(
+            sync_interval_ms = cfg.replica_sync_interval_ms,
+            primary_addr = ?cfg.replica_primary_addr,
+            "Running in read-only REPLICA mode"
+        );
+        println!(
+            "REPLICA MODE: sync_interval={}ms, primary={:?}",
+            cfg.replica_sync_interval_ms,
+            cfg.replica_primary_addr.as_deref().unwrap_or("(shared S3)")
+        );
+    }
+
     // Compact on start if enabled and segment count exceeds threshold
-    if cfg.compact_on_start {
+    // Note: Skip compaction on replicas since they're read-only
+    if cfg.compact_on_start && !cfg.replica_mode {
         let segment_count = db.segment_count();
         if segment_count >= cfg.compact_on_start_threshold {
             info!(
@@ -2227,6 +2460,35 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Start replica sync worker if in replica mode
+    let replica_sync_metrics: Option<Arc<boyodb_core::ReplicaSyncMetrics>> = if cfg.replica_mode {
+        let sync_cfg = boyodb_core::ReplicaSyncConfig {
+            sync_interval_ms: cfg.replica_sync_interval_ms,
+            primary_addr: cfg.replica_primary_addr.clone(),
+            primary_token: cfg.auth_token.clone(),
+            max_bytes_per_sync: Some(64 * 1024 * 1024),
+            use_tls: cfg.tls_acceptor.is_some(),
+            connect_timeout_ms: 5000,
+            read_timeout_ms: 30000,
+        };
+        let (worker, _handle) = boyodb_core::spawn_replica_sync_worker(db.clone(), sync_cfg);
+        let metrics = worker.metrics_arc();
+        info!(
+            sync_interval_ms = cfg.replica_sync_interval_ms,
+            "Replica sync worker started"
+        );
+        // Store the handle but let the worker run in the background
+        let worker_clone = worker.clone();
+        let shutdown_for_replica = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_for_replica.notified().await;
+            worker_clone.shutdown();
+        });
+        Some(metrics)
+    } else {
+        None
+    };
+
     // Start cluster background tasks if cluster is enabled
     if let Some(ref cluster) = cluster_manager {
         let cluster_clone = cluster.clone();
@@ -2263,6 +2525,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                 let rate_limiter = auth_rate_limiter.clone();
                 let conn_id = conn_stats.connection_opened(addr);
                 let repair_state = auto_repair_state.clone();
+                let replica_metrics = replica_sync_metrics.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(
@@ -2277,6 +2540,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                         conn_id,
                         addr.ip(),
                         repair_state,
+                        replica_metrics,
                     )
                     .await
                     {
@@ -2333,6 +2597,7 @@ async fn handle_conn(
     conn_id: u64,
     peer_ip: IpAddr,
     auto_repair_state: Option<Arc<boyodb_core::AutoRepairState>>,
+    replica_sync_metrics: Option<Arc<boyodb_core::ReplicaSyncMetrics>>,
 ) -> Result<(), ServerError> {
     let mut stream: Box<dyn AsyncStream> = if let Some(acceptor) = cfg.tls_acceptor.clone() {
         Box::new(
@@ -2862,6 +3127,8 @@ async fn handle_conn(
                     cfg.wal_max_segments,
                     conn_stats.clone(),
                     auto_repair_state.clone(),
+                    cfg.replica_mode,
+                    replica_sync_metrics.clone(),
                 )
                 .await;
 
@@ -3041,6 +3308,34 @@ fn collect_wal_stats(
     }))
 }
 
+/// Check if a request is a write operation
+fn is_write_request(req: &Request) -> bool {
+    matches!(
+        req,
+        Request::IngestIpc { .. }
+            | Request::IngestIpcBinary { .. }
+            | Request::IngestCsv { .. }
+            | Request::CreateDatabase { .. }
+            | Request::CreateTable { .. }
+            | Request::Compact { .. }
+            | Request::Checkpoint
+            | Request::ApplyBundle { .. }
+            | Request::ApplyManifest { .. }
+    )
+}
+
+/// Check if SQL is a write statement
+fn is_write_sql(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("INSERT")
+        || upper.starts_with("UPDATE")
+        || upper.starts_with("DELETE")
+        || upper.starts_with("CREATE")
+        || upper.starts_with("DROP")
+        || upper.starts_with("ALTER")
+        || upper.starts_with("TRUNCATE")
+}
+
 async fn process_request(
     req: Request,
     db: Arc<Db>,
@@ -3057,7 +3352,27 @@ async fn process_request(
     wal_max_segments: u64,
     conn_stats: Arc<ConnectionStats>,
     auto_repair_state: Option<Arc<boyodb_core::AutoRepairState>>,
+    replica_mode: bool,
+    replica_sync_metrics: Option<Arc<boyodb_core::ReplicaSyncMetrics>>,
 ) -> Result<Response, ServerError> {
+    // Early rejection for write operations on replicas
+    if replica_mode && is_write_request(&req) {
+        return Err(ServerError::Db(
+            "write operations disabled on read replica".into(),
+        ));
+    }
+
+    // For query requests, check if the SQL is a write statement
+    if replica_mode {
+        if let Request::Query { ref sql, .. } = req {
+            if is_write_sql(sql) {
+                return Err(ServerError::Db(
+                    "write operations disabled on read replica".into(),
+                ));
+            }
+        }
+    }
+
     // Helper to check privilege when auth is enabled
     let require_privilege =
         |priv_type: Privilege, target: PrivilegeTarget| -> Result<(), ServerError> {
@@ -4037,6 +4352,43 @@ async fn process_request(
                 })
             } else {
                 Ok(Response::ok_message("cluster mode not enabled"))
+            }
+        }
+        Request::ReplicaStatus => {
+            if replica_mode {
+                if let Some(ref metrics) = replica_sync_metrics {
+                    let snapshot = metrics.snapshot();
+                    let status_value = serde_json::json!({
+                        "mode": "replica",
+                        "syncs_completed": snapshot.syncs_completed,
+                        "syncs_failed": snapshot.syncs_failed,
+                        "bytes_synced": snapshot.bytes_synced,
+                        "segments_synced": snapshot.segments_synced,
+                        "last_sync_millis": snapshot.last_sync_millis,
+                        "last_sync_lag_ms": snapshot.last_sync_lag_ms,
+                        "manifest_version": snapshot.manifest_version,
+                    });
+                    Ok(Response {
+                        replica_status: Some(status_value),
+                        ..Default::default()
+                    })
+                } else {
+                    Ok(Response {
+                        replica_status: Some(serde_json::json!({
+                            "mode": "replica",
+                            "error": "sync metrics not available"
+                        })),
+                        ..Default::default()
+                    })
+                }
+            } else {
+                Ok(Response {
+                    replica_status: Some(serde_json::json!({
+                        "mode": "primary",
+                        "message": "this is a primary server, not a replica"
+                    })),
+                    ..Default::default()
+                })
             }
         }
     }

@@ -373,6 +373,16 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         // Reuse simple query logic
         tracing::debug!("PG Extended Query: {}", query);
 
+        // Check for replica mode and reject write operations
+        if self.db.is_read_only() && is_write_sql(query) {
+            let error_info = ErrorInfo::new(
+                "ERROR".to_owned(),
+                "25006".to_owned(), // SQLSTATE: read_only_sql_transaction
+                "write operations disabled on read replica".to_owned(),
+            );
+            return Err(PgWireError::UserError(Box::new(error_info)));
+        }
+
         // Check for introspection queries first
         if let Some(result) = handle_introspection_query(query, &self.db) {
             // Convert Vec<Response> to single Response for extended query
@@ -540,6 +550,18 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
     }
 }
 
+/// Check if SQL is a write statement (for replica mode rejection)
+fn is_write_sql(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("INSERT")
+        || upper.starts_with("UPDATE")
+        || upper.starts_with("DELETE")
+        || upper.starts_with("CREATE")
+        || upper.starts_with("DROP")
+        || upper.starts_with("ALTER")
+        || upper.starts_with("TRUNCATE")
+}
+
 #[async_trait::async_trait]
 impl SimpleQueryHandler for BoyodbPgHandler {
     async fn do_query<'a, C>(
@@ -551,6 +573,16 @@ impl SimpleQueryHandler for BoyodbPgHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         tracing::debug!("PG Query: {}", query);
+
+        // Check for replica mode and reject write operations with proper PostgreSQL error code
+        if self.db.is_read_only() && is_write_sql(query) {
+            let error_info = ErrorInfo::new(
+                "ERROR".to_owned(),
+                "25006".to_owned(), // SQLSTATE: read_only_sql_transaction
+                "write operations disabled on read replica".to_owned(),
+            );
+            return Err(PgWireError::UserError(Box::new(error_info)));
+        }
 
         // Check for introspection queries first
         if let Some(result) = handle_introspection_query(query, &self.db) {
@@ -1458,6 +1490,10 @@ fn engine_error_to_pg(e: boyodb_core::engine::EngineError) -> PgWireError {
         EngineError::Backpressure(msg) => (
             "53000", // PostgreSQL insufficient_resources
             format!("server busy, retry later: {}", msg),
+        ),
+        EngineError::ReadOnlyReplica(msg) => (
+            "25006", // PostgreSQL read_only_sql_transaction
+            format!("write operations disabled on read replica: {}", msg),
         ),
     };
 

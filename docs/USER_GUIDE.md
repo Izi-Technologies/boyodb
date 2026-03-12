@@ -15,6 +15,7 @@ A comprehensive guide to installing, configuring, and using BoyoDB - a high-perf
 9. [Data Integrity & Corruption Prevention](#data-integrity--corruption-prevention)
 10. [Performance Tuning](#performance-tuning)
 11. [Monitoring & Observability](#monitoring--observability)
+12. [Connection Pooling](#connection-pooling)
 
 ---
 
@@ -1696,6 +1697,145 @@ Enable request logging for debugging:
 ```bash
 boyodb-server /data 0.0.0.0:8765 --log-requests
 ```
+
+---
+
+## Connection Pooling
+
+BoyoDB includes a built-in connection pooler similar to PgBouncer for efficient connection management.
+
+### Pool Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| Transaction | Return to pool after each transaction | Most workloads (default) |
+| Session | Hold connection for entire session | Long-running sessions |
+| Statement | Return after each statement | Highest connection reuse |
+
+### Configuration
+
+Create a pooler configuration file (`pooler.ini`):
+
+```ini
+[pgbouncer]
+listen_addr = 0.0.0.0
+listen_port = 6432
+max_client_conn = 1000
+default_pool_size = 20
+pool_mode = transaction
+log_connections = true
+log_disconnections = true
+server_reset_query = DISCARD ALL
+admin_users = admin
+
+[databases]
+mydb = host=localhost port=8765 dbname=mydb user=app pool_size=50
+analytics = host=localhost port=8765 dbname=analytics pool_mode=session
+```
+
+### Admin Commands
+
+Connect to the pooler admin console:
+
+```bash
+psql -h localhost -p 6432 -U admin pgbouncer
+```
+
+Run admin commands:
+
+```sql
+-- View statistics
+SHOW STATS;
+SHOW POOLS;
+SHOW CLIENTS;
+SHOW SERVERS;
+SHOW CONFIG;
+
+-- Manage databases
+PAUSE mydb;      -- Stop new connections
+RESUME mydb;     -- Resume connections
+WAIT mydb;       -- Wait for active queries
+KILL mydb;       -- Close all connections
+
+-- Manage configuration
+SET default_pool_size = 30;
+SET max_client_conn = 500;
+RELOAD;          -- Reload from config file
+
+-- Shutdown
+SHUTDOWN;
+```
+
+### Dynamic Configuration
+
+Runtime parameter changes:
+
+```sql
+-- Change pool size
+SET default_pool_size = 50;
+
+-- Change max connections
+SET max_client_conn = 2000;
+
+-- Enable/disable logging
+SET log_connections = true;
+SET log_disconnections = true;
+
+-- Change reset query
+SET server_reset_query = 'RESET ALL';
+```
+
+### Monitoring
+
+View pool statistics:
+
+```sql
+SHOW STATS;
+```
+
+Output:
+```
+database   | total_requests | total_received | total_sent | total_query_time
+-----------+----------------+----------------+------------+-----------------
+mydb       | 125000         | 50000000       | 30000000   | 5000000
+analytics  | 50000          | 20000000       | 15000000   | 3000000
+```
+
+View active pools:
+
+```sql
+SHOW POOLS;
+```
+
+Output:
+```
+database   | user  | idle | active | waiting | pool_mode
+-----------+-------+------+--------+---------+-----------
+mydb       | app   | 18   | 2      | 0       | transaction
+analytics  | app   | 5    | 0      | 0       | session
+```
+
+### Best Practices
+
+1. **Choose the right pool mode**:
+   - Use `transaction` for most OLTP workloads
+   - Use `session` for applications with long transactions or prepared statements
+   - Use `statement` for read-heavy workloads with simple queries
+
+2. **Size pools appropriately**:
+   - Set `max_client_conn` based on expected client connections
+   - Set `default_pool_size` based on database connection limits
+   - Monitor `waiting` count to detect pool exhaustion
+
+3. **Configure health checks**:
+   - Use `server_check_query` for connection validation
+   - Set appropriate timeouts to detect stale connections
+
+4. **Use pausing for maintenance**:
+   - `PAUSE db` before maintenance
+   - `WAIT db` to drain active queries
+   - Perform maintenance
+   - `RESUME db` to restore traffic
 
 ---
 
