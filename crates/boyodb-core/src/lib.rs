@@ -177,10 +177,11 @@ pub use replica_sync::{
 pub use sql::{
     parse_ctes, parse_expr, parse_select_items_extended, parse_sql, AuthCommand, CteDefinition,
     DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand, GrantTargetType, GroupBy,
-    GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinType, LiteralValue,
-    OnConflict, OnConflictAction, OrderByClause, ParsedQuery, QueryFilter as SqlQueryFilter,
-    ScalarFunction, SelectColumn, SelectExpr, SqlStatement, SqlValue, UpdateCommand, UserOptions,
-    WindowFrame, WindowFrameBound, WindowFrameUnit, WindowFunction, WindowSpec,
+    GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinTable, JoinType, LiteralValue,
+    MergeCommand, MergeWhenMatched, MergeWhenNotMatched, OnConflict, OnConflictAction, OrderByClause,
+    ParsedQuery, QueryFilter as SqlQueryFilter, ScalarFunction, SelectColumn, SelectExpr,
+    SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame, WindowFrameBound,
+    WindowFrameUnit, WindowFunction, WindowSpec,
 };
 pub use types::{BoyodbStatus, OwnedBuffer};
 

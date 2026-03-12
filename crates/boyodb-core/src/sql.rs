@@ -1690,6 +1690,8 @@ pub enum AuthCommand {
         privileges: Vec<String>,
         target_type: GrantTargetType,
         target_name: Option<String>,
+        /// Column-level grant: list of columns for column-level privileges
+        columns: Option<Vec<String>>,
         grantee: String,
         grantee_is_role: bool,
         with_grant_option: bool,
@@ -1699,6 +1701,8 @@ pub enum AuthCommand {
         privileges: Vec<String>,
         target_type: GrantTargetType,
         target_name: Option<String>,
+        /// Column-level revoke: list of columns for column-level privileges
+        columns: Option<Vec<String>>,
         grantee: String,
         grantee_is_role: bool,
     },
@@ -4460,6 +4464,7 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
     }
 
     // GRANT privilege(s) ON target TO grantee [WITH GRANT OPTION]
+    // Also support column-level: GRANT SELECT (col1, col2) ON table TO user
     let on_idx = upper
         .find(" ON ")
         .ok_or_else(|| EngineError::InvalidArgument("GRANT requires ON clause".into()))?;
@@ -4468,10 +4473,30 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
         .ok_or_else(|| EngineError::InvalidArgument("GRANT requires TO clause".into()))?;
 
     let privileges_str = &sql[6..on_idx];
-    let privileges: Vec<String> = privileges_str
-        .split(',')
-        .map(|p| p.trim().to_uppercase())
-        .collect();
+
+    // Check for column-level grant: SELECT (col1, col2)
+    let (privileges, columns) = if let (Some(paren_start), Some(paren_end)) =
+        (privileges_str.find('('), privileges_str.find(')'))
+    {
+        // Extract privilege before parentheses and columns within
+        let priv_part = privileges_str[..paren_start].trim();
+        let cols_part = &privileges_str[paren_start + 1..paren_end];
+        let cols: Vec<String> = cols_part
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .collect();
+        (
+            vec![priv_part.to_uppercase()],
+            if cols.is_empty() { None } else { Some(cols) },
+        )
+    } else {
+        // Regular privilege list
+        let privs: Vec<String> = privileges_str
+            .split(',')
+            .map(|p| p.trim().to_uppercase())
+            .collect();
+        (privs, None)
+    };
 
     let target_str = &sql[on_idx + 4..to_idx];
     let (target_type, target_name) = parse_grant_target(target_str)?;
@@ -4501,6 +4526,7 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
         privileges,
         target_type,
         target_name,
+        columns,
         grantee,
         grantee_is_role,
         with_grant_option: with_grant,
@@ -4528,6 +4554,7 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
     }
 
     // REVOKE privilege(s) ON target FROM grantee
+    // Also support column-level: REVOKE SELECT (col1, col2) ON table FROM user
     let on_idx = upper
         .find(" ON ")
         .ok_or_else(|| EngineError::InvalidArgument("REVOKE requires ON clause".into()))?;
@@ -4536,10 +4563,30 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
         .ok_or_else(|| EngineError::InvalidArgument("REVOKE requires FROM clause".into()))?;
 
     let privileges_str = &sql[7..on_idx];
-    let privileges: Vec<String> = privileges_str
-        .split(',')
-        .map(|p| p.trim().to_uppercase())
-        .collect();
+
+    // Check for column-level revoke: SELECT (col1, col2)
+    let (privileges, columns) = if let (Some(paren_start), Some(paren_end)) =
+        (privileges_str.find('('), privileges_str.find(')'))
+    {
+        // Extract privilege before parentheses and columns within
+        let priv_part = privileges_str[..paren_start].trim();
+        let cols_part = &privileges_str[paren_start + 1..paren_end];
+        let cols: Vec<String> = cols_part
+            .split(',')
+            .map(|c| c.trim().to_string())
+            .collect();
+        (
+            vec![priv_part.to_uppercase()],
+            if cols.is_empty() { None } else { Some(cols) },
+        )
+    } else {
+        // Regular privilege list
+        let privs: Vec<String> = privileges_str
+            .split(',')
+            .map(|p| p.trim().to_uppercase())
+            .collect();
+        (privs, None)
+    };
 
     let target_str = &sql[on_idx + 4..from_idx];
     let (target_type, target_name) = parse_grant_target(target_str)?;
@@ -4558,6 +4605,7 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
         privileges,
         target_type,
         target_name,
+        columns,
         grantee,
         grantee_is_role,
     })
@@ -4705,13 +4753,25 @@ pub enum SqlValue {
     Boolean(bool),
 }
 
+/// Table reference in FROM/USING/JOIN clauses
+#[derive(Debug, Clone)]
+pub struct JoinTable {
+    pub database: String,
+    pub table: String,
+    pub alias: Option<String>,
+}
+
 /// UPDATE command parsed from SQL
 #[derive(Debug, Clone)]
 pub struct UpdateCommand {
     pub database: String,
     pub table: String,
+    /// Alias for the target table (optional)
+    pub alias: Option<String>,
     /// Column assignments: (column_name, new_value)
     pub assignments: Vec<(String, SqlValue)>,
+    /// FROM clause tables for join-based updates (PostgreSQL style)
+    pub from_clause: Option<Vec<JoinTable>>,
     /// WHERE clause filter (simplified for now)
     pub where_clause: Option<String>,
     /// RETURNING clause - columns to return after update
@@ -4723,10 +4783,52 @@ pub struct UpdateCommand {
 pub struct DeleteCommand {
     pub database: String,
     pub table: String,
+    /// Alias for the target table (optional)
+    pub alias: Option<String>,
+    /// USING clause tables for join-based deletes (PostgreSQL style)
+    pub using_clause: Option<Vec<JoinTable>>,
     /// WHERE clause filter (simplified for now)
     pub where_clause: Option<String>,
     /// RETURNING clause - columns to return after delete
     pub returning: Option<Vec<String>>,
+}
+
+/// MERGE command action for WHEN MATCHED clause
+#[derive(Debug, Clone)]
+pub enum MergeWhenMatched {
+    /// UPDATE SET col = val, ...
+    Update {
+        assignments: Vec<(String, SqlValue)>,
+        condition: Option<String>,
+    },
+    /// DELETE
+    Delete { condition: Option<String> },
+}
+
+/// MERGE command action for WHEN NOT MATCHED clause
+#[derive(Debug, Clone)]
+pub struct MergeWhenNotMatched {
+    pub columns: Vec<String>,
+    pub values: Vec<SqlValue>,
+    pub condition: Option<String>,
+}
+
+/// MERGE command parsed from SQL (UPSERT with WHEN MATCHED/NOT MATCHED)
+#[derive(Debug, Clone)]
+pub struct MergeCommand {
+    /// Target table database
+    pub database: String,
+    /// Target table name
+    pub table: String,
+    /// Source table or subquery (for now, just table name)
+    pub source_database: String,
+    pub source_table: String,
+    /// Join condition (ON clause)
+    pub on_condition: String,
+    /// Actions for WHEN MATCHED
+    pub when_matched: Vec<MergeWhenMatched>,
+    /// Actions for WHEN NOT MATCHED
+    pub when_not_matched: Vec<MergeWhenNotMatched>,
 }
 
 /// Foreign key referential action
@@ -4880,6 +4982,7 @@ pub enum SqlStatement {
     Insert(InsertCommand),
     Update(UpdateCommand),
     Delete(DeleteCommand),
+    Merge(MergeCommand),
     Auth(AuthCommand),
     Transaction(TransactionCommand),
     /// EXPLAIN [ANALYZE] <statement>
@@ -5148,6 +5251,27 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
                         column: col_name,
                     }))
                 }
+                AlterTableOperation::RenameColumn {
+                    old_column_name,
+                    new_column_name,
+                } => {
+                    let old_col = old_column_name.to_string();
+                    let new_col = new_column_name.to_string();
+                    Ok(SqlStatement::Ddl(DdlCommand::AlterTableRenameColumn {
+                        database,
+                        table,
+                        old_column: old_col,
+                        new_column: new_col,
+                    }))
+                }
+                AlterTableOperation::RenameTable { table_name } => {
+                    let new_table = table_name.to_string();
+                    Ok(SqlStatement::Ddl(DdlCommand::AlterTableRename {
+                        database,
+                        old_table: table,
+                        new_table,
+                    }))
+                }
                 _ => Err(EngineError::NotImplemented(
                     "ALTER TABLE operation not supported".into(),
                 )),
@@ -5156,16 +5280,25 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
         Statement::Update {
             table,
             assignments,
-            selection,
-            returning,
-            ..
-        } => parse_update(table, assignments, selection, returning),
-        Statement::Delete {
             from,
             selection,
             returning,
             ..
-        } => parse_delete(from, selection, returning),
+        } => parse_update(table, assignments, from, selection, returning),
+        Statement::Delete {
+            from,
+            using,
+            selection,
+            returning,
+            ..
+        } => parse_delete(from, using, selection, returning),
+        Statement::Merge {
+            table,
+            source,
+            on,
+            clauses,
+            ..
+        } => parse_merge(table, source, on, clauses),
         Statement::CreateIndex {
             name,
             table_name,
@@ -6811,16 +6944,38 @@ fn expr_to_sql_value(expr: &Expr) -> Result<SqlValue, EngineError> {
     }
 }
 
+/// Parse a TableWithJoins into JoinTable
+fn parse_join_table(twj: &sqlparser::ast::TableWithJoins) -> Result<JoinTable, EngineError> {
+    match &twj.relation {
+        TableFactor::Table { name, alias, .. } => {
+            let table_name = name.to_string();
+            let (database, table) = parse_table_name(&table_name)?;
+            let table_alias = alias.as_ref().map(|a| a.name.value.clone());
+            Ok(JoinTable {
+                database,
+                table,
+                alias: table_alias,
+            })
+        }
+        _ => Err(EngineError::NotImplemented(
+            "only simple table references are supported in FROM/USING".into(),
+        )),
+    }
+}
+
 /// Parse UPDATE statement
 fn parse_update(
     table: &sqlparser::ast::TableWithJoins,
     assignments: &[sqlparser::ast::Assignment],
+    from: &Option<sqlparser::ast::TableWithJoins>,
     selection: &Option<Expr>,
     returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
-    // Extract table name from the UPDATE clause
-    let table_name = match &table.relation {
-        TableFactor::Table { name, .. } => name.to_string(),
+    // Extract table name and alias from the UPDATE clause
+    let (table_name, table_alias) = match &table.relation {
+        TableFactor::Table { name, alias, .. } => {
+            (name.to_string(), alias.as_ref().map(|a| a.name.value.clone()))
+        }
         _ => {
             return Err(EngineError::NotImplemented(
                 "UPDATE only supports simple table references".into(),
@@ -6849,6 +7004,26 @@ fn parse_update(
         parsed_assignments.push((column_name, value));
     }
 
+    // Parse FROM clause for join-based updates
+    let from_clause = if let Some(from_twj) = from {
+        let mut tables = vec![parse_join_table(from_twj)?];
+        // Also handle any JOINs in the FROM clause
+        for join in &from_twj.joins {
+            if let TableFactor::Table { name, alias, .. } = &join.relation {
+                let join_table_name = name.to_string();
+                let (join_db, join_tbl) = parse_table_name(&join_table_name)?;
+                tables.push(JoinTable {
+                    database: join_db,
+                    table: join_tbl,
+                    alias: alias.as_ref().map(|a| a.name.value.clone()),
+                });
+            }
+        }
+        Some(tables)
+    } else {
+        None
+    };
+
     // Convert WHERE clause to string representation (simplified for now)
     let where_clause = selection.as_ref().map(|expr| expr.to_string());
 
@@ -6858,7 +7033,9 @@ fn parse_update(
     Ok(SqlStatement::Update(UpdateCommand {
         database,
         table,
+        alias: table_alias,
         assignments: parsed_assignments,
+        from_clause,
         where_clause,
         returning: returning_cols,
     }))
@@ -6867,16 +7044,19 @@ fn parse_update(
 /// Parse DELETE statement
 fn parse_delete(
     from: &[sqlparser::ast::TableWithJoins],
+    using: &Option<Vec<sqlparser::ast::TableWithJoins>>,
     selection: &Option<Expr>,
     returning: &Option<Vec<sqlparser::ast::SelectItem>>,
 ) -> Result<SqlStatement, EngineError> {
-    // Extract table name from the FROM clause
+    // Extract table name and alias from the FROM clause
     let from_table = from
         .first()
         .ok_or_else(|| EngineError::InvalidArgument("DELETE requires FROM clause".into()))?;
 
-    let table_name = match &from_table.relation {
-        TableFactor::Table { name, .. } => name.to_string(),
+    let (table_name, table_alias) = match &from_table.relation {
+        TableFactor::Table { name, alias, .. } => {
+            (name.to_string(), alias.as_ref().map(|a| a.name.value.clone()))
+        }
         _ => {
             return Err(EngineError::NotImplemented(
                 "DELETE only supports simple table references".into(),
@@ -6884,6 +7064,29 @@ fn parse_delete(
         }
     };
     let (database, table) = parse_table_name(&table_name)?;
+
+    // Parse USING clause for join-based deletes
+    let using_clause = if let Some(using_tables) = using {
+        let mut tables = Vec::new();
+        for twj in using_tables {
+            tables.push(parse_join_table(twj)?);
+            // Also handle any JOINs in the USING clause
+            for join in &twj.joins {
+                if let TableFactor::Table { name, alias, .. } = &join.relation {
+                    let join_table_name = name.to_string();
+                    let (join_db, join_tbl) = parse_table_name(&join_table_name)?;
+                    tables.push(JoinTable {
+                        database: join_db,
+                        table: join_tbl,
+                        alias: alias.as_ref().map(|a| a.name.value.clone()),
+                    });
+                }
+            }
+        }
+        Some(tables)
+    } else {
+        None
+    };
 
     // Convert WHERE clause to string representation (simplified for now)
     let where_clause = selection.as_ref().map(|expr| expr.to_string());
@@ -6894,8 +7097,103 @@ fn parse_delete(
     Ok(SqlStatement::Delete(DeleteCommand {
         database,
         table,
+        alias: table_alias,
+        using_clause,
         where_clause,
         returning: returning_cols,
+    }))
+}
+
+/// Parse a MERGE statement
+fn parse_merge(
+    table: &TableFactor,
+    source: &TableFactor,
+    on: &Box<Expr>,
+    clauses: &[sqlparser::ast::MergeClause],
+) -> Result<SqlStatement, EngineError> {
+    use sqlparser::ast::MergeClause;
+
+    // Extract target table
+    let target_name = match table {
+        TableFactor::Table { name, .. } => name.to_string(),
+        _ => {
+            return Err(EngineError::NotImplemented(
+                "MERGE only supports simple table references as target".into(),
+            ))
+        }
+    };
+    let (database, table_name) = parse_table_name(&target_name)?;
+
+    // Extract source table
+    let source_name = match source {
+        TableFactor::Table { name, .. } => name.to_string(),
+        _ => {
+            return Err(EngineError::NotImplemented(
+                "MERGE only supports simple table references as source".into(),
+            ))
+        }
+    };
+    let (source_db, source_table) = parse_table_name(&source_name)?;
+
+    // ON condition
+    let on_condition = on.to_string();
+
+    // Parse WHEN clauses
+    let mut when_matched = Vec::new();
+    let mut when_not_matched = Vec::new();
+
+    for clause in clauses {
+        match clause {
+            MergeClause::MatchedUpdate {
+                predicate,
+                assignments,
+            } => {
+                let mut assigns: Vec<(String, SqlValue)> = Vec::new();
+                for a in assignments {
+                    let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                    let val = expr_to_sql_value(&a.value)?;
+                    assigns.push((col, val));
+                }
+                when_matched.push(MergeWhenMatched::Update {
+                    assignments: assigns,
+                    condition: predicate.as_ref().map(|e| e.to_string()),
+                });
+            }
+            MergeClause::MatchedDelete(predicate) => {
+                when_matched.push(MergeWhenMatched::Delete {
+                    condition: predicate.as_ref().map(|e| e.to_string()),
+                });
+            }
+            MergeClause::NotMatched {
+                predicate,
+                columns,
+                values,
+            } => {
+                let cols: Vec<String> = columns.iter().map(|i| i.value.clone()).collect();
+                // Get first row of values
+                let mut vals: Vec<SqlValue> = Vec::new();
+                if let Some(row) = values.rows.first() {
+                    for e in row {
+                        vals.push(expr_to_sql_value(e)?);
+                    }
+                }
+                when_not_matched.push(MergeWhenNotMatched {
+                    columns: cols,
+                    values: vals,
+                    condition: predicate.as_ref().map(|e| e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(SqlStatement::Merge(MergeCommand {
+        database,
+        table: table_name,
+        source_database: source_db,
+        source_table,
+        on_condition,
+        when_matched,
+        when_not_matched,
     }))
 }
 
@@ -8777,6 +9075,72 @@ mod tests {
                 assert_eq!(index_type, IndexType::Fulltext);
             }
             _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn test_parse_update_with_from() {
+        // UPDATE with FROM clause (PostgreSQL style)
+        let sql = "UPDATE orders o SET status = 'shipped' FROM customers c WHERE o.customer_id = c.id AND c.premium = true";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Update(cmd) => {
+                assert_eq!(cmd.database, "default");
+                assert_eq!(cmd.table, "orders");
+                assert_eq!(cmd.alias, Some("o".to_string()));
+                assert!(cmd.from_clause.is_some());
+                let from_tables = cmd.from_clause.unwrap();
+                assert_eq!(from_tables.len(), 1);
+                assert_eq!(from_tables[0].table, "customers");
+                assert_eq!(from_tables[0].alias, Some("c".to_string()));
+                assert!(cmd.where_clause.is_some());
+                assert!(cmd.assignments.len() == 1);
+                assert_eq!(cmd.assignments[0].0, "status");
+            }
+            _ => panic!("expected Update"),
+        }
+
+        // Simple UPDATE without FROM
+        let sql = "UPDATE users SET name = 'Bob' WHERE id = 1";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Update(cmd) => {
+                assert!(cmd.from_clause.is_none());
+                assert!(cmd.alias.is_none());
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn test_parse_delete_with_using() {
+        // DELETE with USING clause (PostgreSQL style)
+        let sql = "DELETE FROM orders o USING customers c WHERE o.customer_id = c.id AND c.status = 'inactive'";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Delete(cmd) => {
+                assert_eq!(cmd.database, "default");
+                assert_eq!(cmd.table, "orders");
+                assert_eq!(cmd.alias, Some("o".to_string()));
+                assert!(cmd.using_clause.is_some());
+                let using_tables = cmd.using_clause.unwrap();
+                assert_eq!(using_tables.len(), 1);
+                assert_eq!(using_tables[0].table, "customers");
+                assert_eq!(using_tables[0].alias, Some("c".to_string()));
+                assert!(cmd.where_clause.is_some());
+            }
+            _ => panic!("expected Delete"),
+        }
+
+        // Simple DELETE without USING
+        let sql = "DELETE FROM users WHERE id = 1";
+        let result = parse_sql(sql).unwrap();
+        match result {
+            SqlStatement::Delete(cmd) => {
+                assert!(cmd.using_clause.is_none());
+                assert!(cmd.alias.is_none());
+            }
+            _ => panic!("expected Delete"),
         }
     }
 }

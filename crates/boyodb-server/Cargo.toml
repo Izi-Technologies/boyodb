@@ -15,6 +15,7 @@ arrow-csv = "54"
 arrow-array = "54"
 arrow-schema = "54"
 arrow-ipc = "54"
+arrow-select = "54"
 tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
 tokio-rustls = "0.26"
 rustls = "0.22"

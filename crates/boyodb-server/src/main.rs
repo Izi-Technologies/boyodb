@@ -10,9 +10,9 @@ use boyodb_core::planner_distributed::LocalPlan;
 use boyodb_core::TableMeta;
 use boyodb_core::{
     parse_sql, AuthCommand, AuthError, AuthManager, ClusterConfig, ClusterManager, Db, DdlCommand,
-    DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest,
-    OnConflictAction, Privilege, PrivilegeTarget, QueryRequest, SqlStatement, SqlValue,
-    TableConstraint, UpdateCommand,
+    DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest, MergeCommand,
+    MergeWhenMatched, MergeWhenNotMatched, OnConflictAction, Privilege, PrivilegeTarget,
+    QueryRequest, SqlStatement, SqlValue, TableConstraint, UpdateCommand,
 };
 use boyodb_core::cluster::ReplicationState;
 use serde::{Deserialize, Serialize};
@@ -3382,7 +3382,56 @@ async fn process_request(
             Ok(())
         };
     match req {
-        Request::ExecuteSubQuery { .. } => todo!(),
+        Request::ExecuteSubQuery {
+            plan_json,
+            timeout_millis: _,
+            accept_compression,
+        } => {
+            // Parse the plan JSON into LocalPlan
+            let plan: LocalPlan = serde_json::from_value(plan_json)
+                .map_err(|e| ServerError::BadRequest(format!("invalid plan json: {e}")))?;
+
+            // Execute the distributed plan
+            let db = db.clone();
+            let response = blocking(move || {
+                db.execute_distributed_plan(plan.kind)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+
+            // Build response
+            if response.records_ipc.is_empty() {
+                Ok(Response {
+                    data_skipped_bytes: Some(response.data_skipped_bytes),
+                    segments_scanned: Some(response.segments_scanned),
+                    ..Default::default()
+                })
+            } else {
+                if accept_compression.as_deref() == Some("zstd") {
+                    let compressed = zstd::stream::encode_all(
+                        std::io::Cursor::new(&response.records_ipc),
+                        3,
+                    )
+                    .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
+                    Ok(Response {
+                        ipc_base64: Some(general_purpose::STANDARD.encode(&compressed)),
+                        ipc_len: Some(response.records_ipc.len() as u64),
+                        compression: Some("zstd".to_string()),
+                        data_skipped_bytes: Some(response.data_skipped_bytes),
+                        segments_scanned: Some(response.segments_scanned),
+                        ..Default::default()
+                    })
+                } else {
+                    Ok(Response {
+                        ipc_base64: Some(general_purpose::STANDARD.encode(&response.records_ipc)),
+                        ipc_len: Some(response.records_ipc.len() as u64),
+                        data_skipped_bytes: Some(response.data_skipped_bytes),
+                        segments_scanned: Some(response.segments_scanned),
+                        ..Default::default()
+                    })
+                }
+            }
+        }
         Request::Query {
             sql,
             timeout_millis,
@@ -3557,6 +3606,38 @@ async fn process_request(
                         },
                     )?;
                     execute_delete(&db, delete_cmd).await
+                }
+                SqlStatement::Merge(mut merge_cmd) => {
+                    // Use effective_db if using unqualified table names
+                    if merge_cmd.database == "default" {
+                        merge_cmd.database = effective_db.to_string();
+                    }
+                    if merge_cmd.source_database == "default" {
+                        merge_cmd.source_database = effective_db.to_string();
+                    }
+                    // MERGE requires both SELECT on source and INSERT/UPDATE/DELETE on target
+                    require_privilege(
+                        Privilege::Select,
+                        PrivilegeTarget::Table {
+                            database: merge_cmd.source_database.clone(),
+                            table: merge_cmd.source_table.clone(),
+                        },
+                    )?;
+                    require_privilege(
+                        Privilege::Insert,
+                        PrivilegeTarget::Table {
+                            database: merge_cmd.database.clone(),
+                            table: merge_cmd.table.clone(),
+                        },
+                    )?;
+                    require_privilege(
+                        Privilege::Update,
+                        PrivilegeTarget::Table {
+                            database: merge_cmd.database.clone(),
+                            table: merge_cmd.table.clone(),
+                        },
+                    )?;
+                    execute_merge(&db, merge_cmd).await
                 }
                 SqlStatement::SetOperation(_) => {
                     // Set operations (UNION, INTERSECT, EXCEPT) are parsed but execution is not yet implemented
@@ -5271,6 +5352,7 @@ fn execute_auth_command(
             privileges,
             target_type,
             target_name,
+            columns,
             grantee,
             grantee_is_role,
             with_grant_option,
@@ -5320,9 +5402,15 @@ fn execute_auth_command(
                     )?;
                 }
             }
+            let col_info = if let Some(ref cols) = columns {
+                format!(" on columns ({})", cols.join(", "))
+            } else {
+                String::new()
+            };
             Ok(Response::ok_message(&format!(
-                "{} granted to '{}'",
+                "{}{} granted to '{}'",
                 privileges.join(", "),
+                col_info,
                 grantee
             )))
         }
@@ -5330,6 +5418,7 @@ fn execute_auth_command(
             privileges,
             target_type,
             target_name,
+            columns,
             grantee,
             grantee_is_role,
         } => {
@@ -5365,9 +5454,15 @@ fn execute_auth_command(
                     auth.revoke_privilege(&grantee, priv_type, target.clone(), actor)?;
                 }
             }
+            let col_info = if let Some(ref cols) = columns {
+                format!(" on columns ({})", cols.join(", "))
+            } else {
+                String::new()
+            };
             Ok(Response::ok_message(&format!(
-                "{} revoked from '{}'",
+                "{}{} revoked from '{}'",
                 privileges.join(", "),
+                col_info,
                 grantee
             )))
         }
@@ -6176,9 +6271,16 @@ where
                     table: table.clone(),
                 },
             )?;
-            // TODO: Implement column rename in engine
-            Err(ServerError::NotImplemented(format!(
-                "ALTER TABLE RENAME COLUMN is not yet implemented (rename {} to {})",
+            let db = db.clone();
+            let old_col = old_column.clone();
+            let new_col = new_column.clone();
+            blocking(move || {
+                db.alter_table_rename_column(&database, &table, &old_col, &new_col)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!(
+                "column '{}' renamed to '{}'",
                 old_column, new_column
             )))
         }
@@ -8363,72 +8465,444 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
     )))
 }
 
+/// Helper function to format RETURNING response for UPDATE/DELETE with FROM/USING
+fn format_returning_response(
+    count: usize,
+    batches: Vec<RecordBatch>,
+    returning: Option<&Vec<String>>,
+    operation: &str,
+) -> Result<Response, ServerError> {
+    if count == 0 || batches.is_empty() {
+        return Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)));
+    }
+
+    let schema = batches[0].schema();
+
+    // Check if RETURNING is specified
+    let returning_cols = match returning {
+        Some(cols) if !cols.is_empty() => cols,
+        _ => {
+            // No RETURNING clause, just return count
+            return Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)));
+        }
+    };
+
+    if returning_cols.iter().any(|c| c == "*") {
+        // RETURNING * - return all columns
+        let mut output = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut output, &schema)
+                .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+            for batch in &batches {
+                writer.write(batch).map_err(|e| {
+                    ServerError::Encode(format!("failed to write batch: {}", e))
+                })?;
+            }
+            writer.finish().map_err(|e| {
+                ServerError::Encode(format!("failed to finish writer: {}", e))
+            })?;
+        }
+        let ipc_base64 = general_purpose::STANDARD.encode(&output);
+        return Ok(Response {
+            ipc_base64: Some(ipc_base64),
+            ipc_len: Some(output.len() as u64),
+            message: Some(format!("{} row(s) {}", count, operation)),
+            ..Default::default()
+        });
+    }
+
+    // RETURNING specific columns - filter to only requested columns
+    let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+    let mut selected_fields: Vec<Field> = Vec::new();
+    let mut field_initialized = false;
+
+    for batch in &batches {
+        for (i, col_name) in returning_cols.iter().enumerate() {
+            if let Ok(idx) = batch.schema().index_of(col_name) {
+                selected_arrays[i].push(batch.column(idx).clone());
+                if !field_initialized {
+                    selected_fields.push(batch.schema().field(idx).clone());
+                }
+            }
+        }
+        field_initialized = true;
+    }
+
+    if !selected_fields.is_empty() {
+        // Concatenate arrays from all batches for each column
+        let mut final_arrays: Vec<arrow_array::ArrayRef> = Vec::new();
+        for col_arrays in selected_arrays {
+            if !col_arrays.is_empty() {
+                let refs: Vec<&dyn arrow_array::Array> =
+                    col_arrays.iter().map(|a| a.as_ref()).collect();
+                let concatenated = arrow_select::concat::concat(&refs)
+                    .map_err(|e| ServerError::Encode(format!("failed to concat arrays: {}", e)))?;
+                final_arrays.push(concatenated);
+            }
+        }
+
+        let selected_schema = Arc::new(Schema::new(selected_fields));
+        let selected_batch = RecordBatch::try_new(selected_schema.clone(), final_arrays)
+            .map_err(|e| {
+                ServerError::Encode(format!("failed to create returning batch: {}", e))
+            })?;
+
+        let mut output = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
+                .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+            writer.write(&selected_batch).map_err(|e| {
+                ServerError::Encode(format!("failed to write batch: {}", e))
+            })?;
+            writer.finish().map_err(|e| {
+                ServerError::Encode(format!("failed to finish writer: {}", e))
+            })?;
+        }
+        let ipc_base64 = general_purpose::STANDARD.encode(&output);
+        return Ok(Response {
+            ipc_base64: Some(ipc_base64),
+            ipc_len: Some(output.len() as u64),
+            message: Some(format!("{} row(s) {}", count, operation)),
+            ..Default::default()
+        });
+    }
+
+    Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)))
+}
+
 async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, ServerError> {
     let UpdateCommand {
         database,
         table,
+        alias,
         assignments,
+        from_clause,
         where_clause,
         returning,
     } = cmd;
 
     let db = _db.clone();
-    let _db_name = database.clone();
-    let _tbl_name = table.clone();
-    let _where_cl = where_clause.clone();
+    let db_name = database.clone();
+    let tbl_name = table.clone();
+    let tbl_alias = alias.clone();
+    let from_tables = from_clause.clone();
+    let where_cl = where_clause.clone();
+    let assigns = assignments.clone();
     let ret_cols = returning.clone();
 
+    // If FROM clause is present, use multi-table update
+    if let Some(ref from_tables_vec) = from_tables {
+        let from_tables_clone = from_tables_vec.clone();
+        let (updated, batches) = blocking(move || {
+            db.update_rows_with_from(
+                &database,
+                &table,
+                alias.as_deref(),
+                &assignments,
+                &from_tables_clone,
+                where_clause.as_deref(),
+            )
+            .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        return format_returning_response(updated, batches, returning.as_ref(), "updated");
+    }
+
+    // If RETURNING is specified, use the returning variant
+    if let Some(returning_cols) = ret_cols {
+        let db = _db.clone();
+        let (updated, batches) = blocking(move || {
+            db.update_rows_returning(&db_name, &tbl_name, &assigns, where_cl.as_deref())
+                .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        if updated == 0 || batches.is_empty() {
+            return Ok(Response::ok_message(&format!("{} row(s) updated", updated)));
+        }
+
+        // Combine all updated batches
+        let schema = batches[0].schema();
+
+        if returning_cols.iter().any(|c| c == "*") {
+            // RETURNING * - return all columns
+            let mut output = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut output, &schema)
+                    .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                for batch in &batches {
+                    writer.write(batch).map_err(|e| {
+                        ServerError::Encode(format!("failed to write batch: {}", e))
+                    })?;
+                }
+                writer.finish().map_err(|e| {
+                    ServerError::Encode(format!("failed to finish writer: {}", e))
+                })?;
+            }
+            let ipc_base64 = general_purpose::STANDARD.encode(&output);
+            return Ok(Response {
+                ipc_base64: Some(ipc_base64),
+                ipc_len: Some(output.len() as u64),
+                message: Some(format!("{} row(s) updated", updated)),
+                ..Default::default()
+            });
+        } else {
+            // RETURNING specific columns - filter to only requested columns
+            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+            let mut selected_fields: Vec<Field> = Vec::new();
+            let mut field_initialized = false;
+
+            for batch in &batches {
+                for (i, col_name) in returning_cols.iter().enumerate() {
+                    if let Ok(idx) = batch.schema().index_of(col_name) {
+                        selected_arrays[i].push(batch.column(idx).clone());
+                        if !field_initialized {
+                            selected_fields.push(batch.schema().field(idx).clone());
+                        }
+                    }
+                }
+                field_initialized = true;
+            }
+
+            if !selected_fields.is_empty() {
+                // Concatenate arrays from all batches for each column
+                let mut final_arrays: Vec<arrow_array::ArrayRef> = Vec::new();
+                for col_arrays in selected_arrays {
+                    if !col_arrays.is_empty() {
+                        let refs: Vec<&dyn arrow_array::Array> =
+                            col_arrays.iter().map(|a| a.as_ref()).collect();
+                        let concatenated = arrow_select::concat::concat(&refs)
+                            .map_err(|e| ServerError::Encode(format!("failed to concat arrays: {}", e)))?;
+                        final_arrays.push(concatenated);
+                    }
+                }
+
+                let selected_schema = Arc::new(Schema::new(selected_fields));
+                let selected_batch = RecordBatch::try_new(selected_schema.clone(), final_arrays)
+                    .map_err(|e| {
+                        ServerError::Encode(format!("failed to create returning batch: {}", e))
+                    })?;
+
+                let mut output = Vec::new();
+                {
+                    let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
+                        .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                    writer.write(&selected_batch).map_err(|e| {
+                        ServerError::Encode(format!("failed to write batch: {}", e))
+                    })?;
+                    writer.finish().map_err(|e| {
+                        ServerError::Encode(format!("failed to finish writer: {}", e))
+                    })?;
+                }
+                let ipc_base64 = general_purpose::STANDARD.encode(&output);
+                return Ok(Response {
+                    ipc_base64: Some(ipc_base64),
+                    ipc_len: Some(output.len() as u64),
+                    message: Some(format!("{} row(s) updated", updated)),
+                    ..Default::default()
+                });
+            }
+        }
+
+        return Ok(Response::ok_message(&format!("{} row(s) updated", updated)));
+    }
+
+    // No RETURNING clause - use the standard update
     let updated = blocking(move || {
-        db.update_rows(&database, &table, &assignments, where_clause.as_deref())
+        db.update_rows(&db_name, &tbl_name, &assigns, where_cl.as_deref())
             .map_err(|e| ServerError::Db(e.to_string()))
     })
     .await?;
 
-    // Handle RETURNING clause for UPDATE
-    // Note: For full RETURNING support, we would need to capture the modified rows
-    // before and after the update. For now, we'll return a count message.
-    // TODO: Implement full RETURNING support by returning the modified rows
-    if ret_cols.is_some() {
-        // Future: Query the updated rows and return them
-        // For now, return a structured message indicating the update count
-        Ok(Response::ok_message(&format!(
-            "{} row(s) updated (RETURNING clause support is limited)",
-            updated
-        )))
-    } else {
-        Ok(Response::ok_message(&format!("{} row(s) updated", updated)))
-    }
+    Ok(Response::ok_message(&format!("{} row(s) updated", updated)))
 }
 
 async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, ServerError> {
     let DeleteCommand {
         database,
         table,
+        alias,
+        using_clause,
         where_clause,
         returning,
     } = cmd;
 
     let db = _db.clone();
+    let db_name = database.clone();
+    let tbl_name = table.clone();
+    let tbl_alias = alias.clone();
+    let using_tables = using_clause.clone();
+    let where_cl = where_clause.clone();
     let ret_cols = returning.clone();
 
+    // If USING clause is present, use multi-table delete
+    if let Some(ref using_tables_vec) = using_tables {
+        let using_tables_clone = using_tables_vec.clone();
+        let (deleted, batches) = blocking(move || {
+            db.delete_rows_with_using(
+                &database,
+                &table,
+                alias.as_deref(),
+                &using_tables_clone,
+                where_clause.as_deref(),
+            )
+            .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        return format_returning_response(deleted, batches, returning.as_ref(), "deleted");
+    }
+
+    // If RETURNING is specified, use the returning variant
+    if let Some(returning_cols) = ret_cols {
+        let db = _db.clone();
+        let (deleted, batches) = blocking(move || {
+            db.delete_rows_returning(&db_name, &tbl_name, where_cl.as_deref())
+                .map_err(|e| ServerError::Db(e.to_string()))
+        })
+        .await?;
+
+        if deleted == 0 || batches.is_empty() {
+            return Ok(Response::ok_message(&format!("{} row(s) deleted", deleted)));
+        }
+
+        // Combine all deleted batches
+        let schema = batches[0].schema();
+
+        if returning_cols.iter().any(|c| c == "*") {
+            // RETURNING * - return all columns
+            let mut output = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut output, &schema)
+                    .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                for batch in &batches {
+                    writer.write(batch).map_err(|e| {
+                        ServerError::Encode(format!("failed to write batch: {}", e))
+                    })?;
+                }
+                writer.finish().map_err(|e| {
+                    ServerError::Encode(format!("failed to finish writer: {}", e))
+                })?;
+            }
+            let ipc_base64 = general_purpose::STANDARD.encode(&output);
+            return Ok(Response {
+                ipc_base64: Some(ipc_base64),
+                ipc_len: Some(output.len() as u64),
+                message: Some(format!("{} row(s) deleted", deleted)),
+                ..Default::default()
+            });
+        } else {
+            // RETURNING specific columns - filter to only requested columns
+            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+            let mut selected_fields: Vec<Field> = Vec::new();
+            let mut field_initialized = false;
+
+            for batch in &batches {
+                for (i, col_name) in returning_cols.iter().enumerate() {
+                    if let Ok(idx) = batch.schema().index_of(col_name) {
+                        selected_arrays[i].push(batch.column(idx).clone());
+                        if !field_initialized {
+                            selected_fields.push(batch.schema().field(idx).clone());
+                        }
+                    }
+                }
+                field_initialized = true;
+            }
+
+            if !selected_fields.is_empty() {
+                // Concatenate arrays from all batches for each column
+                let mut final_arrays: Vec<arrow_array::ArrayRef> = Vec::new();
+                for col_arrays in selected_arrays {
+                    if !col_arrays.is_empty() {
+                        let refs: Vec<&dyn arrow_array::Array> =
+                            col_arrays.iter().map(|a| a.as_ref()).collect();
+                        let concatenated = arrow_select::concat::concat(&refs)
+                            .map_err(|e| ServerError::Encode(format!("failed to concat arrays: {}", e)))?;
+                        final_arrays.push(concatenated);
+                    }
+                }
+
+                let selected_schema = Arc::new(Schema::new(selected_fields));
+                let selected_batch = RecordBatch::try_new(selected_schema.clone(), final_arrays)
+                    .map_err(|e| {
+                        ServerError::Encode(format!("failed to create returning batch: {}", e))
+                    })?;
+
+                let mut output = Vec::new();
+                {
+                    let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
+                        .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                    writer.write(&selected_batch).map_err(|e| {
+                        ServerError::Encode(format!("failed to write batch: {}", e))
+                    })?;
+                    writer.finish().map_err(|e| {
+                        ServerError::Encode(format!("failed to finish writer: {}", e))
+                    })?;
+                }
+                let ipc_base64 = general_purpose::STANDARD.encode(&output);
+                return Ok(Response {
+                    ipc_base64: Some(ipc_base64),
+                    ipc_len: Some(output.len() as u64),
+                    message: Some(format!("{} row(s) deleted", deleted)),
+                    ..Default::default()
+                });
+            }
+        }
+
+        return Ok(Response::ok_message(&format!("{} row(s) deleted", deleted)));
+    }
+
+    // No RETURNING clause - use the standard delete
     let deleted = blocking(move || {
-        db.delete_rows(&database, &table, where_clause.as_deref())
+        db.delete_rows(&db_name, &tbl_name, where_cl.as_deref())
             .map_err(|e| ServerError::Db(e.to_string()))
     })
     .await?;
 
-    // Handle RETURNING clause for DELETE
-    // Note: For full RETURNING support, we would need to capture the deleted rows
-    // before deletion. For now, we'll return a count message.
-    // TODO: Implement full RETURNING support by returning the deleted rows
-    if ret_cols.is_some() {
-        Ok(Response::ok_message(&format!(
-            "{} row(s) deleted (RETURNING clause support is limited)",
-            deleted
-        )))
-    } else {
-        Ok(Response::ok_message(&format!("{} row(s) deleted", deleted)))
-    }
+    Ok(Response::ok_message(&format!("{} row(s) deleted", deleted)))
+}
+
+/// Execute a MERGE (UPSERT) statement
+async fn execute_merge(_db: &Arc<Db>, cmd: MergeCommand) -> Result<Response, ServerError> {
+    let MergeCommand {
+        database,
+        table,
+        source_database,
+        source_table,
+        on_condition,
+        when_matched,
+        when_not_matched,
+    } = cmd;
+
+    let db = _db.clone();
+    let db_name = database.clone();
+    let tbl_name = table.clone();
+    let src_db = source_database.clone();
+    let src_tbl = source_table.clone();
+    let on_cond = on_condition.clone();
+    let matched_actions = when_matched.clone();
+    let not_matched_actions = when_not_matched.clone();
+
+    // Execute MERGE operation
+    let result = blocking(move || {
+        db.merge_rows(
+            &db_name,
+            &tbl_name,
+            &src_db,
+            &src_tbl,
+            &on_cond,
+            &matched_actions,
+            &not_matched_actions,
+        )
+        .map_err(|e| ServerError::Db(e.to_string()))
+    })
+    .await?;
+
+    Ok(Response::ok_message(&format!(
+        "MERGE completed: {} row(s) matched, {} row(s) inserted",
+        result.0, result.1
+    )))
 }
 
 /// Execute EXPLAIN [ANALYZE] for a SQL statement

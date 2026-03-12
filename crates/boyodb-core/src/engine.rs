@@ -16635,6 +16635,230 @@ impl Db {
         Ok(())
     }
 
+    /// Rename a column by updating the stored schema and rewriting segments.
+    pub fn alter_table_rename_column(
+        &self,
+        database: &str,
+        table: &str,
+        old_column: &str,
+        new_column: &str,
+    ) -> Result<(), EngineError> {
+        if old_column.trim().is_empty() || new_column.trim().is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "column name required".into(),
+            ));
+        }
+
+        if old_column == new_column {
+            return Ok(()); // Nothing to do
+        }
+
+        let table_meta = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let tbl = manifest
+                .tables
+                .iter()
+                .find(|t| t.database == database && t.name == table)
+                .cloned()
+                .ok_or_else(|| {
+                    EngineError::NotFound(format!("table not found: {database}.{table}"))
+                })?;
+            if tbl.schema_json.is_none() {
+                return Err(EngineError::InvalidArgument(
+                    "table schema is not defined; cannot alter".into(),
+                ));
+            }
+            tbl
+        };
+
+        let mut fields: Vec<TableFieldSpec> = serde_json::from_str(
+            table_meta
+                .schema_json
+                .as_ref()
+                .ok_or_else(|| EngineError::InvalidArgument("table schema missing".into()))?,
+        )
+        .map_err(|e| EngineError::InvalidArgument(format!("invalid schema json: {e}")))?;
+
+        // Check if new column name already exists
+        if fields.iter().any(|f| f.name == new_column) {
+            return Err(EngineError::InvalidArgument(format!(
+                "column '{}' already exists",
+                new_column
+            )));
+        }
+
+        // Find and rename the column
+        let field = fields
+            .iter_mut()
+            .find(|f| f.name == old_column)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!("column '{}' not found", old_column))
+            })?;
+        field.name = new_column.to_string();
+
+        let canonical_fields = canonicalize_schema_spec(&fields)?;
+        let new_schema_json = serde_json::to_string(&canonical_fields)
+            .map_err(|e| EngineError::Internal(format!("serialize schema failed: {e}")))?;
+
+        let mut manifest = self
+            .manifest
+            .write()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        manifest.bump_version();
+        if let Some(tbl) = manifest
+            .tables
+            .iter_mut()
+            .find(|t| t.database == database && t.name == table)
+        {
+            tbl.schema_json = Some(new_schema_json.clone());
+        }
+        persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+        {
+            let mut index = self
+                .manifest_index
+                .write()
+                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+        {
+            let mut cache = self.query_cache.lock();
+            cache.invalidate_table(database, table);
+        }
+
+        self.spawn_background_column_rename(database, table, old_column, new_column);
+        Ok(())
+    }
+
+    /// Background task to rename column in all segment files.
+    fn spawn_background_column_rename(
+        &self,
+        database: &str,
+        table: &str,
+        old_column: &str,
+        new_column: &str,
+    ) {
+        let cfg = self.cfg.clone();
+        let db_name = database.to_string();
+        let tbl_name = table.to_string();
+        let old_col = old_column.to_string();
+        let new_col = new_column.to_string();
+        std::thread::spawn(move || match Db::open(cfg) {
+            Ok(db) => {
+                if let Err(e) = db.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col) {
+                    tracing::warn!(
+                        database = %db_name,
+                        table = %tbl_name,
+                        old_column = %old_col,
+                        new_column = %new_col,
+                        error = %e,
+                        "background column rename failed"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    database = %db_name,
+                    table = %tbl_name,
+                    error = %e,
+                    "failed to start background column rename"
+                );
+            }
+        });
+    }
+
+    /// Rewrite all segments to rename a column.
+    fn rewrite_segments_rename_column(
+        &self,
+        database: &str,
+        table: &str,
+        old_column: &str,
+        new_column: &str,
+    ) -> Result<(), EngineError> {
+        let entries = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest
+                .entries
+                .iter()
+                .filter(|e| e.database == database && e.table == table)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        for entry in entries {
+            let data = load_segment(&self.storage, &entry)?;
+            let batches = read_ipc_batches(&data)?;
+
+            if batches.is_empty() {
+                continue;
+            }
+
+            let original_schema = batches[0].schema();
+
+            // Check if column exists in this segment
+            if original_schema.index_of(old_column).is_err() {
+                continue; // Column not in this segment, skip
+            }
+
+            // Build new schema with renamed column
+            let new_fields: Vec<Field> = original_schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    if f.name() == old_column {
+                        Field::new(new_column, f.data_type().clone(), f.is_nullable())
+                            .with_metadata(f.metadata().clone())
+                    } else {
+                        f.as_ref().clone()
+                    }
+                })
+                .collect();
+            let new_schema = Arc::new(Schema::new(new_fields));
+
+            // Rebuild batches with new schema
+            let mut new_batches = Vec::new();
+            for batch in &batches {
+                let new_batch = RecordBatch::try_new(
+                    new_schema.clone(),
+                    batch.columns().to_vec(),
+                )
+                .map_err(|e| EngineError::Internal(format!("failed to rename column: {e}")))?;
+                new_batches.push(new_batch);
+            }
+
+            // Write new segment
+            let ipc = record_batches_to_ipc(&new_schema, &new_batches)?;
+
+            // Ingest new segment and clean up old
+            self.ingest_ipc(IngestBatch {
+                payload_ipc: ipc,
+                watermark_micros: entry.watermark_micros,
+                shard_override: Some(entry.shard_id as u64),
+                database: Some(database.to_string()),
+                table: Some(table.to_string()),
+            })?;
+
+            // Remove old segment
+            {
+                let mut manifest = self
+                    .manifest
+                    .write()
+                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                manifest.entries.retain(|e| e.segment_id != entry.segment_id);
+                persist_manifest(&self.cfg.manifest_path, &manifest)?;
+            }
+            self.remove_segment_file(&entry.segment_id);
+        }
+
+        Ok(())
+    }
+
     fn spawn_background_schema_rewrite(&self, database: &str, table: &str, schema_json: &str) {
         let cfg = self.cfg.clone();
         let db_name = database.to_string();
@@ -17278,6 +17502,126 @@ impl Db {
         Ok(rows_deleted)
     }
 
+    /// Delete rows matching the filter and return them. Returns (deleted_count, deleted_batches).
+    pub fn delete_rows_returning(
+        &self,
+        database: &str,
+        table: &str,
+        where_clause: Option<&str>,
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        let filter = parse_where_filter(where_clause)?;
+        if let Some(clause) = where_clause {
+            if !clause.trim().is_empty() && filter_is_empty(&filter) {
+                return Err(EngineError::InvalidArgument(
+                    "unsupported WHERE clause for DELETE".into(),
+                ));
+            }
+        }
+
+        let entries = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            if !manifest
+                .tables
+                .iter()
+                .any(|t| t.database == database && t.name == table)
+            {
+                return Err(EngineError::NotFound(format!(
+                    "table not found: {database}.{table}"
+                )));
+            }
+            manifest
+                .entries
+                .iter()
+                .filter(|e| e.database == database && e.table == table)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        if entries.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        let mut new_segments: Vec<(u16, u64, Vec<u8>)> = Vec::new();
+        let mut segments_to_drop: Vec<String> = Vec::new();
+        let mut rows_deleted = 0usize;
+        let mut deleted_batches: Vec<RecordBatch> = Vec::new();
+
+        for entry in entries {
+            let data = load_segment(&self.storage, &entry)?;
+            let batches = read_ipc_batches(&data)?;
+            let mut kept_batches = Vec::new();
+            let mut segment_removed = 0usize;
+            for batch in batches {
+                let (kept, deleted, removed) = filter_batch_for_delete_returning(&batch, &filter)?;
+                rows_deleted += removed;
+                segment_removed += removed;
+                if let Some(d) = deleted {
+                    deleted_batches.push(d);
+                }
+                if let Some(k) = kept {
+                    kept_batches.push(k);
+                }
+            }
+            if segment_removed > 0 {
+                if !kept_batches.is_empty() {
+                    let ipc =
+                        record_batches_to_ipc(kept_batches[0].schema().as_ref(), &kept_batches)?;
+                    new_segments.push((entry.shard_id, entry.watermark_micros, ipc));
+                }
+                segments_to_drop.push(entry.segment_id.clone());
+            }
+        }
+
+        if rows_deleted == 0 {
+            return Ok((0, Vec::new()));
+        }
+
+        // Remove affected segments from manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+            snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+            {
+                let mut index = self
+                    .manifest_index
+                    .write()
+                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                *index = ManifestIndex::build(&manifest.entries);
+            }
+            {
+                let mut cache = self.query_cache.lock();
+                cache.invalidate_table(database, table);
+            }
+        }
+
+        // Drop old segment files (best effort)
+        for seg_id in &segments_to_drop {
+            self.remove_segment_file(seg_id);
+        }
+
+        for (shard, watermark, ipc) in new_segments {
+            self.ingest_ipc(IngestBatch {
+                payload_ipc: ipc,
+                watermark_micros: watermark,
+                shard_override: Some(shard as u64),
+                database: Some(database.to_string()),
+                table: Some(table.to_string()),
+            })?;
+        }
+        Ok((rows_deleted, deleted_batches))
+    }
+
     /// Update rows matching the filter by applying assignments. Returns number of rows updated.
     pub fn update_rows(
         &self,
@@ -17557,6 +17901,642 @@ impl Db {
             })?;
         }
         Ok(rows_updated)
+    }
+
+    /// Update rows matching the filter and return the updated rows (with new values).
+    /// Returns (updated_count, updated_batches).
+    pub fn update_rows_returning(
+        &self,
+        database: &str,
+        table: &str,
+        assignments: &[(String, SqlValue)],
+        where_clause: Option<&str>,
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        if assignments.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "UPDATE requires at least one assignment".into(),
+            ));
+        }
+        let filter = parse_where_filter(where_clause)?;
+        if let Some(clause) = where_clause {
+            if !clause.trim().is_empty() && filter_is_empty(&filter) {
+                return Err(EngineError::InvalidArgument(
+                    "unsupported WHERE clause for UPDATE".into(),
+                ));
+            }
+        }
+
+        let entries = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            if !manifest
+                .tables
+                .iter()
+                .any(|t| t.database == database && t.name == table)
+            {
+                return Err(EngineError::NotFound(format!(
+                    "table not found: {database}.{table}"
+                )));
+            }
+            manifest
+                .entries
+                .iter()
+                .filter(|e| e.database == database && e.table == table)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        if entries.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        let mut new_segments: Vec<(u16, u64, Vec<u8>)> = Vec::new();
+        let mut segments_to_drop: Vec<String> = Vec::new();
+        let mut rows_updated = 0usize;
+        let mut updated_batches: Vec<RecordBatch> = Vec::new();
+
+        for entry in entries {
+            let data = load_segment(&self.storage, &entry)?;
+            let batches = read_ipc_batches(&data)?;
+            let mut all_updated_batches = Vec::new();
+            let mut segment_changed = false;
+            for batch in batches {
+                let (updated, updated_rows, count) =
+                    apply_assignments_to_batch_returning(&batch, &filter, assignments)?;
+                if count > 0 {
+                    segment_changed = true;
+                    if let Some(rows) = updated_rows {
+                        updated_batches.push(rows);
+                    }
+                }
+                rows_updated += count;
+                all_updated_batches.push(updated);
+            }
+            if segment_changed {
+                let ipc = record_batches_to_ipc(
+                    all_updated_batches[0].schema().as_ref(),
+                    &all_updated_batches,
+                )?;
+                new_segments.push((entry.shard_id, entry.watermark_micros, ipc));
+                segments_to_drop.push(entry.segment_id.clone());
+            }
+        }
+
+        if rows_updated == 0 {
+            return Ok((0, Vec::new()));
+        }
+
+        // Remove affected segments from manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
+            manifest
+                .entries
+                .retain(|e| !drop_set.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+            snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+            {
+                let mut index = self
+                    .manifest_index
+                    .write()
+                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                *index = ManifestIndex::build(&manifest.entries);
+            }
+            {
+                let mut cache = self.query_cache.lock();
+                cache.invalidate_table(database, table);
+            }
+        }
+
+        for seg_id in &segments_to_drop {
+            self.remove_segment_file(seg_id);
+        }
+
+        for (shard, watermark, ipc) in new_segments {
+            self.ingest_ipc(IngestBatch {
+                payload_ipc: ipc,
+                watermark_micros: watermark,
+                shard_override: Some(shard as u64),
+                database: Some(database.to_string()),
+                table: Some(table.to_string()),
+            })?;
+        }
+        Ok((rows_updated, updated_batches))
+    }
+
+    /// Execute a MERGE statement (UPSERT with WHEN MATCHED/NOT MATCHED).
+    /// Returns (matched_count, inserted_count).
+    pub fn merge_rows(
+        &self,
+        database: &str,
+        table: &str,
+        source_database: &str,
+        source_table: &str,
+        on_condition: &str,
+        when_matched: &[crate::sql::MergeWhenMatched],
+        when_not_matched: &[crate::sql::MergeWhenNotMatched],
+    ) -> Result<(usize, usize), EngineError> {
+        use crate::sql::{MergeWhenMatched, MergeWhenNotMatched};
+
+        // Load source table data
+        let source_batches = self.load_table_batches(source_database, source_table)?;
+        if source_batches.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // Load target table data
+        let target_batches = self.load_table_batches(database, table)?;
+
+        // Parse ON condition to extract join columns
+        // For now, we support simple "target.col = source.col" conditions
+        let (target_col, source_col) = parse_merge_condition(on_condition)?;
+
+        let mut matched_count = 0usize;
+        let mut inserted_count = 0usize;
+
+        // Build a set of values from target table for the join column
+        let mut target_values: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for batch in &target_batches {
+            if let Ok(idx) = batch.schema().index_of(&target_col) {
+                let arr = batch.column(idx);
+                for i in 0..arr.len() {
+                    if let Some(val) = merge_array_value_to_string(arr.as_ref(), i) {
+                        target_values.insert(val);
+                    }
+                }
+            }
+        }
+
+        // Process source rows
+        for src_batch in &source_batches {
+            let src_schema = src_batch.schema();
+            let src_col_idx = src_schema.index_of(&source_col).map_err(|_| {
+                EngineError::InvalidArgument(format!(
+                    "source column '{}' not found in MERGE ON condition",
+                    source_col
+                ))
+            })?;
+
+            let src_arr = src_batch.column(src_col_idx);
+
+            for row_idx in 0..src_batch.num_rows() {
+                let src_val = merge_array_value_to_string(src_arr.as_ref(), row_idx);
+                let is_matched = src_val.as_ref().map(|v| target_values.contains(v)).unwrap_or(false);
+
+                if is_matched {
+                    // WHEN MATCHED - apply update/delete actions
+                    for action in when_matched {
+                        match action {
+                            MergeWhenMatched::Update { assignments, condition } => {
+                                // Build WHERE clause for this specific row
+                                if let Some(key_val) = &src_val {
+                                    let where_clause = format!("{} = '{}'", target_col, key_val);
+                                    // Check condition if specified
+                                    let should_update = condition.is_none() ||
+                                        evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+                                    if should_update {
+                                        self.update_rows(database, table, assignments, Some(&where_clause))?;
+                                        matched_count += 1;
+                                    }
+                                }
+                            }
+                            MergeWhenMatched::Delete { condition } => {
+                                if let Some(key_val) = &src_val {
+                                    let where_clause = format!("{} = '{}'", target_col, key_val);
+                                    let should_delete = condition.is_none() ||
+                                        evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+                                    if should_delete {
+                                        self.delete_rows(database, table, Some(&where_clause))?;
+                                        matched_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // WHEN NOT MATCHED - apply insert actions
+                    for action in when_not_matched {
+                        let MergeWhenNotMatched { columns, values, condition } = action;
+
+                        let should_insert = condition.is_none() ||
+                            evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+
+                        if should_insert && !values.is_empty() {
+                            // Build INSERT for this row
+                            // For now, use the literal values from the MERGE statement
+                            let insert_batch = crate::sql::InsertCommand {
+                                database: database.to_string(),
+                                table: table.to_string(),
+                                columns: Some(columns.clone()),
+                                values: vec![values.clone()],
+                                on_conflict: None,
+                                returning: None,
+                            };
+
+                            // Convert InsertCommand to IPC and ingest
+                            if let Ok(ipc) = build_insert_ipc(&insert_batch, self, database, table) {
+                                if let Ok(_) = self.ingest_ipc(IngestBatch {
+                                    payload_ipc: ipc,
+                                    watermark_micros: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_micros() as u64,
+                                    shard_override: None,
+                                    database: Some(database.to_string()),
+                                    table: Some(table.to_string()),
+                                }) {
+                                    inserted_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((matched_count, inserted_count))
+    }
+
+    /// Delete rows from target table that match a join with USING tables.
+    /// This implements PostgreSQL-style DELETE ... USING syntax.
+    /// Returns (deleted_count, deleted_batches).
+    pub fn delete_rows_with_using(
+        &self,
+        database: &str,
+        table: &str,
+        table_alias: Option<&str>,
+        using_tables: &[crate::sql::JoinTable],
+        where_clause: Option<&str>,
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        // Load all using tables into memory
+        let mut using_data: Vec<(String, String, Option<String>, Vec<RecordBatch>)> = Vec::new();
+        for ut in using_tables {
+            let batches = self.load_table_batches(&ut.database, &ut.table)?;
+            using_data.push((ut.database.clone(), ut.table.clone(), ut.alias.clone(), batches));
+        }
+
+        // Parse WHERE clause to identify join conditions
+        let where_str = where_clause.unwrap_or("");
+
+        // Build a set of matching row IDs from the target table by evaluating the join
+        // Strategy: For each row in target, check if it matches any row in using tables
+        // based on the WHERE clause predicates
+
+        // Load target table batches
+        let target_batches = self.load_table_batches(database, table)?;
+        if target_batches.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        // Extract matching row indices based on the join condition
+        let matching_indices =
+            self.evaluate_join_condition(&target_batches, table_alias, &using_data, where_str)?;
+
+        if matching_indices.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        // Build a WHERE clause that filters by the matching indices
+        // For simplicity, we'll collect the rows to delete based on the matching indices
+        // and delete them by reconstructing the table without those rows
+        self.delete_rows_by_indices(database, table, &target_batches, &matching_indices)
+    }
+
+    /// Update rows in target table that match a join with FROM tables.
+    /// This implements PostgreSQL-style UPDATE ... FROM syntax.
+    /// Returns (updated_count, updated_batches).
+    pub fn update_rows_with_from(
+        &self,
+        database: &str,
+        table: &str,
+        table_alias: Option<&str>,
+        assignments: &[(String, SqlValue)],
+        from_tables: &[crate::sql::JoinTable],
+        where_clause: Option<&str>,
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        if assignments.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "UPDATE requires at least one assignment".into(),
+            ));
+        }
+
+        // Load all from tables into memory
+        let mut from_data: Vec<(String, String, Option<String>, Vec<RecordBatch>)> = Vec::new();
+        for ft in from_tables {
+            let batches = self.load_table_batches(&ft.database, &ft.table)?;
+            from_data.push((ft.database.clone(), ft.table.clone(), ft.alias.clone(), batches));
+        }
+
+        // Parse WHERE clause to identify join conditions
+        let where_str = where_clause.unwrap_or("");
+
+        // Load target table batches
+        let target_batches = self.load_table_batches(database, table)?;
+        if target_batches.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        // Extract matching row indices based on the join condition
+        let matching_indices =
+            self.evaluate_join_condition(&target_batches, table_alias, &from_data, where_str)?;
+
+        if matching_indices.is_empty() {
+            return Ok((0, Vec::new()));
+        }
+
+        // Update the matching rows
+        self.update_rows_by_indices(database, table, assignments, &target_batches, &matching_indices)
+    }
+
+    /// Evaluate a join condition between target table and join tables.
+    /// Returns a set of (batch_index, row_index) tuples for matching target rows.
+    fn evaluate_join_condition(
+        &self,
+        target_batches: &[RecordBatch],
+        target_alias: Option<&str>,
+        join_tables: &[(String, String, Option<String>, Vec<RecordBatch>)],
+        where_clause: &str,
+    ) -> Result<Vec<(usize, usize)>, EngineError> {
+        use std::collections::HashSet;
+
+        if where_clause.trim().is_empty() || join_tables.is_empty() {
+            // No WHERE clause or no join tables - match all rows
+            let mut all_indices = Vec::new();
+            for (batch_idx, batch) in target_batches.iter().enumerate() {
+                for row_idx in 0..batch.num_rows() {
+                    all_indices.push((batch_idx, row_idx));
+                }
+            }
+            return Ok(all_indices);
+        }
+
+        // Parse the WHERE clause to extract join predicates
+        // We look for patterns like "target.col = join.col" or "alias.col = alias2.col"
+        let predicates = parse_join_predicates(where_clause, target_alias, join_tables)?;
+
+        if predicates.is_empty() {
+            // No recognizable join predicates - fall back to matching all rows
+            let mut all_indices = Vec::new();
+            for (batch_idx, batch) in target_batches.iter().enumerate() {
+                for row_idx in 0..batch.num_rows() {
+                    all_indices.push((batch_idx, row_idx));
+                }
+            }
+            return Ok(all_indices);
+        }
+
+        // Build hash sets of values from join tables for each predicate
+        let mut join_value_sets: Vec<HashSet<String>> = Vec::new();
+        for pred in &predicates {
+            let mut value_set = HashSet::new();
+            for (_, _, alias, batches) in join_tables {
+                // Check if this join table matches the predicate's join table reference
+                let matches = pred.join_table_name.is_none()
+                    || alias.as_deref() == pred.join_table_name.as_deref()
+                    || join_tables
+                        .iter()
+                        .any(|(_, t, _, _)| Some(t.as_str()) == pred.join_table_name.as_deref());
+
+                if matches {
+                    for batch in batches {
+                        if let Ok(col_idx) = batch.schema().index_of(&pred.join_column) {
+                            let col = batch.column(col_idx);
+                            for i in 0..col.len() {
+                                if let Some(val) = array_value_to_string_for_join(col.as_ref(), i) {
+                                    value_set.insert(val);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            join_value_sets.push(value_set);
+        }
+
+        // Find matching rows in target table
+        let mut matching_indices = Vec::new();
+        for (batch_idx, batch) in target_batches.iter().enumerate() {
+            // Check each predicate
+            let mut predicate_columns: Vec<Option<&dyn arrow_array::Array>> = Vec::new();
+            for pred in &predicates {
+                let col = batch
+                    .schema()
+                    .index_of(&pred.target_column)
+                    .ok()
+                    .map(|idx| batch.column(idx).as_ref());
+                predicate_columns.push(col);
+            }
+
+            for row_idx in 0..batch.num_rows() {
+                let mut all_match = true;
+                for (i, col_opt) in predicate_columns.iter().enumerate() {
+                    if let Some(col) = col_opt {
+                        if let Some(val) = array_value_to_string_for_join(*col, row_idx) {
+                            if !join_value_sets[i].contains(&val) {
+                                all_match = false;
+                                break;
+                            }
+                        } else {
+                            all_match = false;
+                            break;
+                        }
+                    } else {
+                        all_match = false;
+                        break;
+                    }
+                }
+                if all_match {
+                    matching_indices.push((batch_idx, row_idx));
+                }
+            }
+        }
+
+        Ok(matching_indices)
+    }
+
+    /// Delete rows from a table based on (batch_index, row_index) tuples.
+    fn delete_rows_by_indices(
+        &self,
+        database: &str,
+        table: &str,
+        batches: &[RecordBatch],
+        indices_to_delete: &[(usize, usize)],
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        use std::collections::HashSet;
+
+        let delete_set: HashSet<(usize, usize)> = indices_to_delete.iter().copied().collect();
+        let mut deleted_rows = Vec::new();
+        let mut remaining_batches = Vec::new();
+        let deleted_count = indices_to_delete.len();
+
+        for (batch_idx, batch) in batches.iter().enumerate() {
+            let mut keep_indices = Vec::new();
+            let mut delete_indices = Vec::new();
+
+            for row_idx in 0..batch.num_rows() {
+                if delete_set.contains(&(batch_idx, row_idx)) {
+                    delete_indices.push(row_idx);
+                } else {
+                    keep_indices.push(row_idx);
+                }
+            }
+
+            // Collect deleted rows for RETURNING
+            if !delete_indices.is_empty() {
+                let deleted_batch = filter_batch_by_indices(batch, &delete_indices)?;
+                deleted_rows.push(deleted_batch);
+            }
+
+            // Keep remaining rows
+            if !keep_indices.is_empty() {
+                let remaining_batch = filter_batch_by_indices(batch, &keep_indices)?;
+                remaining_batches.push(remaining_batch);
+            }
+        }
+
+        // Rewrite the table with remaining data
+        self.rewrite_table_with_batches(database, table, &remaining_batches)?;
+
+        Ok((deleted_count, deleted_rows))
+    }
+
+    /// Update rows from a table based on (batch_index, row_index) tuples.
+    fn update_rows_by_indices(
+        &self,
+        database: &str,
+        table: &str,
+        assignments: &[(String, SqlValue)],
+        batches: &[RecordBatch],
+        indices_to_update: &[(usize, usize)],
+    ) -> Result<(usize, Vec<RecordBatch>), EngineError> {
+        use std::collections::HashSet;
+
+        let update_set: HashSet<(usize, usize)> = indices_to_update.iter().copied().collect();
+        let mut updated_rows = Vec::new();
+        let mut result_batches = Vec::new();
+        let updated_count = indices_to_update.len();
+
+        for (batch_idx, batch) in batches.iter().enumerate() {
+            let schema = batch.schema();
+            let mut new_columns: Vec<Arc<dyn arrow_array::Array>> = Vec::new();
+
+            for col_idx in 0..batch.num_columns() {
+                let col_name = schema.field(col_idx).name().to_lowercase();
+                let original_col = batch.column(col_idx);
+
+                // Check if this column needs updating
+                let assignment = assignments
+                    .iter()
+                    .find(|(name, _)| name.to_lowercase() == col_name);
+
+                if let Some((_, new_value)) = assignment {
+                    // Apply updates to matching rows
+                    let updated_col =
+                        apply_update_to_column(original_col, &update_set, batch_idx, new_value)?;
+                    new_columns.push(updated_col);
+                } else {
+                    new_columns.push(original_col.clone());
+                }
+            }
+
+            let new_batch = RecordBatch::try_new(schema.clone(), new_columns)
+                .map_err(|e| EngineError::Internal(format!("failed to create batch: {}", e)))?;
+
+            // Collect updated rows for RETURNING
+            let mut update_indices = Vec::new();
+            for row_idx in 0..batch.num_rows() {
+                if update_set.contains(&(batch_idx, row_idx)) {
+                    update_indices.push(row_idx);
+                }
+            }
+            if !update_indices.is_empty() {
+                let updated_batch = filter_batch_by_indices(&new_batch, &update_indices)?;
+                updated_rows.push(updated_batch);
+            }
+
+            result_batches.push(new_batch);
+        }
+
+        // Rewrite the table with updated data
+        self.rewrite_table_with_batches(database, table, &result_batches)?;
+
+        Ok((updated_count, updated_rows))
+    }
+
+    /// Rewrite a table with new batches, removing old segments and creating new ones.
+    fn rewrite_table_with_batches(
+        &self,
+        database: &str,
+        table: &str,
+        batches: &[RecordBatch],
+    ) -> Result<(), EngineError> {
+        // Get old segments to remove
+        let old_entries = self.table_entries(database, table)?;
+        let old_segment_ids: Vec<String> = old_entries.iter().map(|e| e.segment_id.clone()).collect();
+
+        // Remove old segments from manifest
+        {
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest
+                .entries
+                .retain(|e| !old_segment_ids.contains(&e.segment_id));
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+            snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
+        }
+
+        // Remove old segment files
+        for seg_id in &old_segment_ids {
+            self.remove_segment_file(seg_id);
+        }
+
+        // Invalidate cache
+        {
+            let mut cache = self.query_cache.lock();
+            cache.invalidate_table(database, table);
+        }
+
+        // Ingest new batches
+        for batch in batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let ipc = batch_to_ipc(batch)?;
+            self.ingest_ipc(IngestBatch {
+                payload_ipc: ipc,
+                watermark_micros: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64,
+                shard_override: None,
+                database: Some(database.to_string()),
+                table: Some(table.to_string()),
+            })?;
+        }
+
+        // Rebuild manifest index
+        {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut index = self
+                .manifest_index
+                .write()
+                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            *index = ManifestIndex::build(&manifest.entries);
+        }
+
+        Ok(())
     }
 
     pub fn health_check(&self) -> Result<(), EngineError> {
@@ -23468,6 +24448,222 @@ pub fn filter_batch_for_delete(
     Ok((Some(filtered), deleted_count))
 }
 
+/// Filter batch for delete and return BOTH kept rows and deleted rows.
+/// Returns (kept_batch, deleted_batch, deleted_count).
+pub fn filter_batch_for_delete_returning(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+) -> Result<(Option<RecordBatch>, Option<RecordBatch>, usize), EngineError> {
+    use arrow::compute::{and, filter_record_batch, not};
+    use arrow_array::{Array, BooleanArray, Int64Array, UInt64Array};
+    use arrow_ord::cmp::eq;
+
+    let num_rows = batch.num_rows();
+    if num_rows == 0 {
+        return Ok((None, None, 0));
+    }
+
+    // Build a mask of rows to DELETE (true = delete this row)
+    let mut delete_mask = BooleanArray::from(vec![false; num_rows]);
+
+    // If no filter, delete all rows
+    if filter_is_empty(filter) {
+        return Ok((None, Some(batch.clone()), num_rows));
+    }
+
+    // Check tenant_id_eq filter
+    if let Some(tid) = filter.tenant_id_eq {
+        if let Some(col_idx) = batch.schema().index_of("tenant_id").ok() {
+            let col = batch.column(col_idx);
+            if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+                let scalar = UInt64Array::new_scalar(tid);
+                let matches = eq(arr, &scalar)
+                    .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                if delete_mask.true_count() == 0 {
+                    delete_mask = matches;
+                }
+            }
+        }
+    }
+
+    // Check tenant_id_in filter
+    if let Some(ref tids) = filter.tenant_id_in {
+        if let Some(col_idx) = batch.schema().index_of("tenant_id").ok() {
+            let col = batch.column(col_idx);
+            if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+                let mut in_mask = BooleanArray::from(vec![false; num_rows]);
+                for tid in tids {
+                    let scalar = UInt64Array::new_scalar(*tid);
+                    let matches = eq(arr, &scalar)
+                        .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                    in_mask = arrow::compute::or(&in_mask, &matches)
+                        .map_err(|e| EngineError::Internal(format!("or error: {}", e)))?;
+                }
+                if delete_mask.true_count() > 0 {
+                    delete_mask = and(&delete_mask, &in_mask)
+                        .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                } else {
+                    delete_mask = in_mask;
+                }
+            }
+        }
+    }
+
+    // Check numeric_eq_filters
+    for (col_name, value) in &filter.numeric_eq_filters {
+        if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
+            let col = batch.column(col_idx);
+            if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+                let scalar = UInt64Array::new_scalar(*value as u64);
+                let matches = eq(arr, &scalar)
+                    .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                if delete_mask.true_count() > 0 {
+                    delete_mask = and(&delete_mask, &matches)
+                        .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                } else {
+                    delete_mask = matches;
+                }
+            } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                let scalar = Int64Array::new_scalar(*value as i64);
+                let matches = eq(arr, &scalar)
+                    .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                if delete_mask.true_count() > 0 {
+                    delete_mask = and(&delete_mask, &matches)
+                        .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                } else {
+                    delete_mask = matches;
+                }
+            }
+        }
+    }
+
+    // Check string_eq_filters
+    for (col_name, value) in &filter.string_eq_filters {
+        if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
+            let col = batch.column(col_idx);
+            if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                let scalar = StringArray::new_scalar(value);
+                let matches = arrow_ord::cmp::eq(arr, &scalar)
+                    .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                if delete_mask.true_count() > 0 {
+                    delete_mask = and(&delete_mask, &matches)
+                        .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                } else {
+                    delete_mask = matches;
+                }
+            }
+        }
+    }
+
+    let deleted_count = delete_mask.true_count();
+    if deleted_count == 0 {
+        return Ok((Some(batch.clone()), None, 0));
+    }
+
+    if deleted_count == num_rows {
+        return Ok((None, Some(batch.clone()), num_rows));
+    }
+
+    // Invert mask to get rows to KEEP
+    let keep_mask =
+        not(&delete_mask).map_err(|e| EngineError::Internal(format!("not error: {}", e)))?;
+
+    // Filter batch to get kept rows
+    let kept = filter_record_batch(batch, &keep_mask)
+        .map_err(|e| EngineError::Internal(format!("filter batch error: {}", e)))?;
+
+    // Filter batch to get deleted rows
+    let deleted = filter_record_batch(batch, &delete_mask)
+        .map_err(|e| EngineError::Internal(format!("filter batch error: {}", e)))?;
+
+    Ok((Some(kept), Some(deleted), deleted_count))
+}
+
+/// Apply assignments to batch and return the updated rows.
+/// Returns (full_updated_batch, updated_rows_only, count).
+pub fn apply_assignments_to_batch_returning(
+    batch: &RecordBatch,
+    filter: &QueryFilter,
+    assigns: &[(String, crate::sql::SqlValue)],
+) -> Result<(RecordBatch, Option<RecordBatch>, usize), EngineError> {
+    use crate::sql::SqlValue;
+    use arrow::compute::{and, filter_record_batch};
+    use arrow_array::{Array, BooleanArray, Int64Array, UInt64Array};
+    use arrow_ord::cmp::eq;
+
+    let num_rows = batch.num_rows();
+    if num_rows == 0 || assigns.is_empty() {
+        return Ok((batch.clone(), None, 0));
+    }
+
+    // Build a mask of rows to UPDATE (true = update this row)
+    let mut update_mask = BooleanArray::from(vec![true; num_rows]); // Update all if no filter
+
+    if !filter_is_empty(filter) {
+        update_mask = BooleanArray::from(vec![false; num_rows]);
+
+        // Check numeric_eq_filters
+        for (col_name, value) in &filter.numeric_eq_filters {
+            if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
+                let col = batch.column(col_idx);
+                if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+                    let scalar = UInt64Array::new_scalar(*value as u64);
+                    let matches = eq(arr, &scalar)
+                        .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                    if update_mask.true_count() > 0 {
+                        update_mask = and(&update_mask, &matches)
+                            .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                    } else {
+                        update_mask = matches;
+                    }
+                } else if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+                    let scalar = Int64Array::new_scalar(*value as i64);
+                    let matches = eq(arr, &scalar)
+                        .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                    if update_mask.true_count() > 0 {
+                        update_mask = and(&update_mask, &matches)
+                            .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                    } else {
+                        update_mask = matches;
+                    }
+                }
+            }
+        }
+
+        // Check string_eq_filters
+        for (col_name, value) in &filter.string_eq_filters {
+            if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
+                let col = batch.column(col_idx);
+                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                    let scalar = StringArray::new_scalar(value);
+                    let matches = arrow_ord::cmp::eq(arr, &scalar)
+                        .map_err(|e| EngineError::Internal(format!("filter error: {}", e)))?;
+                    if update_mask.true_count() > 0 {
+                        update_mask = and(&update_mask, &matches)
+                            .map_err(|e| EngineError::Internal(format!("and error: {}", e)))?;
+                    } else {
+                        update_mask = matches;
+                    }
+                }
+            }
+        }
+    }
+
+    let update_count = update_mask.true_count();
+    if update_count == 0 {
+        return Ok((batch.clone(), None, 0));
+    }
+
+    // Apply assignments to create the updated batch
+    let (updated_batch, _) = apply_assignments_to_batch(batch, filter, assigns)?;
+
+    // Extract only the rows that were updated from the new batch
+    let updated_rows = filter_record_batch(&updated_batch, &update_mask)
+        .map_err(|e| EngineError::Internal(format!("filter batch error: {}", e)))?;
+
+    Ok((updated_batch, Some(updated_rows), update_count))
+}
+
 pub fn apply_assignments_to_batch(
     batch: &RecordBatch,
     filter: &QueryFilter,
@@ -28785,6 +29981,639 @@ fn log_repair_to_file(path: &Path, database: &str, table: &str, removed: &[Strin
             tracing::warn!("failed to open repair log file {:?}: {}", path, e);
         }
     }
+}
+
+/// Parse a MERGE ON condition to extract target and source column names.
+/// Supports simple "target.col = source.col" or "col = col" patterns.
+fn parse_merge_condition(condition: &str) -> Result<(String, String), EngineError> {
+    let condition = condition.trim();
+    // Remove outer parentheses if present
+    let condition = condition.trim_start_matches('(').trim_end_matches(')').trim();
+
+    // Look for = sign
+    let parts: Vec<&str> = condition.split('=').collect();
+    if parts.len() != 2 {
+        return Err(EngineError::InvalidArgument(format!(
+            "MERGE ON condition must be a simple equality: {}",
+            condition
+        )));
+    }
+
+    let left = parts[0].trim();
+    let right = parts[1].trim();
+
+    // Extract column names (handle table.column format)
+    let target_col = if left.contains('.') {
+        left.split('.').last().unwrap_or(left).to_string()
+    } else {
+        left.to_string()
+    };
+
+    let source_col = if right.contains('.') {
+        right.split('.').last().unwrap_or(right).to_string()
+    } else {
+        right.to_string()
+    };
+
+    Ok((target_col, source_col))
+}
+
+/// Convert an array value at a specific index to a string for comparison.
+fn merge_array_value_to_string(arr: &dyn arrow_array::Array, idx: usize) -> Option<String> {
+    use arrow_array::Array;
+
+    if arr.is_null(idx) {
+        return None;
+    }
+
+    if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+
+    None
+}
+
+/// Evaluate a simple condition for MERGE.
+/// For now, always returns true (conditions are not fully evaluated).
+fn evaluate_simple_condition(
+    _condition: Option<&String>,
+    _batch: &RecordBatch,
+    _row_idx: usize,
+) -> bool {
+    // TODO: Implement proper condition evaluation
+    // For now, conditions without explicit predicates always match
+    true
+}
+
+/// Build IPC data from an InsertCommand for MERGE insertion.
+fn build_insert_ipc(
+    cmd: &crate::sql::InsertCommand,
+    db: &Db,
+    database: &str,
+    table: &str,
+) -> Result<Vec<u8>, EngineError> {
+    use crate::sql::SqlValue;
+    use arrow_array::builder::*;
+
+    // Get table schema
+    let table_meta = {
+        let manifest = db
+            .manifest
+            .read()
+            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        manifest
+            .tables
+            .iter()
+            .find(|t| t.database == database && t.name == table)
+            .cloned()
+            .ok_or_else(|| EngineError::NotFound(format!("table not found: {database}.{table}")))?
+    };
+
+    let schema_json = table_meta
+        .schema_json
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidArgument("table has no schema".into()))?;
+
+    let fields: Vec<TableFieldSpec> = serde_json::from_str(schema_json)
+        .map_err(|e| EngineError::InvalidArgument(format!("invalid schema: {e}")))?;
+
+    // Build Arrow schema
+    let arrow_fields: Vec<Field> = fields
+        .iter()
+        .map(|f| {
+            let dt = arrow_type_from_str(&f.data_type).unwrap_or(DataType::Utf8);
+            Field::new(&f.name, dt, f.nullable)
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(arrow_fields));
+
+    // Build arrays for each column
+    let columns = cmd.columns.as_ref();
+    let values = &cmd.values;
+
+    if values.is_empty() {
+        return Err(EngineError::InvalidArgument("no values to insert".into()));
+    }
+
+    let mut arrays: Vec<ArrayRef> = Vec::new();
+
+    for (field_idx, field) in fields.iter().enumerate() {
+        // Find the column index in the INSERT columns list
+        let col_idx = columns.as_ref().and_then(|cols| {
+            cols.iter().position(|c| c.eq_ignore_ascii_case(&field.name))
+        });
+
+        let dt = arrow_type_from_str(&field.data_type).unwrap_or(DataType::Utf8);
+
+        // Build array based on data type
+        match dt {
+            DataType::Int64 => {
+                let mut builder = Int64Builder::new();
+                for row in values {
+                    if let Some(idx) = col_idx {
+                        if idx < row.len() {
+                            match &row[idx] {
+                                SqlValue::Integer(v) => builder.append_value(*v),
+                                SqlValue::Null => builder.append_null(),
+                                _ => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                arrays.push(Arc::new(builder.finish()));
+            }
+            DataType::Float64 => {
+                let mut builder = Float64Builder::new();
+                for row in values {
+                    if let Some(idx) = col_idx {
+                        if idx < row.len() {
+                            match &row[idx] {
+                                SqlValue::Float(v) => builder.append_value(*v),
+                                SqlValue::Integer(v) => builder.append_value(*v as f64),
+                                SqlValue::Null => builder.append_null(),
+                                _ => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                arrays.push(Arc::new(builder.finish()));
+            }
+            DataType::Boolean => {
+                let mut builder = BooleanBuilder::new();
+                for row in values {
+                    if let Some(idx) = col_idx {
+                        if idx < row.len() {
+                            match &row[idx] {
+                                SqlValue::Boolean(v) => builder.append_value(*v),
+                                SqlValue::Null => builder.append_null(),
+                                _ => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                arrays.push(Arc::new(builder.finish()));
+            }
+            _ => {
+                // Default to string
+                let mut builder = StringBuilder::new();
+                for row in values {
+                    if let Some(idx) = col_idx {
+                        if idx < row.len() {
+                            match &row[idx] {
+                                SqlValue::String(v) => builder.append_value(v),
+                                SqlValue::Integer(v) => builder.append_value(v.to_string()),
+                                SqlValue::Float(v) => builder.append_value(v.to_string()),
+                                SqlValue::Boolean(v) => builder.append_value(v.to_string()),
+                                SqlValue::Null => builder.append_null(),
+                            }
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                arrays.push(Arc::new(builder.finish()));
+            }
+        }
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|e| EngineError::Internal(format!("failed to create batch: {e}")))?;
+
+    record_batches_to_ipc(&schema, &[batch])
+}
+
+/// Represents a parsed join predicate extracted from a WHERE clause.
+#[derive(Debug)]
+struct JoinPredicate {
+    /// Column name in the target table
+    target_column: String,
+    /// Column name in the join table
+    join_column: String,
+    /// Optional table name/alias for the join table
+    join_table_name: Option<String>,
+}
+
+/// Parse WHERE clause to extract join predicates.
+/// Looks for patterns like "t1.col = t2.col" or "col1 = alias.col2"
+fn parse_join_predicates(
+    where_clause: &str,
+    target_alias: Option<&str>,
+    join_tables: &[(String, String, Option<String>, Vec<RecordBatch>)],
+) -> Result<Vec<JoinPredicate>, EngineError> {
+    let mut predicates = Vec::new();
+
+    // Simple parser: split on AND, look for equality conditions
+    let conditions: Vec<&str> = where_clause
+        .split(" AND ")
+        .chain(where_clause.split(" and "))
+        .collect();
+
+    for cond in conditions {
+        let cond = cond.trim();
+        if let Some(eq_pos) = cond.find('=') {
+            // Skip != and >=, <= etc.
+            if eq_pos > 0 && (cond.as_bytes()[eq_pos - 1] == b'!' ||
+                cond.as_bytes()[eq_pos - 1] == b'<' ||
+                cond.as_bytes()[eq_pos - 1] == b'>') {
+                continue;
+            }
+            if eq_pos + 1 < cond.len() && cond.as_bytes()[eq_pos + 1] == b'=' {
+                continue; // Skip ==
+            }
+
+            let left = cond[..eq_pos].trim();
+            let right = cond[eq_pos + 1..].trim();
+
+            // Parse table.column or just column
+            let (left_table, left_col) = parse_qualified_column(left);
+            let (right_table, right_col) = parse_qualified_column(right);
+
+            // Determine which side is the target table and which is the join table
+            let target_names: Vec<String> = {
+                let mut names = Vec::new();
+                if let Some(alias) = target_alias {
+                    names.push(alias.to_lowercase());
+                }
+                names
+            };
+
+            let join_names: Vec<String> = join_tables
+                .iter()
+                .flat_map(|(_, table, alias, _)| {
+                    let mut names = vec![table.to_lowercase()];
+                    if let Some(a) = alias {
+                        names.push(a.to_lowercase());
+                    }
+                    names
+                })
+                .collect();
+
+            // Check if left is target and right is join
+            let left_is_target = left_table
+                .as_ref()
+                .map(|t| target_names.contains(&t.to_lowercase()))
+                .unwrap_or(true); // If no table qualifier, assume it could be target
+            let right_is_join = right_table
+                .as_ref()
+                .map(|t| join_names.contains(&t.to_lowercase()))
+                .unwrap_or(false);
+
+            if left_is_target && right_is_join {
+                predicates.push(JoinPredicate {
+                    target_column: left_col.to_string(),
+                    join_column: right_col.to_string(),
+                    join_table_name: right_table.map(|s| s.to_string()),
+                });
+                continue;
+            }
+
+            // Check if right is target and left is join
+            let right_is_target = right_table
+                .as_ref()
+                .map(|t| target_names.contains(&t.to_lowercase()))
+                .unwrap_or(true);
+            let left_is_join = left_table
+                .as_ref()
+                .map(|t| join_names.contains(&t.to_lowercase()))
+                .unwrap_or(false);
+
+            if right_is_target && left_is_join {
+                predicates.push(JoinPredicate {
+                    target_column: right_col.to_string(),
+                    join_column: left_col.to_string(),
+                    join_table_name: left_table.map(|s| s.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(predicates)
+}
+
+/// Parse a potentially qualified column name like "table.column" or just "column"
+fn parse_qualified_column(s: &str) -> (Option<&str>, &str) {
+    if let Some(dot_pos) = s.rfind('.') {
+        let table = s[..dot_pos].trim();
+        let col = s[dot_pos + 1..].trim();
+        (Some(table), col)
+    } else {
+        (None, s.trim())
+    }
+}
+
+/// Convert array value to string for join comparisons.
+fn array_value_to_string_for_join(arr: &dyn arrow_array::Array, idx: usize) -> Option<String> {
+    use arrow_array::Array;
+
+    if arr.is_null(idx) {
+        return None;
+    }
+
+    if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Int16Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Int8Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::UInt32Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::UInt16Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::UInt8Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Float32Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::TimestampMillisecondArray>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Date32Array>() {
+        return Some(a.value(idx).to_string());
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Date64Array>() {
+        return Some(a.value(idx).to_string());
+    }
+
+    None
+}
+
+/// Filter a RecordBatch to only include specific row indices.
+fn filter_batch_by_indices(batch: &RecordBatch, indices: &[usize]) -> Result<RecordBatch, EngineError> {
+    use arrow_array::builder::UInt32Builder;
+    use arrow_select::take::take;
+
+    if indices.is_empty() {
+        // Return empty batch with same schema
+        let empty_cols: Vec<Arc<dyn arrow_array::Array>> = batch
+            .columns()
+            .iter()
+            .map(|col| {
+                col.slice(0, 0)
+            })
+            .collect();
+        return RecordBatch::try_new(batch.schema(), empty_cols)
+            .map_err(|e| EngineError::Internal(format!("failed to create empty batch: {e}")));
+    }
+
+    let mut builder = UInt32Builder::with_capacity(indices.len());
+    for &idx in indices {
+        builder.append_value(idx as u32);
+    }
+    let indices_array = builder.finish();
+
+    let new_columns: Result<Vec<Arc<dyn arrow_array::Array>>, _> = batch
+        .columns()
+        .iter()
+        .map(|col| take(col.as_ref(), &indices_array, None).map(|a| Arc::from(a)))
+        .collect();
+
+    let new_columns = new_columns
+        .map_err(|e| EngineError::Internal(format!("failed to filter batch: {e}")))?;
+
+    RecordBatch::try_new(batch.schema(), new_columns)
+        .map_err(|e| EngineError::Internal(format!("failed to create filtered batch: {e}")))
+}
+
+/// Apply an update to a column for specific row indices.
+fn apply_update_to_column(
+    column: &Arc<dyn arrow_array::Array>,
+    update_set: &std::collections::HashSet<(usize, usize)>,
+    batch_idx: usize,
+    new_value: &SqlValue,
+) -> Result<Arc<dyn arrow_array::Array>, EngineError> {
+    use arrow_array::builder::*;
+    use arrow_array::Array;
+    use arrow_schema::DataType;
+
+    let len = column.len();
+    let dt = column.data_type().clone();
+
+    match &dt {
+        DataType::Utf8 => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| EngineError::Internal("expected string array".into()))?;
+            let mut builder = StringBuilder::with_capacity(len, len * 32);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::String(s) => builder.append_value(s),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::Integer(n) => builder.append_value(n.to_string()),
+                        SqlValue::Float(f) => builder.append_value(f.to_string()),
+                        SqlValue::Boolean(b) => builder.append_value(b.to_string()),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Int64 => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| EngineError::Internal("expected int64 array".into()))?;
+            let mut builder = Int64Builder::with_capacity(len);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::Integer(n) => builder.append_value(*n),
+                        SqlValue::Float(f) => builder.append_value(*f as i64),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::String(s) => {
+                            if let Ok(n) = s.parse::<i64>() {
+                                builder.append_value(n);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Float64 => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| EngineError::Internal("expected float64 array".into()))?;
+            let mut builder = Float64Builder::with_capacity(len);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::Float(f) => builder.append_value(*f),
+                        SqlValue::Integer(n) => builder.append_value(*n as f64),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::String(s) => {
+                            if let Ok(f) = s.parse::<f64>() {
+                                builder.append_value(f);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Boolean => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<arrow_array::BooleanArray>()
+                .ok_or_else(|| EngineError::Internal("expected boolean array".into()))?;
+            let mut builder = arrow_array::builder::BooleanBuilder::with_capacity(len);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::Boolean(b) => builder.append_value(*b),
+                        SqlValue::Integer(n) => builder.append_value(*n != 0),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::String(s) => {
+                            let b = s.eq_ignore_ascii_case("true") || s == "1";
+                            builder.append_value(b);
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Int32 => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or_else(|| EngineError::Internal("expected int32 array".into()))?;
+            let mut builder = Int32Builder::with_capacity(len);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::Integer(n) => builder.append_value(*n as i32),
+                        SqlValue::Float(f) => builder.append_value(*f as i32),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::String(s) => {
+                            if let Ok(n) = s.parse::<i32>() {
+                                builder.append_value(n);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::UInt64 => {
+            let arr = column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| EngineError::Internal("expected uint64 array".into()))?;
+            let mut builder = UInt64Builder::with_capacity(len);
+            for i in 0..len {
+                if update_set.contains(&(batch_idx, i)) {
+                    match new_value {
+                        SqlValue::Integer(n) => builder.append_value(*n as u64),
+                        SqlValue::Float(f) => builder.append_value(*f as u64),
+                        SqlValue::Null => builder.append_null(),
+                        SqlValue::String(s) => {
+                            if let Ok(n) = s.parse::<u64>() {
+                                builder.append_value(n);
+                            } else {
+                                builder.append_null();
+                            }
+                        }
+                        _ => builder.append_null(),
+                    }
+                } else if arr.is_null(i) {
+                    builder.append_null();
+                } else {
+                    builder.append_value(arr.value(i));
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        _ => {
+            // For unsupported types, return the original column unchanged
+            Ok(column.clone())
+        }
+    }
+}
+
+/// Convert a RecordBatch to IPC bytes.
+fn batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, EngineError> {
+    record_batches_to_ipc(&batch.schema(), &[batch.clone()])
 }
 
 #[cfg(test)]
