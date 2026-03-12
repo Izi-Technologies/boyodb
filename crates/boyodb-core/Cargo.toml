@@ -66,12 +66,18 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }     # Fast hashing for c
 libc = "0.2"                                                 # For disk space checking (statvfs)
 memmap2 = "0.9"                                              # Memory-mapped file access for large segments
 
+# FDW PostgreSQL connectivity
+tokio-postgres = { version = "0.7", optional = true }
+postgres-types = { version = "0.2", optional = true, features = ["derive"] }
+
 [features]
 default = []
 # Enable DataFusion query engine integration for advanced optimization
 datafusion-engine = ["datafusion", "datafusion-common", "datafusion-expr", "datafusion-physical-plan"]
 # Enable GPU acceleration (requires CUDA runtime)
 gpu = ["datafusion-engine"]
+# Enable FDW PostgreSQL connectivity
+fdw-postgres = ["tokio-postgres", "postgres-types"]
 
 [lints]
 workspace = true

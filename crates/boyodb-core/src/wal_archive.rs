@@ -7,11 +7,16 @@
 
 use crate::engine::EngineError;
 
+use object_store::aws::AmazonS3Builder;
+use object_store::path::Path as ObjPath;
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::runtime::Handle;
 
 /// Information about an archived WAL segment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +67,12 @@ pub struct WalArchiveConfig {
     /// S3 endpoint (for compatible services)
     pub s3_endpoint: Option<String>,
 
+    /// S3 access key
+    pub s3_access_key: Option<String>,
+
+    /// S3 secret key
+    pub s3_secret_key: Option<String>,
+
     /// Retention period in days (0 = forever)
     pub retention_days: u32,
 
@@ -83,6 +94,8 @@ impl Default for WalArchiveConfig {
             s3_prefix: None,
             s3_region: None,
             s3_endpoint: None,
+            s3_access_key: None,
+            s3_secret_key: None,
             retention_days: 30,
             compression: Some("zstd".to_string()),
             verify_checksum: true,
@@ -97,6 +110,12 @@ pub struct WalArchiver {
 
     /// Index of archived segments (LSN -> info)
     archive_index: parking_lot::RwLock<Vec<WalArchiveInfo>>,
+
+    /// S3 object store for remote archiving
+    s3_store: Option<Arc<dyn ObjectStore>>,
+
+    /// Tokio runtime handle for async S3 operations
+    runtime: Option<Handle>,
 }
 
 impl WalArchiver {
@@ -110,9 +129,53 @@ impl WalArchiver {
             ))
         })?;
 
+        // Initialize S3 store if configured
+        let has_s3_config = config.s3_bucket.is_some() && config.s3_region.is_some();
+
+        let runtime = if has_s3_config {
+            Some(Handle::try_current().map_err(|_| {
+                EngineError::Internal(
+                    "WalArchiver with S3 must be initialized within a Tokio runtime".into(),
+                )
+            })?)
+        } else {
+            Handle::try_current().ok()
+        };
+
+        let s3_store = if let (Some(bucket), Some(region)) =
+            (&config.s3_bucket, &config.s3_region)
+        {
+            let mut builder = AmazonS3Builder::new()
+                .with_region(region)
+                .with_bucket_name(bucket);
+
+            if let Some(endpoint) = &config.s3_endpoint {
+                builder = builder.with_endpoint(endpoint);
+            }
+
+            if let (Some(ak), Some(sk)) = (&config.s3_access_key, &config.s3_secret_key) {
+                builder = builder
+                    .with_access_key_id(ak)
+                    .with_secret_access_key(sk);
+            }
+
+            // Allow http for local minio/testing
+            builder = builder.with_allow_http(true);
+
+            let s3 = builder
+                .build()
+                .map_err(|e| EngineError::Internal(format!("Failed to build S3 client: {}", e)))?;
+
+            Some(Arc::new(s3) as Arc<dyn ObjectStore>)
+        } else {
+            None
+        };
+
         let archiver = WalArchiver {
             config,
             archive_index: parking_lot::RwLock::new(Vec::new()),
+            s3_store,
+            runtime,
         };
 
         // Load existing archive index
@@ -417,24 +480,107 @@ impl WalArchiver {
         Ok(())
     }
 
-    fn upload_to_s3(&self, _local_path: &Path, _remote_name: &str) -> Result<(), EngineError> {
-        // TODO: Implement S3 upload using aws-sdk-s3 or similar
-        // For now, just log that we would upload
-        tracing::debug!("Would upload to S3: {}", _remote_name);
+    fn upload_to_s3(&self, local_path: &Path, remote_name: &str) -> Result<(), EngineError> {
+        let s3_store = self.s3_store.as_ref().ok_or_else(|| {
+            EngineError::Configuration("S3 not configured for WAL archiver".into())
+        })?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            EngineError::Internal("No Tokio runtime available for S3 operations".into())
+        })?;
+
+        // Read the file
+        let data = fs::read(local_path)
+            .map_err(|e| EngineError::Io(format!("Failed to read file for S3 upload: {}", e)))?;
+
+        // Build the S3 path with prefix
+        let s3_path = if let Some(ref prefix) = self.config.s3_prefix {
+            format!("{}/{}", prefix.trim_end_matches('/'), remote_name)
+        } else {
+            format!("wal_archive/{}", remote_name)
+        };
+
+        let path = ObjPath::from(s3_path.as_str());
+        let store = s3_store.clone();
+        let payload = PutPayload::from(data);
+
+        // Execute upload
+        runtime
+            .block_on(async move {
+                store.put(&path, payload).await
+            })
+            .map_err(|e| EngineError::Io(format!("S3 upload failed: {}", e)))?;
+
+        tracing::info!("Uploaded WAL archive to S3: {}", s3_path);
         Ok(())
     }
 
-    fn download_from_s3(&self, _remote_name: &str) -> Result<Vec<u8>, EngineError> {
-        // TODO: Implement S3 download
-        Err(EngineError::NotImplemented(
-            "S3 download not yet implemented".to_string(),
-        ))
+    fn download_from_s3(&self, remote_name: &str) -> Result<Vec<u8>, EngineError> {
+        let s3_store = self.s3_store.as_ref().ok_or_else(|| {
+            EngineError::Configuration("S3 not configured for WAL archiver".into())
+        })?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            EngineError::Internal("No Tokio runtime available for S3 operations".into())
+        })?;
+
+        // Build the S3 path with prefix
+        let s3_path = if let Some(ref prefix) = self.config.s3_prefix {
+            format!("{}/{}", prefix.trim_end_matches('/'), remote_name)
+        } else {
+            format!("wal_archive/{}", remote_name)
+        };
+
+        let path = ObjPath::from(s3_path.as_str());
+        let store = s3_store.clone();
+
+        // Execute download - get the object and read bytes
+        let get_result = runtime
+            .block_on(async move { store.get(&path).await })
+            .map_err(|e| EngineError::Io(format!("S3 download failed: {}", e)))?;
+
+        let data = runtime
+            .block_on(async move { get_result.bytes().await })
+            .map_err(|e| EngineError::Io(format!("Failed to read S3 response: {}", e)))?;
+
+        tracing::info!("Downloaded WAL archive from S3: {}", s3_path);
+        Ok(data.to_vec())
     }
 
-    fn delete_from_s3(&self, _remote_name: &str) -> Result<(), EngineError> {
-        // TODO: Implement S3 delete
-        tracing::debug!("Would delete from S3: {}", _remote_name);
+    fn delete_from_s3(&self, remote_name: &str) -> Result<(), EngineError> {
+        let s3_store = self.s3_store.as_ref().ok_or_else(|| {
+            EngineError::Configuration("S3 not configured for WAL archiver".into())
+        })?;
+
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            EngineError::Internal("No Tokio runtime available for S3 operations".into())
+        })?;
+
+        // Build the S3 path with prefix
+        let s3_path = if let Some(ref prefix) = self.config.s3_prefix {
+            format!("{}/{}", prefix.trim_end_matches('/'), remote_name)
+        } else {
+            format!("wal_archive/{}", remote_name)
+        };
+
+        let path = ObjPath::from(s3_path.as_str());
+        let store = s3_store.clone();
+
+        // Execute delete
+        runtime
+            .block_on(async move {
+                let result: Result<(), object_store::Error> = store.delete(&path).await;
+                result
+            })
+            .map_err(|e| EngineError::Io(format!("S3 delete failed: {}", e)))?;
+
+        tracing::info!("Deleted WAL archive from S3: {}", s3_path);
         Ok(())
+    }
+
+    /// Check if S3 is configured
+    pub fn has_s3(&self) -> bool {
+        self.s3_store.is_some()
     }
 }
 

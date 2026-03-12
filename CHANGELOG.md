@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Replica status monitoring endpoint
   - Proper PostgreSQL error codes (SQLSTATE 25006) for write rejections
 
+- **WAL Archive S3 Operations**: Full S3 support for WAL archiving
+  - Real S3 upload for WAL segment archiving (was stub)
+  - Real S3 download for WAL segment retrieval (was NotImplemented)
+  - Real S3 delete for WAL retention enforcement (was stub)
+  - Uses ObjectStore abstraction for S3 compatibility
+  - Configurable S3 bucket, prefix, and credentials
+
 ### Fixed
 - **Memory Context Double-Counting**: Fixed bug where parent contexts counted children's allocations twice (once in parent's `current_used`, once via `total_usage()` recursion)
 - **Memory Context Leak**: Fixed memory leak where deallocated blocks weren't properly removed from the block vector
