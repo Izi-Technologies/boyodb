@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.9.5] - 2026-03-12
 
 ### Added
+
+- **GraphQL API**: Complete GraphQL interface for BoyoDB
+  - Full schema introspection with automatic table schema generation
+  - Query, Mutation, and Subscription type support
+  - SDL (Schema Definition Language) export
+  - Nested field resolution for related data
+  - Custom scalar types for BoyoDB data types
+
+- **In-Database ML Inference**: Machine learning model registry and inference
+  - Support for ONNX, TensorFlow, PyTorch, XGBoost, LightGBM model formats
+  - Model versioning with A/B testing support
+  - Batch inference with configurable batch sizes
+  - Prediction caching for improved performance
+  - Feature preprocessing pipelines (normalize, standardize, one-hot encode)
+  - SQL interface: `ML_PREDICT(model, features)`, `ML_SCORE(model, input)`
+
+- **OpenTelemetry Integration**: Distributed tracing and metrics
+  - W3C Trace Context propagation (traceparent header support)
+  - Automatic tracing for queries, ingestion, and compaction
+  - Metrics collection (counters, gauges, histograms)
+  - OTLP and Prometheus exporters
+  - Database semantic conventions (db.system, db.statement, etc.)
+
+- **CDC Webhooks**: Real-time change data capture notifications
+  - Configurable webhook endpoints per table
+  - INSERT, UPDATE, DELETE operation tracking
+  - Batched delivery for high-throughput scenarios
+  - Retry logic with exponential backoff
+  - HMAC-SHA256 payload signing for security
+  - At-least-once delivery semantics
+
+- **PIVOT/UNPIVOT**: SQL data transformation
+  - `PIVOT (aggregate FOR column IN (values))` - rows to columns
+  - `UNPIVOT (value_column FOR name_column IN (columns))` - columns to rows
+
+- **Approximate Aggregates**: High-performance statistical functions
+  - `APPROX_PERCENTILE(column, percentile)` - T-Digest approximate percentile
+  - `APPROX_MEDIAN(column)` - T-Digest approximate median
+  - `APPROX_COUNT_DISTINCT(column)` - HyperLogLog cardinality estimation
+
+- **GROUPING SETS/CUBE/ROLLUP**: Multi-level aggregations
+  - `GROUP BY GROUPING SETS (...)` - multiple grouping combinations
+  - `GROUP BY ROLLUP (...)` - hierarchical subtotals
+  - `GROUP BY CUBE (...)` - all possible combinations
+  - `GROUPING(column)` function for null vs aggregate null detection
+
 - **DISTINCT ON**: PostgreSQL-style first-row-per-group selection
   - `SELECT DISTINCT ON (category) * FROM products ORDER BY category, price`
   - Returns first row for each unique value in the DISTINCT ON columns
