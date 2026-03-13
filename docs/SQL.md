@@ -11,9 +11,12 @@ Complete SQL reference for BoyoDB.
 - [Query Statements](#query-statements)
 - [Operators](#operators)
 - [Functions](#functions)
+- [JSON Functions](#json-functions)
 - [Window Functions](#window-functions)
 - [Common Table Expressions](#common-table-expressions)
 - [Prepared Statements](#prepared-statements)
+- [Materialized Views](#materialized-views)
+- [Foreign Data Wrappers](#foreign-data-wrappers)
 - [Recovery Statements](#recovery-statements)
 
 ---
@@ -234,6 +237,63 @@ DROP INDEX IF EXISTS index_name ON [database.]table_name;
 ```sql
 DROP INDEX idx_email ON mydb.users;
 DROP INDEX IF EXISTS idx_old ON mydb.events;
+```
+
+### CREATE MATERIALIZED VIEW
+
+```sql
+CREATE MATERIALIZED VIEW view_name AS
+SELECT ...;
+```
+
+**Examples:**
+```sql
+-- Daily aggregations
+CREATE MATERIALIZED VIEW daily_stats AS
+SELECT DATE(event_time) as day, COUNT(*) as events, SUM(amount) as total
+FROM events
+GROUP BY DATE(event_time);
+
+-- Customer summaries
+CREATE MATERIALIZED VIEW customer_summary AS
+SELECT customer_id, COUNT(*) as orders, SUM(total) as lifetime_value
+FROM orders
+GROUP BY customer_id;
+```
+
+### REFRESH MATERIALIZED VIEW
+
+```sql
+-- Full refresh (recompute entire view)
+REFRESH MATERIALIZED VIEW view_name;
+
+-- Incremental refresh (delta-based, faster for append-heavy tables)
+REFRESH MATERIALIZED VIEW view_name INCREMENTAL;
+```
+
+**Incremental Refresh:**
+
+Incremental refresh uses watermark tracking to identify rows added since the last refresh, computing only the delta and merging with existing data. This is much faster for append-heavy workloads.
+
+**Examples:**
+```sql
+-- Full refresh (recomputes everything)
+REFRESH MATERIALIZED VIEW daily_stats;
+
+-- Incremental refresh (only processes new data)
+REFRESH MATERIALIZED VIEW daily_stats INCREMENTAL;
+```
+
+**Best Practices:**
+- Use incremental refresh for append-only or append-heavy tables
+- Use full refresh after DELETE/UPDATE operations or periodic full reconciliation
+- Schedule refreshes during low-traffic periods for large views
+
+### DROP MATERIALIZED VIEW
+
+```sql
+DROP MATERIALIZED VIEW view_name;
+DROP MATERIALIZED VIEW IF EXISTS view_name;
 ```
 
 ### SHOW INDEXES
@@ -484,7 +544,42 @@ SELECT id, price * quantity AS total FROM orders;
 
 -- DISTINCT
 SELECT DISTINCT category FROM products;
+
+-- DISTINCT ON (PostgreSQL-style)
+SELECT DISTINCT ON (category) * FROM products ORDER BY category, price ASC;
 ```
+
+### DISTINCT ON
+
+PostgreSQL-style first-row-per-group selection:
+
+```sql
+SELECT DISTINCT ON (column1, column2, ...) columns
+FROM table
+ORDER BY column1, column2, ... [, additional_columns];
+```
+
+Returns the first row for each unique combination of the DISTINCT ON columns. The ORDER BY clause determines which row is "first".
+
+**Examples:**
+```sql
+-- Get cheapest product in each category
+SELECT DISTINCT ON (category) id, category, name, price
+FROM products
+ORDER BY category, price ASC;
+
+-- Get most recent order per customer
+SELECT DISTINCT ON (customer_id) *
+FROM orders
+ORDER BY customer_id, order_date DESC;
+
+-- Multiple DISTINCT ON columns
+SELECT DISTINCT ON (region, category) *
+FROM sales
+ORDER BY region, category, revenue DESC;
+```
+
+**Note:** The DISTINCT ON columns must match the leading columns in ORDER BY.
 
 ### WHERE Clause
 
@@ -682,6 +777,14 @@ ARRAY_AGG(column)                    -- Collect values into array
 ARRAY_AGG(DISTINCT column)           -- Collect unique values into array
 STRING_AGG(column, ',')              -- Concatenate strings with delimiter
 STRING_AGG(DISTINCT column, ',')     -- Concatenate unique strings
+
+-- Ordered aggregates (WITHIN GROUP)
+MODE() WITHIN GROUP (ORDER BY column)                    -- Most frequent value
+STRING_AGG_ORDERED(column, ',' ORDER BY col)             -- Ordered string concatenation
+ARRAY_AGG_ORDERED(column ORDER BY col)                   -- Ordered array collection
+FIRST_VALUE(column) WITHIN GROUP (ORDER BY col)          -- First value in order
+LAST_VALUE(column) WITHIN GROUP (ORDER BY col)           -- Last value in order
+NTH_VALUE(column, n) WITHIN GROUP (ORDER BY col)         -- Nth value in order
 ```
 
 **Examples:**
@@ -704,6 +807,19 @@ SELECT user_id, ARRAY_AGG(product_id) as purchased_products
 FROM orders GROUP BY user_id;
 
 SELECT department, STRING_AGG(name, ', ') as team_members
+FROM employees GROUP BY department;
+
+-- Ordered aggregates (WITHIN GROUP)
+SELECT category, MODE() WITHIN GROUP (ORDER BY brand) as most_common_brand
+FROM products GROUP BY category;
+
+SELECT user_id, STRING_AGG_ORDERED(event_type, ' -> ' ORDER BY event_time) as journey
+FROM events GROUP BY user_id;
+
+SELECT department, FIRST_VALUE(name) WITHIN GROUP (ORDER BY hire_date) as first_hire
+FROM employees GROUP BY department;
+
+SELECT department, NTH_VALUE(salary, 2) WITHIN GROUP (ORDER BY salary DESC) as second_highest
 FROM employees GROUP BY department;
 ```
 
@@ -741,6 +857,57 @@ SELECT REGEXP_REPLACE(email, '@.*', '@redacted.com') AS masked_email FROM users;
 SELECT REGEXP_REPLACE(phone, '[^0-9]', '', 'g') AS digits_only FROM users;
 SELECT * FROM logs WHERE REGEXP_MATCH(message, 'error|warning', 'i');
 SELECT REGEXP_EXTRACT(url, 'https?://([^/]+)', 1) AS domain FROM requests;
+```
+
+### JSON Functions
+
+```sql
+-- Basic extraction
+JSON_EXTRACT(json, '$.path')           -- Extract value at path
+JSON_EXTRACT(json, '$.nested.field')   -- Nested field access
+JSON_EXTRACT(json, '$.array[0]')       -- Array index access
+
+-- Advanced JSON Path expressions
+JSON_EXTRACT(json, '$.items[*].name')          -- Wildcard: all array elements
+JSON_EXTRACT(json, '$.items[0:5]')             -- Slicing: elements 0-4
+JSON_EXTRACT(json, '$..field')                 -- Recursive descent: find at any depth
+JSON_EXTRACT(json, '$.items[?(@.price > 100)]') -- Filter: conditional selection
+
+-- Multi-value extraction
+JSON_EXTRACT_ALL(json, '$.items[*].id')        -- Returns array of all matches
+```
+
+**JSON Path Syntax:**
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `$.field` | Root field access | `$.name` |
+| `$.a.b` | Nested field | `$.user.email` |
+| `$[n]` | Array index | `$[0]`, `$[2]` |
+| `$[*]` | All array elements | `$.items[*]` |
+| `$[start:end]` | Array slice | `$[0:5]`, `$[2:10]` |
+| `$..field` | Recursive descent | `$..id` (find id at any level) |
+| `$[?(@.x > y)]` | Filter expression | `$[?(@.price > 100)]` |
+
+**Examples:**
+```sql
+-- Extract nested field
+SELECT JSON_EXTRACT(metadata, '$.user.preferences.theme') FROM settings;
+
+-- Get all product names from array
+SELECT JSON_EXTRACT(order_data, '$.items[*].name') FROM orders;
+
+-- Slice first 3 items
+SELECT JSON_EXTRACT(data, '$.results[0:3]') FROM api_responses;
+
+-- Find all IDs at any depth
+SELECT JSON_EXTRACT(document, '$..id') FROM documents;
+
+-- Filter products over $100
+SELECT JSON_EXTRACT(cart, '$.items[?(@.price > 100)]') FROM shopping_carts;
+
+-- Extract all matching values as array
+SELECT JSON_EXTRACT_ALL(log_entry, '$.events[*].timestamp') FROM logs;
 ```
 
 ### Math Functions
@@ -1427,6 +1594,92 @@ STOP STREAM user_events;
 
 -- Remove stream definition
 DROP STREAM user_events;
+```
+
+---
+
+## Materialized Views
+
+See [CREATE MATERIALIZED VIEW](#create-materialized-view) in DDL Statements for syntax.
+
+Materialized views store precomputed query results for fast access. BoyoDB supports both full and incremental refresh strategies.
+
+**Key Features:**
+- Full refresh: Recomputes entire view from base tables
+- Incremental refresh: Uses watermark tracking to process only new data
+- Automatic query rewriting to use materialized views (when applicable)
+
+---
+
+## Foreign Data Wrappers
+
+BoyoDB supports querying external databases through Foreign Data Wrappers (FDW).
+
+### CREATE SERVER
+
+```sql
+CREATE SERVER server_name
+FOREIGN DATA WRAPPER postgres
+OPTIONS (host 'hostname', port '5432', dbname 'database');
+```
+
+### CREATE FOREIGN TABLE
+
+```sql
+CREATE FOREIGN TABLE local_name (
+    column1 type,
+    column2 type,
+    ...
+)
+SERVER server_name
+OPTIONS (schema_name 'public', table_name 'remote_table');
+```
+
+### Query Federation
+
+BoyoDB can push down operations to foreign servers for improved performance:
+
+```sql
+-- Aggregations are pushed to remote server
+SELECT category, SUM(amount) FROM foreign_sales GROUP BY category;
+
+-- Sorts are pushed down
+SELECT * FROM foreign_orders ORDER BY created_at DESC LIMIT 100;
+
+-- Filters are pushed down
+SELECT * FROM foreign_users WHERE status = 'active';
+```
+
+**Push-down Capabilities:**
+- WHERE clause filters
+- GROUP BY with aggregations (SUM, COUNT, AVG, MIN, MAX)
+- ORDER BY with LIMIT
+- Column projection (only fetch needed columns)
+
+**Example Setup:**
+```sql
+-- Create connection to PostgreSQL
+CREATE SERVER pg_warehouse
+FOREIGN DATA WRAPPER postgres
+OPTIONS (host 'warehouse.example.com', port '5432', dbname 'analytics');
+
+-- Create foreign table
+CREATE FOREIGN TABLE remote_sales (
+    id INT64,
+    product_id INT64,
+    amount DECIMAL(10,2),
+    sale_date TIMESTAMP
+)
+SERVER pg_warehouse
+OPTIONS (schema_name 'public', table_name 'sales');
+
+-- Query with push-down
+SELECT product_id, SUM(amount) as total
+FROM remote_sales
+WHERE sale_date >= '2024-01-01'
+GROUP BY product_id
+ORDER BY total DESC
+LIMIT 10;
 ```
 
 ---
