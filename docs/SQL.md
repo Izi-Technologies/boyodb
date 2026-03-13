@@ -623,6 +623,23 @@ SELECT category, COUNT(*) FROM products GROUP BY category;
 -- Multiple columns
 SELECT category, status, COUNT(*) FROM products GROUP BY category, status;
 
+-- GROUPING SETS - multiple groupings in one query
+SELECT category, region, SUM(sales)
+FROM sales_data
+GROUP BY GROUPING SETS ((category, region), (category), (region), ());
+
+-- ROLLUP - hierarchical subtotals
+SELECT category, region, SUM(sales)
+FROM sales_data
+GROUP BY ROLLUP (category, region);
+-- Produces: (category, region), (category), ()
+
+-- CUBE - all possible combinations
+SELECT category, region, SUM(sales)
+FROM sales_data
+GROUP BY CUBE (category, region);
+-- Produces: (category, region), (category), (region), ()
+
 -- With aggregations
 SELECT
     tenant_id,
@@ -785,6 +802,11 @@ ARRAY_AGG_ORDERED(column ORDER BY col)                   -- Ordered array collec
 FIRST_VALUE(column) WITHIN GROUP (ORDER BY col)          -- First value in order
 LAST_VALUE(column) WITHIN GROUP (ORDER BY col)           -- Last value in order
 NTH_VALUE(column, n) WITHIN GROUP (ORDER BY col)         -- Nth value in order
+
+-- Approximate aggregates (faster for large datasets)
+APPROX_COUNT_DISTINCT(column)                            -- HyperLogLog-based distinct count
+APPROX_PERCENTILE(column, 0.95)                          -- T-Digest approximate percentile
+APPROX_MEDIAN(column)                                    -- T-Digest approximate median
 ```
 
 **Examples:**
@@ -1594,6 +1616,62 @@ STOP STREAM user_events;
 
 -- Remove stream definition
 DROP STREAM user_events;
+```
+
+---
+
+## PIVOT and UNPIVOT
+
+### PIVOT
+
+Transform rows to columns based on aggregate values:
+
+```sql
+SELECT *
+FROM sales_data
+PIVOT (
+    SUM(amount) FOR quarter IN ('Q1', 'Q2', 'Q3', 'Q4')
+);
+```
+
+**Example:**
+```sql
+-- Source data:
+-- | product | quarter | amount |
+-- | A       | Q1      | 100    |
+-- | A       | Q2      | 150    |
+-- | B       | Q1      | 200    |
+
+-- After PIVOT:
+-- | product | Q1  | Q2  | Q3   | Q4   |
+-- | A       | 100 | 150 | NULL | NULL |
+-- | B       | 200 | NULL| NULL | NULL |
+```
+
+### UNPIVOT
+
+Transform columns to rows:
+
+```sql
+SELECT *
+FROM quarterly_sales
+UNPIVOT (
+    amount FOR quarter IN (Q1, Q2, Q3, Q4)
+);
+```
+
+**Example:**
+```sql
+-- Source data:
+-- | product | Q1  | Q2  | Q3  | Q4  |
+-- | A       | 100 | 150 | 200 | 175 |
+
+-- After UNPIVOT:
+-- | product | quarter | amount |
+-- | A       | Q1      | 100    |
+-- | A       | Q2      | 150    |
+-- | A       | Q3      | 200    |
+-- | A       | Q4      | 175    |
 ```
 
 ---
