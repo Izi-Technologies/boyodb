@@ -2,17 +2,17 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.4-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.5-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
-## What's New in v0.9.4
+## What's New in v0.9.5
 
-- **Built-in Connection Pooler**: PgBouncer-compatible pooling with Transaction/Session/Statement modes
-- **Memory Context Manager**: PostgreSQL-style hierarchical memory allocation tracking
-- **Dynamic Configuration**: Runtime parameter changes via SET/RELOAD commands
-- **Enhanced Admin Console**: PAUSE/RESUME/WAIT/KILL database management commands
-- **Bug Fixes**: Fixed memory leaks and race conditions in pooling layer
+- **DISTINCT ON**: PostgreSQL-style first-row-per-group selection with custom ordering
+- **Incremental Materialized View Refresh**: Delta-based updates using watermark tracking for efficient refreshes
+- **Advanced JSON Path Expressions**: Wildcards `[*]`, array slicing `[0:5]`, recursive descent `..`, filter expressions `?(@.field > value)`
+- **WITHIN GROUP Ordered Aggregates**: MODE, STRING_AGG_ORDERED, ARRAY_AGG_ORDERED, FIRST_VALUE, LAST_VALUE, NTH_VALUE
+- **Query Federation Push-down**: Push aggregations, GROUP BY, and ORDER BY to foreign servers for reduced data transfer
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 
@@ -118,7 +118,7 @@ REFRESH MATERIALIZED VIEW daily_stats;
 - DML: `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `UPSERT`
 - DDL: `CREATE/DROP/ALTER` for databases, tables, indexes, views
 - Joins: `INNER`, `LEFT`, `RIGHT`, `FULL`, `CROSS`
-- Aggregations: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`, `VARIANCE`, `MEDIAN`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `ARRAY_AGG`, `STRING_AGG`
+- Aggregations: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`, `VARIANCE`, `MEDIAN`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `ARRAY_AGG`, `STRING_AGG`, `MODE`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE`
 - Window Functions: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`
 - CTEs (Common Table Expressions)
 - Subqueries (scalar, IN, EXISTS, correlated)

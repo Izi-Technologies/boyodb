@@ -5,6 +5,45 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-03-12
+
+### Added
+- **DISTINCT ON**: PostgreSQL-style first-row-per-group selection
+  - `SELECT DISTINCT ON (category) * FROM products ORDER BY category, price`
+  - Returns first row for each unique value in the DISTINCT ON columns
+  - Fully compatible with ORDER BY for deterministic row selection
+
+- **Incremental Materialized View Refresh**: Delta-based updates for efficient refreshes
+  - `REFRESH MATERIALIZED VIEW view_name INCREMENTAL`
+  - Uses watermark tracking to identify changed rows since last refresh
+  - Merges delta changes with existing view data
+  - Dramatically reduces refresh time for append-heavy workloads
+
+- **Advanced JSON Path Expressions**: Extended JSONPath syntax
+  - Wildcard access: `$.items[*].name` - access all array elements
+  - Array slicing: `$.items[0:5]` - slice arrays with start:end syntax
+  - Recursive descent: `$..field` - find field at any depth
+  - Filter expressions: `$.items[?(@.price > 100)]` - filter with conditions
+  - `JSON_EXTRACT_ALL()` function for multi-value extraction
+
+- **WITHIN GROUP Ordered Aggregates**: Statistical and ordered aggregate functions
+  - `MODE() WITHIN GROUP (ORDER BY column)` - most frequent value
+  - `STRING_AGG_ORDERED(col, sep ORDER BY ...)` - ordered string concatenation
+  - `ARRAY_AGG_ORDERED(col ORDER BY ...)` - ordered array aggregation
+  - `FIRST_VALUE(col) WITHIN GROUP (ORDER BY ...)` - first value in order
+  - `LAST_VALUE(col) WITHIN GROUP (ORDER BY ...)` - last value in order
+  - `NTH_VALUE(col, n) WITHIN GROUP (ORDER BY ...)` - nth value in order
+
+- **Query Federation Push-down**: Optimized foreign data wrapper queries
+  - Push aggregations (SUM, COUNT, AVG, MIN, MAX) to foreign servers
+  - Push GROUP BY clauses for remote aggregation
+  - Push ORDER BY and LIMIT for sorted remote fetches
+  - Reduces data transfer by computing aggregates at source
+  - Works with PostgreSQL and other FDW sources
+
+### Improved
+- **Driver Updates**: All drivers updated to v0.9.5 (Python, Rust, Go, Java, Node.js, C#, PHP)
+
 ## [0.9.4] - 2026-03-11
 
 ### Added
@@ -325,6 +364,7 @@ New engine configuration options:
 - Tiered storage (hot/warm/cold)
 - Compression (Zstd, LZ4, Snappy)
 
+[0.9.5]: https://github.com/Izi-Technologies/boyodb/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.7...v0.9.4
 [0.2.7]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.5...v0.2.6
