@@ -157,6 +157,12 @@ pub mod pg_upgrade;
 pub mod connection_pooler;
 pub mod query_explain;
 
+// --- Competitive Features (Phase 33) ---
+pub mod graphql_api;
+pub mod ml_inference;
+pub mod otel_integration;
+pub mod cdc_webhooks;
+
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
@@ -410,4 +416,34 @@ pub use optimizer::{
     HistogramBucket as OptimizerHistogramBucket,
     QueryExecutionStats as StoredQueryStats,
     TableStats as OptimizerTableStats,
+};
+
+// --- Competitive Features re-exports (Phase 33) ---
+
+// GraphQL API
+pub use graphql_api::{
+    ArgumentDefinition, DirectiveDefinition, DirectiveLocation, FieldDefinition, GraphQLConfig,
+    GraphQLError, GraphQLExecutor, GraphQLLocation, GraphQLRequest, GraphQLResponse, GraphQLSchema,
+    GraphQLType, ScalarType, TypeDefinition, TypeKind,
+};
+
+// ML Inference
+pub use ml_inference::{
+    FeatureSpec, FeatureType, InferenceRequest, InferenceResult, MLConfig, MLError, MLModel,
+    ModelFormat, ModelRegistry, ModelType, OutputType, Prediction, PredictionExplanation,
+    Preprocessing, RegistryStats, sql_predict,
+};
+
+// OpenTelemetry Integration
+pub use otel_integration::{
+    AttributeValue, BoyoDbInstrumentation, Meter, MetricDataPoint, MetricKind, OtelConfig,
+    OtlpExporter, PrometheusExporter as OtelPrometheusExporter, Span, SpanEvent, SpanKind,
+    SpanLink, SpanStatus, TraceContext, Tracer,
+};
+
+// CDC Webhooks
+pub use cdc_webhooks::{
+    ChangeEvent, ChangeOperation, ChangeTracker, DeliveryAttempt, DeliveryStatus, PendingDelivery,
+    WebhookBuilder, WebhookConfig, WebhookDeliveryWorker, WebhookError, WebhookRegistry,
+    WebhookStats,
 };

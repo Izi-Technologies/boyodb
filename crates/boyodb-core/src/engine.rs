@@ -33635,6 +33635,7 @@ mod tests {
             aggregation: None,
             order_by: None,
             distinct: false,
+            distinct_on: None,
             joins: vec![],
             computed_columns: vec![],
             ctes: vec![],
@@ -33658,6 +33659,7 @@ mod tests {
             aggregation: None,
             order_by: None,
             distinct: false,
+            distinct_on: None,
             joins: vec![],
             computed_columns: vec![],
             ctes: vec![],
@@ -36203,7 +36205,7 @@ mod tests {
         let sql = "REFRESH MATERIALIZED VIEW testdb.my_view";
         let result = parse_sql(sql).unwrap();
         match result {
-            SqlStatement::Ddl(DdlCommand::RefreshMaterializedView { database, name }) => {
+            SqlStatement::Ddl(DdlCommand::RefreshMaterializedView { database, name, .. }) => {
                 assert_eq!(database, "testdb");
                 assert_eq!(name, "my_view");
             }
