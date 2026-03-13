@@ -5962,6 +5962,12 @@ impl Db {
             if filter.distinct && !records.is_empty() {
                 records = apply_distinct(&records)?;
             }
+            // Apply DISTINCT ON after ordering (keeps first row per unique combination)
+            if let Some(ref distinct_on_cols) = filter.distinct_on {
+                if !records.is_empty() && !distinct_on_cols.is_empty() {
+                    records = apply_distinct_on(&records, distinct_on_cols)?;
+                }
+            }
             if let Some(offset) = filter.offset {
                 if !records.is_empty() && (filter.order_by.is_some() || filter.distinct) {
                     records = apply_offset(&records, offset)?;
@@ -11209,6 +11215,189 @@ impl Db {
                 };
 
                 // Add a manifest entry for the new segment
+                manifest.entries.push(crate::replication::ManifestEntry {
+                    segment_id,
+                    shard_id: 0,
+                    version_added,
+                    size_bytes: payload.len() as u64,
+                    checksum,
+                    tier: crate::replication::SegmentTier::Hot,
+                    compression: None,
+                    database: database.to_string(),
+                    table: format!("__mv_{}", name),
+                    watermark_micros: now,
+                    event_time_min: None,
+                    event_time_max: None,
+                    tenant_id_min: None,
+                    tenant_id_max: None,
+                    route_id_min: None,
+                    route_id_max: None,
+                    bloom_tenant: None,
+                    bloom_route: None,
+                    column_stats: None,
+                    schema_hash: None,
+                    created_txn: None,
+                    deleted_txn: None,
+                    deleted_version: None,
+                });
+            }
+
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+        }
+
+        Ok(())
+    }
+
+    /// Incrementally refresh a materialized view
+    ///
+    /// This uses delta tracking to only process new data since last refresh,
+    /// then merges with existing results for aggregate views.
+    pub fn refresh_materialized_view_incremental(
+        &self,
+        database: &str,
+        name: &str,
+    ) -> Result<(), EngineError> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        if database.trim().is_empty() || name.trim().is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "database and materialized view name required".into(),
+            ));
+        }
+
+        // Get the view's query and last refresh timestamp
+        let (query_sql, last_refresh_micros, old_segment_id) = {
+            let manifest = self
+                .manifest
+                .read()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            manifest
+                .materialized_views
+                .iter()
+                .find(|v| v.database == database && v.name == name)
+                .map(|v| (v.query_sql.clone(), v.last_refresh_micros, v.data_segment_id.clone()))
+                .ok_or_else(|| {
+                    EngineError::NotFound(format!("materialized view not found: {database}.{name}"))
+                })?
+        };
+
+        // Check if incremental refresh is possible for this query
+        if !crate::incremental_mv::can_refresh_incrementally(&query_sql) {
+            // Fall back to full refresh
+            return self.refresh_materialized_view(database, name);
+        }
+
+        // If never refreshed before, do full refresh
+        if last_refresh_micros == 0 {
+            return self.refresh_materialized_view(database, name);
+        }
+
+        // Modify query to only fetch new data since last refresh
+        // This works by adding a filter on the watermark column if present
+        let delta_query = crate::incremental_mv::build_delta_query(&query_sql, last_refresh_micros);
+
+        // Execute the delta query
+        let delta_response = self.query(QueryRequest {
+            sql: delta_query.clone(),
+            timeout_millis: 0,
+            collect_stats: false,
+            transaction_id: None,
+        })?;
+
+        // If no new data, just update the refresh timestamp
+        if delta_response.records_ipc.is_empty() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros() as u64;
+
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            if let Some(mv_idx) = manifest
+                .materialized_views
+                .iter()
+                .position(|v| v.database == database && v.name == name)
+            {
+                manifest.materialized_views[mv_idx].last_refresh_micros = now;
+            }
+            manifest.bump_version();
+            persist_manifest(&self.cfg.manifest_path, &manifest)?;
+            return Ok(());
+        }
+
+        // Load existing materialized view data
+        let existing_data = if let Some(ref seg_id) = old_segment_id {
+            let seg_path = self.cfg.segments_dir.join(seg_id);
+            if seg_path.exists() {
+                Some(fs::read(&seg_path).map_err(|e| {
+                    EngineError::Io(format!("read existing mv segment failed: {e}"))
+                })?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Merge existing data with delta results
+        let merged_data = if let Some(existing) = existing_data {
+            crate::incremental_mv::merge_ipc_data(
+                &existing,
+                &delta_response.records_ipc,
+                &query_sql,
+            )?
+        } else {
+            delta_response.records_ipc.clone()
+        };
+
+        // Create a unique segment ID
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        let segment_id = format!("mv-{}-{}-{}", database, name, now);
+
+        // Store the merged result
+        if !merged_data.is_empty() {
+            let segment_path = self.cfg.segments_dir.join(&segment_id);
+            let payload = &merged_data;
+            fs::write(&segment_path, payload)
+                .map_err(|e| EngineError::Io(format!("write mv segment failed: {e}")))?;
+
+            let mut manifest = self
+                .manifest
+                .write()
+                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+
+            if let Some(mv_idx) = manifest
+                .materialized_views
+                .iter()
+                .position(|v| v.database == database && v.name == name)
+            {
+                // Remove old segment
+                if let Some(ref old_id) = old_segment_id {
+                    manifest.entries.retain(|e| &e.segment_id != old_id);
+                    let old_path = self.cfg.segments_dir.join(old_id);
+                    let _ = fs::remove_file(old_path);
+                }
+
+                // Update metadata
+                manifest.materialized_views[mv_idx].last_refresh_micros = now;
+                manifest.materialized_views[mv_idx].data_segment_id = Some(segment_id.clone());
+
+                // Compute version and checksum
+                let version_added = manifest.version + 1;
+                let checksum = {
+                    let mut hasher = Crc32Hasher::new();
+                    hasher.update(payload);
+                    hasher.finalize() as u64
+                };
+
+                // Add manifest entry for new segment
                 manifest.entries.push(crate::replication::ManifestEntry {
                     segment_id,
                     shard_id: 0,
@@ -21839,6 +22028,180 @@ fn apply_distinct(ipc_data: &[u8]) -> Result<Vec<u8>, EngineError> {
     Ok(output)
 }
 
+/// Apply DISTINCT ON (columns) to keep first row for each unique combination
+/// of the specified columns. Data should already be sorted by ORDER BY clause.
+fn apply_distinct_on(ipc_data: &[u8], columns: &[String]) -> Result<Vec<u8>, EngineError> {
+    if columns.is_empty() {
+        return Ok(ipc_data.to_vec());
+    }
+
+    let cursor = Cursor::new(ipc_data);
+    let mut reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| EngineError::Internal(format!("read IPC for distinct on failed: {e}")))?;
+
+    let mut batches = Vec::new();
+    while let Some(batch) = reader
+        .next()
+        .transpose()
+        .map_err(|e| EngineError::Internal(format!("read batch for distinct on failed: {e}")))?
+    {
+        batches.push(batch);
+    }
+
+    if batches.is_empty() {
+        return Ok(ipc_data.to_vec());
+    }
+
+    let schema = batches[0].schema();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+    if total_rows == 0 {
+        return Ok(ipc_data.to_vec());
+    }
+
+    // Find column indices for DISTINCT ON columns
+    let col_indices: Vec<usize> = columns
+        .iter()
+        .filter_map(|name| schema.index_of(name).ok())
+        .collect();
+
+    if col_indices.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            format!("DISTINCT ON columns not found in result: {:?}", columns)
+        ));
+    }
+
+    // Concatenate all batches
+    let mut all_columns = Vec::new();
+    for col_idx in 0..schema.fields().len() {
+        let arrays: Vec<_> = batches.iter().map(|b| b.column(col_idx).clone()).collect();
+        let refs: Vec<_> = arrays.iter().map(|a| a.as_ref()).collect();
+        let concatenated = arrow_select::concat::concat(&refs)
+            .map_err(|e| EngineError::Internal(format!("concat for distinct on failed: {e}")))?;
+        all_columns.push(concatenated);
+    }
+
+    // Build a set of seen row hashes for DISTINCT ON columns only
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut keep_indices: Vec<usize> = Vec::new();
+
+    for row_idx in 0..total_rows {
+        let mut hasher = DefaultHasher::new();
+        // Only hash the DISTINCT ON columns
+        for &col_idx in &col_indices {
+            let col = &all_columns[col_idx];
+            let array = col.as_ref();
+            if array.is_null(row_idx) {
+                0u8.hash(&mut hasher);
+            } else {
+                1u8.hash(&mut hasher);
+                use arrow::datatypes::DataType;
+                match array.data_type() {
+                    DataType::UInt64 => {
+                        if let Some(a) = array.as_any().downcast_ref::<UInt64Array>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Int64 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Int64Array>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Int32 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Int32Array>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Utf8 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::StringArray>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::LargeUtf8 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::LargeStringArray>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Float64 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float64Array>() {
+                            a.value(row_idx).to_bits().hash(&mut hasher);
+                        }
+                    }
+                    DataType::Float32 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float32Array>() {
+                            a.value(row_idx).to_bits().hash(&mut hasher);
+                        }
+                    }
+                    DataType::Boolean => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Date32 => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Date32Array>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    DataType::Timestamp(_, _) => {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+                            a.value(row_idx).hash(&mut hasher);
+                        }
+                    }
+                    _ => {
+                        // For other types, use row index (no dedup for this column)
+                        row_idx.hash(&mut hasher);
+                    }
+                }
+            }
+        }
+        let row_hash = hasher.finish();
+        // Keep only the first occurrence of each unique combination
+        if seen.insert(row_hash) {
+            keep_indices.push(row_idx);
+        }
+    }
+
+    // If no duplicates, return original
+    if keep_indices.len() == total_rows {
+        return Ok(ipc_data.to_vec());
+    }
+
+    // Build indices array for selection
+    let indices_u32 =
+        arrow_array::UInt32Array::from(keep_indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
+
+    // Select only unique rows
+    use arrow_select::take::take;
+    let mut distinct_columns = Vec::new();
+    for col in &all_columns {
+        let selected = take(col.as_ref(), &indices_u32, None)
+            .map_err(|e| EngineError::Internal(format!("take for distinct on failed: {e}")))?;
+        distinct_columns.push(selected);
+    }
+
+    let distinct_batch = RecordBatch::try_new(schema.clone(), distinct_columns)
+        .map_err(|e| EngineError::Internal(format!("create distinct on batch failed: {e}")))?;
+
+    // Write back to IPC
+    let mut output = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut output, schema.as_ref())
+            .map_err(|e| EngineError::Internal(format!("create IPC writer failed: {e}")))?;
+        writer
+            .write(&distinct_batch)
+            .map_err(|e| EngineError::Internal(format!("write distinct on batch failed: {e}")))?;
+        writer
+            .finish()
+            .map_err(|e| EngineError::Internal(format!("finish IPC writer failed: {e}")))?;
+    }
+
+    Ok(output)
+}
+
 fn parse_table_target(sql: &str) -> Result<(String, String), EngineError> {
     let mut tokens = sql.split_whitespace().peekable();
     while let Some(tok) = tokens.next() {
@@ -21892,6 +22255,9 @@ pub struct QueryFilter {
     pub route_id_in: Option<Vec<u64>>,
     order_by: Option<Vec<(String, bool)>>, // (column, ascending)
     distinct: bool,
+    /// DISTINCT ON (columns) - PostgreSQL-style first row per group
+    #[serde(default)]
+    distinct_on: Option<Vec<String>>,
     /// Generic numeric equality filters (integer-only)
     numeric_eq_filters: Vec<(String, i128)>,
     /// Generic floating-point equality filters
@@ -21956,22 +22322,27 @@ pub struct TableFieldSpec {
     pub encoding: Option<String>,
 }
 
-/// Aggregate expression with optional alias for result column naming
+/// Aggregate expression with optional alias and FILTER clause for result column naming
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AggregateExpr {
     pub kind: AggKind,
     pub alias: Option<String>,
+    /// Optional FILTER clause: only include rows where this condition is true
+    /// Example: COUNT(*) FILTER (WHERE status = 'active')
+    #[serde(default)]
+    pub filter: Option<crate::sql::AggregateFilter>,
 }
 
 impl AggregateExpr {
     pub fn new(kind: AggKind) -> Self {
-        Self { kind, alias: None }
+        Self { kind, alias: None, filter: None }
     }
 
     pub fn with_alias(kind: AggKind, alias: String) -> Self {
         Self {
             kind,
             alias: Some(alias),
+            filter: None,
         }
     }
 
@@ -22002,6 +22373,12 @@ impl AggregateExpr {
             }
             AggKind::ArrayAgg { column, .. } => format!("array_agg_{}", column),
             AggKind::StringAgg { column, .. } => format!("string_agg_{}", column),
+            AggKind::Mode { column } => format!("mode_{}", column),
+            AggKind::StringAggOrdered { column, .. } => format!("string_agg_ordered_{}", column),
+            AggKind::ArrayAggOrdered { column, .. } => format!("array_agg_ordered_{}", column),
+            AggKind::NthValue { column, n } => format!("nth_value_{}_{}", n, column),
+            AggKind::FirstValue { column } => format!("first_value_{}", column),
+            AggKind::LastValue { column } => format!("last_value_{}", column),
         }
     }
 }
@@ -22031,6 +22408,18 @@ pub enum AggKind {
     PercentileDisc { column: String, percentile: f64 },
     ArrayAgg { column: String, distinct: bool },
     StringAgg { column: String, delimiter: String, distinct: bool },
+    /// MODE - most frequent value
+    Mode { column: String },
+    /// STRING_AGG with WITHIN GROUP ordering
+    StringAggOrdered { column: String, delimiter: String, order_by: String, order_desc: bool },
+    /// ARRAY_AGG with WITHIN GROUP ordering
+    ArrayAggOrdered { column: String, order_by: String, order_desc: bool },
+    /// NTH_VALUE - get nth value in ordered group
+    NthValue { column: String, n: usize },
+    /// FIRST_VALUE - first value in ordered group
+    FirstValue { column: String },
+    /// LAST_VALUE - last value in ordered group
+    LastValue { column: String },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -22111,6 +22500,16 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
         crate::sql::AggKind::StringAgg { column, delimiter, distinct } => {
             AggKind::StringAgg { column, delimiter, distinct }
         }
+        crate::sql::AggKind::Mode { column } => AggKind::Mode { column },
+        crate::sql::AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
+            AggKind::StringAggOrdered { column, delimiter, order_by, order_desc }
+        }
+        crate::sql::AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
+            AggKind::ArrayAggOrdered { column, order_by, order_desc }
+        }
+        crate::sql::AggKind::NthValue { column, n } => AggKind::NthValue { column, n },
+        crate::sql::AggKind::FirstValue { column } => AggKind::FirstValue { column },
+        crate::sql::AggKind::LastValue { column } => AggKind::LastValue { column },
     }
 }
 
@@ -22118,6 +22517,7 @@ fn agg_expr_from_sql(expr: crate::sql::AggregateExpr) -> AggregateExpr {
     AggregateExpr {
         kind: agg_kind_from_sql(expr.kind),
         alias: expr.alias,
+        filter: expr.filter,
     }
 }
 
@@ -22182,6 +22582,7 @@ fn query_filter_from_sql(filter: &crate::sql::QueryFilter) -> QueryFilter {
         route_id_in: filter.route_id_in.clone(),
         order_by: None,  // Handle at call site or improve mapping
         distinct: false, // Handle at call site
+        distinct_on: filter.distinct_on.clone(),
         numeric_eq_filters: Vec::new(),
         float_eq_filters: Vec::new(),
         bool_eq_filters: Vec::new(),
@@ -22242,6 +22643,7 @@ fn build_query_plan(sql: &str) -> Result<CachedPlan, EngineError> {
                 );
             }
             filter.distinct = parsed.distinct;
+            filter.distinct_on = parsed.distinct_on;
 
             Ok(CachedPlan {
                 kind: PlanKind::Simple {
@@ -23500,6 +23902,205 @@ fn evaluate_scalar_function(
             }
         }
 
+        // JSON functions
+        ScalarFunction::JsonExtract { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match json_extract(&json_str, path) {
+                Some(v) => Ok(ComputedValue::String(v)),
+                None => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonExtractScalar { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match json_extract_scalar(&json_str, path) {
+                Some(v) => Ok(ComputedValue::String(v)),
+                None => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonExtractAll { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match json_extract_all(&json_str, path) {
+                Some(v) => Ok(ComputedValue::String(v)),
+                None => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonArray(exprs) => {
+            let mut values = Vec::new();
+            for e in exprs {
+                let val = evaluate_expr(e, ctx)?;
+                values.push(computed_value_to_json_value(&val));
+            }
+            Ok(ComputedValue::String(
+                serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string()),
+            ))
+        }
+        ScalarFunction::JsonObject(pairs) => {
+            let mut map = serde_json::Map::new();
+            for (key, expr) in pairs {
+                let val = evaluate_expr(expr, ctx)?;
+                map.insert(key.clone(), computed_value_to_json_value(&val));
+            }
+            Ok(ComputedValue::String(
+                serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()),
+            ))
+        }
+        ScalarFunction::JsonType(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::String("NULL".to_string())),
+                _ => return Ok(ComputedValue::Null),
+            };
+            let type_str = match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(serde_json::Value::Null) => "NULL",
+                Ok(serde_json::Value::Bool(_)) => "BOOLEAN",
+                Ok(serde_json::Value::Number(_)) => "NUMBER",
+                Ok(serde_json::Value::String(_)) => "STRING",
+                Ok(serde_json::Value::Array(_)) => "ARRAY",
+                Ok(serde_json::Value::Object(_)) => "OBJECT",
+                Err(_) => "INVALID",
+            };
+            Ok(ComputedValue::String(type_str.to_string()))
+        }
+        ScalarFunction::JsonContainsPath { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Boolean(false)),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let exists = json_path_exists(&json_str, path);
+            Ok(ComputedValue::Boolean(exists))
+        }
+        ScalarFunction::JsonArrayLength(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(serde_json::Value::Array(arr)) => Ok(ComputedValue::Integer(arr.len() as i64)),
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonKeys(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(serde_json::Value::Object(obj)) => {
+                    let keys: Vec<serde_json::Value> =
+                        obj.keys().map(|k| serde_json::Value::String(k.clone())).collect();
+                    Ok(ComputedValue::String(
+                        serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()),
+                    ))
+                }
+                _ => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonValid(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Boolean(false)),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let is_valid = serde_json::from_str::<serde_json::Value>(&json_str).is_ok();
+            Ok(ComputedValue::Boolean(is_valid))
+        }
+        ScalarFunction::JsonPretty(expr) => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(v) => Ok(ComputedValue::String(
+                    serde_json::to_string_pretty(&v).unwrap_or(json_str),
+                )),
+                Err(_) => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonContains { left, right } => {
+            let left_val = evaluate_expr(left, ctx)?;
+            let right_val = evaluate_expr(right, ctx)?;
+            let left_str = match left_val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let right_str = match right_val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let contains = json_contains(&left_str, &right_str);
+            Ok(ComputedValue::Boolean(contains))
+        }
+        ScalarFunction::JsonRemove { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Null),
+            };
+            match json_remove(&json_str, path) {
+                Some(v) => Ok(ComputedValue::String(v)),
+                None => Ok(ComputedValue::Null),
+            }
+        }
+        ScalarFunction::JsonPathExists { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let path_val = evaluate_expr(path, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let path_str = match path_val {
+                ComputedValue::String(s) => s,
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let exists = json_path_exists(&json_str, &path_str);
+            Ok(ComputedValue::Boolean(exists))
+        }
+        ScalarFunction::JsonPathMatch { expr, path } => {
+            let val = evaluate_expr(expr, ctx)?;
+            let path_val = evaluate_expr(path, ctx)?;
+            let json_str = match val {
+                ComputedValue::String(s) => s,
+                ComputedValue::Null => return Ok(ComputedValue::Null),
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            let path_str = match path_val {
+                ComputedValue::String(s) => s,
+                _ => return Ok(ComputedValue::Boolean(false)),
+            };
+            // For path match, we check if the path returns a truthy result
+            let result = json_path_match(&json_str, &path_str);
+            Ok(ComputedValue::Boolean(result))
+        }
+
         // Default for unhandled functions
         _ => Ok(ComputedValue::Null),
     }
@@ -23536,6 +24137,592 @@ fn evaluate_case_expr(
         evaluate_expr(else_expr, ctx)
     } else {
         Ok(ComputedValue::Null)
+    }
+}
+
+// --- JSON Helper Functions ---
+
+/// Convert a ComputedValue to a serde_json::Value
+fn computed_value_to_json_value(val: &ComputedValue) -> serde_json::Value {
+    match val {
+        ComputedValue::Null => serde_json::Value::Null,
+        ComputedValue::Boolean(b) => serde_json::Value::Bool(*b),
+        ComputedValue::Integer(i) => serde_json::Value::Number((*i).into()),
+        ComputedValue::Float(f) => {
+            serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        ComputedValue::String(s) => serde_json::Value::String(s.clone()),
+        ComputedValue::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
+        ComputedValue::Date(d) => serde_json::Value::Number((*d as i64).into()),
+        ComputedValue::Binary(b) => {
+            // Encode binary as base64 string
+            use base64::Engine;
+            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+        }
+        ComputedValue::Uuid(u) => {
+            // Format UUID as hex string
+            serde_json::Value::String(hex::encode(u))
+        }
+        ComputedValue::Decimal { value, scale, .. } => {
+            // Convert decimal to float for JSON
+            let divisor = 10_i128.pow(*scale as u32);
+            let float_val = *value as f64 / divisor as f64;
+            serde_json::Number::from_f64(float_val)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        ComputedValue::Json(s) => {
+            // Parse the JSON string and return it directly
+            serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.clone()))
+        }
+    }
+}
+
+/// Extract a value from JSON using a JSONPath-like path
+/// Supports paths like $.key, $.key.subkey, $[0], $.array[0].field
+fn json_extract(json_str: &str, path: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let result = navigate_json_path(&value, path)?;
+    Some(result.to_string())
+}
+
+/// Extract a scalar value from JSON (returns unquoted string for strings)
+fn json_extract_scalar(json_str: &str, path: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let result = navigate_json_path(&value, path)?;
+    match result {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Null => None,
+        v => Some(v.to_string()),
+    }
+}
+
+/// Navigate a JSON value using a simple path (no wildcards/recursion)
+/// Returns borrowed reference for efficiency
+fn navigate_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let path = path.trim();
+    if path.is_empty() || path == "$" {
+        return Some(value);
+    }
+
+    // Remove leading $ if present
+    let path = if path.starts_with("$.") {
+        &path[2..]
+    } else if path.starts_with('$') {
+        &path[1..]
+    } else {
+        path
+    };
+
+    let mut current = value;
+    let mut remaining = path;
+
+    while !remaining.is_empty() {
+        // Skip leading dots
+        if remaining.starts_with('.') {
+            remaining = &remaining[1..];
+        }
+
+        if remaining.starts_with('[') {
+            // Array index
+            let end = remaining.find(']')?;
+            let index_str = &remaining[1..end];
+            // Simple numeric index only
+            let index: usize = index_str.parse().ok()?;
+            current = current.get(index)?;
+            remaining = &remaining[end + 1..];
+        } else {
+            // Object key
+            let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+            let key = &remaining[..end];
+            if key.is_empty() {
+                break;
+            }
+            current = current.get(key)?;
+            remaining = &remaining[end..];
+        }
+    }
+
+    Some(current)
+}
+
+/// Navigate JSON with advanced JSONPath support
+/// Returns multiple values for wildcards, slices, and recursive descent
+fn navigate_json_path_multi(value: &serde_json::Value, path: &str) -> Vec<serde_json::Value> {
+    let path = path.trim();
+    if path.is_empty() || path == "$" {
+        return vec![value.clone()];
+    }
+
+    // Remove leading $ if present
+    let path = if path.starts_with("$.") {
+        &path[2..]
+    } else if path.starts_with('$') {
+        &path[1..]
+    } else {
+        path
+    };
+
+    navigate_path_impl(value, path)
+}
+
+/// Internal implementation of path navigation
+fn navigate_path_impl(value: &serde_json::Value, path: &str) -> Vec<serde_json::Value> {
+    if path.is_empty() {
+        return vec![value.clone()];
+    }
+
+    let mut remaining = path;
+
+    // Skip leading dots
+    while remaining.starts_with('.') && !remaining.starts_with("..") {
+        remaining = &remaining[1..];
+    }
+
+    if remaining.is_empty() {
+        return vec![value.clone()];
+    }
+
+    // Handle recursive descent (..)
+    if remaining.starts_with("..") {
+        remaining = &remaining[2..];
+        let mut results = Vec::new();
+
+        // Find next path component
+        let next_end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+        let next_key = &remaining[..next_end];
+        let rest = &remaining[next_end..];
+
+        // Recursive descent: search all levels
+        collect_recursive_descent(value, next_key, rest, &mut results);
+        return results;
+    }
+
+    // Handle array access
+    if remaining.starts_with('[') {
+        let end = match remaining.find(']') {
+            Some(e) => e,
+            None => return vec![],
+        };
+        let bracket_content = &remaining[1..end];
+        let rest = &remaining[end + 1..];
+
+        // Wildcard [*]
+        if bracket_content == "*" {
+            if let serde_json::Value::Array(arr) = value {
+                let mut results = Vec::new();
+                for elem in arr {
+                    results.extend(navigate_path_impl(elem, rest));
+                }
+                return results;
+            }
+            return vec![];
+        }
+
+        // Array slice [start:end] or [start:end:step]
+        if bracket_content.contains(':') {
+            if let serde_json::Value::Array(arr) = value {
+                let slice_results = parse_and_apply_slice(arr, bracket_content);
+                let mut results = Vec::new();
+                for elem in slice_results {
+                    results.extend(navigate_path_impl(&elem, rest));
+                }
+                return results;
+            }
+            return vec![];
+        }
+
+        // Filter expression [?(@.field > value)]
+        if bracket_content.starts_with("?(") && bracket_content.ends_with(')') {
+            if let serde_json::Value::Array(arr) = value {
+                let filter_expr = &bracket_content[2..bracket_content.len() - 1];
+                let filtered: Vec<_> = arr
+                    .iter()
+                    .filter(|elem| evaluate_json_filter(elem, filter_expr))
+                    .cloned()
+                    .collect();
+                let mut results = Vec::new();
+                for elem in filtered {
+                    results.extend(navigate_path_impl(&elem, rest));
+                }
+                return results;
+            }
+            return vec![];
+        }
+
+        // Negative index (last element)
+        if bracket_content.starts_with('-') {
+            if let serde_json::Value::Array(arr) = value {
+                if let Ok(neg_idx) = bracket_content.parse::<i64>() {
+                    let idx = (arr.len() as i64 + neg_idx) as usize;
+                    if idx < arr.len() {
+                        return navigate_path_impl(&arr[idx], rest);
+                    }
+                }
+            }
+            return vec![];
+        }
+
+        // Simple numeric index
+        if let Ok(index) = bracket_content.parse::<usize>() {
+            if let Some(elem) = value.get(index) {
+                return navigate_path_impl(elem, rest);
+            }
+        }
+
+        return vec![];
+    }
+
+    // Object key access
+    let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+    let key = &remaining[..end];
+    let rest = &remaining[end..];
+
+    if key.is_empty() {
+        return vec![value.clone()];
+    }
+
+    // Wildcard key access (*)
+    if key == "*" {
+        let mut results = Vec::new();
+        match value {
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    results.extend(navigate_path_impl(v, rest));
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    results.extend(navigate_path_impl(v, rest));
+                }
+            }
+            _ => {}
+        }
+        return results;
+    }
+
+    // Regular key access
+    if let Some(v) = value.get(key) {
+        return navigate_path_impl(v, rest);
+    }
+
+    vec![]
+}
+
+/// Collect values using recursive descent
+fn collect_recursive_descent(
+    value: &serde_json::Value,
+    target_key: &str,
+    rest: &str,
+    results: &mut Vec<serde_json::Value>,
+) {
+    // Check if current value matches
+    if let Some(v) = value.get(target_key) {
+        results.extend(navigate_path_impl(v, rest));
+    }
+
+    // Recursively search children
+    match value {
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                collect_recursive_descent(v, target_key, rest, results);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for elem in arr {
+                collect_recursive_descent(elem, target_key, rest, results);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Parse and apply array slice [start:end] or [start:end:step]
+fn parse_and_apply_slice(arr: &[serde_json::Value], slice_expr: &str) -> Vec<serde_json::Value> {
+    let parts: Vec<&str> = slice_expr.split(':').collect();
+    let len = arr.len() as i64;
+
+    let start = if parts.is_empty() || parts[0].is_empty() {
+        0i64
+    } else {
+        parts[0].parse::<i64>().unwrap_or(0)
+    };
+
+    let end = if parts.len() < 2 || parts[1].is_empty() {
+        len
+    } else {
+        parts[1].parse::<i64>().unwrap_or(len)
+    };
+
+    let step = if parts.len() < 3 || parts[2].is_empty() {
+        1i64
+    } else {
+        parts[2].parse::<i64>().unwrap_or(1).max(1)
+    };
+
+    // Normalize negative indices
+    let start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
+    let end = if end < 0 { (len + end).max(0) } else { end.min(len) } as usize;
+
+    if start >= end || step <= 0 {
+        return vec![];
+    }
+
+    let mut result = Vec::new();
+    let mut i = start;
+    while i < end {
+        if i < arr.len() {
+            result.push(arr[i].clone());
+        }
+        i += step as usize;
+    }
+    result
+}
+
+/// Evaluate a JSONPath filter expression
+fn evaluate_json_filter(value: &serde_json::Value, filter_expr: &str) -> bool {
+    let expr = filter_expr.trim();
+
+    // Parse simple comparisons: @.field op value
+    if let Some((lhs, rest)) = expr.split_once(|c| c == '=' || c == '>' || c == '<' || c == '!') {
+        let lhs = lhs.trim();
+        let (op, rhs) = if rest.starts_with('=') {
+            let rhs = rest[1..].trim();
+            if filter_expr.contains("!=") {
+                ("!=", rhs)
+            } else if filter_expr.contains(">=") {
+                (">=", rhs)
+            } else if filter_expr.contains("<=") {
+                ("<=", rhs)
+            } else {
+                ("==", rhs)
+            }
+        } else {
+            let rhs = rest.trim();
+            if filter_expr.contains('>') && !filter_expr.contains(">=") {
+                (">", rhs)
+            } else if filter_expr.contains('<') && !filter_expr.contains("<=") {
+                ("<", rhs)
+            } else {
+                return false;
+            }
+        };
+
+        // Get value from @ path
+        let lhs_value = if lhs.starts_with("@.") {
+            let path = &lhs[2..];
+            value.get(path)
+        } else if lhs == "@" {
+            Some(value)
+        } else {
+            None
+        };
+
+        let lhs_value = match lhs_value {
+            Some(v) => v,
+            None => return false,
+        };
+
+        // Parse right-hand side
+        let rhs = rhs.trim_matches(|c| c == '\'' || c == '"');
+
+        match op {
+            "==" => compare_json_values(lhs_value, rhs, |a, b| a == b, |a, b| a == b),
+            "!=" => compare_json_values(lhs_value, rhs, |a, b| a != b, |a, b| a != b),
+            ">" => compare_json_values(lhs_value, rhs, |a, b| a > b, |a, b| a > b),
+            ">=" => compare_json_values(lhs_value, rhs, |a, b| a >= b, |a, b| a >= b),
+            "<" => compare_json_values(lhs_value, rhs, |a, b| a < b, |a, b| a < b),
+            "<=" => compare_json_values(lhs_value, rhs, |a, b| a <= b, |a, b| a <= b),
+            _ => false,
+        }
+    } else {
+        // Check for existence: @.field
+        if expr.starts_with("@.") {
+            let path = &expr[2..];
+            value.get(path).is_some()
+        } else {
+            false
+        }
+    }
+}
+
+/// Compare JSON value against string literal
+fn compare_json_values<F1, F2>(json_val: &serde_json::Value, rhs: &str, num_cmp: F1, str_cmp: F2) -> bool
+where
+    F1: Fn(f64, f64) -> bool,
+    F2: Fn(&str, &str) -> bool,
+{
+    match json_val {
+        serde_json::Value::Number(n) => {
+            if let Ok(rhs_num) = rhs.parse::<f64>() {
+                if let Some(lhs_num) = n.as_f64() {
+                    return num_cmp(lhs_num, rhs_num);
+                }
+            }
+            false
+        }
+        serde_json::Value::String(s) => str_cmp(s.as_str(), rhs),
+        serde_json::Value::Bool(b) => {
+            let rhs_bool = rhs == "true";
+            str_cmp(&b.to_string(), &rhs_bool.to_string())
+        }
+        serde_json::Value::Null => rhs == "null",
+        _ => false,
+    }
+}
+
+/// Extract multiple values as a JSON array (for [*] and .. paths)
+fn json_extract_all(json_str: &str, path: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let results = navigate_json_path_multi(&value, path);
+    if results.is_empty() {
+        None
+    } else if results.len() == 1 {
+        Some(results[0].to_string())
+    } else {
+        Some(serde_json::Value::Array(results).to_string())
+    }
+}
+
+/// Check if a path exists in JSON
+fn json_path_exists(json_str: &str, path: &str) -> bool {
+    let value: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    navigate_json_path(&value, path).is_some()
+}
+
+/// Check if left JSON contains right JSON (PostgreSQL @> semantics)
+fn json_contains(left_str: &str, right_str: &str) -> bool {
+    let left: serde_json::Value = match serde_json::from_str(left_str) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let right: serde_json::Value = match serde_json::from_str(right_str) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    json_value_contains(&left, &right)
+}
+
+/// Recursively check if left contains right
+fn json_value_contains(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    match (left, right) {
+        // Arrays: left must contain all elements of right
+        (serde_json::Value::Array(l_arr), serde_json::Value::Array(r_arr)) => {
+            r_arr.iter().all(|r_elem| {
+                l_arr.iter().any(|l_elem| json_value_contains(l_elem, r_elem))
+            })
+        }
+        // Objects: left must have all keys from right with matching values
+        (serde_json::Value::Object(l_obj), serde_json::Value::Object(r_obj)) => {
+            r_obj.iter().all(|(k, r_val)| {
+                l_obj.get(k).map(|l_val| json_value_contains(l_val, r_val)).unwrap_or(false)
+            })
+        }
+        // Scalars: must be equal
+        _ => left == right,
+    }
+}
+
+/// Remove a path from JSON
+fn json_remove(json_str: &str, path: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(json_str).ok()?;
+
+    let path = path.trim();
+    let path = if path.starts_with("$.") {
+        &path[2..]
+    } else if path.starts_with('$') {
+        &path[1..]
+    } else {
+        path
+    };
+
+    // Parse path into components
+    let mut components = Vec::new();
+    let mut remaining = path;
+    while !remaining.is_empty() {
+        if remaining.starts_with('.') {
+            remaining = &remaining[1..];
+        }
+        if remaining.starts_with('[') {
+            let end = remaining.find(']')?;
+            let index_str = &remaining[1..end];
+            components.push(PathComponent::Index(index_str.parse().ok()?));
+            remaining = &remaining[end + 1..];
+        } else {
+            let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+            let key = &remaining[..end];
+            if !key.is_empty() {
+                components.push(PathComponent::Key(key.to_string()));
+            }
+            remaining = &remaining[end..];
+        }
+    }
+
+    if components.is_empty() {
+        return None;
+    }
+
+    // Navigate to parent and remove the last component
+    let last = components.pop()?;
+    let mut current = &mut value;
+
+    for comp in &components {
+        current = match comp {
+            PathComponent::Key(k) => current.get_mut(k)?,
+            PathComponent::Index(i) => current.get_mut(*i)?,
+        };
+    }
+
+    match last {
+        PathComponent::Key(k) => {
+            if let serde_json::Value::Object(obj) = current {
+                obj.remove(&k);
+            }
+        }
+        PathComponent::Index(i) => {
+            if let serde_json::Value::Array(arr) = current {
+                if i < arr.len() {
+                    arr.remove(i);
+                }
+            }
+        }
+    }
+
+    serde_json::to_string(&value).ok()
+}
+
+#[derive(Debug)]
+enum PathComponent {
+    Key(String),
+    Index(usize),
+}
+
+/// JSON path match (simplified implementation)
+fn json_path_match(json_str: &str, path_str: &str) -> bool {
+    // This is a simplified implementation that checks if the path expression
+    // returns a truthy value. A full implementation would need a JSONPath parser.
+    let value: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    // Simple path matching: just check if the path exists and has a truthy value
+    if let Some(result) = navigate_json_path(&value, path_str) {
+        match result {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+            serde_json::Value::String(s) => !s.is_empty(),
+            serde_json::Value::Array(a) => !a.is_empty(),
+            serde_json::Value::Object(o) => !o.is_empty(),
+        }
+    } else {
+        false
     }
 }
 
@@ -26653,6 +27840,21 @@ struct AggState {
     array_agg_values: HashMap<String, Vec<String>>,
     /// For STRING_AGG: collect all string values per column
     string_agg_values: HashMap<String, Vec<String>>,
+    /// For filtered aggregates: separate count by aggregate name
+    filtered_counts: HashMap<String, u64>,
+    /// For filtered SUM: separate sum by aggregate name
+    filtered_sums: HashMap<String, f64>,
+    /// For filtered MIN: separate min by aggregate name
+    filtered_mins: HashMap<String, f64>,
+    /// For filtered MAX: separate max by aggregate name
+    filtered_maxs: HashMap<String, f64>,
+    /// For filtered AVG: sum and count by aggregate name
+    filtered_avg_sums: HashMap<String, f64>,
+    filtered_avg_counts: HashMap<String, u64>,
+    /// For ordered aggregates: store (value, order_key) pairs
+    ordered_values: HashMap<String, Vec<(String, f64)>>,
+    /// For MODE: count occurrences of each value
+    mode_counts: HashMap<String, HashMap<String, u64>>,
 }
 
 impl Aggregator {
@@ -27114,6 +28316,12 @@ impl Aggregator {
                 AggKind::PercentileDisc { .. } => DataType::Float64,
                 AggKind::ArrayAgg { .. } => DataType::Utf8, // Store as JSON string for now
                 AggKind::StringAgg { .. } => DataType::Utf8,
+                AggKind::Mode { .. } => DataType::Utf8, // Mode can be any type, store as string
+                AggKind::StringAggOrdered { .. } => DataType::Utf8,
+                AggKind::ArrayAggOrdered { .. } => DataType::Utf8,
+                AggKind::NthValue { .. } => DataType::Utf8, // Value type varies
+                AggKind::FirstValue { .. } => DataType::Utf8,
+                AggKind::LastValue { .. } => DataType::Utf8,
             };
             fields.push(Field::new(name, dtype, true));
         }
@@ -27129,32 +28337,57 @@ impl Aggregator {
         let mut columns: Vec<ArrayRef> = Vec::new();
 
         for agg in &self.plan.aggs {
+            let agg_name = agg.output_name();
+            let has_filter = agg.filter.is_some();
+
             let arr: ArrayRef = match &agg.kind {
-                AggKind::CountStar => Arc::new(UInt64Array::from(vec![state.count_star])),
+                AggKind::CountStar => {
+                    // For filtered COUNT(*), use filtered_counts
+                    let count = if has_filter {
+                        state.filtered_counts.get(&agg_name).copied().unwrap_or(0)
+                    } else {
+                        state.count_star
+                    };
+                    Arc::new(UInt64Array::from(vec![count]))
+                }
                 AggKind::CountDistinct { column } => {
+                    let key = if has_filter { &agg_name } else { column };
                     let count = state
                         .count_distinct_sets
-                        .get(column)
+                        .get(key)
                         .map(|s| s.len())
                         .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
                 }
                 AggKind::Sum { column } => {
-                    let sum = state.sum_values.get(column).copied().unwrap_or(0.0);
+                    let sum = if has_filter {
+                        state.filtered_sums.get(&agg_name).copied().unwrap_or(0.0)
+                    } else {
+                        state.sum_values.get(column).copied().unwrap_or(0.0)
+                    };
                     Arc::new(Int64Array::from(vec![sum as i64]))
                 }
                 AggKind::Avg { column } => {
-                    let sum = state.avg_sums.get(column).copied().unwrap_or(0.0);
-                    let count = state.avg_counts.get(column).copied().unwrap_or(0);
+                    let (sum, count) = if has_filter {
+                        (
+                            state.filtered_avg_sums.get(&agg_name).copied().unwrap_or(0.0),
+                            state.filtered_avg_counts.get(&agg_name).copied().unwrap_or(0),
+                        )
+                    } else {
+                        (
+                            state.avg_sums.get(column).copied().unwrap_or(0.0),
+                            state.avg_counts.get(column).copied().unwrap_or(0),
+                        )
+                    };
                     let avg = if count > 0 { sum / count as f64 } else { 0.0 };
                     Arc::new(Float64Array::from(vec![avg]))
                 }
                 AggKind::Min { column } => {
-                    let min = state
-                        .min_values
-                        .get(column)
-                        .copied()
-                        .unwrap_or(f64::INFINITY);
+                    let min = if has_filter {
+                        state.filtered_mins.get(&agg_name).copied().unwrap_or(f64::INFINITY)
+                    } else {
+                        state.min_values.get(column).copied().unwrap_or(f64::INFINITY)
+                    };
                     Arc::new(Int64Array::from(vec![if min.is_infinite() {
                         0
                     } else {
@@ -27162,11 +28395,11 @@ impl Aggregator {
                     }]))
                 }
                 AggKind::Max { column } => {
-                    let max = state
-                        .max_values
-                        .get(column)
-                        .copied()
-                        .unwrap_or(f64::NEG_INFINITY);
+                    let max = if has_filter {
+                        state.filtered_maxs.get(&agg_name).copied().unwrap_or(f64::NEG_INFINITY)
+                    } else {
+                        state.max_values.get(column).copied().unwrap_or(f64::NEG_INFINITY)
+                    };
                     Arc::new(Int64Array::from(vec![if max.is_infinite() {
                         0
                     } else {
@@ -27174,9 +28407,10 @@ impl Aggregator {
                     }]))
                 }
                 AggKind::ApproxCountDistinct { column } => {
+                    let key = if has_filter { &agg_name } else { column };
                     let count = state
                         .count_distinct_sets
-                        .get(column)
+                        .get(key)
                         .map(|s| s.len())
                         .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
@@ -27219,6 +28453,73 @@ impl Aggregator {
                 AggKind::StringAgg { column, delimiter, .. } => {
                     let result = if let Some(values) = state.string_agg_values.get(column) {
                         values.join(delimiter)
+                    } else {
+                        String::new()
+                    };
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::Mode { column } => {
+                    // Find most frequent value
+                    let result = if let Some(values) = state.string_agg_values.get(column) {
+                        compute_mode(values)
+                    } else {
+                        String::new()
+                    };
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
+                    // Get values with their order keys, sort, then join
+                    let result = if let Some(values) = state.ordered_values.get(column) {
+                        let mut sorted: Vec<_> = values.iter().cloned().collect();
+                        sorted.sort_by(|a, b| {
+                            let cmp = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
+                            if *order_desc { cmp.reverse() } else { cmp }
+                        });
+                        sorted.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(delimiter)
+                    } else if let Some(values) = state.string_agg_values.get(column) {
+                        values.join(delimiter)
+                    } else {
+                        String::new()
+                    };
+                    let _ = order_by; // suppress unused warning
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
+                    let json = if let Some(values) = state.ordered_values.get(column) {
+                        let mut sorted: Vec<_> = values.iter().cloned().collect();
+                        sorted.sort_by(|a, b| {
+                            let cmp = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
+                            if *order_desc { cmp.reverse() } else { cmp }
+                        });
+                        let vals: Vec<_> = sorted.iter().map(|(v, _)| v.as_str()).collect();
+                        serde_json::to_string(&vals).unwrap_or_else(|_| "[]".to_string())
+                    } else if let Some(values) = state.array_agg_values.get(column) {
+                        serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+                    } else {
+                        "[]".to_string()
+                    };
+                    let _ = order_by; // suppress unused warning
+                    Arc::new(StringArray::from(vec![json]))
+                }
+                AggKind::NthValue { column, n } => {
+                    let result = if let Some(values) = state.array_agg_values.get(column) {
+                        values.get(*n - 1).cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::FirstValue { column } => {
+                    let result = if let Some(values) = state.array_agg_values.get(column) {
+                        values.first().cloned().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    Arc::new(StringArray::from(vec![result]))
+                }
+                AggKind::LastValue { column } => {
+                    let result = if let Some(values) = state.array_agg_values.get(column) {
+                        values.last().cloned().unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -27603,6 +28904,62 @@ fn accumulate_aggs_into(
                     collect_string_values(col, values, *distinct);
                 }
             }
+            AggKind::Mode { column } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let counts = state
+                        .mode_counts
+                        .entry(column.clone())
+                        .or_insert_with(HashMap::new);
+                    collect_mode_values(col, counts);
+                    // Also collect for string_agg_values for fallback
+                    let values = state
+                        .string_agg_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_string_values(col, values, false);
+                }
+            }
+            AggKind::StringAggOrdered { column, order_by, .. } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let order_col = if let Ok(order_idx) = batch.schema().index_of(order_by) {
+                        Some(batch.column(order_idx))
+                    } else {
+                        None
+                    };
+                    let values = state
+                        .ordered_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_ordered_values(col, order_col, values);
+                }
+            }
+            AggKind::ArrayAggOrdered { column, order_by, .. } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let order_col = if let Ok(order_idx) = batch.schema().index_of(order_by) {
+                        Some(batch.column(order_idx))
+                    } else {
+                        None
+                    };
+                    let values = state
+                        .ordered_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_ordered_values(col, order_col, values);
+                }
+            }
+            AggKind::NthValue { column, .. } | AggKind::FirstValue { column } | AggKind::LastValue { column } => {
+                if let Ok(col_idx) = batch.schema().index_of(column) {
+                    let col = batch.column(col_idx);
+                    let values = state
+                        .array_agg_values
+                        .entry(column.clone())
+                        .or_insert_with(Vec::new);
+                    collect_string_values(col, values, false);
+                }
+            }
         }
     }
     Ok(())
@@ -27760,6 +29117,146 @@ fn collect_string_values(col: &ArrayRef, values: &mut Vec<String>, distinct: boo
     }
 }
 
+/// Collect values for MODE aggregate (count occurrences)
+fn collect_mode_values(col: &ArrayRef, counts: &mut HashMap<String, u64>) {
+    use arrow_array::*;
+
+    match col.data_type() {
+        DataType::Utf8 => {
+            let arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let s = arr.value(i).to_string();
+                    *counts.entry(s).or_insert(0) += 1;
+                }
+            }
+        }
+        DataType::Int64 => {
+            let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let s = arr.value(i).to_string();
+                    *counts.entry(s).or_insert(0) += 1;
+                }
+            }
+        }
+        DataType::Float64 => {
+            let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+            for i in 0..arr.len() {
+                if !arr.is_null(i) {
+                    let s = arr.value(i).to_string();
+                    *counts.entry(s).or_insert(0) += 1;
+                }
+            }
+        }
+        _ => {
+            // Generic fallback using debug format
+            for i in 0..col.len() {
+                if !col.is_null(i) {
+                    let s = format!("{:?}", col.slice(i, 1));
+                    *counts.entry(s).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Compute mode (most frequent value) from occurrence counts
+fn compute_mode(values: &[String]) -> String {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for v in values {
+        *counts.entry(v.as_str()).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(val, _)| val.to_string())
+        .unwrap_or_default()
+}
+
+/// Collect values with their order keys for ordered aggregates
+fn collect_ordered_values(
+    col: &ArrayRef,
+    order_col: Option<&ArrayRef>,
+    values: &mut Vec<(String, f64)>,
+) {
+    use arrow_array::*;
+
+    for i in 0..col.len() {
+        if col.is_null(i) {
+            continue;
+        }
+
+        // Get value as string
+        let val = match col.data_type() {
+            DataType::Utf8 => {
+                col.as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(i)
+                    .to_string()
+            }
+            DataType::Int64 => {
+                col.as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(i)
+                    .to_string()
+            }
+            DataType::Float64 => {
+                col.as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(i)
+                    .to_string()
+            }
+            _ => format!("{:?}", col.slice(i, 1)),
+        };
+
+        // Get order key (default to insertion order)
+        let order_key = if let Some(order) = order_col {
+            if order.is_null(i) {
+                values.len() as f64
+            } else {
+                match order.data_type() {
+                    DataType::Int64 => {
+                        order
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .value(i) as f64
+                    }
+                    DataType::Float64 => {
+                        order
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .unwrap()
+                            .value(i)
+                    }
+                    DataType::Utf8 => {
+                        // Use string ordering - hash as f64
+                        let s = order
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .value(i);
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        s.hash(&mut hasher);
+                        hasher.finish() as f64
+                    }
+                    _ => values.len() as f64,
+                }
+            }
+        } else {
+            values.len() as f64
+        };
+
+        values.push((val, order_key));
+    }
+}
+
 /// Compute percentile from sorted values
 fn compute_percentile(values: &mut [f64], percentile: f64, continuous: bool) -> f64 {
     if values.is_empty() {
@@ -27795,31 +29292,60 @@ fn accumulate_single_row(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<(), EngineError> {
+    // Check if this row passes the aggregate's FILTER clause
+    if !row_passes_filter(&agg.filter, batch, row) {
+        return Ok(());
+    }
+
+    let agg_name = agg.output_name();
+    let has_filter = agg.filter.is_some();
+
     match &agg.kind {
         AggKind::CountStar => {
-            // Already counted in outer loop
+            // For filtered COUNT(*), track in filtered_counts
+            if has_filter {
+                *state.filtered_counts.entry(agg_name).or_insert(0) += 1;
+            }
+            // Unfiltered count is already tracked in outer loop
         }
         AggKind::CountDistinct { column } | AggKind::ApproxCountDistinct { column } => {
             if let Ok(col_idx) = batch.schema().index_of(column) {
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     let hash = hash_array_value_u64(col, row);
+                    // For filtered COUNT DISTINCT, use aggregate name as key
+                    let key = if has_filter { agg_name.clone() } else { column.clone() };
                     let set = state
                         .count_distinct_sets
-                        .entry(column.clone())
+                        .entry(key)
                         .or_insert_with(HashSet::new);
                     set.insert(hash);
                 }
             }
         }
-        AggKind::Sum { column } | AggKind::Avg { column } => {
+        AggKind::Sum { column } => {
             if let Ok(col_idx) = batch.schema().index_of(column) {
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
-                    let val = extract_f64(col, row);
-                    if let Some(v) = val {
-                        *state.sum_values.entry(column.clone()).or_insert(0.0) += v;
-                        if matches!(&agg.kind, AggKind::Avg { .. }) {
+                    if let Some(v) = extract_f64(col, row) {
+                        if has_filter {
+                            *state.filtered_sums.entry(agg_name).or_insert(0.0) += v;
+                        } else {
+                            *state.sum_values.entry(column.clone()).or_insert(0.0) += v;
+                        }
+                    }
+                }
+            }
+        }
+        AggKind::Avg { column } => {
+            if let Ok(col_idx) = batch.schema().index_of(column) {
+                let col = batch.column(col_idx);
+                if !col.is_null(row) {
+                    if let Some(v) = extract_f64(col, row) {
+                        if has_filter {
+                            *state.filtered_avg_sums.entry(agg_name.clone()).or_insert(0.0) += v;
+                            *state.filtered_avg_counts.entry(agg_name).or_insert(0) += 1;
+                        } else {
                             *state.avg_sums.entry(column.clone()).or_insert(0.0) += v;
                             *state.avg_counts.entry(column.clone()).or_insert(0) += 1;
                         }
@@ -27832,12 +29358,16 @@ fn accumulate_single_row(
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
-                        let entry = state
-                            .min_values
-                            .entry(column.clone())
-                            .or_insert(f64::INFINITY);
-                        if v < *entry {
-                            *entry = v;
+                        if has_filter {
+                            let entry = state.filtered_mins.entry(agg_name).or_insert(f64::INFINITY);
+                            if v < *entry {
+                                *entry = v;
+                            }
+                        } else {
+                            let entry = state.min_values.entry(column.clone()).or_insert(f64::INFINITY);
+                            if v < *entry {
+                                *entry = v;
+                            }
                         }
                     }
                 }
@@ -27848,12 +29378,16 @@ fn accumulate_single_row(
                 let col = batch.column(col_idx);
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
-                        let entry = state
-                            .max_values
-                            .entry(column.clone())
-                            .or_insert(f64::NEG_INFINITY);
-                        if v > *entry {
-                            *entry = v;
+                        if has_filter {
+                            let entry = state.filtered_maxs.entry(agg_name).or_insert(f64::NEG_INFINITY);
+                            if v > *entry {
+                                *entry = v;
+                            }
+                        } else {
+                            let entry = state.max_values.entry(column.clone()).or_insert(f64::NEG_INFINITY);
+                            if v > *entry {
+                                *entry = v;
+                            }
                         }
                     }
                 }
@@ -27862,6 +29396,64 @@ fn accumulate_single_row(
         _ => {}
     }
     Ok(())
+}
+
+/// Check if a row passes the aggregate's FILTER clause condition
+/// Returns true if no filter is set or if the row matches the filter criteria
+fn row_passes_filter(
+    filter: &Option<crate::sql::AggregateFilter>,
+    batch: &RecordBatch,
+    row: usize,
+) -> bool {
+    let filter = match filter {
+        Some(f) => f,
+        None => return true, // No filter means include all rows
+    };
+
+    // Get the filter column
+    let col_idx = match batch.schema().index_of(&filter.column) {
+        Ok(idx) => idx,
+        Err(_) => return false, // Column not found
+    };
+    let col = batch.column(col_idx);
+
+    // Extract value from column
+    let value = if col.is_null(row) {
+        None
+    } else {
+        extract_value_for_filter(col, row)
+    };
+
+    // Apply the filter comparison
+    filter.matches(value.as_ref())
+}
+
+/// Extract a value from an array for filter comparison
+fn extract_value_for_filter(arr: &ArrayRef, row: usize) -> Option<serde_json::Value> {
+    if arr.is_null(row) {
+        return Some(serde_json::Value::Null);
+    }
+
+    // Try different array types
+    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<UInt64Array>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<Float32Array>() {
+        Some(serde_json::json!(a.value(row) as f64))
+    } else if let Some(a) = arr.as_any().downcast_ref::<arrow_array::StringArray>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<arrow_array::LargeStringArray>() {
+        Some(serde_json::json!(a.value(row)))
+    } else if let Some(a) = arr.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+        Some(serde_json::json!(a.value(row)))
+    } else {
+        None
+    }
 }
 
 /// Extract a float value from an array at a specific row
@@ -27958,9 +29550,22 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
             | AggKind::PercentileCont { column, .. }
             | AggKind::PercentileDisc { column, .. }
             | AggKind::ArrayAgg { column, .. }
-            | AggKind::StringAgg { column, .. } => {
+            | AggKind::StringAgg { column, .. }
+            | AggKind::Mode { column }
+            | AggKind::NthValue { column, .. }
+            | AggKind::FirstValue { column }
+            | AggKind::LastValue { column } => {
                 if !needed.contains(column) {
                     needed.push(column.clone());
+                }
+            }
+            AggKind::StringAggOrdered { column, order_by, .. }
+            | AggKind::ArrayAggOrdered { column, order_by, .. } => {
+                if !needed.contains(column) {
+                    needed.push(column.clone());
+                }
+                if !needed.contains(order_by) {
+                    needed.push(order_by.clone());
                 }
             }
         }
@@ -28616,6 +30221,51 @@ fn evaluate_window_function(
             WindowFunction::DenseRank => {
                 // DENSE_RANK() - rank without gaps for ties
                 compute_rank(partition_rows, &spec.order_by, true)
+            }
+            WindowFunction::PercentRank => {
+                // PERCENT_RANK() = (rank - 1) / (total_rows - 1)
+                let ranks = compute_rank(partition_rows, &spec.order_by, false);
+                if partition_size <= 1 {
+                    vec![ComputedValue::Float(0.0); partition_size]
+                } else {
+                    ranks
+                        .into_iter()
+                        .map(|r| {
+                            if let ComputedValue::Integer(rank) = r {
+                                ComputedValue::Float(
+                                    (rank - 1) as f64 / (partition_size - 1) as f64,
+                                )
+                            } else {
+                                ComputedValue::Float(0.0)
+                            }
+                        })
+                        .collect()
+                }
+            }
+            WindowFunction::CumeDist => {
+                // CUME_DIST() = number of rows with value <= current / total_rows
+                let ranks = compute_rank(partition_rows, &spec.order_by, false);
+                // Group by rank to find how many rows have each rank or lower
+                let mut result = Vec::with_capacity(partition_size);
+                for (i, _) in ranks.iter().enumerate() {
+                    // Count rows with rank <= current row's rank
+                    let current_rank = match &ranks[i] {
+                        ComputedValue::Integer(r) => *r,
+                        _ => (i + 1) as i64,
+                    };
+                    let count = ranks
+                        .iter()
+                        .filter(|r| {
+                            if let ComputedValue::Integer(rank) = r {
+                                *rank <= current_rank
+                            } else {
+                                false
+                            }
+                        })
+                        .count();
+                    result.push(ComputedValue::Float(count as f64 / partition_size as f64));
+                }
+                result
             }
             WindowFunction::NTile(n) => {
                 // NTILE(n) - divide into n roughly equal groups

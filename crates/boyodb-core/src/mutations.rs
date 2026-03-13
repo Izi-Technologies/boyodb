@@ -707,7 +707,11 @@ pub struct MergeTreeConfig {
     pub partition_by: Option<String>,
     pub primary_key: Option<Vec<String>>,
     pub sample_by: Option<String>,
-    pub ttl: Option<String>,
+    /// TTL configuration for automatic data expiration
+    /// Example: "timestamp + INTERVAL 30 DAY DELETE"
+    pub ttl: Option<crate::ttl::TtlConfig>,
+    /// Legacy TTL string for backwards compatibility
+    pub ttl_string: Option<String>,
     pub settings: MergeTreeSettings,
 }
 
@@ -1521,6 +1525,7 @@ mod tests {
             primary_key: None,
             sample_by: None,
             ttl: None,
+            ttl_string: None,
             settings: MergeTreeSettings::default(),
         };
 
@@ -1570,6 +1575,7 @@ mod tests {
             primary_key: None,
             sample_by: None,
             ttl: None,
+            ttl_string: None,
             settings: MergeTreeSettings::default(),
         };
 
@@ -1617,6 +1623,7 @@ mod tests {
             primary_key: None,
             sample_by: None,
             ttl: None,
+            ttl_string: None,
             settings: MergeTreeSettings::default(),
         };
 
@@ -1661,6 +1668,7 @@ mod tests {
             primary_key: None,
             sample_by: None,
             ttl: None,
+            ttl_string: None,
             settings: MergeTreeSettings::default(),
         };
 
@@ -1716,6 +1724,7 @@ mod tests {
             primary_key: None,
             sample_by: None,
             ttl: None,
+            ttl_string: None,
             settings: MergeTreeSettings::default(),
         };
 

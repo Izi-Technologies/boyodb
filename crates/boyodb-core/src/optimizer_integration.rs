@@ -421,6 +421,42 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
                     distinct: *distinct,
                     alias: get_alias(format!("string_agg_{}", column)),
                 },
+                AggKind::Mode { column } => AggregateExpr {
+                    function: AggFunction::Count, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("mode_{}", column)),
+                },
+                AggKind::StringAggOrdered { column, .. } => AggregateExpr {
+                    function: AggFunction::Sum, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("string_agg_ordered_{}", column)),
+                },
+                AggKind::ArrayAggOrdered { column, .. } => AggregateExpr {
+                    function: AggFunction::Sum, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("array_agg_ordered_{}", column)),
+                },
+                AggKind::NthValue { column, n } => AggregateExpr {
+                    function: AggFunction::Sum, // Placeholder
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("nth_value_{}_{}", n, column)),
+                },
+                AggKind::FirstValue { column } => AggregateExpr {
+                    function: AggFunction::Min, // Placeholder - similar semantics
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("first_value_{}", column)),
+                },
+                AggKind::LastValue { column } => AggregateExpr {
+                    function: AggFunction::Max, // Placeholder - similar semantics
+                    column: Some(column.clone()),
+                    distinct: false,
+                    alias: get_alias(format!("last_value_{}", column)),
+                },
             }
         })
         .collect()
@@ -494,6 +530,20 @@ fn select_expr_to_project_expr(expr: &SelectExpr) -> ProjectExpr {
                         format!("STRING_AGG({}, '{}')", column, delimiter)
                     }
                 }
+                crate::sql::AggKind::Mode { column } => format!("MODE({})", column),
+                crate::sql::AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
+                    let order = if *order_desc { "DESC" } else { "ASC" };
+                    format!("STRING_AGG({}, '{}' ORDER BY {} {})", column, delimiter, order_by, order)
+                }
+                crate::sql::AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
+                    let order = if *order_desc { "DESC" } else { "ASC" };
+                    format!("ARRAY_AGG({} ORDER BY {} {})", column, order_by, order)
+                }
+                crate::sql::AggKind::NthValue { column, n } => {
+                    format!("NTH_VALUE({}, {})", column, n)
+                }
+                crate::sql::AggKind::FirstValue { column } => format!("FIRST_VALUE({})", column),
+                crate::sql::AggKind::LastValue { column } => format!("LAST_VALUE({})", column),
             };
             ProjectExpr::Column(name)
         }

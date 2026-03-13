@@ -6,7 +6,7 @@
 
     <groupId>io.boyodb</groupId>
     <artifactId>boyodb-client</artifactId>
-    <version>0.9.4</version>
+    <version>0.9.5</version>
     <packaging>jar</packaging>
 
     <name>BoyoDB Java Client</name>

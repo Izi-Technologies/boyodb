@@ -725,6 +725,1003 @@ class Client
         $this->exec("RELEASE SAVEPOINT $name");
     }
 
+    // ========================================================================
+    // Pub/Sub Support
+    // ========================================================================
+
+    /**
+     * Start listening on a notification channel.
+     *
+     * @throws QueryException
+     */
+    public function listen(string $channel): void
+    {
+        $this->exec("LISTEN " . $this->escapeIdentifier($channel));
+    }
+
+    /**
+     * Stop listening on a notification channel.
+     *
+     * @param string $channel Channel name, or "*" to unlisten all
+     * @throws QueryException
+     */
+    public function unlisten(string $channel = '*'): void
+    {
+        if ($channel === '*') {
+            $this->exec("UNLISTEN *");
+        } else {
+            $this->exec("UNLISTEN " . $this->escapeIdentifier($channel));
+        }
+    }
+
+    /**
+     * Send a notification on a channel.
+     *
+     * @param string $channel Channel name
+     * @param string|null $payload Optional payload
+     * @throws QueryException
+     */
+    public function notify(string $channel, ?string $payload = null): void
+    {
+        if ($payload !== null) {
+            $this->exec("NOTIFY " . $this->escapeIdentifier($channel) . ", '" . $this->escapeString($payload) . "'");
+        } else {
+            $this->exec("NOTIFY " . $this->escapeIdentifier($channel));
+        }
+    }
+
+    // ========================================================================
+    // Trigger Management
+    // ========================================================================
+
+    /**
+     * Create a database trigger.
+     *
+     * @param string $name Trigger name
+     * @param string $table Table name
+     * @param string $timing When to fire: "BEFORE", "AFTER", or "INSTEAD OF"
+     * @param array<string> $events Events to trigger on
+     * @param string $function Function to execute
+     * @param array<mixed>|null $arguments Arguments to pass to function
+     * @param bool $forEachRow Whether to fire for each row (vs statement)
+     * @param string|null $whenClause Optional WHEN condition
+     * @param bool $orReplace Whether to replace existing trigger
+     * @throws QueryException
+     */
+    public function createTrigger(
+        string $name,
+        string $table,
+        string $timing,
+        array $events,
+        string $function,
+        ?array $arguments = null,
+        bool $forEachRow = true,
+        ?string $whenClause = null,
+        bool $orReplace = false
+    ): void {
+        $sql = $orReplace ? "CREATE OR REPLACE TRIGGER " : "CREATE TRIGGER ";
+        $sql .= $this->escapeIdentifier($name) . " ";
+        $sql .= strtoupper($timing) . " ";
+        $sql .= implode(" OR ", array_map('strtoupper', $events)) . " ";
+        $sql .= "ON " . $this->escapeIdentifier($table) . " ";
+        $sql .= $forEachRow ? "FOR EACH ROW " : "FOR EACH STATEMENT ";
+
+        if ($whenClause !== null) {
+            $sql .= "WHEN ($whenClause) ";
+        }
+
+        $sql .= "EXECUTE FUNCTION " . $this->escapeIdentifier($function) . "(";
+        if ($arguments !== null && count($arguments) > 0) {
+            $sql .= implode(", ", array_map([$this, 'formatValue'], $arguments));
+        }
+        $sql .= ")";
+
+        $this->exec($sql);
+    }
+
+    /**
+     * Drop a trigger.
+     *
+     * @throws QueryException
+     */
+    public function dropTrigger(string $name, string $table, bool $ifExists = false): void
+    {
+        $sql = "DROP TRIGGER ";
+        if ($ifExists) {
+            $sql .= "IF EXISTS ";
+        }
+        $sql .= $this->escapeIdentifier($name) . " ON " . $this->escapeIdentifier($table);
+        $this->exec($sql);
+    }
+
+    /**
+     * Enable or disable a trigger.
+     *
+     * @throws QueryException
+     */
+    public function alterTrigger(string $name, string $table, bool $enable = true): void
+    {
+        $action = $enable ? "ENABLE" : "DISABLE";
+        $this->exec("ALTER TRIGGER " . $this->escapeIdentifier($name) . " ON " . $this->escapeIdentifier($table) . " $action");
+    }
+
+    /**
+     * List triggers on a table or in a database.
+     *
+     * @throws QueryException
+     */
+    public function listTriggers(?string $table = null, ?string $database = null): QueryResult
+    {
+        $sql = "SHOW TRIGGERS";
+        if ($table !== null) {
+            $sql .= " ON " . $this->escapeIdentifier($table);
+        } elseif ($database !== null) {
+            $sql .= " IN " . $this->escapeIdentifier($database);
+        }
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Stored Procedures and Functions
+    // ========================================================================
+
+    /**
+     * Call a stored procedure.
+     *
+     * @param string $procedure Procedure name
+     * @param mixed ...$args Arguments to pass
+     * @throws QueryException
+     */
+    public function call(string $procedure, mixed ...$args): QueryResult
+    {
+        $sql = "CALL " . $this->escapeIdentifier($procedure) . "(";
+        $sql .= implode(", ", array_map([$this, 'formatValue'], $args));
+        $sql .= ")";
+        return $this->query($sql);
+    }
+
+    /**
+     * Create a stored function.
+     *
+     * @param string $name Function name
+     * @param array<array{name: string, type: string}> $parameters Parameters
+     * @param string $returnType Return type
+     * @param string $body Function body
+     * @param string $language Language (default: plpgsql)
+     * @param bool $orReplace Whether to replace existing function
+     * @param string|null $volatility IMMUTABLE, STABLE, or VOLATILE
+     * @throws QueryException
+     */
+    public function createFunction(
+        string $name,
+        array $parameters,
+        string $returnType,
+        string $body,
+        string $language = 'plpgsql',
+        bool $orReplace = false,
+        ?string $volatility = null
+    ): void {
+        $sql = $orReplace ? "CREATE OR REPLACE FUNCTION " : "CREATE FUNCTION ";
+        $sql .= $this->escapeIdentifier($name) . "(";
+
+        $params = [];
+        foreach ($parameters as $param) {
+            $params[] = $this->escapeIdentifier($param['name']) . " " . $param['type'];
+        }
+        $sql .= implode(", ", $params);
+
+        $sql .= ") RETURNS $returnType LANGUAGE $language ";
+
+        if ($volatility !== null) {
+            $sql .= strtoupper($volatility) . " ";
+        }
+
+        $sql .= "AS \$\$ $body \$\$";
+
+        $this->exec($sql);
+    }
+
+    /**
+     * Create a stored procedure.
+     *
+     * @param string $name Procedure name
+     * @param array<array{name: string, type: string, mode?: string}> $parameters Parameters
+     * @param string $body Procedure body
+     * @param string $language Language (default: plpgsql)
+     * @param bool $orReplace Whether to replace existing procedure
+     * @throws QueryException
+     */
+    public function createProcedure(
+        string $name,
+        array $parameters,
+        string $body,
+        string $language = 'plpgsql',
+        bool $orReplace = false
+    ): void {
+        $sql = $orReplace ? "CREATE OR REPLACE PROCEDURE " : "CREATE PROCEDURE ";
+        $sql .= $this->escapeIdentifier($name) . "(";
+
+        $params = [];
+        foreach ($parameters as $param) {
+            $mode = isset($param['mode']) ? strtoupper($param['mode']) . " " : "";
+            $params[] = $mode . $this->escapeIdentifier($param['name']) . " " . $param['type'];
+        }
+        $sql .= implode(", ", $params);
+
+        $sql .= ") LANGUAGE $language AS \$\$ $body \$\$";
+
+        $this->exec($sql);
+    }
+
+    /**
+     * Drop a function.
+     *
+     * @param string $name Function name
+     * @param array<string>|null $paramTypes Parameter types for overload resolution
+     * @param bool $ifExists Don't error if function doesn't exist
+     * @throws QueryException
+     */
+    public function dropFunction(string $name, ?array $paramTypes = null, bool $ifExists = false): void
+    {
+        $sql = "DROP FUNCTION ";
+        if ($ifExists) {
+            $sql .= "IF EXISTS ";
+        }
+        $sql .= $this->escapeIdentifier($name);
+        if ($paramTypes !== null) {
+            $sql .= "(" . implode(", ", $paramTypes) . ")";
+        }
+        $this->exec($sql);
+    }
+
+    /**
+     * Drop a procedure.
+     *
+     * @param string $name Procedure name
+     * @param array<string>|null $paramTypes Parameter types for overload resolution
+     * @param bool $ifExists Don't error if procedure doesn't exist
+     * @throws QueryException
+     */
+    public function dropProcedure(string $name, ?array $paramTypes = null, bool $ifExists = false): void
+    {
+        $sql = "DROP PROCEDURE ";
+        if ($ifExists) {
+            $sql .= "IF EXISTS ";
+        }
+        $sql .= $this->escapeIdentifier($name);
+        if ($paramTypes !== null) {
+            $sql .= "(" . implode(", ", $paramTypes) . ")";
+        }
+        $this->exec($sql);
+    }
+
+    // ========================================================================
+    // JSON Operations
+    // ========================================================================
+
+    /**
+     * Extract a JSON value using the -> operator.
+     *
+     * @throws QueryException
+     */
+    public function jsonExtract(
+        string $column,
+        string $path,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $pathExpr = is_numeric($path) ? $path : "'" . $this->escapeString($path) . "'";
+        $sql = "SELECT " . $this->escapeIdentifier($column) . " -> $pathExpr AS value FROM " . $this->escapeIdentifier($table);
+        if ($where !== null) {
+            $sql .= " WHERE $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Extract a JSON value as text using the ->> operator.
+     *
+     * @throws QueryException
+     */
+    public function jsonExtractText(
+        string $column,
+        string $path,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $pathExpr = is_numeric($path) ? $path : "'" . $this->escapeString($path) . "'";
+        $sql = "SELECT " . $this->escapeIdentifier($column) . " ->> $pathExpr AS value FROM " . $this->escapeIdentifier($table);
+        if ($where !== null) {
+            $sql .= " WHERE $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Extract a nested JSON value using the #> operator.
+     *
+     * @param array<string> $path Array of path elements
+     * @throws QueryException
+     */
+    public function jsonExtractPath(
+        string $column,
+        array $path,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $pathArray = "'{" . implode(",", array_map([$this, 'escapeString'], $path)) . "}'";
+        $sql = "SELECT " . $this->escapeIdentifier($column) . " #> $pathArray AS value FROM " . $this->escapeIdentifier($table);
+        if ($where !== null) {
+            $sql .= " WHERE $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Check if JSON contains a value using the @> operator.
+     *
+     * @param mixed $value Value to check for
+     * @throws QueryException
+     */
+    public function jsonContains(
+        string $column,
+        mixed $value,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $jsonValue = json_encode($value);
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) . " WHERE " .
+               $this->escapeIdentifier($column) . " @> '" . $this->escapeString($jsonValue) . "'::jsonb";
+        if ($where !== null) {
+            $sql .= " AND $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Check if JSON is contained in a value using the <@ operator.
+     *
+     * @param mixed $value Value to check against
+     * @throws QueryException
+     */
+    public function jsonContainedBy(
+        string $column,
+        mixed $value,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $jsonValue = json_encode($value);
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) . " WHERE " .
+               $this->escapeIdentifier($column) . " <@ '" . $this->escapeString($jsonValue) . "'::jsonb";
+        if ($where !== null) {
+            $sql .= " AND $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Check if a JSON path exists using the @? operator.
+     *
+     * @throws QueryException
+     */
+    public function jsonPathExists(
+        string $column,
+        string $jsonPath,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) . " WHERE " .
+               $this->escapeIdentifier($column) . " @? '" . $this->escapeString($jsonPath) . "'";
+        if ($where !== null) {
+            $sql .= " AND $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Check if a JSON path predicate matches using the @@ operator.
+     *
+     * @throws QueryException
+     */
+    public function jsonPathMatch(
+        string $column,
+        string $jsonPath,
+        string $table,
+        ?string $where = null,
+        ?int $limit = null
+    ): QueryResult {
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) . " WHERE " .
+               $this->escapeIdentifier($column) . " @@ '" . $this->escapeString($jsonPath) . "'";
+        if ($where !== null) {
+            $sql .= " AND $where";
+        }
+        if ($limit !== null && $limit > 0) {
+            $sql .= " LIMIT $limit";
+        }
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Cursor Support
+    // ========================================================================
+
+    /**
+     * Declare a server-side cursor.
+     *
+     * @throws QueryException
+     */
+    public function declareCursor(string $name, string $queryStr, bool $scroll = false, bool $hold = false): void
+    {
+        $sql = "DECLARE " . $this->escapeIdentifier($name);
+        if ($scroll) $sql .= " SCROLL";
+        if ($hold) $sql .= " WITH HOLD";
+        $sql .= " CURSOR FOR " . $queryStr;
+        $this->exec($sql);
+    }
+
+    /**
+     * Fetch rows from a cursor.
+     *
+     * @throws QueryException
+     */
+    public function fetchCursor(string $name, int $count = 1, string $direction = 'NEXT'): QueryResult
+    {
+        $dir = strtoupper($direction);
+        $safeName = $this->escapeIdentifier($name);
+        if (in_array($dir, ['NEXT', 'PRIOR', 'FIRST', 'LAST'], true)) {
+            $sql = "FETCH $dir $count FROM $safeName";
+        } else {
+            $sql = "FETCH $dir FROM $safeName";
+        }
+        return $this->query($sql);
+    }
+
+    /**
+     * Move cursor position without returning data.
+     *
+     * @throws QueryException
+     */
+    public function moveCursor(string $name, int $count = 1, string $direction = 'NEXT'): void
+    {
+        $dir = strtoupper($direction);
+        $safeName = $this->escapeIdentifier($name);
+        if (in_array($dir, ['NEXT', 'PRIOR', 'FIRST', 'LAST'], true)) {
+            $sql = "MOVE $dir $count IN $safeName";
+        } else {
+            $sql = "MOVE $dir IN $safeName";
+        }
+        $this->exec($sql);
+    }
+
+    /**
+     * Close a cursor.
+     *
+     * @throws QueryException
+     */
+    public function closeCursor(string $name): void
+    {
+        if ($name === '*' || strtoupper($name) === 'ALL') {
+            $this->exec("CLOSE ALL");
+        } else {
+            $this->exec("CLOSE " . $this->escapeIdentifier($name));
+        }
+    }
+
+    // ========================================================================
+    // Large Objects (LOB) Support
+    // ========================================================================
+
+    /**
+     * Create a new large object.
+     *
+     * @throws QueryException
+     */
+    public function loCreate(): int
+    {
+        $result = $this->query("SELECT lo_create(0) AS oid");
+        return (int)$result->rows[0]['oid'];
+    }
+
+    /**
+     * Open a large object.
+     *
+     * @throws QueryException
+     */
+    public function loOpen(int $oid, string $mode = 'rw'): int
+    {
+        $modeFlag = 0x40000; // INV_READ
+        if (str_contains($mode, 'w')) $modeFlag |= 0x20000;
+        $result = $this->query("SELECT lo_open($oid, $modeFlag) AS fd");
+        return (int)$result->rows[0]['fd'];
+    }
+
+    /**
+     * Write data to a large object.
+     *
+     * @throws QueryException
+     */
+    public function loWrite(int $fd, string $data): int
+    {
+        $b64 = base64_encode($data);
+        $result = $this->query("SELECT lowrite($fd, decode('$b64', 'base64')) AS written");
+        return (int)$result->rows[0]['written'];
+    }
+
+    /**
+     * Read data from a large object.
+     *
+     * @throws QueryException
+     */
+    public function loRead(int $fd, int $length): string
+    {
+        $result = $this->query("SELECT encode(loread($fd, $length), 'base64') AS data");
+        return base64_decode($result->rows[0]['data']);
+    }
+
+    /**
+     * Close a large object file descriptor.
+     *
+     * @throws QueryException
+     */
+    public function loClose(int $fd): void
+    {
+        $this->query("SELECT lo_close($fd)");
+    }
+
+    /**
+     * Delete a large object.
+     *
+     * @throws QueryException
+     */
+    public function loUnlink(int $oid): void
+    {
+        $this->query("SELECT lo_unlink($oid)");
+    }
+
+    // ========================================================================
+    // Advisory Locks
+    // ========================================================================
+
+    /**
+     * Acquire a session-level advisory lock.
+     *
+     * @throws QueryException
+     */
+    public function advisoryLock(int $key, bool $shared = false): void
+    {
+        $fn = $shared ? 'pg_advisory_lock_shared' : 'pg_advisory_lock';
+        $this->query("SELECT $fn($key)");
+    }
+
+    /**
+     * Try to acquire an advisory lock without blocking.
+     *
+     * @throws QueryException
+     */
+    public function advisoryLockTry(int $key, bool $shared = false): bool
+    {
+        $fn = $shared ? 'pg_try_advisory_lock_shared' : 'pg_try_advisory_lock';
+        $result = $this->query("SELECT $fn($key) AS acquired");
+        return (bool)$result->rows[0]['acquired'];
+    }
+
+    /**
+     * Release a session-level advisory lock.
+     *
+     * @throws QueryException
+     */
+    public function advisoryUnlock(int $key, bool $shared = false): bool
+    {
+        $fn = $shared ? 'pg_advisory_unlock_shared' : 'pg_advisory_unlock';
+        $result = $this->query("SELECT $fn($key) AS released");
+        return (bool)$result->rows[0]['released'];
+    }
+
+    /**
+     * Release all session-level advisory locks.
+     *
+     * @throws QueryException
+     */
+    public function advisoryUnlockAll(): void
+    {
+        $this->query("SELECT pg_advisory_unlock_all()");
+    }
+
+    // ========================================================================
+    // Full-Text Search
+    // ========================================================================
+
+    /**
+     * Perform a full-text search.
+     *
+     * @throws QueryException
+     */
+    public function ftsSearch(
+        string $table,
+        string $textColumn,
+        string $queryStr,
+        string $config = 'english',
+        int $limit = 100,
+        bool $includeRank = true,
+        ?string $where = null
+    ): QueryResult {
+        $safeTable = $this->escapeIdentifier($table);
+        $safeColumn = $this->escapeIdentifier($textColumn);
+        $safeQuery = $this->escapeString($queryStr);
+
+        if ($includeRank) {
+            $sql = "SELECT *, ts_rank(to_tsvector('$config', $safeColumn), plainto_tsquery('$config', '$safeQuery')) AS rank ";
+            $sql .= "FROM $safeTable WHERE to_tsvector('$config', $safeColumn) @@ plainto_tsquery('$config', '$safeQuery')";
+        } else {
+            $sql = "SELECT * FROM $safeTable WHERE to_tsvector('$config', $safeColumn) @@ plainto_tsquery('$config', '$safeQuery')";
+        }
+        if ($where !== null) $sql .= " AND $where";
+        if ($includeRank) $sql .= " ORDER BY rank DESC";
+        $sql .= " LIMIT $limit";
+
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Geospatial Support
+    // ========================================================================
+
+    /**
+     * Find records within a distance from a point.
+     *
+     * @throws QueryException
+     */
+    public function geoDistance(
+        string $table,
+        string $geoColumn,
+        float $lat,
+        float $lon,
+        float $radiusMeters,
+        int $limit = 100,
+        ?string $where = null
+    ): QueryResult {
+        $safeTable = $this->escapeIdentifier($table);
+        $safeColumn = $this->escapeIdentifier($geoColumn);
+
+        $sql = "SELECT *, ST_Distance($safeColumn, ST_SetSRID(ST_MakePoint($lon, $lat), 4326)::geography) AS distance ";
+        $sql .= "FROM $safeTable WHERE ST_DWithin($safeColumn, ST_SetSRID(ST_MakePoint($lon, $lat), 4326)::geography, $radiusMeters)";
+        if ($where !== null) $sql .= " AND $where";
+        $sql .= " ORDER BY distance ASC LIMIT $limit";
+
+        return $this->query($sql);
+    }
+
+    /**
+     * Find K nearest neighbors to a point.
+     *
+     * @throws QueryException
+     */
+    public function geoNearest(
+        string $table,
+        string $geoColumn,
+        float $lat,
+        float $lon,
+        int $k = 10,
+        ?string $where = null
+    ): QueryResult {
+        $safeTable = $this->escapeIdentifier($table);
+        $safeColumn = $this->escapeIdentifier($geoColumn);
+
+        $sql = "SELECT *, ST_Distance($safeColumn, ST_SetSRID(ST_MakePoint($lon, $lat), 4326)::geography) AS distance FROM $safeTable";
+        if ($where !== null) $sql .= " WHERE $where";
+        $sql .= " ORDER BY $safeColumn <-> ST_SetSRID(ST_MakePoint($lon, $lat), 4326)::geometry LIMIT $k";
+
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Time Travel Queries
+    // ========================================================================
+
+    /**
+     * Query data as of a specific timestamp.
+     *
+     * @param string $timestamp ISO-8601 timestamp
+     * @throws QueryException
+     */
+    public function queryAsOf(string $sql, string $timestamp): QueryResult
+    {
+        $safeTs = $this->escapeString($timestamp);
+        return $this->query("$sql AS OF TIMESTAMP '$safeTs'");
+    }
+
+    /**
+     * Query data changes between two timestamps.
+     *
+     * @throws QueryException
+     */
+    public function queryBetween(string $sql, string $startTime, string $endTime): QueryResult
+    {
+        $safeStart = $this->escapeString($startTime);
+        $safeEnd = $this->escapeString($endTime);
+        return $this->query("$sql FOR SYSTEM_TIME FROM '$safeStart' TO '$safeEnd'");
+    }
+
+    // ========================================================================
+    // Batch Operations
+    // ========================================================================
+
+    /**
+     * Insert multiple rows in batches.
+     *
+     * @param array<array<string, mixed>> $rows
+     * @throws QueryException
+     */
+    public function batchInsert(string $table, array $rows, int $chunkSize = 1000): int
+    {
+        if (count($rows) === 0) return 0;
+
+        $safeTable = $this->escapeIdentifier($table);
+        $columns = array_keys($rows[0]);
+        $colList = implode(', ', array_map([$this, 'escapeIdentifier'], $columns));
+
+        $totalInserted = 0;
+        foreach (array_chunk($rows, $chunkSize) as $chunk) {
+            $values = [];
+            foreach ($chunk as $row) {
+                $vals = array_map([$this, 'formatValue'], array_values($row));
+                $values[] = '(' . implode(', ', $vals) . ')';
+            }
+            $this->exec("INSERT INTO $safeTable ($colList) VALUES " . implode(', ', $values));
+            $totalInserted += count($chunk);
+        }
+        return $totalInserted;
+    }
+
+    /**
+     * Upsert multiple rows (INSERT ... ON CONFLICT).
+     *
+     * @param array<array<string, mixed>> $rows
+     * @param array<string> $conflictColumns
+     * @param array<string>|null $updateColumns
+     * @throws QueryException
+     */
+    public function batchUpsert(
+        string $table,
+        array $rows,
+        array $conflictColumns,
+        ?array $updateColumns = null,
+        int $chunkSize = 1000
+    ): int {
+        if (count($rows) === 0) return 0;
+
+        $safeTable = $this->escapeIdentifier($table);
+        $columns = array_keys($rows[0]);
+        $colList = implode(', ', array_map([$this, 'escapeIdentifier'], $columns));
+        $conflictList = implode(', ', array_map([$this, 'escapeIdentifier'], $conflictColumns));
+
+        $conflictSet = array_flip($conflictColumns);
+        $updateCols = $updateColumns ?? array_filter($columns, fn($c) => !isset($conflictSet[$c]));
+        $updateClause = implode(', ', array_map(
+            fn($c) => $this->escapeIdentifier($c) . ' = EXCLUDED.' . $this->escapeIdentifier($c),
+            $updateCols
+        ));
+
+        $totalAffected = 0;
+        foreach (array_chunk($rows, $chunkSize) as $chunk) {
+            $values = [];
+            foreach ($chunk as $row) {
+                $vals = array_map([$this, 'formatValue'], array_values($row));
+                $values[] = '(' . implode(', ', $vals) . ')';
+            }
+
+            $sql = "INSERT INTO $safeTable ($colList) VALUES " . implode(', ', $values) . " ON CONFLICT ($conflictList)";
+            $sql .= $updateClause ? " DO UPDATE SET $updateClause" : " DO NOTHING";
+
+            $this->exec($sql);
+            $totalAffected += count($chunk);
+        }
+        return $totalAffected;
+    }
+
+    /**
+     * Delete multiple rows by key values.
+     *
+     * @param array<mixed> $keys
+     * @throws QueryException
+     */
+    public function batchDelete(string $table, array $keys, string $keyColumn, int $chunkSize = 1000): int
+    {
+        if (count($keys) === 0) return 0;
+
+        $safeTable = $this->escapeIdentifier($table);
+        $safeKeyColumn = $this->escapeIdentifier($keyColumn);
+
+        $totalDeleted = 0;
+        foreach (array_chunk($keys, $chunkSize) as $chunk) {
+            $values = implode(', ', array_map([$this, 'formatValue'], $chunk));
+            $this->exec("DELETE FROM $safeTable WHERE $safeKeyColumn IN ($values)");
+            $totalDeleted += count($chunk);
+        }
+        return $totalDeleted;
+    }
+
+    // ========================================================================
+    // Schema Introspection
+    // ========================================================================
+
+    /**
+     * Get column information for a table.
+     *
+     * @throws QueryException
+     */
+    public function getColumns(string $table, ?string $database = null): QueryResult
+    {
+        $safeTable = $this->escapeIdentifier($table);
+        $sql = $database !== null
+            ? "DESCRIBE " . $this->escapeIdentifier($database) . ".$safeTable"
+            : "DESCRIBE $safeTable";
+        return $this->query($sql);
+    }
+
+    /**
+     * Get indexes for a table.
+     *
+     * @throws QueryException
+     */
+    public function getIndexes(string $table, ?string $database = null): QueryResult
+    {
+        $safeTable = $this->escapeIdentifier($table);
+        $sql = $database !== null
+            ? "SHOW INDEXES ON " . $this->escapeIdentifier($database) . ".$safeTable"
+            : "SHOW INDEXES ON $safeTable";
+        return $this->query($sql);
+    }
+
+    /**
+     * Get constraints for a table.
+     *
+     * @throws QueryException
+     */
+    public function getConstraints(string $table, ?string $database = null): QueryResult
+    {
+        $safeTable = $this->escapeIdentifier($table);
+        $sql = $database !== null
+            ? "SHOW CONSTRAINTS ON " . $this->escapeIdentifier($database) . ".$safeTable"
+            : "SHOW CONSTRAINTS ON $safeTable";
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Array Operations
+    // ========================================================================
+
+    /**
+     * Find rows where array column contains a value.
+     *
+     * @throws QueryException
+     */
+    public function arrayContains(
+        string $table,
+        string $arrayColumn,
+        mixed $value,
+        int $limit = 100,
+        ?string $where = null
+    ): QueryResult {
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) .
+               " WHERE " . $this->formatValue($value) . " = ANY(" . $this->escapeIdentifier($arrayColumn) . ")";
+        if ($where !== null) $sql .= " AND $where";
+        $sql .= " LIMIT $limit";
+        return $this->query($sql);
+    }
+
+    /**
+     * Find rows where array columns have overlapping elements.
+     *
+     * @param array<mixed> $values
+     * @throws QueryException
+     */
+    public function arrayOverlap(
+        string $table,
+        string $arrayColumn,
+        array $values,
+        int $limit = 100,
+        ?string $where = null
+    ): QueryResult {
+        $arrayLiteral = "ARRAY[" . implode(", ", array_map([$this, 'formatValue'], $values)) . "]";
+        $sql = "SELECT * FROM " . $this->escapeIdentifier($table) .
+               " WHERE " . $this->escapeIdentifier($arrayColumn) . " && $arrayLiteral";
+        if ($where !== null) $sql .= " AND $where";
+        $sql .= " LIMIT $limit";
+        return $this->query($sql);
+    }
+
+    // ========================================================================
+    // Async Pub/Sub Polling
+    // ========================================================================
+
+    /**
+     * Poll for pending notifications.
+     *
+     * @return array<array{channel: string, payload: string}>
+     * @throws QueryException
+     */
+    public function pollNotifications(int $timeoutMs = 0): array
+    {
+        $result = $this->query("SELECT * FROM pg_notification_queue($timeoutMs)");
+        $notifications = [];
+        foreach ($result->rows as $row) {
+            $notifications[] = [
+                'channel' => $row['channel'] ?? '',
+                'payload' => $row['payload'] ?? '',
+            ];
+        }
+        return $notifications;
+    }
+
+    // ========================================================================
+    // Helper Methods
+    // ========================================================================
+
+    /**
+     * Escape an identifier for SQL.
+     */
+    private function escapeIdentifier(string $identifier): string
+    {
+        if (str_contains($identifier, '.')) {
+            return implode('.', array_map([$this, 'escapeIdentifier'], explode('.', $identifier)));
+        }
+        return '"' . str_replace('"', '""', $identifier) . '"';
+    }
+
+    /**
+     * Escape a string value for SQL.
+     */
+    private function escapeString(string $value): string
+    {
+        return str_replace("'", "''", $value);
+    }
+
+    /**
+     * Format a value for SQL.
+     */
+    private function formatValue(mixed $value): string
+    {
+        if ($value === null) {
+            return 'NULL';
+        }
+        if (is_bool($value)) {
+            return $value ? 'TRUE' : 'FALSE';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string)$value;
+        }
+        if (is_string($value)) {
+            return "'" . $this->escapeString($value) . "'";
+        }
+        // Arrays and objects as JSON
+        return "'" . $this->escapeString(json_encode($value)) . "'";
+    }
+
     /**
      * Execute a callable within a transaction.
      *

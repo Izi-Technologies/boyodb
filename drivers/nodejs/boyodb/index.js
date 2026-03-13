@@ -811,6 +811,1298 @@ class Client {
     await this.exec(`RELEASE SAVEPOINT ${name}`);
   }
 
+  // ==========================================
+  // Pub/Sub Support
+  // ==========================================
+
+  /**
+   * Start listening on a notification channel.
+   * @param {string} channel - Channel name to listen on
+   * @returns {Promise<void>}
+   */
+  async listen(channel) {
+    const safeChannel = this._escapeIdentifier(channel);
+    await this.exec(`LISTEN ${safeChannel}`);
+  }
+
+  /**
+   * Stop listening on a notification channel.
+   * @param {string} [channel='*'] - Channel name (use '*' to unlisten all)
+   * @returns {Promise<void>}
+   */
+  async unlisten(channel = '*') {
+    if (channel === '*') {
+      await this.exec('UNLISTEN *');
+    } else {
+      const safeChannel = this._escapeIdentifier(channel);
+      await this.exec(`UNLISTEN ${safeChannel}`);
+    }
+  }
+
+  /**
+   * Send a notification on a channel.
+   * @param {string} channel - Channel name
+   * @param {string} [payload] - Optional message payload
+   * @returns {Promise<void>}
+   */
+  async notify(channel, payload = null) {
+    const safeChannel = this._escapeIdentifier(channel);
+    if (payload !== null) {
+      const safePayload = this._escapeString(payload);
+      await this.exec(`NOTIFY ${safeChannel}, '${safePayload}'`);
+    } else {
+      await this.exec(`NOTIFY ${safeChannel}`);
+    }
+  }
+
+  // ==========================================
+  // Trigger Management
+  // ==========================================
+
+  /**
+   * Create a database trigger.
+   * @param {string} name - Trigger name
+   * @param {string} table - Target table (format: database.table)
+   * @param {Object} options - Trigger options
+   * @param {string} options.timing - When to fire: 'BEFORE', 'AFTER', or 'INSTEAD OF'
+   * @param {string|Array<string>} options.events - Trigger events: 'INSERT', 'UPDATE', 'DELETE', or array of events
+   * @param {string} options.function - Function name to call
+   * @param {Array} [options.arguments] - Arguments to pass to the function
+   * @param {boolean} [options.forEachRow=true] - Fire for each row (vs statement)
+   * @param {string} [options.when] - Optional WHEN condition
+   * @param {boolean} [options.orReplace=false] - Replace if exists
+   * @returns {Promise<void>}
+   */
+  async createTrigger(name, table, options) {
+    const safeName = this._escapeIdentifier(name);
+    const safeTable = this._escapeIdentifier(table);
+    const timing = (options.timing || 'AFTER').toUpperCase();
+
+    const events = Array.isArray(options.events)
+      ? options.events.map(e => e.toUpperCase()).join(' OR ')
+      : options.events.toUpperCase();
+
+    const forEachRow = options.forEachRow !== false;
+    const safeFunction = this._escapeIdentifier(options.function);
+
+    let sql = options.orReplace ? 'CREATE OR REPLACE TRIGGER ' : 'CREATE TRIGGER ';
+    sql += `${safeName} ${timing} ${events} ON ${safeTable} `;
+    sql += forEachRow ? 'FOR EACH ROW ' : 'FOR EACH STATEMENT ';
+
+    if (options.when) {
+      sql += `WHEN (${options.when}) `;
+    }
+
+    sql += `EXECUTE FUNCTION ${safeFunction}(`;
+    if (options.arguments && options.arguments.length > 0) {
+      sql += options.arguments.map(arg => this._formatValue(arg)).join(', ');
+    }
+    sql += ')';
+
+    await this.exec(sql);
+  }
+
+  /**
+   * Drop a trigger.
+   * @param {string} name - Trigger name
+   * @param {string} table - Table the trigger is on
+   * @param {boolean} [ifExists=false] - Don't error if trigger doesn't exist
+   * @returns {Promise<void>}
+   */
+  async dropTrigger(name, table, ifExists = false) {
+    const safeName = this._escapeIdentifier(name);
+    const safeTable = this._escapeIdentifier(table);
+    const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
+    await this.exec(`DROP TRIGGER ${ifExistsClause}${safeName} ON ${safeTable}`);
+  }
+
+  /**
+   * Enable or disable a trigger.
+   * @param {string} name - Trigger name
+   * @param {string} table - Table the trigger is on
+   * @param {boolean} [enable=true] - Enable (true) or disable (false) the trigger
+   * @returns {Promise<void>}
+   */
+  async alterTrigger(name, table, enable = true) {
+    const safeName = this._escapeIdentifier(name);
+    const safeTable = this._escapeIdentifier(table);
+    const action = enable ? 'ENABLE' : 'DISABLE';
+    await this.exec(`ALTER TRIGGER ${safeName} ON ${safeTable} ${action}`);
+  }
+
+  /**
+   * List triggers on a table or in a database.
+   * @param {Object} [options={}] - Filter options
+   * @param {string} [options.table] - Filter by table
+   * @param {string} [options.database] - Filter by database
+   * @returns {Promise<QueryResult>}
+   */
+  async listTriggers(options = {}) {
+    let sql = 'SHOW TRIGGERS';
+    if (options.table) {
+      sql += ` ON ${this._escapeIdentifier(options.table)}`;
+    } else if (options.database) {
+      sql += ` IN ${this._escapeIdentifier(options.database)}`;
+    }
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Stored Procedures and Functions
+  // ==========================================
+
+  /**
+   * Call a stored procedure.
+   * @param {string} procedure - Procedure name
+   * @param {...*} args - Arguments to pass to the procedure
+   * @returns {Promise<QueryResult>}
+   */
+  async call(procedure, ...args) {
+    const safeName = this._escapeIdentifier(procedure);
+    const formattedArgs = args.map(arg => this._formatValue(arg)).join(', ');
+    return await this.query(`CALL ${safeName}(${formattedArgs})`);
+  }
+
+  /**
+   * Create a stored function.
+   * @param {string} name - Function name
+   * @param {Array<{name: string, type: string}>} parameters - Function parameters
+   * @param {string} returnType - Return type
+   * @param {string} body - Function body
+   * @param {Object} [options={}] - Function options
+   * @param {string} [options.language='plpgsql'] - Function language
+   * @param {boolean} [options.orReplace=false] - Replace if exists
+   * @param {string} [options.volatility] - IMMUTABLE, STABLE, or VOLATILE
+   * @returns {Promise<void>}
+   */
+  async createFunction(name, parameters, returnType, body, options = {}) {
+    const safeName = this._escapeIdentifier(name);
+    const language = options.language || 'plpgsql';
+
+    const params = parameters.map(p => `${this._escapeIdentifier(p.name)} ${p.type}`).join(', ');
+
+    let sql = options.orReplace ? 'CREATE OR REPLACE FUNCTION ' : 'CREATE FUNCTION ';
+    sql += `${safeName}(${params}) RETURNS ${returnType} `;
+    sql += `LANGUAGE ${language} `;
+
+    if (options.volatility) {
+      sql += `${options.volatility.toUpperCase()} `;
+    }
+
+    sql += `AS $$ ${body} $$`;
+
+    await this.exec(sql);
+  }
+
+  /**
+   * Create a stored procedure.
+   * @param {string} name - Procedure name
+   * @param {Array<{name: string, type: string, mode?: string}>} parameters - Procedure parameters (mode: IN, OUT, INOUT)
+   * @param {string} body - Procedure body
+   * @param {Object} [options={}] - Procedure options
+   * @param {string} [options.language='plpgsql'] - Procedure language
+   * @param {boolean} [options.orReplace=false] - Replace if exists
+   * @returns {Promise<void>}
+   */
+  async createProcedure(name, parameters, body, options = {}) {
+    const safeName = this._escapeIdentifier(name);
+    const language = options.language || 'plpgsql';
+
+    const params = parameters.map(p => {
+      const mode = p.mode ? `${p.mode.toUpperCase()} ` : '';
+      return `${mode}${this._escapeIdentifier(p.name)} ${p.type}`;
+    }).join(', ');
+
+    let sql = options.orReplace ? 'CREATE OR REPLACE PROCEDURE ' : 'CREATE PROCEDURE ';
+    sql += `${safeName}(${params}) `;
+    sql += `LANGUAGE ${language} `;
+    sql += `AS $$ ${body} $$`;
+
+    await this.exec(sql);
+  }
+
+  /**
+   * Drop a function.
+   * @param {string} name - Function name
+   * @param {Array<string>} [paramTypes] - Parameter types for overload resolution
+   * @param {boolean} [ifExists=false] - Don't error if function doesn't exist
+   * @returns {Promise<void>}
+   */
+  async dropFunction(name, paramTypes = null, ifExists = false) {
+    const safeName = this._escapeIdentifier(name);
+    const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
+    const signature = paramTypes ? `(${paramTypes.join(', ')})` : '';
+    await this.exec(`DROP FUNCTION ${ifExistsClause}${safeName}${signature}`);
+  }
+
+  /**
+   * Drop a procedure.
+   * @param {string} name - Procedure name
+   * @param {Array<string>} [paramTypes] - Parameter types for overload resolution
+   * @param {boolean} [ifExists=false] - Don't error if procedure doesn't exist
+   * @returns {Promise<void>}
+   */
+  async dropProcedure(name, paramTypes = null, ifExists = false) {
+    const safeName = this._escapeIdentifier(name);
+    const ifExistsClause = ifExists ? 'IF EXISTS ' : '';
+    const signature = paramTypes ? `(${paramTypes.join(', ')})` : '';
+    await this.exec(`DROP PROCEDURE ${ifExistsClause}${safeName}${signature}`);
+  }
+
+  // ==========================================
+  // JSON Operations
+  // ==========================================
+
+  /**
+   * Extract a JSON value from a column using -> operator.
+   * @param {string} column - JSON column name
+   * @param {string|number} path - JSON key or array index
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @param {string} [options.where] - WHERE clause
+   * @param {number} [options.limit] - LIMIT clause
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonExtract(column, path, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const pathExpr = typeof path === 'number' ? path : `'${this._escapeString(path)}'`;
+
+    let sql = `SELECT ${safeColumn} -> ${pathExpr} AS value FROM ${safeTable}`;
+    if (options.where) sql += ` WHERE ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Extract a JSON value as text using ->> operator.
+   * @param {string} column - JSON column name
+   * @param {string|number} path - JSON key or array index
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @param {string} [options.where] - WHERE clause
+   * @param {number} [options.limit] - LIMIT clause
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonExtractText(column, path, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const pathExpr = typeof path === 'number' ? path : `'${this._escapeString(path)}'`;
+
+    let sql = `SELECT ${safeColumn} ->> ${pathExpr} AS value FROM ${safeTable}`;
+    if (options.where) sql += ` WHERE ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Extract a nested JSON value using #> operator (path array).
+   * @param {string} column - JSON column name
+   * @param {Array<string>} path - Array of path elements
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonExtractPath(column, path, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const pathArray = `'{${path.map(p => this._escapeString(p)).join(',')}}'`;
+
+    let sql = `SELECT ${safeColumn} #> ${pathArray} AS value FROM ${safeTable}`;
+    if (options.where) sql += ` WHERE ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Extract a nested JSON value as text using #>> operator.
+   * @param {string} column - JSON column name
+   * @param {Array<string>} path - Array of path elements
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonExtractPathText(column, path, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const pathArray = `'{${path.map(p => this._escapeString(p)).join(',')}}'`;
+
+    let sql = `SELECT ${safeColumn} #>> ${pathArray} AS value FROM ${safeTable}`;
+    if (options.where) sql += ` WHERE ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Check if JSON contains another JSON value using @> operator.
+   * @param {string} column - JSON column name
+   * @param {Object} value - JSON value to check for
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonContains(column, value, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const jsonValue = JSON.stringify(value);
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} @> '${this._escapeString(jsonValue)}'::jsonb`;
+    if (options.where) sql += ` AND ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Check if JSON is contained in another JSON value using <@ operator.
+   * @param {string} column - JSON column name
+   * @param {Object} value - JSON value to check against
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonContainedBy(column, value, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+    const jsonValue = JSON.stringify(value);
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} <@ '${this._escapeString(jsonValue)}'::jsonb`;
+    if (options.where) sql += ` AND ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Check if a JSON path exists using @? operator.
+   * @param {string} column - JSON column name
+   * @param {string} jsonPath - JSONPath expression
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonPathExists(column, jsonPath, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} @? '${this._escapeString(jsonPath)}'`;
+    if (options.where) sql += ` AND ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Check if a JSON path predicate matches using @@ operator.
+   * @param {string} column - JSON column name
+   * @param {string} jsonPath - JSONPath predicate expression
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Query options
+   * @returns {Promise<QueryResult>}
+   */
+  async jsonPathMatch(column, jsonPath, table, options = {}) {
+    const safeColumn = this._escapeIdentifier(column);
+    const safeTable = this._escapeIdentifier(table);
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} @@ '${this._escapeString(jsonPath)}'`;
+    if (options.where) sql += ` AND ${options.where}`;
+    if (options.limit) sql += ` LIMIT ${options.limit}`;
+
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Cursor Support
+  // ==========================================
+
+  /**
+   * Declare a server-side cursor.
+   * @param {string} name - Cursor name
+   * @param {string} query - SQL query for the cursor
+   * @param {Object} [options={}] - Cursor options
+   * @param {boolean} [options.scroll=false] - Allow backward movement
+   * @param {boolean} [options.hold=false] - Keep cursor open after commit
+   * @returns {Promise<void>}
+   */
+  async declareCursor(name, query, options = {}) {
+    const safeName = this._escapeIdentifier(name);
+    let sql = 'DECLARE ' + safeName;
+    if (options.scroll) sql += ' SCROLL';
+    if (options.hold) sql += ' WITH HOLD';
+    sql += ' CURSOR FOR ' + query;
+    await this.exec(sql);
+  }
+
+  /**
+   * Fetch rows from a cursor.
+   * @param {string} name - Cursor name
+   * @param {number} [count=1] - Number of rows to fetch
+   * @param {string} [direction='NEXT'] - Fetch direction (NEXT, PRIOR, FIRST, LAST, ABSOLUTE n, RELATIVE n, FORWARD, BACKWARD)
+   * @returns {Promise<QueryResult>}
+   */
+  async fetchCursor(name, count = 1, direction = 'NEXT') {
+    const safeName = this._escapeIdentifier(name);
+    let sql;
+    const dir = direction.toUpperCase();
+    if (dir === 'NEXT' || dir === 'PRIOR' || dir === 'FIRST' || dir === 'LAST') {
+      sql = `FETCH ${dir} ${count} FROM ${safeName}`;
+    } else if (dir.startsWith('ABSOLUTE') || dir.startsWith('RELATIVE')) {
+      sql = `FETCH ${dir} FROM ${safeName}`;
+    } else {
+      sql = `FETCH ${dir} ${count} FROM ${safeName}`;
+    }
+    return await this.query(sql);
+  }
+
+  /**
+   * Move cursor position without returning data.
+   * @param {string} name - Cursor name
+   * @param {number} [count=1] - Number of rows to move
+   * @param {string} [direction='NEXT'] - Move direction
+   * @returns {Promise<void>}
+   */
+  async moveCursor(name, count = 1, direction = 'NEXT') {
+    const safeName = this._escapeIdentifier(name);
+    const dir = direction.toUpperCase();
+    let sql;
+    if (dir === 'NEXT' || dir === 'PRIOR' || dir === 'FIRST' || dir === 'LAST') {
+      sql = `MOVE ${dir} ${count} IN ${safeName}`;
+    } else {
+      sql = `MOVE ${dir} IN ${safeName}`;
+    }
+    await this.exec(sql);
+  }
+
+  /**
+   * Close a cursor.
+   * @param {string} name - Cursor name (use '*' or 'ALL' to close all)
+   * @returns {Promise<void>}
+   */
+  async closeCursor(name) {
+    if (name === '*' || name.toUpperCase() === 'ALL') {
+      await this.exec('CLOSE ALL');
+    } else {
+      const safeName = this._escapeIdentifier(name);
+      await this.exec(`CLOSE ${safeName}`);
+    }
+  }
+
+  // ==========================================
+  // Large Objects (LOB) Support
+  // ==========================================
+
+  /**
+   * Create a new large object.
+   * @returns {Promise<number>} - OID of the new large object
+   */
+  async loCreate() {
+    const result = await this.query('SELECT lo_create(0) AS oid');
+    return result.rows[0].oid;
+  }
+
+  /**
+   * Open a large object.
+   * @param {number} oid - OID of the large object
+   * @param {string} [mode='rw'] - Open mode ('r', 'w', 'rw')
+   * @returns {Promise<number>} - File descriptor
+   */
+  async loOpen(oid, mode = 'rw') {
+    // Mode: INV_READ = 0x40000, INV_WRITE = 0x20000
+    let modeFlag = 0x40000; // read
+    if (mode.includes('w')) modeFlag |= 0x20000;
+    const result = await this.query(`SELECT lo_open(${oid}, ${modeFlag}) AS fd`);
+    return result.rows[0].fd;
+  }
+
+  /**
+   * Write data to a large object.
+   * @param {number} fd - File descriptor from loOpen
+   * @param {Buffer|string} data - Data to write
+   * @returns {Promise<number>} - Number of bytes written
+   */
+  async loWrite(fd, data) {
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    const b64 = buffer.toString('base64');
+    const result = await this.query(`SELECT lowrite(${fd}, decode('${b64}', 'base64')) AS written`);
+    return result.rows[0].written;
+  }
+
+  /**
+   * Read data from a large object.
+   * @param {number} fd - File descriptor from loOpen
+   * @param {number} length - Number of bytes to read
+   * @returns {Promise<Buffer>} - Data read
+   */
+  async loRead(fd, length) {
+    const result = await this.query(`SELECT encode(loread(${fd}, ${length}), 'base64') AS data`);
+    return Buffer.from(result.rows[0].data, 'base64');
+  }
+
+  /**
+   * Seek within a large object.
+   * @param {number} fd - File descriptor
+   * @param {number} offset - Byte offset
+   * @param {number} [whence=0] - 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+   * @returns {Promise<number>} - New position
+   */
+  async loSeek(fd, offset, whence = 0) {
+    const result = await this.query(`SELECT lo_lseek(${fd}, ${offset}, ${whence}) AS pos`);
+    return result.rows[0].pos;
+  }
+
+  /**
+   * Get current position in large object.
+   * @param {number} fd - File descriptor
+   * @returns {Promise<number>} - Current position
+   */
+  async loTell(fd) {
+    const result = await this.query(`SELECT lo_tell(${fd}) AS pos`);
+    return result.rows[0].pos;
+  }
+
+  /**
+   * Close a large object.
+   * @param {number} fd - File descriptor
+   * @returns {Promise<void>}
+   */
+  async loClose(fd) {
+    await this.query(`SELECT lo_close(${fd})`);
+  }
+
+  /**
+   * Delete a large object.
+   * @param {number} oid - OID of the large object
+   * @returns {Promise<void>}
+   */
+  async loUnlink(oid) {
+    await this.query(`SELECT lo_unlink(${oid})`);
+  }
+
+  /**
+   * Import data as a large object.
+   * @param {Buffer|string} data - Data to import
+   * @returns {Promise<number>} - OID of the new large object
+   */
+  async loImport(data) {
+    const oid = await this.loCreate();
+    const fd = await this.loOpen(oid, 'w');
+    try {
+      await this.loWrite(fd, data);
+    } finally {
+      await this.loClose(fd);
+    }
+    return oid;
+  }
+
+  /**
+   * Export a large object as data.
+   * @param {number} oid - OID of the large object
+   * @returns {Promise<Buffer>} - Large object data
+   */
+  async loExport(oid) {
+    const fd = await this.loOpen(oid, 'r');
+    const chunks = [];
+    try {
+      while (true) {
+        const chunk = await this.loRead(fd, 8192);
+        if (chunk.length === 0) break;
+        chunks.push(chunk);
+      }
+    } finally {
+      await this.loClose(fd);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  // ==========================================
+  // Advisory Locks
+  // ==========================================
+
+  /**
+   * Acquire an advisory lock (session-level).
+   * @param {number} key - Lock key
+   * @param {boolean} [shared=false] - Shared (true) or exclusive (false) lock
+   * @returns {Promise<boolean>} - True if lock acquired
+   */
+  async advisoryLock(key, shared = false) {
+    const func = shared ? 'pg_advisory_lock_shared' : 'pg_advisory_lock';
+    await this.query(`SELECT ${func}(${key})`);
+    return true;
+  }
+
+  /**
+   * Try to acquire an advisory lock without blocking.
+   * @param {number} key - Lock key
+   * @param {boolean} [shared=false] - Shared (true) or exclusive (false) lock
+   * @returns {Promise<boolean>} - True if lock acquired, false otherwise
+   */
+  async advisoryLockTry(key, shared = false) {
+    const func = shared ? 'pg_try_advisory_lock_shared' : 'pg_try_advisory_lock';
+    const result = await this.query(`SELECT ${func}(${key}) AS acquired`);
+    return result.rows[0].acquired === true;
+  }
+
+  /**
+   * Release an advisory lock.
+   * @param {number} key - Lock key
+   * @param {boolean} [shared=false] - Shared (true) or exclusive (false) lock
+   * @returns {Promise<boolean>} - True if lock was released
+   */
+  async advisoryUnlock(key, shared = false) {
+    const func = shared ? 'pg_advisory_unlock_shared' : 'pg_advisory_unlock';
+    const result = await this.query(`SELECT ${func}(${key}) AS released`);
+    return result.rows[0].released === true;
+  }
+
+  /**
+   * Release all session-level advisory locks.
+   * @returns {Promise<void>}
+   */
+  async advisoryUnlockAll() {
+    await this.query('SELECT pg_advisory_unlock_all()');
+  }
+
+  /**
+   * Acquire a transaction-level advisory lock.
+   * @param {number} key - Lock key
+   * @param {boolean} [shared=false] - Shared (true) or exclusive (false) lock
+   * @returns {Promise<void>}
+   */
+  async advisoryXactLock(key, shared = false) {
+    const func = shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock';
+    await this.query(`SELECT ${func}(${key})`);
+  }
+
+  /**
+   * Try to acquire a transaction-level advisory lock without blocking.
+   * @param {number} key - Lock key
+   * @param {boolean} [shared=false] - Shared (true) or exclusive (false) lock
+   * @returns {Promise<boolean>} - True if lock acquired
+   */
+  async advisoryXactLockTry(key, shared = false) {
+    const func = shared ? 'pg_try_advisory_xact_lock_shared' : 'pg_try_advisory_xact_lock';
+    const result = await this.query(`SELECT ${func}(${key}) AS acquired`);
+    return result.rows[0].acquired === true;
+  }
+
+  // ==========================================
+  // Full-Text Search
+  // ==========================================
+
+  /**
+   * Perform a full-text search.
+   * @param {string} table - Table name
+   * @param {string} textColumn - Text column to search
+   * @param {string} query - Search query
+   * @param {Object} [options={}] - Search options
+   * @param {string} [options.config='english'] - Text search configuration
+   * @param {number} [options.limit=100] - Maximum results
+   * @param {boolean} [options.rank=true] - Include ranking
+   * @param {string} [options.where] - Additional WHERE clause
+   * @returns {Promise<QueryResult>}
+   */
+  async ftsSearch(table, textColumn, query, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(textColumn);
+    const config = options.config || 'english';
+    const limit = options.limit || 100;
+    const safeQuery = this._escapeString(query);
+
+    let sql;
+    if (options.rank !== false) {
+      sql = `SELECT *, ts_rank(to_tsvector('${config}', ${safeColumn}), plainto_tsquery('${config}', '${safeQuery}')) AS rank ` +
+            `FROM ${safeTable} ` +
+            `WHERE to_tsvector('${config}', ${safeColumn}) @@ plainto_tsquery('${config}', '${safeQuery}')`;
+      if (options.where) sql += ` AND ${options.where}`;
+      sql += ` ORDER BY rank DESC LIMIT ${limit}`;
+    } else {
+      sql = `SELECT * FROM ${safeTable} ` +
+            `WHERE to_tsvector('${config}', ${safeColumn}) @@ plainto_tsquery('${config}', '${safeQuery}')`;
+      if (options.where) sql += ` AND ${options.where}`;
+      sql += ` LIMIT ${limit}`;
+    }
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Get highlighted search results.
+   * @param {string} table - Table name
+   * @param {string} textColumn - Text column to search
+   * @param {string} query - Search query
+   * @param {Object} [options={}] - Highlight options
+   * @param {string} [options.config='english'] - Text search configuration
+   * @param {string} [options.startTag='<b>'] - Tag before match
+   * @param {string} [options.stopTag='</b>'] - Tag after match
+   * @param {number} [options.limit=100] - Maximum results
+   * @returns {Promise<QueryResult>}
+   */
+  async ftsHighlight(table, textColumn, query, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(textColumn);
+    const config = options.config || 'english';
+    const startTag = options.startTag || '<b>';
+    const stopTag = options.stopTag || '</b>';
+    const limit = options.limit || 100;
+    const safeQuery = this._escapeString(query);
+
+    const sql = `SELECT *, ts_headline('${config}', ${safeColumn}, plainto_tsquery('${config}', '${safeQuery}'), ` +
+                `'StartSel=${startTag}, StopSel=${stopTag}') AS headline ` +
+                `FROM ${safeTable} ` +
+                `WHERE to_tsvector('${config}', ${safeColumn}) @@ plainto_tsquery('${config}', '${safeQuery}') ` +
+                `LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Geospatial Support
+  // ==========================================
+
+  /**
+   * Find records within a distance from a point.
+   * @param {string} table - Table name
+   * @param {string} geoColumn - Geometry/geography column
+   * @param {number} lat - Latitude
+   * @param {number} lon - Longitude
+   * @param {number} radiusMeters - Search radius in meters
+   * @param {Object} [options={}] - Options
+   * @param {number} [options.limit=100] - Maximum results
+   * @param {string} [options.where] - Additional WHERE clause
+   * @returns {Promise<QueryResult>}
+   */
+  async geoDistance(table, geoColumn, lat, lon, radiusMeters, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(geoColumn);
+    const limit = options.limit || 100;
+
+    let sql = `SELECT *, ST_Distance(${safeColumn}, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geography) AS distance ` +
+              `FROM ${safeTable} ` +
+              `WHERE ST_DWithin(${safeColumn}, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geography, ${radiusMeters})`;
+    if (options.where) sql += ` AND ${options.where}`;
+    sql += ` ORDER BY distance ASC LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Find records where geometry contains a point or is contained by a polygon.
+   * @param {string} table - Table name
+   * @param {string} geoColumn - Geometry column
+   * @param {string} wkt - WKT (Well-Known Text) of geometry to test
+   * @param {Object} [options={}] - Options
+   * @param {number} [options.limit=100] - Maximum results
+   * @returns {Promise<QueryResult>}
+   */
+  async geoContains(table, geoColumn, wkt, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(geoColumn);
+    const limit = options.limit || 100;
+
+    const sql = `SELECT * FROM ${safeTable} ` +
+                `WHERE ST_Contains(${safeColumn}, ST_GeomFromText('${this._escapeString(wkt)}', 4326)) ` +
+                `LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Find K nearest neighbors to a point.
+   * @param {string} table - Table name
+   * @param {string} geoColumn - Geometry/geography column
+   * @param {number} lat - Latitude
+   * @param {number} lon - Longitude
+   * @param {number} [k=10] - Number of neighbors
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async geoNearest(table, geoColumn, lat, lon, k = 10, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(geoColumn);
+
+    let sql = `SELECT *, ST_Distance(${safeColumn}, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geography) AS distance ` +
+              `FROM ${safeTable}`;
+    if (options.where) sql += ` WHERE ${options.where}`;
+    sql += ` ORDER BY ${safeColumn} <-> ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geometry LIMIT ${k}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Find records that intersect with a geometry.
+   * @param {string} table - Table name
+   * @param {string} geoColumn - Geometry column
+   * @param {string} wkt - WKT of geometry to intersect with
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async geoIntersects(table, geoColumn, wkt, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(geoColumn);
+    const limit = options.limit || 100;
+
+    const sql = `SELECT * FROM ${safeTable} ` +
+                `WHERE ST_Intersects(${safeColumn}, ST_GeomFromText('${this._escapeString(wkt)}', 4326)) ` +
+                `LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Time Travel Queries
+  // ==========================================
+
+  /**
+   * Query data as of a specific timestamp.
+   * @param {string} sql - SQL query
+   * @param {Date|string} timestamp - Point in time
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async queryAsOf(sql, timestamp, options = {}) {
+    const ts = timestamp instanceof Date ? timestamp.toISOString() : timestamp;
+    const modifiedSql = `${sql} AS OF TIMESTAMP '${this._escapeString(ts)}'`;
+    return await this.query(modifiedSql, options);
+  }
+
+  /**
+   * Query data changes between two timestamps.
+   * @param {string} sql - SQL query
+   * @param {Date|string} startTime - Start timestamp
+   * @param {Date|string} endTime - End timestamp
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async queryBetween(sql, startTime, endTime, options = {}) {
+    const start = startTime instanceof Date ? startTime.toISOString() : startTime;
+    const end = endTime instanceof Date ? endTime.toISOString() : endTime;
+    const modifiedSql = `${sql} FOR SYSTEM_TIME FROM '${this._escapeString(start)}' TO '${this._escapeString(end)}'`;
+    return await this.query(modifiedSql, options);
+  }
+
+  /**
+   * Get the history of a table.
+   * @param {string} table - Table name
+   * @param {Object} [options={}] - Options
+   * @param {Date|string} [options.since] - Start timestamp
+   * @param {Date|string} [options.until] - End timestamp
+   * @param {number} [options.limit=1000] - Maximum rows
+   * @returns {Promise<QueryResult>}
+   */
+  async getHistory(table, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const limit = options.limit || 1000;
+
+    let sql = `SELECT * FROM ${safeTable}`;
+    if (options.since && options.until) {
+      const since = options.since instanceof Date ? options.since.toISOString() : options.since;
+      const until = options.until instanceof Date ? options.until.toISOString() : options.until;
+      sql += ` FOR SYSTEM_TIME FROM '${this._escapeString(since)}' TO '${this._escapeString(until)}'`;
+    } else if (options.since) {
+      const since = options.since instanceof Date ? options.since.toISOString() : options.since;
+      sql += ` FOR SYSTEM_TIME FROM '${this._escapeString(since)}' TO NOW()`;
+    }
+    sql += ` LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Batch Operations
+  // ==========================================
+
+  /**
+   * Insert multiple rows in batches.
+   * @param {string} table - Table name
+   * @param {Array<Object>} rows - Rows to insert
+   * @param {Object} [options={}] - Options
+   * @param {number} [options.chunkSize=1000] - Batch size
+   * @returns {Promise<number>} - Total rows inserted
+   */
+  async batchInsert(table, rows, options = {}) {
+    if (!rows || rows.length === 0) return 0;
+
+    const chunkSize = options.chunkSize || 1000;
+    const safeTable = this._escapeIdentifier(table);
+    const columns = Object.keys(rows[0]);
+    const safeColumns = columns.map(c => this._escapeIdentifier(c)).join(', ');
+
+    let totalInserted = 0;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      const values = chunk.map(row => {
+        const vals = columns.map(c => this._formatValue(row[c]));
+        return `(${vals.join(', ')})`;
+      }).join(', ');
+
+      const sql = `INSERT INTO ${safeTable} (${safeColumns}) VALUES ${values}`;
+      await this.exec(sql);
+      totalInserted += chunk.length;
+    }
+
+    return totalInserted;
+  }
+
+  /**
+   * Update multiple rows by key.
+   * @param {string} table - Table name
+   * @param {Array<Object>} updates - Updates, each containing key and fields to update
+   * @param {string} keyColumn - Primary key column name
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<number>} - Total rows updated
+   */
+  async batchUpdate(table, updates, keyColumn, options = {}) {
+    if (!updates || updates.length === 0) return 0;
+
+    const safeTable = this._escapeIdentifier(table);
+    const safeKeyColumn = this._escapeIdentifier(keyColumn);
+    let totalUpdated = 0;
+
+    for (const update of updates) {
+      const keyValue = update[keyColumn];
+      const setClauses = Object.entries(update)
+        .filter(([k]) => k !== keyColumn)
+        .map(([k, v]) => `${this._escapeIdentifier(k)} = ${this._formatValue(v)}`)
+        .join(', ');
+
+      if (!setClauses) continue;
+
+      const sql = `UPDATE ${safeTable} SET ${setClauses} WHERE ${safeKeyColumn} = ${this._formatValue(keyValue)}`;
+      await this.exec(sql);
+      totalUpdated++;
+    }
+
+    return totalUpdated;
+  }
+
+  /**
+   * Upsert multiple rows (INSERT ... ON CONFLICT).
+   * @param {string} table - Table name
+   * @param {Array<Object>} rows - Rows to upsert
+   * @param {Array<string>} conflictColumns - Columns that define the conflict
+   * @param {Array<string>} [updateColumns] - Columns to update on conflict (defaults to all non-conflict columns)
+   * @param {Object} [options={}] - Options
+   * @param {number} [options.chunkSize=1000] - Batch size
+   * @returns {Promise<number>} - Total rows affected
+   */
+  async batchUpsert(table, rows, conflictColumns, updateColumns = null, options = {}) {
+    if (!rows || rows.length === 0) return 0;
+
+    const chunkSize = options.chunkSize || 1000;
+    const safeTable = this._escapeIdentifier(table);
+    const columns = Object.keys(rows[0]);
+    const safeColumns = columns.map(c => this._escapeIdentifier(c)).join(', ');
+    const safeConflict = conflictColumns.map(c => this._escapeIdentifier(c)).join(', ');
+
+    const updateCols = updateColumns || columns.filter(c => !conflictColumns.includes(c));
+    const updateClause = updateCols
+      .map(c => `${this._escapeIdentifier(c)} = EXCLUDED.${this._escapeIdentifier(c)}`)
+      .join(', ');
+
+    let totalAffected = 0;
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      const values = chunk.map(row => {
+        const vals = columns.map(c => this._formatValue(row[c]));
+        return `(${vals.join(', ')})`;
+      }).join(', ');
+
+      let sql = `INSERT INTO ${safeTable} (${safeColumns}) VALUES ${values} ` +
+                `ON CONFLICT (${safeConflict})`;
+      if (updateClause) {
+        sql += ` DO UPDATE SET ${updateClause}`;
+      } else {
+        sql += ' DO NOTHING';
+      }
+
+      await this.exec(sql);
+      totalAffected += chunk.length;
+    }
+
+    return totalAffected;
+  }
+
+  /**
+   * Delete multiple rows by key values.
+   * @param {string} table - Table name
+   * @param {Array} keys - Key values to delete
+   * @param {string} keyColumn - Key column name
+   * @param {Object} [options={}] - Options
+   * @param {number} [options.chunkSize=1000] - Batch size
+   * @returns {Promise<number>} - Total rows deleted
+   */
+  async batchDelete(table, keys, keyColumn, options = {}) {
+    if (!keys || keys.length === 0) return 0;
+
+    const chunkSize = options.chunkSize || 1000;
+    const safeTable = this._escapeIdentifier(table);
+    const safeKeyColumn = this._escapeIdentifier(keyColumn);
+
+    let totalDeleted = 0;
+    for (let i = 0; i < keys.length; i += chunkSize) {
+      const chunk = keys.slice(i, i + chunkSize);
+      const values = chunk.map(k => this._formatValue(k)).join(', ');
+
+      const sql = `DELETE FROM ${safeTable} WHERE ${safeKeyColumn} IN (${values})`;
+      await this.exec(sql);
+      totalDeleted += chunk.length;
+    }
+
+    return totalDeleted;
+  }
+
+  // ==========================================
+  // Schema Introspection
+  // ==========================================
+
+  /**
+   * Get column information for a table.
+   * @param {string} table - Table name
+   * @param {string} [database] - Database name
+   * @returns {Promise<QueryResult>}
+   */
+  async getColumns(table, database = null) {
+    const db = database || this.config.database;
+    const safeTable = this._escapeIdentifier(table);
+    let sql;
+    if (db) {
+      sql = `DESCRIBE ${this._escapeIdentifier(db)}.${safeTable}`;
+    } else {
+      sql = `DESCRIBE ${safeTable}`;
+    }
+    return await this.query(sql);
+  }
+
+  /**
+   * Get indexes for a table.
+   * @param {string} table - Table name
+   * @param {string} [database] - Database name
+   * @returns {Promise<QueryResult>}
+   */
+  async getIndexes(table, database = null) {
+    const db = database || this.config.database;
+    const safeTable = this._escapeIdentifier(table);
+    let sql;
+    if (db) {
+      sql = `SHOW INDEXES ON ${this._escapeIdentifier(db)}.${safeTable}`;
+    } else {
+      sql = `SHOW INDEXES ON ${safeTable}`;
+    }
+    return await this.query(sql);
+  }
+
+  /**
+   * Get constraints for a table.
+   * @param {string} table - Table name
+   * @param {string} [database] - Database name
+   * @returns {Promise<QueryResult>}
+   */
+  async getConstraints(table, database = null) {
+    const db = database || this.config.database;
+    const safeTable = this._escapeIdentifier(table);
+    let sql;
+    if (db) {
+      sql = `SHOW CONSTRAINTS ON ${this._escapeIdentifier(db)}.${safeTable}`;
+    } else {
+      sql = `SHOW CONSTRAINTS ON ${safeTable}`;
+    }
+    return await this.query(sql);
+  }
+
+  /**
+   * Get table statistics.
+   * @param {string} table - Table name
+   * @param {string} [database] - Database name
+   * @returns {Promise<QueryResult>}
+   */
+  async getTableStats(table, database = null) {
+    const db = database || this.config.database;
+    const safeTable = this._escapeIdentifier(table);
+    let sql;
+    if (db) {
+      sql = `SHOW STATS FOR ${this._escapeIdentifier(db)}.${safeTable}`;
+    } else {
+      sql = `SHOW STATS FOR ${safeTable}`;
+    }
+    return await this.query(sql);
+  }
+
+  /**
+   * Get full schema for a database.
+   * @param {string} [database] - Database name
+   * @returns {Promise<{tables: Array, indexes: Array, constraints: Array}>}
+   */
+  async getSchema(database = null) {
+    const db = database || this.config.database;
+    const tables = await this.listTables(db);
+
+    const schema = {
+      tables: [],
+      indexes: [],
+      constraints: [],
+    };
+
+    for (const tableInfo of tables) {
+      const tableName = tableInfo.name || tableInfo;
+      try {
+        const columns = await this.getColumns(tableName, db);
+        schema.tables.push({ name: tableName, columns: columns.rows });
+
+        try {
+          const indexes = await this.getIndexes(tableName, db);
+          schema.indexes.push(...indexes.rows.map(idx => ({ ...idx, table: tableName })));
+        } catch (e) { /* No indexes */ }
+
+        try {
+          const constraints = await this.getConstraints(tableName, db);
+          schema.constraints.push(...constraints.rows.map(c => ({ ...c, table: tableName })));
+        } catch (e) { /* No constraints */ }
+      } catch (e) {
+        schema.tables.push({ name: tableName, error: e.message });
+      }
+    }
+
+    return schema;
+  }
+
+  // ==========================================
+  // Array Operations
+  // ==========================================
+
+  /**
+   * Find rows where array column contains a value.
+   * @param {string} table - Table name
+   * @param {string} arrayColumn - Array column name
+   * @param {*} value - Value to search for
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async arrayContains(table, arrayColumn, value, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(arrayColumn);
+    const limit = options.limit || 100;
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${this._formatValue(value)} = ANY(${safeColumn})`;
+    if (options.where) sql += ` AND ${options.where}`;
+    sql += ` LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Find rows where array columns overlap.
+   * @param {string} table - Table name
+   * @param {string} arrayColumn - Array column name
+   * @param {Array} values - Values to check for overlap
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async arrayOverlap(table, arrayColumn, values, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(arrayColumn);
+    const limit = options.limit || 100;
+    const arrayLiteral = `ARRAY[${values.map(v => this._formatValue(v)).join(', ')}]`;
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} && ${arrayLiteral}`;
+    if (options.where) sql += ` AND ${options.where}`;
+    sql += ` LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  /**
+   * Find rows where array contains all specified values.
+   * @param {string} table - Table name
+   * @param {string} arrayColumn - Array column name
+   * @param {Array} values - Values that must all be present
+   * @param {Object} [options={}] - Options
+   * @returns {Promise<QueryResult>}
+   */
+  async arrayContainsAll(table, arrayColumn, values, options = {}) {
+    const safeTable = this._escapeIdentifier(table);
+    const safeColumn = this._escapeIdentifier(arrayColumn);
+    const limit = options.limit || 100;
+    const arrayLiteral = `ARRAY[${values.map(v => this._formatValue(v)).join(', ')}]`;
+
+    let sql = `SELECT * FROM ${safeTable} WHERE ${safeColumn} @> ${arrayLiteral}`;
+    if (options.where) sql += ` AND ${options.where}`;
+    sql += ` LIMIT ${limit}`;
+
+    return await this.query(sql);
+  }
+
+  // ==========================================
+  // Async Pub/Sub Polling
+  // ==========================================
+
+  /**
+   * Poll for pending notifications.
+   * @param {number} [timeout=0] - Timeout in milliseconds (0 = non-blocking)
+   * @returns {Promise<Array<{channel: string, payload: string}>>}
+   */
+  async pollNotifications(timeout = 0) {
+    const result = await this.query(`SELECT * FROM pg_notification_queue(${timeout})`);
+    return result.rows.map(row => ({
+      channel: row.channel,
+      payload: row.payload,
+    }));
+  }
+
+  // ==========================================
+  // Helper Methods
+  // ==========================================
+
+  /**
+   * Escape an identifier (table name, column name, etc.).
+   * @private
+   * @param {string} identifier - Identifier to escape
+   * @returns {string} - Escaped identifier
+   */
+  _escapeIdentifier(identifier) {
+    // Handle qualified names (database.table)
+    if (identifier.includes('.')) {
+      return identifier.split('.').map(part => this._escapeIdentifier(part)).join('.');
+    }
+    // Simple escape - double any double quotes
+    return `"${identifier.replace(/"/g, '""')}"`;
+  }
+
+  /**
+   * Escape a string value for SQL.
+   * @private
+   * @param {string} value - String to escape
+   * @returns {string} - Escaped string (without surrounding quotes)
+   */
+  _escapeString(value) {
+    return String(value).replace(/'/g, "''");
+  }
+
+  /**
+   * Format a value for SQL.
+   * @private
+   * @param {*} value - Value to format
+   * @returns {string} - Formatted value
+   */
+  _formatValue(value) {
+    if (value === null || value === undefined) {
+      return 'NULL';
+    }
+    if (typeof value === 'number') {
+      return String(value);
+    }
+    if (typeof value === 'boolean') {
+      return value ? 'TRUE' : 'FALSE';
+    }
+    if (Array.isArray(value) || typeof value === 'object') {
+      return `'${this._escapeString(JSON.stringify(value))}'`;
+    }
+    return `'${this._escapeString(value)}'`;
+  }
+
   /**
    * Execute a function within a transaction.
    * If the function throws, the transaction is rolled back.

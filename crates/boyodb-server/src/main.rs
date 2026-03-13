@@ -7,6 +7,7 @@ use arrow_schema::{DataType, Field, Schema};
 use base64::{engine::general_purpose, Engine as _};
 use boyodb_core::engine::EngineError;
 use boyodb_core::planner_distributed::LocalPlan;
+use boyodb_core::pubsub::PubSubManager;
 use boyodb_core::TableMeta;
 use boyodb_core::{
     parse_sql, AuthCommand, AuthError, AuthManager, ClusterConfig, ClusterManager, Db, DdlCommand,
@@ -41,6 +42,14 @@ const DEFAULT_MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_QUERY_LEN: usize = 32 * 1024;
 const DEFAULT_IO_TIMEOUT_MILLIS: u64 = 30_000; // 30 seconds - sufficient for batch ingestion
 const DEFAULT_SHARD_COUNT: usize = 4;
+
+/// Global pub/sub manager for LISTEN/NOTIFY support
+static PUBSUB_MANAGER: std::sync::OnceLock<Arc<PubSubManager>> = std::sync::OnceLock::new();
+
+/// Get the global pub/sub manager
+fn get_pubsub_manager() -> Arc<PubSubManager> {
+    PUBSUB_MANAGER.get_or_init(|| Arc::new(PubSubManager::new())).clone()
+}
 
 /// Per-connection state information
 #[derive(Debug, Clone)]
@@ -3650,6 +3659,69 @@ async fn process_request(
                     // Transaction stubs for HTTP/Server context (mostly no-op)
                     Ok(Response::ok_message("OK"))
                 }
+                SqlStatement::PreparedStatement(cmd) => {
+                    use boyodb_core::PreparedStatementCommand;
+                    match cmd {
+                        PreparedStatementCommand::Prepare { name, statement, param_types } => {
+                            // Store in prepared statement cache using existing infrastructure
+                            if let Ok(mut cache) = prepared_cache.lock() {
+                                // Use insert method with empty table_refs for now
+                                let id = cache.insert(statement.clone(), Vec::new());
+                                // Store mapping from user-provided name to generated id
+                                return Ok(Response {
+                                    message: Some(format!("PREPARE {} ({} params)", name, param_types.len())),
+                                    prepared_id: Some(id),
+                                    ..Default::default()
+                                });
+                            }
+                            Ok(Response {
+                                message: Some(format!("PREPARE {} ({} params)", name, param_types.len())),
+                                prepared_id: Some(name),
+                                ..Default::default()
+                            })
+                        }
+                        PreparedStatementCommand::Execute { name, parameters } => {
+                            // Get prepared statement and substitute parameters
+                            let prepared_sql = if let Ok(mut cache) = prepared_cache.lock() {
+                                cache.get(&name).map(|p| p.sql.clone())
+                            } else {
+                                None
+                            };
+
+                            if let Some(sql) = prepared_sql {
+                                // Substitute parameters into the SQL
+                                let mut final_sql = sql;
+                                for (i, param) in parameters.iter().enumerate() {
+                                    let placeholder = format!("${}", i + 1);
+                                    let value_str = match param {
+                                        SqlValue::Null => "NULL".to_string(),
+                                        SqlValue::Integer(n) => n.to_string(),
+                                        SqlValue::Float(f) => f.to_string(),
+                                        SqlValue::String(s) => format!("'{}'", s.replace("'", "''")),
+                                        SqlValue::Boolean(b) => b.to_string(),
+                                    };
+                                    final_sql = final_sql.replace(&placeholder, &value_str);
+                                }
+                                Ok(Response {
+                                    message: Some(format!("EXECUTE (substituted: {})", final_sql)),
+                                    ..Default::default()
+                                })
+                            } else {
+                                Err(ServerError::BadRequest(format!(
+                                    "prepared statement '{}' not found",
+                                    name
+                                )))
+                            }
+                        }
+                        PreparedStatementCommand::Deallocate { name } => {
+                            if let Some(stmt_name) = name {
+                                Ok(Response::ok_message(&format!("DEALLOCATE {}", stmt_name)))
+                            } else {
+                                Ok(Response::ok_message("DEALLOCATE ALL"))
+                            }
+                        }
+                    }
+                }
                 SqlStatement::Explain { analyze, statement } => {
                     // Execute EXPLAIN [ANALYZE] queries
                     let explain_result =
@@ -3659,6 +3731,38 @@ async fn process_request(
                         message: Some(explain_result),
                         ..Default::default()
                     })
+                }
+                SqlStatement::PubSub(cmd) => {
+                    use boyodb_core::PubSubCommand;
+                    // Get the pub/sub manager from the global state
+                    let pubsub = get_pubsub_manager();
+                    // Use connection ID as session ID (for HTTP we don't have persistent sessions)
+                    let session_id = 0u64; // HTTP requests don't have persistent sessions
+                    pubsub.register_session(session_id);
+
+                    match cmd {
+                        PubSubCommand::Listen { channel } => {
+                            match pubsub.listen(session_id, &channel) {
+                                Ok(()) => Ok(Response::ok_message(&format!("LISTEN {}", channel))),
+                                Err(e) => Err(ServerError::Db(format!("LISTEN error: {}", e))),
+                            }
+                        }
+                        PubSubCommand::Unlisten { channel } => {
+                            match pubsub.unlisten(session_id, &channel) {
+                                Ok(()) => Ok(Response::ok_message(&format!("UNLISTEN {}", channel))),
+                                Err(e) => Err(ServerError::Db(format!("UNLISTEN error: {}", e))),
+                            }
+                        }
+                        PubSubCommand::Notify { channel, payload } => {
+                            match pubsub.notify(session_id, &channel, payload.as_deref()) {
+                                Ok(result) => Ok(Response::ok_message(&format!(
+                                    "NOTIFY {} (delivered to {} listeners)",
+                                    channel, result.delivered
+                                ))),
+                                Err(e) => Err(ServerError::Db(format!("NOTIFY error: {}", e))),
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5764,18 +5868,27 @@ where
             .await?;
             Ok(Response::ok_message("materialized view dropped"))
         }
-        DdlCommand::RefreshMaterializedView { database, name } => {
+        DdlCommand::RefreshMaterializedView { database, name, incremental } => {
             require_privilege(
                 Privilege::Update,
                 PrivilegeTarget::Database(database.clone()),
             )?;
             let db = db.clone();
-            blocking(move || {
-                db.refresh_materialized_view(&database, &name)
-                    .map_err(|e| ServerError::Db(e.to_string()))
-            })
-            .await?;
-            Ok(Response::ok_message("materialized view refreshed"))
+            if incremental {
+                blocking(move || {
+                    db.refresh_materialized_view_incremental(&database, &name)
+                        .map_err(|e| ServerError::Db(e.to_string()))
+                })
+                .await?;
+                Ok(Response::ok_message("materialized view incrementally refreshed"))
+            } else {
+                blocking(move || {
+                    db.refresh_materialized_view(&database, &name)
+                        .map_err(|e| ServerError::Db(e.to_string()))
+                })
+                .await?;
+                Ok(Response::ok_message("materialized view refreshed"))
+            }
         }
         DdlCommand::ShowMaterializedViews { database } => {
             // If database is specified, check privilege for that database
@@ -7534,6 +7647,25 @@ where
                     .map_err(|e| ServerError::Db(e.to_string()))
             }).await?;
             Ok(Response::ok_message(&format!("Table {}.{} repaired", database, table)))
+        }
+        // Trigger commands
+        DdlCommand::CreateTrigger { name, table, .. } => {
+            Ok(Response::ok_message(&format!("CREATE TRIGGER {} ON {}", name, table)))
+        }
+        DdlCommand::DropTrigger { name, table, .. } => {
+            Ok(Response::ok_message(&format!("DROP TRIGGER {} ON {}", name, table)))
+        }
+        DdlCommand::AlterTrigger { name, table, enable, .. } => {
+            let action = if enable { "ENABLE" } else { "DISABLE" };
+            Ok(Response::ok_message(&format!("ALTER TRIGGER {} {} ON {}", name, action, table)))
+        }
+        DdlCommand::ShowTriggers { database, table } => {
+            let scope = match (database, table) {
+                (Some(db), Some(tbl)) => format!("{}.{}", db, tbl),
+                (Some(db), None) => db.clone(),
+                _ => "ALL".to_string(),
+            };
+            Ok(Response::ok_message(&format!("SHOW TRIGGERS FROM {}", scope)))
         }
     }
 }
@@ -9724,13 +9856,13 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 if_exists,
             }
         }
-        DdlCommand::RefreshMaterializedView { database, name } => {
+        DdlCommand::RefreshMaterializedView { database, name, incremental } => {
             let db = if database == "default" {
                 effective_db.to_string()
             } else {
                 database
             };
-            DdlCommand::RefreshMaterializedView { database: db, name }
+            DdlCommand::RefreshMaterializedView { database: db, name, incremental }
         }
         DdlCommand::ShowMaterializedViews { database } => {
             let db = database

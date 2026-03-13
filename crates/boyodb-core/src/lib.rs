@@ -8,6 +8,7 @@ pub mod geospatial;
 pub mod hnsw;
 pub mod http_api;
 pub mod incremental_backup;
+pub mod incremental_mv;
 pub mod io_uring;
 pub mod jit;
 pub mod ffi;
@@ -51,6 +52,7 @@ pub mod streaming;
 pub mod telemetry;
 pub mod tiering;
 pub mod time_travel;
+pub mod ttl;
 pub mod tooling;
 pub mod types;
 pub mod vector;
@@ -179,9 +181,9 @@ pub use sql::{
     DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand, GrantTargetType, GroupBy,
     GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinTable, JoinType, LiteralValue,
     MergeCommand, MergeWhenMatched, MergeWhenNotMatched, OnConflict, OnConflictAction, OrderByClause,
-    ParsedQuery, QueryFilter as SqlQueryFilter, ScalarFunction, SelectColumn, SelectExpr,
-    SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame, WindowFrameBound,
-    WindowFrameUnit, WindowFunction, WindowSpec,
+    ParsedQuery, PreparedStatementCommand, PubSubCommand, QueryFilter as SqlQueryFilter, ScalarFunction,
+    SelectColumn, SelectExpr, SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame,
+    WindowFrameBound, WindowFrameUnit, WindowFunction, WindowSpec,
 };
 pub use types::{BoyodbStatus, OwnedBuffer};
 

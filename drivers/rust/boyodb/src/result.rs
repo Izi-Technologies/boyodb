@@ -255,4 +255,6 @@ pub(crate) struct Response {
     pub metrics: Option<Value>,
     #[serde(default)]
     pub prepared_id: Option<String>,
+    #[serde(default)]
+    pub notifications: Option<Vec<Value>>,
 }

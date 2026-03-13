@@ -18,6 +18,10 @@ pub struct ParsedQuery {
     pub aggregation: Option<AggPlan>,
     pub order_by: Option<Vec<OrderByClause>>,
     pub distinct: bool,
+    /// DISTINCT ON (columns) - PostgreSQL-style first row per group
+    /// When set, returns first row for each unique combination of these columns
+    #[serde(default)]
+    pub distinct_on: Option<Vec<String>>,
     pub joins: Vec<JoinClause>,
     /// Computed columns with expressions (SELECT expr AS alias, ...)
     pub computed_columns: Vec<SelectColumn>,
@@ -220,6 +224,9 @@ pub struct QueryFilter {
     /// DISTINCT flag
     #[serde(default)]
     pub distinct: bool,
+    /// DISTINCT ON (columns) - PostgreSQL-style first row per group
+    #[serde(default)]
+    pub distinct_on: Option<Vec<String>>,
 }
 
 /// Aggregation function type
@@ -287,25 +294,234 @@ pub enum AggKind {
         delimiter: String,
         distinct: bool,
     },
+    /// MODE - most frequent value (WITHIN GROUP ordered aggregate)
+    Mode {
+        column: String,
+    },
+    /// STRING_AGG with WITHIN GROUP ordering
+    StringAggOrdered {
+        column: String,
+        delimiter: String,
+        order_by: String,
+        order_desc: bool,
+    },
+    /// ARRAY_AGG with WITHIN GROUP ordering
+    ArrayAggOrdered {
+        column: String,
+        order_by: String,
+        order_desc: bool,
+    },
+    /// NTH_VALUE - get nth value in ordered group
+    NthValue {
+        column: String,
+        n: usize,
+    },
+    /// FIRST_VALUE - first value in ordered group
+    FirstValue {
+        column: String,
+    },
+    /// LAST_VALUE - last value in ordered group
+    LastValue {
+        column: String,
+    },
 }
 
-/// Aggregate with optional alias for result column naming
+/// Aggregate with optional alias and FILTER clause for result column naming
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregateExpr {
     pub kind: AggKind,
     pub alias: Option<String>,
+    /// Optional FILTER clause: only include rows where this condition is true
+    /// Example: COUNT(*) FILTER (WHERE status = 'active')
+    #[serde(default)]
+    pub filter: Option<AggregateFilter>,
+}
+
+/// Filter condition for FILTER (WHERE ...) clause in aggregates
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AggregateFilter {
+    /// Column to filter on
+    pub column: String,
+    /// Comparison operator
+    pub op: FilterOp,
+    /// Value to compare against
+    pub value: FilterValue,
+}
+
+/// Filter comparison operators
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+    IsNull,
+    IsNotNull,
+    Like,
+    In,
+}
+
+/// Filter value types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FilterValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    /// For IN operator: multiple values
+    List(Vec<FilterValue>),
+}
+
+impl PartialEq for FilterValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FilterValue::Null, FilterValue::Null) => true,
+            (FilterValue::Bool(a), FilterValue::Bool(b)) => a == b,
+            (FilterValue::Int(a), FilterValue::Int(b)) => a == b,
+            (FilterValue::Float(a), FilterValue::Float(b)) => {
+                (a - b).abs() < f64::EPSILON || (a.is_nan() && b.is_nan())
+            }
+            (FilterValue::String(a), FilterValue::String(b)) => a == b,
+            (FilterValue::List(a), FilterValue::List(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl AggregateFilter {
+    pub fn new(column: String, op: FilterOp, value: FilterValue) -> Self {
+        Self { column, op, value }
+    }
+
+    /// Check if a row passes this filter
+    pub fn matches(&self, row_value: Option<&serde_json::Value>) -> bool {
+        match (&self.op, row_value, &self.value) {
+            (FilterOp::IsNull, None, _) => true,
+            (FilterOp::IsNull, Some(serde_json::Value::Null), _) => true,
+            (FilterOp::IsNull, Some(_), _) => false,
+            (FilterOp::IsNotNull, None, _) => false,
+            (FilterOp::IsNotNull, Some(serde_json::Value::Null), _) => false,
+            (FilterOp::IsNotNull, Some(_), _) => true,
+            (_, None, _) => false,
+            (_, Some(serde_json::Value::Null), _) => false,
+            (FilterOp::Eq, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x == *i).unwrap_or(false)
+            }
+            (FilterOp::Eq, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| (x - f).abs() < f64::EPSILON).unwrap_or(false)
+            }
+            (FilterOp::Eq, Some(v), FilterValue::String(s)) => {
+                v.as_str().map(|x| x == s).unwrap_or(false)
+            }
+            (FilterOp::Eq, Some(v), FilterValue::Bool(b)) => {
+                v.as_bool().map(|x| x == *b).unwrap_or(false)
+            }
+            (FilterOp::Ne, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x != *i).unwrap_or(true)
+            }
+            (FilterOp::Ne, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| (x - f).abs() >= f64::EPSILON).unwrap_or(true)
+            }
+            (FilterOp::Ne, Some(v), FilterValue::String(s)) => {
+                v.as_str().map(|x| x != s).unwrap_or(true)
+            }
+            (FilterOp::Ne, Some(v), FilterValue::Bool(b)) => {
+                v.as_bool().map(|x| x != *b).unwrap_or(true)
+            }
+            (FilterOp::Gt, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x > *i).unwrap_or(false)
+            }
+            (FilterOp::Gt, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| x > *f).unwrap_or(false)
+            }
+            (FilterOp::Ge, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x >= *i).unwrap_or(false)
+            }
+            (FilterOp::Ge, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| x >= *f).unwrap_or(false)
+            }
+            (FilterOp::Lt, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x < *i).unwrap_or(false)
+            }
+            (FilterOp::Lt, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| x < *f).unwrap_or(false)
+            }
+            (FilterOp::Le, Some(v), FilterValue::Int(i)) => {
+                v.as_i64().map(|x| x <= *i).unwrap_or(false)
+            }
+            (FilterOp::Le, Some(v), FilterValue::Float(f)) => {
+                v.as_f64().map(|x| x <= *f).unwrap_or(false)
+            }
+            (FilterOp::Like, Some(v), FilterValue::String(pattern)) => {
+                if let Some(s) = v.as_str() {
+                    // Simple LIKE matching: % = any chars, _ = single char
+                    let regex_pattern = pattern
+                        .replace('%', ".*")
+                        .replace('_', ".");
+                    regex::Regex::new(&format!("^{}$", regex_pattern))
+                        .map(|re| re.is_match(s))
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            (FilterOp::In, Some(v), FilterValue::List(vals)) => {
+                vals.iter().any(|fv| {
+                    match (v, fv) {
+                        (serde_json::Value::Number(n), FilterValue::Int(i)) => {
+                            n.as_i64().map(|x| x == *i).unwrap_or(false)
+                        }
+                        (serde_json::Value::Number(n), FilterValue::Float(f)) => {
+                            n.as_f64().map(|x| (x - f).abs() < f64::EPSILON).unwrap_or(false)
+                        }
+                        (serde_json::Value::String(s), FilterValue::String(fs)) => s == fs,
+                        (serde_json::Value::Bool(b), FilterValue::Bool(fb)) => b == fb,
+                        _ => false,
+                    }
+                })
+            }
+            _ => false,
+        }
+    }
 }
 
 impl AggregateExpr {
     pub fn new(kind: AggKind) -> Self {
-        Self { kind, alias: None }
+        Self { kind, alias: None, filter: None }
     }
 
     pub fn with_alias(kind: AggKind, alias: String) -> Self {
         Self {
             kind,
             alias: Some(alias),
+            filter: None,
         }
+    }
+
+    /// Create an aggregate with a FILTER clause
+    pub fn with_filter(kind: AggKind, filter: AggregateFilter) -> Self {
+        Self {
+            kind,
+            alias: None,
+            filter: Some(filter),
+        }
+    }
+
+    /// Create an aggregate with both alias and filter
+    pub fn with_alias_and_filter(kind: AggKind, alias: String, filter: AggregateFilter) -> Self {
+        Self {
+            kind,
+            alias: Some(alias),
+            filter: Some(filter),
+        }
+    }
+
+    /// Check if this aggregate has a filter condition
+    pub fn has_filter(&self) -> bool {
+        self.filter.is_some()
     }
 
     /// Get the output column name for this aggregate
@@ -335,6 +551,12 @@ impl AggregateExpr {
             }
             AggKind::ArrayAgg { column, .. } => format!("array_agg_{}", column),
             AggKind::StringAgg { column, .. } => format!("string_agg_{}", column),
+            AggKind::Mode { column } => format!("mode_{}", column),
+            AggKind::StringAggOrdered { column, .. } => format!("string_agg_ordered_{}", column),
+            AggKind::ArrayAggOrdered { column, .. } => format!("array_agg_ordered_{}", column),
+            AggKind::NthValue { column, n } => format!("nth_value_{}_{}", n, column),
+            AggKind::FirstValue { column } => format!("first_value_{}", column),
+            AggKind::LastValue { column } => format!("last_value_{}", column),
         }
     }
 }
@@ -548,6 +770,12 @@ pub enum ScalarFunction {
         expr: Box<SelectExpr>,
         path: String,
     },
+    /// Extract all matching values from JSON using JSONPath (wildcards, recursive descent)
+    /// Returns array of matches for paths like $.users[*].name or $..id
+    JsonExtractAll {
+        expr: Box<SelectExpr>,
+        path: String,
+    },
     /// Create a JSON array from values
     JsonArray(Vec<SelectExpr>),
     /// Create a JSON object from key-value pairs
@@ -567,6 +795,26 @@ pub enum ScalarFunction {
     JsonValid(Box<SelectExpr>),
     /// Pretty print JSON
     JsonPretty(Box<SelectExpr>),
+    /// Check if left JSON contains right JSON (@>)
+    JsonContains {
+        left: Box<SelectExpr>,
+        right: Box<SelectExpr>,
+    },
+    /// Remove a path from JSON (#-)
+    JsonRemove {
+        expr: Box<SelectExpr>,
+        path: String,
+    },
+    /// Check if JSON path exists (@?)
+    JsonPathExists {
+        expr: Box<SelectExpr>,
+        path: Box<SelectExpr>,
+    },
+    /// JSON path predicate match (@@)
+    JsonPathMatch {
+        expr: Box<SelectExpr>,
+        path: Box<SelectExpr>,
+    },
 
     // Array functions
     /// Create an array from values
@@ -736,6 +984,8 @@ pub enum WindowFunction {
     RowNumber,
     Rank,
     DenseRank,
+    PercentRank,
+    CumeDist,
     NTile(i64),
     Lag {
         expr: Box<SelectExpr>,
@@ -948,10 +1198,12 @@ pub enum DdlCommand {
         name: String,
         if_exists: bool,
     },
-    /// REFRESH MATERIALIZED VIEW [database.]view
+    /// REFRESH MATERIALIZED VIEW [database.]view [INCREMENTAL]
     RefreshMaterializedView {
         database: String,
         name: String,
+        /// If true, attempt incremental refresh; if false, full refresh
+        incremental: bool,
     },
     /// SHOW MATERIALIZED VIEWS [IN database]
     ShowMaterializedViews {
@@ -1461,6 +1713,58 @@ pub enum DdlCommand {
         database: String,
         table: String,
     },
+    // ============================================================================
+    // Trigger Commands
+    // ============================================================================
+    /// CREATE TRIGGER name BEFORE|AFTER INSERT|UPDATE|DELETE ON table FOR EACH ROW EXECUTE ...
+    CreateTrigger {
+        name: String,
+        database: String,
+        table: String,
+        timing: TriggerTiming,
+        events: Vec<TriggerEventType>,
+        for_each_row: bool,
+        when_condition: Option<String>,
+        function_name: Option<String>,
+        function_body: Option<String>,
+        or_replace: bool,
+    },
+    /// DROP TRIGGER [IF EXISTS] name ON table
+    DropTrigger {
+        name: String,
+        database: String,
+        table: String,
+        if_exists: bool,
+    },
+    /// ALTER TRIGGER name ON table ENABLE|DISABLE
+    AlterTrigger {
+        name: String,
+        database: String,
+        table: String,
+        enable: bool,
+    },
+    /// SHOW TRIGGERS [FROM database.table]
+    ShowTriggers {
+        database: Option<String>,
+        table: Option<String>,
+    },
+}
+
+/// Trigger timing
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// Trigger event type
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TriggerEventType {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
 }
 
 /// Variable scope for SET commands
@@ -1751,6 +2055,11 @@ pub fn parse_sql(sql: &str) -> Result<SqlStatement, EngineError> {
     // First, try to parse as an auth command (custom syntax)
     if let Some(auth_cmd) = try_parse_auth_command(sql)? {
         return Ok(SqlStatement::Auth(auth_cmd));
+    }
+
+    // Try to parse pub/sub commands (LISTEN, UNLISTEN, NOTIFY)
+    if let Some(pubsub_cmd) = try_parse_pubsub_command(sql)? {
+        return Ok(SqlStatement::PubSub(pubsub_cmd));
     }
 
     // Try to parse SHOW commands (SHOW DATABASES, SHOW TABLES)
@@ -3667,7 +3976,7 @@ fn parse_drop_materialized_view(sql: &str) -> Result<Option<DdlCommand>, EngineE
 /// Parse REFRESH MATERIALIZED VIEW command
 fn parse_refresh_materialized_view(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let tokens: Vec<&str> = sql.split_whitespace().collect();
-    // REFRESH MATERIALIZED VIEW name
+    // REFRESH MATERIALIZED VIEW name [INCREMENTAL]
 
     if tokens.len() < 4 {
         return Err(EngineError::InvalidArgument(
@@ -3678,7 +3987,11 @@ fn parse_refresh_materialized_view(sql: &str) -> Result<Option<DdlCommand>, Engi
     let view_name = tokens[3].trim_end_matches(';');
     let (database, name) = parse_table_name(view_name)?;
 
-    Ok(Some(DdlCommand::RefreshMaterializedView { database, name }))
+    // Check for INCREMENTAL keyword
+    let incremental = tokens.len() > 4
+        && tokens[4].trim_end_matches(';').eq_ignore_ascii_case("INCREMENTAL");
+
+    Ok(Some(DdlCommand::RefreshMaterializedView { database, name, incremental }))
 }
 
 /// Parse ALTER TABLE ... SET DEDUPLICATION or DROP DEDUPLICATION
@@ -4177,6 +4490,81 @@ fn parse_drop_database_fallback(sql: &str) -> Option<SqlStatement> {
         name: name_clean.to_string(),
         if_exists,
     }))
+}
+
+/// Try to parse a SQL string as a pub/sub command (LISTEN, UNLISTEN, NOTIFY)
+/// Returns None if not a pub/sub command, Some(cmd) if parsed successfully, Err on parse error
+fn try_parse_pubsub_command(sql: &str) -> Result<Option<PubSubCommand>, EngineError> {
+    let sql = sql.trim();
+    let upper = sql.to_uppercase();
+    let upper_trimmed = upper.trim_end_matches(';');
+
+    // LISTEN channel_name
+    if upper_trimmed.starts_with("LISTEN ") {
+        let channel = sql[7..].trim().trim_end_matches(';');
+        let channel = channel.trim_matches('"').trim_matches('\'');
+        if channel.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "LISTEN requires a channel name".into(),
+            ));
+        }
+        return Ok(Some(PubSubCommand::Listen {
+            channel: channel.to_string(),
+        }));
+    }
+
+    // UNLISTEN channel_name | UNLISTEN *
+    if upper_trimmed.starts_with("UNLISTEN ") {
+        let channel = sql[9..].trim().trim_end_matches(';');
+        let channel = channel.trim_matches('"').trim_matches('\'');
+        if channel.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "UNLISTEN requires a channel name or *".into(),
+            ));
+        }
+        return Ok(Some(PubSubCommand::Unlisten {
+            channel: channel.to_string(),
+        }));
+    }
+
+    // NOTIFY channel_name [, 'payload']
+    if upper_trimmed.starts_with("NOTIFY ") {
+        let rest = sql[7..].trim().trim_end_matches(';');
+
+        // Check for payload (comma-separated)
+        if let Some(comma_pos) = rest.find(',') {
+            let channel = rest[..comma_pos].trim().trim_matches('"').trim_matches('\'');
+            let payload = rest[comma_pos + 1..]
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"');
+
+            if channel.is_empty() {
+                return Err(EngineError::InvalidArgument(
+                    "NOTIFY requires a channel name".into(),
+                ));
+            }
+
+            return Ok(Some(PubSubCommand::Notify {
+                channel: channel.to_string(),
+                payload: Some(payload.to_string()),
+            }));
+        } else {
+            let channel = rest.trim_matches('"').trim_matches('\'');
+            if channel.is_empty() {
+                return Err(EngineError::InvalidArgument(
+                    "NOTIFY requires a channel name".into(),
+                ));
+            }
+
+            return Ok(Some(PubSubCommand::Notify {
+                channel: channel.to_string(),
+                payload: None,
+            }));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Try to parse a SQL string as an auth command
@@ -4973,6 +5361,29 @@ pub enum TransactionCommand {
     ReleaseSavepoint { name: String },
 }
 
+/// Prepared statement command
+#[derive(Debug, Clone)]
+pub enum PreparedStatementCommand {
+    /// PREPARE name AS statement
+    Prepare {
+        name: String,
+        /// The SQL statement to prepare (as string for now)
+        statement: String,
+        /// Parameter types if specified
+        param_types: Vec<String>,
+    },
+    /// EXECUTE name [(params)]
+    Execute {
+        name: String,
+        /// Parameter values
+        parameters: Vec<SqlValue>,
+    },
+    /// DEALLOCATE [PREPARE] name | ALL
+    Deallocate {
+        name: Option<String>, // None means ALL
+    },
+}
+
 /// Parsed SQL statement - either a query, DDL, Insert, Update, Delete, auth, or set operation
 #[derive(Debug, Clone)]
 pub enum SqlStatement {
@@ -4985,11 +5396,26 @@ pub enum SqlStatement {
     Merge(MergeCommand),
     Auth(AuthCommand),
     Transaction(TransactionCommand),
+    /// Prepared statement commands (PREPARE, EXECUTE, DEALLOCATE)
+    PreparedStatement(PreparedStatementCommand),
     /// EXPLAIN [ANALYZE] <statement>
     Explain {
         analyze: bool,
         statement: Box<SqlStatement>,
     },
+    /// Pub/Sub commands (LISTEN, UNLISTEN, NOTIFY)
+    PubSub(PubSubCommand),
+}
+
+/// Pub/Sub commands for LISTEN/NOTIFY
+#[derive(Debug, Clone)]
+pub enum PubSubCommand {
+    /// LISTEN channel_name
+    Listen { channel: String },
+    /// UNLISTEN channel_name | UNLISTEN *
+    Unlisten { channel: String },
+    /// NOTIFY channel_name [, 'payload']
+    Notify { channel: String, payload: Option<String> },
 }
 
 /// Convert SQL data types to boyodb schema types
@@ -5101,6 +5527,58 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
             Ok(SqlStatement::Transaction(TransactionCommand::Rollback {
                 savepoint: savepoint.as_ref().map(|s| s.to_string()),
             }))
+        }
+        Statement::Savepoint { name } => {
+            Ok(SqlStatement::Transaction(TransactionCommand::Savepoint {
+                name: name.value.clone(),
+            }))
+        }
+        Statement::ReleaseSavepoint { name } => {
+            Ok(SqlStatement::Transaction(TransactionCommand::ReleaseSavepoint {
+                name: name.value.clone(),
+            }))
+        }
+        Statement::Prepare {
+            name,
+            data_types,
+            statement,
+            ..
+        } => {
+            let param_types: Vec<String> = data_types
+                .iter()
+                .map(|dt| sql_type_to_boyodb_type(dt))
+                .collect();
+            Ok(SqlStatement::PreparedStatement(
+                PreparedStatementCommand::Prepare {
+                    name: name.value.clone(),
+                    statement: statement.to_string(),
+                    param_types,
+                },
+            ))
+        }
+        Statement::Execute { name, parameters } => {
+            let mut params = Vec::new();
+            for param in parameters {
+                params.push(expr_to_sql_value(param)?);
+            }
+            Ok(SqlStatement::PreparedStatement(
+                PreparedStatementCommand::Execute {
+                    name: name.value.clone(),
+                    parameters: params,
+                },
+            ))
+        }
+        Statement::Deallocate { name, .. } => {
+            let deallocate_name = if name.value.to_uppercase() == "ALL" {
+                None
+            } else {
+                Some(name.value.clone())
+            };
+            Ok(SqlStatement::PreparedStatement(
+                PreparedStatementCommand::Deallocate {
+                    name: deallocate_name,
+                },
+            ))
         }
         Statement::CreateDatabase { db_name, .. } => {
             Ok(SqlStatement::Ddl(DdlCommand::CreateDatabase {
@@ -5475,15 +5953,26 @@ fn parse_query(query: &Query) -> Result<ParsedQuery, EngineError> {
         agg
     });
 
-    // Parse DISTINCT
-    let distinct = match &select.distinct {
-        Some(Distinct::Distinct) => true,
-        Some(Distinct::On(_)) => {
-            return Err(EngineError::NotImplemented(
-                "DISTINCT ON not supported".into(),
-            ));
+    // Parse DISTINCT and DISTINCT ON
+    let (distinct, distinct_on) = match &select.distinct {
+        Some(Distinct::Distinct) => (true, None),
+        Some(Distinct::On(exprs)) => {
+            // Extract column names from DISTINCT ON expressions
+            let columns: Result<Vec<String>, EngineError> = exprs
+                .iter()
+                .map(|expr| match expr {
+                    Expr::Identifier(ident) => Ok(ident.value.clone()),
+                    Expr::CompoundIdentifier(parts) => {
+                        Ok(parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join("."))
+                    }
+                    _ => Err(EngineError::InvalidArgument(
+                        format!("DISTINCT ON only supports column references, got: {:?}", expr)
+                    )),
+                })
+                .collect();
+            (false, Some(columns?))
         }
-        None => false,
+        None => (false, None),
     };
 
     // Parse CTEs (WITH clause)
@@ -5501,6 +5990,7 @@ fn parse_query(query: &Query) -> Result<ParsedQuery, EngineError> {
         aggregation,
         order_by,
         distinct,
+        distinct_on,
         joins,
         computed_columns,
         ctes,
@@ -5725,8 +6215,10 @@ fn parse_select_items(
                     });
                 }
                 Expr::Function(func) => {
-                    if let Some(agg) = parse_aggregate_function(func)? {
-                        aggs.push(AggregateExpr::new(agg));
+                    if let Some((agg_kind, filter)) = parse_aggregate_function(func)? {
+                        let mut agg_expr = AggregateExpr::new(agg_kind);
+                        agg_expr.filter = filter;
+                        aggs.push(agg_expr);
                     } else {
                         return Err(EngineError::NotImplemented(format!(
                             "unsupported function: {}",
@@ -5768,8 +6260,10 @@ fn parse_select_items(
                     });
                 }
                 Expr::Function(func) => {
-                    if let Some(agg) = parse_aggregate_function(func)? {
-                        aggs.push(AggregateExpr::with_alias(agg, alias.value.clone()));
+                    if let Some((agg_kind, filter)) = parse_aggregate_function(func)? {
+                        let mut agg_expr = AggregateExpr::with_alias(agg_kind, alias.value.clone());
+                        agg_expr.filter = filter;
+                        aggs.push(agg_expr);
                     } else {
                         return Err(EngineError::NotImplemented(format!(
                             "unsupported function: {}",
@@ -5820,71 +6314,204 @@ fn parse_select_items(
     }
 }
 
+/// Parse a FILTER clause expression into AggregateFilter
+fn parse_aggregate_filter_expr(expr: &Expr) -> Result<AggregateFilter, EngineError> {
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            // Extract column name from left side
+            let column = match left.as_ref() {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                }
+                _ => return Err(EngineError::NotImplemented(
+                    "FILTER clause left side must be a column reference".into()
+                )),
+            };
+
+            // Parse operator
+            let filter_op = match op {
+                BinaryOperator::Eq => FilterOp::Eq,
+                BinaryOperator::NotEq => FilterOp::Ne,
+                BinaryOperator::Gt => FilterOp::Gt,
+                BinaryOperator::GtEq => FilterOp::Ge,
+                BinaryOperator::Lt => FilterOp::Lt,
+                BinaryOperator::LtEq => FilterOp::Le,
+                _ => return Err(EngineError::NotImplemented(
+                    format!("unsupported operator in FILTER clause: {:?}", op)
+                )),
+            };
+
+            // Parse value from right side
+            let value = parse_filter_value(right)?;
+
+            Ok(AggregateFilter { column, op: filter_op, value })
+        }
+        Expr::IsNull(inner) => {
+            let column = match inner.as_ref() {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                }
+                _ => return Err(EngineError::NotImplemented(
+                    "IS NULL must reference a column".into()
+                )),
+            };
+            Ok(AggregateFilter { column, op: FilterOp::IsNull, value: FilterValue::Null })
+        }
+        Expr::IsNotNull(inner) => {
+            let column = match inner.as_ref() {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                }
+                _ => return Err(EngineError::NotImplemented(
+                    "IS NOT NULL must reference a column".into()
+                )),
+            };
+            Ok(AggregateFilter { column, op: FilterOp::IsNotNull, value: FilterValue::Null })
+        }
+        Expr::Like { expr: inner, pattern, negated, .. } => {
+            if *negated {
+                return Err(EngineError::NotImplemented(
+                    "NOT LIKE not supported in FILTER clause".into()
+                ));
+            }
+            let column = match inner.as_ref() {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                }
+                _ => return Err(EngineError::NotImplemented(
+                    "LIKE must reference a column".into()
+                )),
+            };
+            let value = parse_filter_value(pattern)?;
+            Ok(AggregateFilter { column, op: FilterOp::Like, value })
+        }
+        Expr::InList { expr: inner, list, negated } => {
+            if *negated {
+                return Err(EngineError::NotImplemented(
+                    "NOT IN not supported in FILTER clause".into()
+                ));
+            }
+            let column = match inner.as_ref() {
+                Expr::Identifier(ident) => ident.value.clone(),
+                Expr::CompoundIdentifier(parts) => {
+                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                }
+                _ => return Err(EngineError::NotImplemented(
+                    "IN clause must reference a column".into()
+                )),
+            };
+            let values: Result<Vec<FilterValue>, _> = list.iter()
+                .map(|e| parse_filter_value(&Box::new(e.clone())))
+                .collect();
+            Ok(AggregateFilter { column, op: FilterOp::In, value: FilterValue::List(values?) })
+        }
+        _ => Err(EngineError::NotImplemented(
+            format!("unsupported FILTER clause expression: {:?}", expr)
+        )),
+    }
+}
+
+/// Parse a value expression into FilterValue
+fn parse_filter_value(expr: &Box<Expr>) -> Result<FilterValue, EngineError> {
+    match expr.as_ref() {
+        Expr::Value(Value::Number(n, _)) => {
+            if n.contains('.') {
+                n.parse::<f64>()
+                    .map(FilterValue::Float)
+                    .map_err(|_| EngineError::InvalidArgument(format!("invalid number: {}", n)))
+            } else {
+                n.parse::<i64>()
+                    .map(FilterValue::Int)
+                    .map_err(|_| EngineError::InvalidArgument(format!("invalid integer: {}", n)))
+            }
+        }
+        Expr::Value(Value::SingleQuotedString(s)) => Ok(FilterValue::String(s.clone())),
+        Expr::Value(Value::DoubleQuotedString(s)) => Ok(FilterValue::String(s.clone())),
+        Expr::Value(Value::Boolean(b)) => Ok(FilterValue::Bool(*b)),
+        Expr::Value(Value::Null) => Ok(FilterValue::Null),
+        _ => Err(EngineError::NotImplemented(
+            format!("unsupported value in FILTER clause: {:?}", expr)
+        )),
+    }
+}
+
 /// Parse an aggregate function from SQL AST
+/// Returns the aggregate kind and optional filter clause
 fn parse_aggregate_function(
     func: &sqlparser::ast::Function,
-) -> Result<Option<AggKind>, EngineError> {
+) -> Result<Option<(AggKind, Option<AggregateFilter>)>, EngineError> {
     let func_name = func.name.to_string().to_lowercase();
 
-    match func_name.as_str() {
+    // Parse the optional FILTER clause
+    let filter = if let Some(filter_expr) = &func.filter {
+        Some(parse_aggregate_filter_expr(filter_expr)?)
+    } else {
+        None
+    };
+
+    let agg_kind = match func_name.as_str() {
         "count" => {
             // Check for COUNT(DISTINCT column)
             if func.distinct {
                 let col = extract_function_column(func)?;
-                Ok(Some(AggKind::CountDistinct { column: col }))
+                Some(AggKind::CountDistinct { column: col })
             } else {
                 // Check if it's COUNT(*) or COUNT(column)
                 if func.args.is_empty() {
-                    Ok(Some(AggKind::CountStar))
+                    Some(AggKind::CountStar)
                 } else if let Some(FunctionArg::Unnamed(FunctionArgExpr::Wildcard)) =
                     func.args.first()
                 {
-                    Ok(Some(AggKind::CountStar))
+                    Some(AggKind::CountStar)
                 } else {
                     // COUNT(column) - treat as COUNT(*)
-                    Ok(Some(AggKind::CountStar))
+                    Some(AggKind::CountStar)
                 }
             }
         }
         "approx_count_distinct" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::ApproxCountDistinct { column: col }))
+            Some(AggKind::ApproxCountDistinct { column: col })
         }
         "sum" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::Sum { column: col }))
+            Some(AggKind::Sum { column: col })
         }
         "avg" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::Avg { column: col }))
+            Some(AggKind::Avg { column: col })
         }
         "min" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::Min { column: col }))
+            Some(AggKind::Min { column: col })
         }
         "max" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::Max { column: col }))
+            Some(AggKind::Max { column: col })
         }
         "stddev" | "stddev_samp" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::StddevSamp { column: col }))
+            Some(AggKind::StddevSamp { column: col })
         }
         "stddev_pop" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::StddevPop { column: col }))
+            Some(AggKind::StddevPop { column: col })
         }
         "variance" | "var_samp" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::VarianceSamp { column: col }))
+            Some(AggKind::VarianceSamp { column: col })
         }
         "var_pop" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::VariancePop { column: col }))
+            Some(AggKind::VariancePop { column: col })
         }
         "median" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::Median { column: col }))
+            Some(AggKind::Median { column: col })
         }
         "percentile_cont" => {
             // PERCENTILE_CONT(percentile) WITHIN GROUP (ORDER BY column)
@@ -5896,7 +6523,7 @@ fn parse_aggregate_function(
             }
             let col = extract_function_column(func)?;
             let percentile = extract_function_percentile(func, 1)?;
-            Ok(Some(AggKind::PercentileCont { column: col, percentile }))
+            Some(AggKind::PercentileCont { column: col, percentile })
         }
         "percentile_disc" => {
             if func.args.len() < 2 {
@@ -5906,14 +6533,14 @@ fn parse_aggregate_function(
             }
             let col = extract_function_column(func)?;
             let percentile = extract_function_percentile(func, 1)?;
-            Ok(Some(AggKind::PercentileDisc { column: col, percentile }))
+            Some(AggKind::PercentileDisc { column: col, percentile })
         }
         "array_agg" => {
             let col = extract_function_column(func)?;
-            Ok(Some(AggKind::ArrayAgg {
+            Some(AggKind::ArrayAgg {
                 column: col,
                 distinct: func.distinct,
-            }))
+            })
         }
         "string_agg" | "group_concat" | "listagg" => {
             let col = extract_function_column(func)?;
@@ -5923,14 +6550,78 @@ fn parse_aggregate_function(
             } else {
                 ",".to_string()
             };
-            Ok(Some(AggKind::StringAgg {
-                column: col,
-                delimiter,
-                distinct: func.distinct,
-            }))
+            // Check for optional order_by column (3rd argument)
+            if func.args.len() >= 3 {
+                let order_by = extract_function_string_arg(func, 2)
+                    .unwrap_or_else(|_| col.clone());
+                let order_desc = if func.args.len() >= 4 {
+                    matches!(extract_function_string_arg(func, 3).as_deref(), Ok("DESC" | "desc"))
+                } else {
+                    false
+                };
+                Some(AggKind::StringAggOrdered {
+                    column: col,
+                    delimiter,
+                    order_by,
+                    order_desc,
+                })
+            } else {
+                Some(AggKind::StringAgg {
+                    column: col,
+                    delimiter,
+                    distinct: func.distinct,
+                })
+            }
         }
-        _ => Ok(None),
-    }
+        "mode" => {
+            // MODE() - most frequent value
+            let col = extract_function_column(func)?;
+            Some(AggKind::Mode { column: col })
+        }
+        "first_value" | "first" => {
+            let col = extract_function_column(func)?;
+            Some(AggKind::FirstValue { column: col })
+        }
+        "last_value" | "last" => {
+            let col = extract_function_column(func)?;
+            Some(AggKind::LastValue { column: col })
+        }
+        "nth_value" => {
+            // NTH_VALUE(column, n)
+            if func.args.len() < 2 {
+                return Err(EngineError::InvalidArgument(
+                    "NTH_VALUE requires column and n arguments".into(),
+                ));
+            }
+            let col = extract_function_column(func)?;
+            let n = extract_function_percentile(func, 1)? as usize;
+            Some(AggKind::NthValue { column: col, n })
+        }
+        "array_agg_ordered" => {
+            // ARRAY_AGG with ordering: ARRAY_AGG_ORDERED(column, order_column, [DESC])
+            if func.args.len() < 2 {
+                return Err(EngineError::InvalidArgument(
+                    "ARRAY_AGG_ORDERED requires column and order_by arguments".into(),
+                ));
+            }
+            let col = extract_function_column(func)?;
+            let order_by = extract_function_string_arg(func, 1)?;
+            let order_desc = if func.args.len() >= 3 {
+                matches!(extract_function_string_arg(func, 2).as_deref(), Ok("DESC" | "desc"))
+            } else {
+                false
+            };
+            Some(AggKind::ArrayAggOrdered {
+                column: col,
+                order_by,
+                order_desc,
+            })
+        }
+        _ => None,
+    };
+
+    // Return the aggregate kind with its optional filter
+    Ok(agg_kind.map(|kind| (kind, filter)))
 }
 
 fn extract_function_column(func: &sqlparser::ast::Function) -> Result<String, EngineError> {
@@ -6664,7 +7355,7 @@ fn parse_having_expr(
                 | BinaryOperator::LtEq => {
                     // Left side should be an aggregate function
                     if let Expr::Function(func) = left.as_ref() {
-                        if let Some(agg) = parse_aggregate_function(func)? {
+                        if let Some((agg_kind, _filter)) = parse_aggregate_function(func)? {
                             let having_op = match op {
                                 BinaryOperator::Eq => HavingOp::Eq,
                                 BinaryOperator::NotEq => HavingOp::Ne,
@@ -6676,7 +7367,7 @@ fn parse_having_expr(
                             };
                             let value = extract_numeric_value(right)?;
                             conditions.push(HavingCondition {
-                                agg,
+                                agg: agg_kind,
                                 op: having_op,
                                 value,
                             });
@@ -7352,8 +8043,178 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
             }))
         }
 
+        // PostgreSQL JSON operators: ->, ->>, #>, #>>
+        Expr::JsonAccess { left, operator, right } => {
+            use sqlparser::ast::JsonOperator;
+            let left_expr = parse_expr(left)?;
+            match operator {
+                // -> : Extract JSON object field by key or array element by index (returns JSON)
+                JsonOperator::Arrow => {
+                    let path = extract_json_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonExtract {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // ->> : Extract JSON object field as text (returns TEXT)
+                JsonOperator::LongArrow => {
+                    let path = extract_json_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonExtractScalar {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // #> : Extract JSON sub-object at specified path (returns JSON)
+                JsonOperator::HashArrow => {
+                    let path = extract_json_array_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonExtract {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // #>> : Extract JSON sub-object at specified path as text (returns TEXT)
+                JsonOperator::HashLongArrow => {
+                    let path = extract_json_array_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonExtractScalar {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // : Colon (Snowflake variant, similar to ->>)
+                JsonOperator::Colon => {
+                    let path = extract_json_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonExtractScalar {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // @> : JSON contains
+                JsonOperator::AtArrow => {
+                    Ok(SelectExpr::Function(ScalarFunction::JsonContains {
+                        left: Box::new(left_expr),
+                        right: Box::new(parse_expr(right)?),
+                    }))
+                }
+                // <@ : JSON contained by
+                JsonOperator::ArrowAt => {
+                    let right_expr = parse_expr(right)?;
+                    // Swap left and right for "contained by" semantics
+                    Ok(SelectExpr::Function(ScalarFunction::JsonContains {
+                        left: Box::new(right_expr),
+                        right: Box::new(left_expr),
+                    }))
+                }
+                // #- : Delete path from JSON
+                JsonOperator::HashMinus => {
+                    let path = extract_json_array_path(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonRemove {
+                        expr: Box::new(left_expr),
+                        path,
+                    }))
+                }
+                // @? : JSON path exists
+                JsonOperator::AtQuestion => {
+                    let path_expr = parse_expr(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonPathExists {
+                        expr: Box::new(left_expr),
+                        path: Box::new(path_expr),
+                    }))
+                }
+                // @@ : JSON path match
+                JsonOperator::AtAt => {
+                    let path_expr = parse_expr(right)?;
+                    Ok(SelectExpr::Function(ScalarFunction::JsonPathMatch {
+                        expr: Box::new(left_expr),
+                        path: Box::new(path_expr),
+                    }))
+                }
+            }
+        }
+
         _ => Err(EngineError::NotImplemented(format!(
             "unsupported expression: {expr}"
+        ))),
+    }
+}
+
+/// Extract a JSON path from the right side of -> or ->> operator
+/// For simple key access like `col -> 'key'`, returns `$.key`
+/// For array index access like `col -> 0`, returns `$[0]`
+fn extract_json_path(expr: &Expr) -> Result<String, EngineError> {
+    match expr {
+        // String literal key: col -> 'key' becomes $.key
+        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s))
+        | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(s)) => Ok(format!("$.{}", s)),
+        // Numeric index: col -> 0 becomes $[0]
+        Expr::Value(sqlparser::ast::Value::Number(n, _)) => Ok(format!("$[{}]", n)),
+        // Identifier (unquoted): col -> key becomes $.key
+        Expr::Identifier(ident) => Ok(format!("$.{}", ident.value)),
+        _ => Err(EngineError::InvalidArgument(format!(
+            "JSON operator expects string key or numeric index, got: {}",
+            expr
+        ))),
+    }
+}
+
+/// Extract a JSON path from the right side of #> or #>> operator
+/// For path array like `col #> '{a,b,c}'`, returns `$.a.b.c`
+fn extract_json_array_path(expr: &Expr) -> Result<String, EngineError> {
+    match expr {
+        // PostgreSQL path array: '{a,b,c}' becomes $.a.b.c
+        Expr::Value(sqlparser::ast::Value::SingleQuotedString(s))
+        | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(s)) => {
+            // Parse PostgreSQL array literal format: {a,b,c}
+            let s = s.trim();
+            if s.starts_with('{') && s.ends_with('}') {
+                let inner = &s[1..s.len() - 1];
+                let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+                if parts.is_empty() {
+                    return Ok("$".to_string());
+                }
+                // Build JSONPath: $.a.b.c or handle numeric indices
+                let mut path = String::from("$");
+                for part in parts {
+                    if part.parse::<i64>().is_ok() {
+                        path.push_str(&format!("[{}]", part));
+                    } else {
+                        path.push_str(&format!(".{}", part));
+                    }
+                }
+                Ok(path)
+            } else {
+                // Plain path string
+                Ok(format!("$.{}", s))
+            }
+        }
+        // Array constructor: ARRAY['a', 'b', 'c']
+        Expr::Array(arr) => {
+            let mut path = String::from("$");
+            for elem in &arr.elem {
+                match elem {
+                    Expr::Value(sqlparser::ast::Value::SingleQuotedString(s))
+                    | Expr::Value(sqlparser::ast::Value::DoubleQuotedString(s)) => {
+                        if s.parse::<i64>().is_ok() {
+                            path.push_str(&format!("[{}]", s));
+                        } else {
+                            path.push_str(&format!(".{}", s));
+                        }
+                    }
+                    Expr::Value(sqlparser::ast::Value::Number(n, _)) => {
+                        path.push_str(&format!("[{}]", n));
+                    }
+                    _ => {
+                        return Err(EngineError::InvalidArgument(format!(
+                            "JSON path array element must be string or number, got: {}",
+                            elem
+                        )))
+                    }
+                }
+            }
+            Ok(path)
+        }
+        _ => Err(EngineError::InvalidArgument(format!(
+            "JSON #> operator expects path array like '{{a,b,c}}', got: {}",
+            expr
         ))),
     }
 }
@@ -7674,6 +8535,14 @@ fn parse_function_expr(func: &sqlparser::ast::Function) -> Result<SelectExpr, En
                 path,
             }
         }
+        "json_extract_all" | "jsonpath_query" => {
+            let expr = get_arg(&args, 0, "JSON_EXTRACT_ALL")?;
+            let path = get_string_arg(&args, 1, "JSON_EXTRACT_ALL")?;
+            ScalarFunction::JsonExtractAll {
+                expr: Box::new(expr),
+                path,
+            }
+        }
         "json_array" => ScalarFunction::JsonArray(args),
         "json_object" => {
             // Pairs of key, value
@@ -7843,6 +8712,8 @@ fn parse_window_function(
         "row_number" => WindowFunction::RowNumber,
         "rank" => WindowFunction::Rank,
         "dense_rank" => WindowFunction::DenseRank,
+        "percent_rank" => WindowFunction::PercentRank,
+        "cume_dist" => WindowFunction::CumeDist,
         "ntile" => {
             let n = get_int_arg(args, 0, "NTILE")?;
             WindowFunction::NTile(n)
@@ -8162,6 +9033,7 @@ fn parse_query_from_sqlparser(query: &Query) -> Result<ParsedQuery, EngineError>
         aggregation: None,
         order_by: None,
         distinct: false,
+        distinct_on: None,
         joins: Vec::new(),
         computed_columns: Vec::new(),
         ctes: Vec::new(),

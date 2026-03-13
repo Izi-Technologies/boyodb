@@ -196,6 +196,117 @@ pub struct ForeignScanStats {
     pub batches_fetched: u64,
 }
 
+/// Aggregation expression for pushdown
+#[derive(Debug, Clone)]
+pub struct FdwAggregation {
+    pub function: FdwAggFunction,
+    pub column: Option<String>,
+    pub alias: Option<String>,
+    pub distinct: bool,
+}
+
+/// Supported aggregate functions for pushdown
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdwAggFunction {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    CountDistinct,
+}
+
+impl FdwAggFunction {
+    pub fn to_sql(&self) -> &'static str {
+        match self {
+            Self::Count => "COUNT",
+            Self::Sum => "SUM",
+            Self::Avg => "AVG",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
+            Self::CountDistinct => "COUNT",
+        }
+    }
+}
+
+/// Sort specification for pushdown
+#[derive(Debug, Clone)]
+pub struct FdwSort {
+    pub column: String,
+    pub descending: bool,
+    pub nulls_first: Option<bool>,
+}
+
+impl FdwSort {
+    pub fn to_sql(&self) -> String {
+        let mut s = self.column.clone();
+        s.push_str(if self.descending { " DESC" } else { " ASC" });
+        if let Some(nulls_first) = self.nulls_first {
+            s.push_str(if nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
+        }
+        s
+    }
+}
+
+/// GROUP BY specification for pushdown
+#[derive(Debug, Clone)]
+pub struct FdwGroupBy {
+    pub columns: Vec<String>,
+}
+
+/// Full pushdown plan
+#[derive(Debug, Clone, Default)]
+pub struct FdwPushdownPlan {
+    pub projections: Vec<String>,
+    pub predicates: Vec<FdwPredicate>,
+    pub aggregations: Vec<FdwAggregation>,
+    pub group_by: Option<FdwGroupBy>,
+    pub sort: Vec<FdwSort>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+impl FdwPushdownPlan {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_projections(mut self, cols: Vec<String>) -> Self {
+        self.projections = cols;
+        self
+    }
+
+    pub fn with_predicates(mut self, preds: Vec<FdwPredicate>) -> Self {
+        self.predicates = preds;
+        self
+    }
+
+    pub fn with_aggregations(mut self, aggs: Vec<FdwAggregation>) -> Self {
+        self.aggregations = aggs;
+        self
+    }
+
+    pub fn with_group_by(mut self, cols: Vec<String>) -> Self {
+        self.group_by = Some(FdwGroupBy { columns: cols });
+        self
+    }
+
+    pub fn with_sort(mut self, sorts: Vec<FdwSort>) -> Self {
+        self.sort = sorts;
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+}
+
 /// Predicate for pushdown
 #[derive(Debug, Clone)]
 pub enum FdwPredicate {
@@ -745,6 +856,141 @@ impl FdwRegistry {
         }
 
         Ok(query)
+    }
+
+    /// Build query with full pushdown plan including aggregations and sorting
+    pub fn build_pushdown_query_full(
+        &self,
+        table: &ForeignTable,
+        plan: &FdwPushdownPlan,
+        conn: &Box<dyn FdwConnection>,
+    ) -> Result<String, FdwError> {
+        let capabilities = conn.capabilities();
+
+        let remote_table = table
+            .options
+            .get("table_name")
+            .cloned()
+            .unwrap_or_else(|| table.name.clone());
+
+        // Build SELECT clause
+        let select_clause = if !plan.aggregations.is_empty() && capabilities.aggregate {
+            // Aggregation query
+            let mut parts = Vec::new();
+
+            // Add GROUP BY columns first
+            if let Some(ref group_by) = plan.group_by {
+                for col in &group_by.columns {
+                    parts.push(col.clone());
+                }
+            }
+
+            // Add aggregation expressions
+            for agg in &plan.aggregations {
+                let agg_sql = self.aggregation_to_sql(agg)?;
+                parts.push(agg_sql);
+            }
+
+            if parts.is_empty() {
+                "*".to_string()
+            } else {
+                parts.join(", ")
+            }
+        } else if plan.projections.is_empty() || !capabilities.projection {
+            "*".to_string()
+        } else {
+            plan.projections.join(", ")
+        };
+
+        let mut query = format!("SELECT {} FROM {}", select_clause, remote_table);
+
+        // WHERE clause (before GROUP BY)
+        if capabilities.filter && !plan.predicates.is_empty() {
+            let where_clause = self.predicates_to_sql(&plan.predicates)?;
+            query.push_str(" WHERE ");
+            query.push_str(&where_clause);
+        }
+
+        // GROUP BY clause
+        if let Some(ref group_by) = plan.group_by {
+            if capabilities.group_by && !group_by.columns.is_empty() {
+                query.push_str(" GROUP BY ");
+                query.push_str(&group_by.columns.join(", "));
+            }
+        }
+
+        // ORDER BY clause
+        if capabilities.sort && !plan.sort.is_empty() {
+            let sort_parts: Vec<String> = plan.sort.iter().map(|s| s.to_sql()).collect();
+            query.push_str(" ORDER BY ");
+            query.push_str(&sort_parts.join(", "));
+        }
+
+        // LIMIT clause
+        if capabilities.limit {
+            if let Some(lim) = plan.limit {
+                query.push_str(&format!(" LIMIT {}", lim));
+            }
+            if let Some(off) = plan.offset {
+                query.push_str(&format!(" OFFSET {}", off));
+            }
+        }
+
+        Ok(query)
+    }
+
+    /// Convert aggregation to SQL
+    fn aggregation_to_sql(&self, agg: &FdwAggregation) -> Result<String, FdwError> {
+        let func = agg.function.to_sql();
+        let col = agg.column.clone().unwrap_or_else(|| "*".to_string());
+
+        let expr = if agg.distinct && agg.function == FdwAggFunction::CountDistinct {
+            format!("{}(DISTINCT {})", func, col)
+        } else if agg.distinct {
+            format!("{}(DISTINCT {})", func, col)
+        } else {
+            format!("{}({})", func, col)
+        };
+
+        if let Some(ref alias) = agg.alias {
+            Ok(format!("{} AS {}", expr, alias))
+        } else {
+            Ok(expr)
+        }
+    }
+
+    /// Execute foreign query with full pushdown plan
+    pub fn execute_query_with_plan(
+        &self,
+        table_name: &str,
+        plan: FdwPushdownPlan,
+        local_user: &str,
+    ) -> Result<ForeignScanState, FdwError> {
+        let table = self
+            .foreign_tables
+            .read()
+            .unwrap()
+            .get(table_name)
+            .cloned()
+            .ok_or_else(|| FdwError::TableNotFound(table_name.to_string()))?;
+
+        let mut conn = self.get_connection(&table.server_name, local_user)?;
+
+        // Build query with full pushdown
+        let query = self.build_pushdown_query_full(&table, &plan, &conn)?;
+
+        let cursor = conn.execute_query(&query)?;
+
+        self.stats.write().unwrap().total_queries += 1;
+
+        Ok(ForeignScanState {
+            table,
+            connection: conn,
+            cursor: Some(cursor),
+            pushdown_predicates: plan.predicates,
+            projected_columns: plan.projections,
+            stats: ForeignScanStats::default(),
+        })
     }
 
     fn predicates_to_sql(&self, predicates: &[FdwPredicate]) -> Result<String, FdwError> {
