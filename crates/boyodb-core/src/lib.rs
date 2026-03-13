@@ -163,6 +163,14 @@ pub mod ml_inference;
 pub mod otel_integration;
 pub mod cdc_webhooks;
 
+// --- Advanced ML Features (Phase 34) ---
+pub mod feature_store;
+pub mod model_monitoring;
+pub mod embeddings_engine;
+pub mod online_learning;
+pub mod automl;
+pub mod ml_explainability;
+
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
@@ -446,4 +454,47 @@ pub use cdc_webhooks::{
     ChangeEvent, ChangeOperation, ChangeTracker, DeliveryAttempt, DeliveryStatus, PendingDelivery,
     WebhookBuilder, WebhookConfig, WebhookDeliveryWorker, WebhookError, WebhookRegistry,
     WebhookStats,
+};
+
+// --- Advanced ML Features re-exports (Phase 34) ---
+
+// Feature Store
+pub use feature_store::{
+    EntityRow, FeatureDataType, FeatureDefinition, FeatureGroup, FeaturePipeline, FeatureSource,
+    FeatureStore, FeatureStoreError, FeatureStoreStats, FeatureValue, FeatureView, FeatureVector,
+    MissingStrategy, OnlineStore, PipelineStep, PointInTimeRequest, Transformation,
+};
+
+// Model Monitoring
+pub use model_monitoring::{
+    Alert, AlertChannel, AlertConfig, AlertSeverity, ComparisonOp, DriftResult, DriftSeverity,
+    DriftTest, DistributionStats, ModelMonitor, MonitoredMetric, MonitoringRegistry,
+    PerformanceMetrics, PredictionLog, ReferenceDistribution,
+};
+
+// Embeddings Engine
+pub use embeddings_engine::{
+    Embedding, EmbeddingConfig, EmbeddingModelType, EmbeddingRegistry, EmbeddingStats,
+    EmbeddingsEngine, SentenceTransformerModel, Tokenizer as EmbeddingTokenizer,
+};
+
+// Online Learning
+pub use online_learning::{
+    ArmStats, BanditAlgorithm, ContextualBandit, Example, LearningRateSchedule, MultiArmedBandit,
+    OnlineAlgorithm, OnlineConfig, OnlineLearningRegistry, OnlineLinearModel, OnlineModelStats,
+};
+
+// AutoML
+pub use automl::{
+    AutoML, AutoMLConfig, AutoMLRegistry, AutoMLResult, CrossValidation, FeatureImportance,
+    HyperparameterSpace, HyperparameterValue, Metric as AutoMLMetric, ModelType as AutoMLModelType,
+    SearchStrategy, TaskType, TrainingData, TrialResult, TrialStatus,
+};
+
+// ML Explainability
+pub use ml_explainability::{
+    Counterfactual, CounterfactualExplainer, ExplainabilityRegistry, ExplainableModel,
+    ExplanationType, FeatureChange, FeatureContribution, LimeExplainer, LimeExplanation,
+    LinearExplainableModel, PartialDependence, PermutationImportance, ShapExplainer,
+    ShapExplanation,
 };
