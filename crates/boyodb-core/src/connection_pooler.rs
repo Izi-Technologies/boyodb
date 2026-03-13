@@ -1551,6 +1551,12 @@ impl ConnectionPooler {
             clients.remove(&client_id);
         }
 
+        // Clean up auth salt to prevent memory leak
+        {
+            let mut salts = self.auth_salts.write().unwrap();
+            salts.remove(&client_id);
+        }
+
         self.stats.current_clients.fetch_sub(1, Ordering::Relaxed);
 
         Ok(())

@@ -3400,25 +3400,27 @@ impl Db {
     }
 
     fn remove_segment_file(&self, segment_id: &str) {
-        if self.active_readers.load(Ordering::Acquire) > 0 {
-            let mut pending = self.pending_deletes.lock();
-            pending.push(segment_id.to_string());
-            return;
-        }
-        self.remove_segment_file_now(segment_id);
+        // Always queue for deletion - actual delete happens in cleanup
+        // This avoids TOCTOU race where readers could start between check and delete
+        let mut pending = self.pending_deletes.lock();
+        pending.push(segment_id.to_string());
     }
 
     fn cleanup_pending_deletes(&self) {
-        if self.active_readers.load(Ordering::Acquire) > 0 {
-            return;
-        }
+        // Atomically check and drain pending deletes while holding lock
+        // to prevent race conditions with concurrent readers
         let pending = {
             let mut pending = self.pending_deletes.lock();
             if pending.is_empty() {
                 return;
             }
+            // Check readers while still holding pending lock
+            if self.active_readers.load(Ordering::Acquire) > 0 {
+                return;
+            }
             pending.drain(..).collect::<Vec<_>>()
         };
+        // Now safe to delete - no readers active when we drained
         for seg_id in pending {
             self.remove_segment_file_now(&seg_id);
         }

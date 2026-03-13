@@ -522,6 +522,8 @@ pub struct SlowQueryLogConfig {
     pub threshold: Duration,
     /// Maximum entries to keep in memory
     pub max_entries: usize,
+    /// Maximum unique fingerprints to track (prevents unbounded growth)
+    pub max_fingerprints: usize,
     /// Log to file
     pub log_to_file: bool,
     /// Log file path
@@ -542,6 +544,7 @@ impl Default for SlowQueryLogConfig {
             enabled: true,
             threshold: Duration::from_secs(1),
             max_entries: 1000,
+            max_fingerprints: 10000,
             log_to_file: false,
             log_file_path: None,
             include_plan: true,
@@ -710,9 +713,13 @@ impl SlowQueryLog {
 
             stats.avg_execution_time = stats.total_execution_time / stats.total_slow_queries as u32;
 
-            *stats.queries_by_fingerprint
-                .entry(fingerprint.hash)
-                .or_insert(0) += 1;
+            // Track fingerprints with bounded size to prevent memory leak
+            if stats.queries_by_fingerprint.contains_key(&fingerprint.hash) {
+                *stats.queries_by_fingerprint.get_mut(&fingerprint.hash).unwrap() += 1;
+            } else if stats.queries_by_fingerprint.len() < self.config.max_fingerprints {
+                stats.queries_by_fingerprint.insert(fingerprint.hash, 1);
+            }
+            // If at max capacity and new fingerprint, skip tracking (prevents unbounded growth)
 
             if entry.full_scan {
                 stats.full_scans += 1;
@@ -857,11 +864,14 @@ pub struct QueryExecutionMetadata {
 // Query Performance Analyzer
 // ============================================================================
 
+/// Maximum unique queries to track in performance analyzer (prevents unbounded growth)
+const MAX_EXECUTION_HISTORY_ENTRIES: usize = 10000;
+
 /// Query performance analyzer
 pub struct QueryPerformanceAnalyzer {
     plan_cache: Arc<PlanCache>,
     slow_query_log: Arc<SlowQueryLog>,
-    /// Query execution history
+    /// Query execution history (bounded to prevent memory leaks)
     execution_history: RwLock<HashMap<u64, QueryExecutionHistory>>,
 }
 
@@ -964,17 +974,27 @@ impl QueryPerformanceAnalyzer {
     ) {
         let fingerprint = QueryFingerprint::from_sql(sql, metadata.database.as_deref());
 
-        // Update execution history
+        // Update execution history with bounded size to prevent memory leak
         {
             let mut history = self.execution_history.write().unwrap();
-            let entry = history.entry(fingerprint.hash).or_insert_with(|| {
-                QueryExecutionHistory {
+
+            // Check if entry exists or if we have room for new entries
+            if history.contains_key(&fingerprint.hash) {
+                // Update existing entry
+                if let Some(entry) = history.get_mut(&fingerprint.hash) {
+                    entry.record(execution_time);
+                }
+            } else if history.len() < MAX_EXECUTION_HISTORY_ENTRIES {
+                // Add new entry if under limit
+                let mut entry = QueryExecutionHistory {
                     fingerprint_hash: fingerprint.hash,
                     sample_sql: sql.to_string(),
                     ..Default::default()
-                }
-            });
-            entry.record(execution_time);
+                };
+                entry.record(execution_time);
+                history.insert(fingerprint.hash, entry);
+            }
+            // If at max capacity with new fingerprint, skip to prevent unbounded growth
         }
 
         // Update plan cache
