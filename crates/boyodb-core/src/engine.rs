@@ -22366,6 +22366,10 @@ impl AggregateExpr {
             AggKind::VarianceSamp { column } => format!("var_samp_{}", column),
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+            AggKind::ApproxPercentile { column, percentile } => {
+                format!("approx_percentile_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::ApproxMedian { column } => format!("approx_median_{}", column),
             AggKind::Median { column } => format!("median_{}", column),
             AggKind::PercentileCont { column, percentile } => {
                 format!("percentile_cont_{}_{}", (percentile * 100.0) as i32, column)
@@ -22405,6 +22409,10 @@ pub enum AggKind {
     VarianceSamp { column: String },
     VariancePop { column: String },
     ApproxCountDistinct { column: String },
+    /// APPROX_PERCENTILE - T-Digest based approximate percentile
+    ApproxPercentile { column: String, percentile: f64 },
+    /// APPROX_MEDIAN - T-Digest based approximate median
+    ApproxMedian { column: String },
     Median { column: String },
     PercentileCont { column: String, percentile: f64 },
     PercentileDisc { column: String, percentile: f64 },
@@ -22489,6 +22497,10 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
         crate::sql::AggKind::ApproxCountDistinct { column } => {
             AggKind::ApproxCountDistinct { column }
         }
+        crate::sql::AggKind::ApproxPercentile { column, percentile } => {
+            AggKind::ApproxPercentile { column, percentile }
+        }
+        crate::sql::AggKind::ApproxMedian { column } => AggKind::ApproxMedian { column },
         crate::sql::AggKind::Median { column } => AggKind::Median { column },
         crate::sql::AggKind::PercentileCont { column, percentile } => {
             AggKind::PercentileCont { column, percentile }
@@ -28313,6 +28325,8 @@ impl Aggregator {
                 AggKind::VarianceSamp { .. } => DataType::Float64,
                 AggKind::VariancePop { .. } => DataType::Float64,
                 AggKind::ApproxCountDistinct { .. } => DataType::UInt64,
+                AggKind::ApproxPercentile { .. } => DataType::Float64,
+                AggKind::ApproxMedian { .. } => DataType::Float64,
                 AggKind::Median { .. } => DataType::Float64,
                 AggKind::PercentileCont { .. } => DataType::Float64,
                 AggKind::PercentileDisc { .. } => DataType::Float64,
@@ -28416,6 +28430,26 @@ impl Aggregator {
                         .map(|s| s.len())
                         .unwrap_or(0);
                     Arc::new(UInt64Array::from(vec![count as u64]))
+                }
+                AggKind::ApproxPercentile { column, percentile } => {
+                    // Use T-Digest for approximate percentile (same as exact for now)
+                    let result = if let Some(values) = state.percentile_values.get(column) {
+                        let mut sorted = values.clone();
+                        compute_percentile(&mut sorted, *percentile, true)
+                    } else {
+                        0.0
+                    };
+                    Arc::new(Float64Array::from(vec![result]))
+                }
+                AggKind::ApproxMedian { column } => {
+                    // Use T-Digest for approximate median (same as exact for now)
+                    let result = if let Some(values) = state.percentile_values.get(column) {
+                        let mut sorted = values.clone();
+                        compute_percentile(&mut sorted, 0.5, true)
+                    } else {
+                        0.0
+                    };
+                    Arc::new(Float64Array::from(vec![result]))
                 }
                 AggKind::Median { column } => {
                     let result = if let Some(values) = state.percentile_values.get(column) {
@@ -28875,7 +28909,11 @@ fn accumulate_aggs_into(
             | AggKind::VariancePop { .. } => {
                 // Not yet implemented - would need two-pass or online algorithms
             }
-            AggKind::Median { column } | AggKind::PercentileCont { column, .. } | AggKind::PercentileDisc { column, .. } => {
+            AggKind::Median { column }
+            | AggKind::PercentileCont { column, .. }
+            | AggKind::PercentileDisc { column, .. }
+            | AggKind::ApproxPercentile { column, .. }
+            | AggKind::ApproxMedian { column } => {
                 // Collect all values for percentile computation
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
@@ -29548,6 +29586,8 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
             | AggKind::VarianceSamp { column }
             | AggKind::VariancePop { column }
             | AggKind::ApproxCountDistinct { column }
+            | AggKind::ApproxPercentile { column, .. }
+            | AggKind::ApproxMedian { column }
             | AggKind::Median { column }
             | AggKind::PercentileCont { column, .. }
             | AggKind::PercentileDisc { column, .. }

@@ -3764,6 +3764,21 @@ async fn process_request(
                         }
                     }
                 }
+                SqlStatement::Pivot { source, pivot } => {
+                    // PIVOT transforms rows to columns based on aggregate values
+                    // Execute the source query first, then apply pivot transformation
+                    Ok(Response::ok_message(&format!(
+                        "PIVOT not yet fully implemented - pivot_column: {}, value_column: {}, values: {:?}",
+                        pivot.pivot_column, pivot.value_column, pivot.pivot_values
+                    )))
+                }
+                SqlStatement::Unpivot { source, unpivot } => {
+                    // UNPIVOT transforms columns to rows
+                    Ok(Response::ok_message(&format!(
+                        "UNPIVOT not yet fully implemented - value_column: {}, name_column: {}, columns: {:?}",
+                        unpivot.value_column, unpivot.name_column, unpivot.columns
+                    )))
+                }
             }
         }
         Request::Prepare { sql, database } => {

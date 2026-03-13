@@ -661,6 +661,8 @@ fn distribute_aggregation(
             AggKind::Median { .. }
             | AggKind::PercentileCont { .. }
             | AggKind::PercentileDisc { .. }
+            | AggKind::ApproxPercentile { .. }
+            | AggKind::ApproxMedian { .. }
             | AggKind::ArrayAgg { .. }
             | AggKind::StringAgg { .. }
             | AggKind::Mode { .. }

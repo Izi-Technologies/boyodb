@@ -269,6 +269,15 @@ pub enum AggKind {
     ApproxCountDistinct {
         column: String,
     },
+    /// APPROX_PERCENTILE - T-Digest based approximate percentile (faster for large datasets)
+    ApproxPercentile {
+        column: String,
+        percentile: f64,
+    },
+    /// APPROX_MEDIAN - T-Digest based approximate median
+    ApproxMedian {
+        column: String,
+    },
     /// MEDIAN - 50th percentile (equivalent to PERCENTILE_CONT(0.5))
     Median {
         column: String,
@@ -542,6 +551,10 @@ impl AggregateExpr {
             AggKind::VarianceSamp { column } => format!("variance_{}", column),
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
+            AggKind::ApproxPercentile { column, percentile } => {
+                format!("approx_percentile_{}_{}", (percentile * 100.0) as i32, column)
+            }
+            AggKind::ApproxMedian { column } => format!("approx_median_{}", column),
             AggKind::Median { column } => format!("median_{}", column),
             AggKind::PercentileCont { column, percentile } => {
                 format!("percentile_cont_{}_{}", (percentile * 100.0) as i32, column)
@@ -5384,6 +5397,34 @@ pub enum PreparedStatementCommand {
     },
 }
 
+/// PIVOT clause for transforming rows to columns
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PivotClause {
+    /// Aggregate function to apply (e.g., SUM, COUNT, AVG)
+    pub agg_function: AggKind,
+    /// Column to aggregate
+    pub value_column: String,
+    /// Column whose values become new column names
+    pub pivot_column: String,
+    /// Specific values to pivot on (IN clause)
+    pub pivot_values: Vec<String>,
+    /// Aliases for the pivoted columns (optional)
+    pub column_aliases: Option<Vec<String>>,
+}
+
+/// UNPIVOT clause for transforming columns to rows
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnpivotClause {
+    /// Name for the new value column
+    pub value_column: String,
+    /// Name for the new name column (holds original column names)
+    pub name_column: String,
+    /// Columns to unpivot
+    pub columns: Vec<String>,
+    /// Include nulls in output (default: false)
+    pub include_nulls: bool,
+}
+
 /// Parsed SQL statement - either a query, DDL, Insert, Update, Delete, auth, or set operation
 #[derive(Debug, Clone)]
 pub enum SqlStatement {
@@ -5405,6 +5446,16 @@ pub enum SqlStatement {
     },
     /// Pub/Sub commands (LISTEN, UNLISTEN, NOTIFY)
     PubSub(PubSubCommand),
+    /// PIVOT query - transform rows to columns
+    Pivot {
+        source: Box<SqlStatement>,
+        pivot: PivotClause,
+    },
+    /// UNPIVOT query - transform columns to rows
+    Unpivot {
+        source: Box<SqlStatement>,
+        unpivot: UnpivotClause,
+    },
 }
 
 /// Pub/Sub commands for LISTEN/NOTIFY
