@@ -18,6 +18,7 @@ Complete SQL reference for BoyoDB.
 - [Materialized Views](#materialized-views)
 - [Foreign Data Wrappers](#foreign-data-wrappers)
 - [Recovery Statements](#recovery-statements)
+- [Analytical Functions](#analytical-functions)
 
 ---
 
@@ -1811,6 +1812,143 @@ SHOW WAL STATUS;
 
 -- Recover to point before data corruption
 RECOVER TO TIMESTAMP '2024-01-15 14:30:00';
+```
+
+---
+
+## Analytical Functions
+
+BoyoDB provides specialized SQL functions for advanced analytics.
+
+### Graph Functions
+
+```sql
+-- Traverse graph from start node
+SELECT * FROM GRAPH_TRAVERSE('graph_name', 'start_node', 'outgoing', 3);
+
+-- Find shortest path between nodes
+SELECT * FROM SHORTEST_PATH('graph_name', 'node_a', 'node_b');
+
+-- Calculate PageRank scores
+SELECT * FROM PAGERANK('graph_name', 0.85, 20);
+
+-- Detect communities
+SELECT * FROM COMMUNITY_DETECT('graph_name', 'label_propagation');
+```
+
+### Time Series Functions
+
+```sql
+-- Downsample time series data
+SELECT * FROM DOWNSAMPLE(
+    (SELECT timestamp, value FROM metrics),
+    '1 hour',
+    'avg'
+);
+
+-- Fill gaps in time series
+SELECT * FROM GAP_FILL(
+    (SELECT timestamp, value FROM metrics),
+    '5 minutes',
+    'linear'
+);
+
+-- Calculate moving average
+SELECT * FROM MOVING_AVERAGE(
+    (SELECT timestamp, value FROM metrics),
+    10
+);
+
+-- Forecast future values
+SELECT * FROM FORECAST(
+    (SELECT timestamp, value FROM metrics),
+    24
+);
+
+-- Detect anomalies
+SELECT * FROM DETECT_ANOMALIES(
+    (SELECT timestamp, value FROM metrics),
+    3.0
+);
+```
+
+### Vector Search Functions
+
+```sql
+-- Search for k nearest vectors
+SELECT * FROM VECTOR_SEARCH('index_name', [0.1, 0.2, 0.3], 10);
+
+-- Calculate cosine distance
+SELECT COSINE_DISTANCE([1.0, 2.0], [2.0, 3.0]);
+
+-- Calculate Euclidean distance
+SELECT EUCLIDEAN_DISTANCE([1.0, 2.0], [2.0, 3.0]);
+
+-- Generate text embedding
+SELECT EMBEDDING('Hello world', 'default');
+```
+
+### Data Quality Functions
+
+```sql
+-- Validate data against rules
+SELECT * FROM VALIDATE('table_name', 'not_null:col1,range:col2:0:100');
+
+-- Profile table data
+SELECT * FROM PROFILE('table_name');
+
+-- Get quality score
+SELECT QUALITY_SCORE('table_name');
+```
+
+### Natural Language Functions
+
+```sql
+-- Convert natural language to SQL
+SELECT * FROM NL_QUERY('Show top 10 customers by revenue');
+
+-- With schema context
+SELECT * FROM NL_QUERY('Count orders per day', 'analytics.orders');
+```
+
+### Catalog Functions
+
+```sql
+-- Search data catalog
+SELECT * FROM SEARCH_CATALOG('customer');
+
+-- Get data lineage
+SELECT * FROM DATA_LINEAGE('table_name', 'upstream');
+```
+
+### Audit Functions
+
+```sql
+-- Get audit log for table
+SELECT * FROM AUDIT_LOG('table_name');
+
+-- Verify blockchain integrity
+SELECT VERIFY_CHAIN('ledger_name');
+```
+
+### Workflow Functions
+
+```sql
+-- Execute workflow
+SELECT RUN_WORKFLOW('workflow_id', '{"param": "value"}');
+
+-- Get workflow status
+SELECT * FROM WORKFLOW_STATUS('run_id');
+```
+
+### ML Functions
+
+```sql
+-- Run prediction
+SELECT * FROM PREDICT('model_name', features_table);
+
+-- Explain prediction
+SELECT * FROM EXPLAIN_PREDICTION('model_name', features_table);
 ```
 
 ---

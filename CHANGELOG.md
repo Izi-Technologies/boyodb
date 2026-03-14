@@ -5,9 +5,139 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.5] - 2026-03-12
+## [0.9.5] - 2026-03-14
 
 ### Added
+
+#### Machine Learning Features (Phase 34)
+- **Feature Store**: Versioned feature engineering with point-in-time lookups
+  - Feature groups with transformations (StandardScaler, MinMax, OneHot, Bucketize)
+  - Online store with TTL caching for real-time serving
+  - Feature pipelines for data processing workflows
+
+- **Model Monitoring**: Production ML model observability
+  - PSI (Population Stability Index) and KS (Kolmogorov-Smirnov) drift detection
+  - Performance metrics tracking with alerting
+  - Reference distribution comparison
+
+- **Embeddings Engine**: Text embedding generation and management
+  - Sentence transformer model support
+  - Embedding caching for performance
+  - Cosine similarity search
+
+- **Online Learning**: Incremental model updates
+  - SGD, Adam, AdaGrad, RMSProp, Momentum optimizers
+  - Multi-armed bandits (epsilon-greedy, UCB, Thompson Sampling)
+  - Contextual bandits with LinUCB algorithm
+
+- **AutoML**: Automated machine learning pipeline
+  - Grid, random, and Bayesian hyperparameter search
+  - K-fold and stratified cross-validation
+  - Feature importance scoring
+  - Trial tracking and model selection
+
+- **ML Explainability**: Interpretable ML predictions
+  - SHAP (Kernel SHAP) for global/local explanations
+  - LIME for local interpretable explanations
+  - Permutation feature importance
+  - Counterfactual explanations
+
+#### Data Platform Features (Phase 35)
+- **Time Series Engine**: Specialized time series analytics
+  - Aggregation by time buckets (second to year)
+  - Gap filling (null, zero, forward/backward fill, linear interpolation)
+  - Downsampling with configurable policies
+  - Linear regression forecasting
+  - Z-score anomaly detection
+
+- **Graph Database Engine**: Native graph query capabilities
+  - Node and edge storage with arbitrary properties
+  - BFS/DFS graph traversal with depth limits
+  - Dijkstra's shortest path algorithm
+  - All paths enumeration
+  - PageRank algorithm for node importance
+  - Label propagation community detection
+
+- **Data Quality Framework**: Automated data validation
+  - Validation rules: NotNull, Unique, Range, Regex, Email, URL, Custom
+  - Column profiling with statistics
+  - Anomaly detection using z-score
+  - Quality scoring with recommendations
+
+- **Natural Language to SQL**: NL query interface
+  - Intent recognition (select, count, sum, avg, max, min, group, filter, order)
+  - Entity extraction for tables and columns
+  - Schema-aware SQL generation
+  - Support for aggregations, conditions, ordering
+
+- **Data Catalog**: Enterprise metadata management
+  - Catalog entries with metadata, classification, tags
+  - Data lineage graph (upstream/downstream tracking)
+  - Business glossary with term definitions
+  - Full-text search with relevance scoring
+
+- **Blockchain Ledger**: Immutable audit logging
+  - SHA-256 hash chains for data integrity
+  - Merkle tree verification
+  - Transaction signing and verification
+  - Tamper detection and chain validation
+
+- **Workflow Engine**: DAG-based pipeline orchestration
+  - Task dependencies with topological ordering
+  - Parallel execution levels
+  - Retry policies with exponential backoff
+  - Scheduling (cron, interval, daily, weekly)
+  - Task state tracking and logging
+
+#### Advanced Analytics Features (Phase 36)
+- **Enhanced Vector Search**: HNSW approximate nearest neighbor
+  - Multiple distance metrics (Cosine, Euclidean, Dot Product, Manhattan)
+  - Product quantization for memory efficiency
+  - Filtered vector search with metadata predicates
+  - Configurable M and ef parameters
+
+- **Query Federation**: Multi-source query execution
+  - Support for PostgreSQL, MySQL, S3, HTTP APIs
+  - Push-down optimization (filters, projections, aggregations)
+  - Result merging and caching
+  - Connection pooling
+
+- **Real-time Dashboards**: WebSocket streaming
+  - Live metric updates via WebSocket
+  - Subscription management
+  - Dashboard configurations with widgets
+  - Alert broadcasting
+  - Query result streaming
+
+- **Data Contracts**: Schema evolution management
+  - Semantic versioning (major.minor.patch)
+  - Backward/forward compatibility checking
+  - Breaking change detection
+  - Migration plan generation
+  - Type promotion rules
+
+- **Lakehouse Formats**: Open table format support
+  - Delta Lake transaction log and ACID semantics
+  - Apache Iceberg metadata and manifest files
+  - Time travel queries
+  - Schema evolution
+  - Partition pruning
+
+- **SQL Extensions**: Analytical function bindings
+  - Graph functions: GRAPH_TRAVERSE, SHORTEST_PATH, PAGERANK, COMMUNITY_DETECT
+  - Time series: DOWNSAMPLE, GAP_FILL, MOVING_AVERAGE, FORECAST, DETECT_ANOMALIES
+  - Vector search: VECTOR_SEARCH, COSINE_DISTANCE, EUCLIDEAN_DISTANCE, EMBEDDING
+  - Data quality: VALIDATE, PROFILE, QUALITY_SCORE
+  - Catalog: SEARCH_CATALOG, DATA_LINEAGE
+  - Workflow: RUN_WORKFLOW, WORKFLOW_STATUS
+
+#### Performance & Testing (Phase 37)
+- **Benchmarking Utilities**: Performance measurement tools
+  - BenchmarkRunner with warmup and iteration control
+  - LatencyHistogram for distribution analysis
+  - ThroughputTracker for sustained workloads
+  - Percentile calculations (P50, P95, P99, P99.9)
+  - JSON output for CI integration
 
 - **GraphQL API**: Complete GraphQL interface for BoyoDB
   - Full schema introspection with automatic table schema generation

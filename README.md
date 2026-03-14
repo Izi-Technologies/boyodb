@@ -8,11 +8,30 @@ A high-performance columnar database engine built in Rust for real-time analytic
 
 ## What's New in v0.9.5
 
-- **DISTINCT ON**: PostgreSQL-style first-row-per-group selection with custom ordering
-- **Incremental Materialized View Refresh**: Delta-based updates using watermark tracking for efficient refreshes
-- **Advanced JSON Path Expressions**: Wildcards `[*]`, array slicing `[0:5]`, recursive descent `..`, filter expressions `?(@.field > value)`
-- **WITHIN GROUP Ordered Aggregates**: MODE, STRING_AGG_ORDERED, ARRAY_AGG_ORDERED, FIRST_VALUE, LAST_VALUE, NTH_VALUE
-- **Query Federation Push-down**: Push aggregations, GROUP BY, and ORDER BY to foreign servers for reduced data transfer
+### Machine Learning & AI
+- **Feature Store**: Versioned feature sets, point-in-time lookups, online/offline serving
+- **Model Monitoring**: PSI/KS drift detection, performance metrics, alerting
+- **Embeddings Engine**: Sentence transformers, text embeddings, similarity search
+- **Online Learning**: SGD/Adam optimizers, multi-armed bandits, LinUCB
+- **AutoML**: Hyperparameter optimization, cross-validation, model selection
+- **ML Explainability**: SHAP, LIME, permutation importance, counterfactuals
+
+### Data Platform
+- **Time Series Engine**: Aggregations, gap filling, downsampling, forecasting, anomaly detection
+- **Graph Database**: BFS/DFS traversal, Dijkstra shortest path, PageRank, community detection
+- **Data Quality**: Validation rules, profiling, anomaly detection, quality scoring
+- **Natural Language SQL**: Intent recognition, entity extraction, schema-aware query generation
+- **Data Catalog**: Metadata management, lineage tracking, business glossary, search
+- **Blockchain Ledger**: Immutable audit logs, SHA-256 hash chains, Merkle tree verification
+- **Workflow Engine**: DAG-based pipelines, task dependencies, retry policies
+
+### Advanced Analytics
+- **Enhanced Vector Search**: HNSW index, product quantization, filtered search
+- **Query Federation**: Multi-source queries, push-down optimization, result merging
+- **Real-time Dashboards**: WebSocket streaming, live metrics, alert broadcasting
+- **Data Contracts**: Schema versioning, compatibility checking, migration planning
+- **Lakehouse Formats**: Delta Lake, Apache Iceberg, ACID on object storage
+- **Read Replicas**: Offload read queries, manifest sync, automatic failover
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 
@@ -325,7 +344,7 @@ CREATE TABLE embeddings (
     embedding VECTOR(1536)  -- OpenAI ada-002 dimensions
 );
 
--- Vector similarity search
+-- Vector similarity search using HNSW index
 SELECT id, content,
        COSINE_SIMILARITY(embedding, $query_vector) as score
 FROM embeddings
@@ -337,13 +356,243 @@ SELECT * FROM embeddings
 WHERE content LIKE '%machine learning%'
 ORDER BY COSINE_SIMILARITY(embedding, $query_vector) DESC
 LIMIT 10;
+
+-- Use SQL extension functions
+SELECT * FROM VECTOR_SEARCH('embeddings_idx', [0.1, 0.2, ...], 10);
 ```
 
 **Vector Features:**
+- HNSW index for approximate nearest neighbor search
 - Distance metrics: Cosine, Euclidean, Dot Product, Manhattan
+- Product quantization for memory-efficient storage
+- Filtered vector search with metadata predicates
 - Pre-configured dimensions for OpenAI, Cohere, HuggingFace models
 - Hybrid search with RRF and linear fusion
-- Text chunking: Fixed-size, sentence, paragraph, semantic
+
+### Machine Learning
+
+Integrated ML capabilities for feature engineering, model deployment, and monitoring:
+
+```sql
+-- Feature Store: Point-in-time feature lookup
+SELECT * FROM FEATURE_STORE_LOOKUP('user_features', user_id, '2024-01-15 14:30:00');
+
+-- ML Predictions with explainability
+SELECT
+    user_id,
+    PREDICT('churn_model', features) as churn_prob,
+    EXPLAIN_PREDICTION('churn_model', features) as explanation
+FROM user_features;
+
+-- Model drift monitoring
+SELECT * FROM MODEL_DRIFT('churn_model', 'psi') WHERE drift_score > 0.1;
+```
+
+**ML Features:**
+- **Feature Store**: Versioned features, transformations, online serving
+- **Model Registry**: Deploy and version ML models
+- **Predictions**: Run inference in SQL queries
+- **Explainability**: SHAP/LIME explanations for predictions
+- **Drift Detection**: PSI, KS tests for data/model drift
+- **Online Learning**: Incremental model updates
+- **AutoML**: Hyperparameter optimization, cross-validation
+
+### Graph Queries
+
+Native graph database capabilities for relationship analysis:
+
+```sql
+-- Traverse graph from a node
+SELECT * FROM GRAPH_TRAVERSE('social_graph', 'user_123', 'outgoing', 3);
+
+-- Find shortest path
+SELECT * FROM SHORTEST_PATH('social_graph', 'user_123', 'user_456');
+
+-- PageRank for influence scoring
+SELECT * FROM PAGERANK('social_graph', 0.85, 20);
+
+-- Community detection
+SELECT * FROM COMMUNITY_DETECT('social_graph', 'label_propagation');
+```
+
+**Graph Features:**
+- Node and edge storage with properties
+- BFS/DFS traversal with depth limits
+- Dijkstra's shortest path algorithm
+- PageRank for node importance
+- Label propagation for community detection
+- All paths enumeration
+
+### Time Series Analytics
+
+Specialized functions for time series data:
+
+```sql
+-- Downsample to hourly buckets
+SELECT * FROM DOWNSAMPLE(
+    (SELECT timestamp, value FROM metrics),
+    '1 hour', 'avg'
+);
+
+-- Fill gaps with interpolation
+SELECT * FROM GAP_FILL(
+    (SELECT timestamp, value FROM metrics),
+    '5 minutes', 'linear'
+);
+
+-- Anomaly detection
+SELECT * FROM DETECT_ANOMALIES(
+    (SELECT timestamp, value FROM metrics),
+    3.0  -- z-score threshold
+);
+
+-- Forecasting
+SELECT * FROM FORECAST(
+    (SELECT timestamp, value FROM metrics),
+    24  -- predict next 24 periods
+);
+```
+
+**Time Series Features:**
+- Aggregation: sum, avg, min, max, count, first, last
+- Gap filling: null, zero, forward fill, backward fill, linear interpolation
+- Downsampling with multiple aggregation methods
+- Moving averages and exponential smoothing
+- Seasonal decomposition
+- Anomaly detection (z-score, IQR)
+- Linear regression forecasting
+
+### Data Quality
+
+Built-in data quality validation and profiling:
+
+```sql
+-- Profile a table
+SELECT * FROM PROFILE('analytics.events');
+
+-- Validate against rules
+SELECT * FROM VALIDATE('analytics.events', 'not_null:user_id,range:amount:0:10000');
+
+-- Get quality score
+SELECT QUALITY_SCORE('analytics.events');
+```
+
+**Data Quality Features:**
+- Column profiling (nulls, distinct, min, max, mean)
+- Validation rules: not null, unique, range, regex, email, URL
+- Anomaly detection for outliers
+- Quality scoring with recommendations
+- Data type inference
+
+### Natural Language to SQL
+
+Query your data using natural language:
+
+```sql
+-- Convert question to SQL
+SELECT * FROM NL_QUERY('Show me top 10 customers by revenue last month');
+
+-- With schema context
+SELECT * FROM NL_QUERY('How many orders per day?', 'analytics.orders');
+```
+
+**NL Features:**
+- Intent recognition (select, aggregate, filter, sort)
+- Entity extraction for tables and columns
+- Schema-aware query generation
+- Support for aggregations, filters, ordering
+
+### Query Federation
+
+Query across multiple data sources:
+
+```sql
+-- Register external sources
+CREATE FOREIGN DATA WRAPPER postgres_fdw;
+CREATE SERVER pg_server FOREIGN DATA WRAPPER postgres_fdw
+    OPTIONS (host 'pg.example.com', dbname 'prod');
+
+-- Federated query
+SELECT * FROM FEDERATED_QUERY(
+    ['local.events', 'pg_server.orders'],
+    'SELECT e.*, o.total FROM events e JOIN orders o ON e.order_id = o.id'
+);
+```
+
+**Federation Features:**
+- PostgreSQL, MySQL, S3, HTTP API connectors
+- Push-down optimization (filters, projections, aggregations)
+- Connection pooling
+- Result merging and caching
+
+### Read Replicas
+
+Scale read workloads with read replicas:
+
+```bash
+# Start primary server
+boyodb-server /data/primary 0.0.0.0:8765 \
+    --s3-bucket my-bucket --s3-region us-east-1
+
+# Start read replica
+boyodb-server /data/replica 0.0.0.0:8766 \
+    --replica \
+    --replica-sync-interval-ms 1000 \
+    --s3-bucket my-bucket --s3-region us-east-1
+
+# Or sync from primary via HTTP
+boyodb-server /data/replica 0.0.0.0:8766 \
+    --replica \
+    --replica-primary-addr http://primary:8765
+```
+
+**Replica Features:**
+- Read-only mode (all writes rejected)
+- Manifest sync from shared S3
+- HTTP bundle pull from primary
+- Sub-second sync lag
+- Automatic failover support
+
+### Data Catalog
+
+Metadata management and data discovery:
+
+```sql
+-- Search catalog
+SELECT * FROM SEARCH_CATALOG('customer');
+
+-- View data lineage
+SELECT * FROM DATA_LINEAGE('analytics.daily_stats', 'upstream');
+
+-- Business glossary
+SELECT * FROM system.glossary WHERE term LIKE '%revenue%';
+```
+
+**Catalog Features:**
+- Automatic metadata collection
+- Data lineage tracking (upstream/downstream)
+- Business glossary with definitions
+- Classification and tagging
+- Full-text search
+
+### Blockchain Audit Log
+
+Immutable audit logging with cryptographic verification:
+
+```sql
+-- View audit trail
+SELECT * FROM AUDIT_LOG('analytics.transactions');
+
+-- Verify chain integrity
+SELECT VERIFY_CHAIN('audit_ledger');
+```
+
+**Audit Features:**
+- Append-only blockchain ledger
+- SHA-256 hash chains
+- Merkle tree verification
+- Transaction signing
+- Tamper detection
 
 ### Storage Engine
 
