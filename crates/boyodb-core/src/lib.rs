@@ -556,3 +556,60 @@ pub use workflow_engine::{
     TaskType as WorkflowTaskType, TriggerType, Workflow, WorkflowEngine, WorkflowError,
     WorkflowRegistry, WorkflowRun,
 };
+
+// --- Advanced Analytics Features (Phase 36) ---
+pub mod vector_search;
+pub mod query_federation;
+pub mod realtime_dashboard;
+pub mod data_contracts;
+pub mod lakehouse_formats;
+pub mod sql_extensions;
+
+// Vector Search
+pub use vector_search::{
+    DistanceMetric, HnswConfig, HnswIndex, HnswStats, ProductQuantizer,
+    SearchResult as VectorSearchResult, Vector, VectorIndexRegistry,
+};
+
+// Query Federation
+pub use query_federation::{
+    AggregateExpr, DataSource, DataSourceType, ExecutionStats as FederationExecutionStats,
+    FederatedPlan, FederatedQuery, FederatedResult, FederatedValue, FederationEngine,
+    FederationRegistry, JoinType as FederatedJoinType, PlanStep, QueryPart, SourceCapabilities,
+    SourceConfig, SourceStats, TableStats as FederationTableStats,
+    ColumnStats as FederationColumnStats,
+};
+
+// Real-time Dashboard
+pub use realtime_dashboard::{
+    Alert as DashboardAlert, AlertSeverity as DashboardAlertSeverity, Dashboard, DashboardManager,
+    LogEntry as DashboardLogEntry, MetricPoint, MetricSeries, MetricsRegistry, StreamingHub,
+    Subscription, SubscriptionManager, SubscriptionType, Threshold, Widget, WidgetLayout,
+    WidgetOptions, WidgetType, WsMessage, MessageType, MessagePayload,
+};
+
+// Data Contracts
+pub use data_contracts::{
+    ChangeType, CompatibilityChecker, CompatibilityMode, CompatibilityResult, ContractRegistry,
+    ContractStore, DataContract, DataType as ContractDataType,
+    FieldDefinition as ContractFieldDefinition, IndexDefinition as ContractIndexDefinition,
+    SchemaChange as ContractSchemaChange, SchemaDefinition, SemanticVersion,
+    ValidationRule as ContractValidationRule, ValidationRuleType,
+    ValidationResult as ContractValidationResult, VersionBump,
+};
+
+// Lakehouse Formats
+pub use lakehouse_formats::{
+    AddFile as DeltaAddFile, CommitInfoAction, DeltaAction, DeltaField, DeltaSchema, DeltaTable,
+    DeltaTransaction, DeltaType, FileFormat, IcebergField, IcebergSchema, IcebergSnapshot,
+    IcebergTable, IcebergType, LakehouseRegistry, LakehouseStore, ManifestContent, ManifestFile,
+    MetadataAction, PartitionField, PartitionSpec, PartitionTransform, ProtocolAction,
+    RemoveFile as DeltaRemoveFile, SnapshotOperation, SnapshotSummary, SortDirection, SortField,
+    SortOrder, TableIdentifier, TxnAction,
+};
+
+// SQL Extensions
+pub use sql_extensions::{
+    ExtensionCategory, FunctionCall, Param, ParamType, QueryRewriter, RewriteResult,
+    SqlExtension, SqlExtensionRegistry, SqlValue as ExtSqlValue,
+};
