@@ -498,3 +498,61 @@ pub use ml_explainability::{
     LinearExplainableModel, PartialDependence, PermutationImportance, ShapExplainer,
     ShapExplanation,
 };
+
+// --- Data Platform Features (Phase 35) ---
+pub mod time_series_engine;
+pub mod graph_engine;
+pub mod data_quality;
+pub mod nl_to_sql;
+pub mod data_catalog;
+pub mod blockchain_ledger;
+pub mod workflow_engine;
+
+// Time Series Engine
+pub use time_series_engine::{
+    AggregatedBucket, DataPoint, DownsamplePolicy, GapFillStrategy, InterpolationMethod,
+    TimeAggregation, TimeBucket, TimeRange, TimeSeries, TimeSeriesFunctions, TimeSeriesQuery,
+    TimeSeriesStore,
+};
+
+// Graph Engine
+pub use graph_engine::{
+    Direction, Edge, EdgePattern, GraphDatabase, GraphQuery, GraphStats, Node, NodePattern,
+    Path, PropertyValue, QueryCondition, QueryResult as GraphQueryResult, ResultValue,
+};
+
+// Data Quality
+pub use data_quality::{
+    Anomaly, AnomalyType, CellValue, ColumnProfile, DataProfile, DataQualityEngine,
+    DataType as DqDataType, QualityMetric, QualityReport, Severity,
+    ValidationResult as DqValidationResult, ValidationRule,
+};
+
+// Natural Language to SQL
+pub use nl_to_sql::{
+    AggregationType as NlAggregationType, ColumnSchema, ComparisonOp as NlComparisonOp,
+    Condition, Entity, EntityType, GeneratedSQL, NLToSQL, ParsedQuery as NlParsedQuery,
+    QueryIntent, TableSchema as NlTableSchema,
+};
+
+// Data Catalog
+pub use data_catalog::{
+    CatalogEntry, CatalogStats, Classification, ColumnEntry, ColumnStats, DataCatalog, EntryType,
+    GlossaryTerm, LineageDirection, LineageEdge, LineageEdgeType, LineageGraph, LineageNode,
+    LineageNodeType, SearchQuery, SearchResult, TermStatus,
+};
+
+// Blockchain Ledger
+pub use blockchain_ledger::{
+    AuditEntry as LedgerAuditEntry, AuditTrail, Block, BlockchainLedger, ChainVerification,
+    LedgerRegistry, LedgerStats, MerkleNode, MerkleTree, Transaction as LedgerTransaction,
+    TransactionType,
+};
+
+// Workflow Engine
+pub use workflow_engine::{
+    LogEntry as WorkflowLogEntry, LogLevel, RetryPolicy, RunStats, RunStatus, Schedule,
+    ScheduleType, Task as WorkflowTask, TaskState as WorkflowTaskState, TaskStatus,
+    TaskType as WorkflowTaskType, TriggerType, Workflow, WorkflowEngine, WorkflowError,
+    WorkflowRegistry, WorkflowRun,
+};
