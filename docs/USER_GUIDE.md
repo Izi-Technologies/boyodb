@@ -16,6 +16,18 @@ A comprehensive guide to installing, configuring, and using BoyoDB - a high-perf
 10. [Performance Tuning](#performance-tuning)
 11. [Monitoring & Observability](#monitoring--observability)
 12. [Connection Pooling](#connection-pooling)
+13. [Graph Database](#graph-database)
+14. [Time Series Analytics](#time-series-analytics)
+15. [Data Quality](#data-quality)
+16. [Natural Language Queries](#natural-language-queries)
+17. [Data Catalog](#data-catalog)
+18. [Blockchain Audit Ledger](#blockchain-audit-ledger)
+19. [Workflow Engine](#workflow-engine)
+20. [Vector Search](#vector-search)
+21. [Query Federation](#query-federation)
+22. [Real-time Dashboards](#real-time-dashboards)
+23. [Data Contracts](#data-contracts)
+24. [Lakehouse Formats](#lakehouse-formats)
 
 ---
 
@@ -1836,6 +1848,711 @@ analytics  | app   | 5    | 0      | 0       | session
    - `WAIT db` to drain active queries
    - Perform maintenance
    - `RESUME db` to restore traffic
+
+---
+
+## Graph Database
+
+BoyoDB includes a property graph database for relationship-heavy data like social networks, fraud detection, and knowledge graphs.
+
+### Creating Graphs
+
+```sql
+-- Create a graph
+CREATE GRAPH social;
+
+-- Add vertices (nodes)
+INSERT VERTEX social (id, label, properties)
+VALUES ('user:1', 'Person', '{"name": "Alice", "age": 30}');
+
+INSERT VERTEX social (id, label, properties)
+VALUES ('user:2', 'Person', '{"name": "Bob", "age": 25}');
+
+-- Add edges (relationships)
+INSERT EDGE social (from_id, to_id, label, properties)
+VALUES ('user:1', 'user:2', 'FOLLOWS', '{"since": "2024-01-15"}');
+```
+
+### Graph Queries
+
+```sql
+-- Find all followers
+SELECT * FROM GRAPH_TRAVERSE(
+    'social',           -- graph name
+    'user:1',          -- start vertex
+    'OUTBOUND',        -- direction (OUTBOUND, INBOUND, ANY)
+    1,                 -- min depth
+    2,                 -- max depth
+    'FOLLOWS'          -- edge label filter
+);
+
+-- Shortest path between nodes
+SELECT * FROM GRAPH_SHORTEST_PATH(
+    'social',
+    'user:1',
+    'user:100',
+    'ANY',
+    10                 -- max depth
+);
+
+-- All paths between nodes
+SELECT * FROM GRAPH_ALL_PATHS(
+    'social',
+    'user:1',
+    'user:50',
+    3                  -- max depth
+);
+
+-- Pattern matching (Cypher-like)
+SELECT * FROM GRAPH_MATCH(
+    'social',
+    '(a:Person)-[:FOLLOWS]->(b:Person)-[:FOLLOWS]->(c:Person)',
+    '{"a.name": "Alice"}'  -- bindings
+);
+```
+
+### Graph Algorithms
+
+```sql
+-- PageRank
+SELECT vertex_id, score FROM GRAPH_PAGERANK('social', 0.85, 20);
+
+-- Community detection (Louvain)
+SELECT vertex_id, community FROM GRAPH_COMMUNITIES('social');
+
+-- Centrality metrics
+SELECT vertex_id, centrality FROM GRAPH_BETWEENNESS('social');
+```
+
+---
+
+## Time Series Analytics
+
+BoyoDB provides specialized time series functions for IoT, monitoring, and financial data.
+
+### Downsampling
+
+Reduce data granularity while preserving statistical properties:
+
+```sql
+-- Downsample metrics to 1-hour buckets
+SELECT * FROM DOWNSAMPLE(
+    'metrics.cpu',              -- source table
+    'timestamp',                -- time column
+    '1h',                       -- bucket size
+    'host',                     -- group by columns (optional)
+    'avg:value,max:value,min:value'  -- aggregations
+)
+WHERE timestamp > NOW() - INTERVAL '7 days';
+```
+
+### Gap Filling
+
+Fill missing time series data points:
+
+```sql
+-- Fill gaps with interpolation
+SELECT * FROM GAP_FILL(
+    'metrics.temperature',
+    'timestamp',
+    '5m',                       -- expected interval
+    'linear',                   -- fill method: linear, previous, next, null
+    'sensor_id'
+)
+WHERE timestamp BETWEEN '2024-01-01' AND '2024-01-02';
+```
+
+### Time Series Functions
+
+```sql
+-- Moving average
+SELECT
+    timestamp,
+    value,
+    AVG(value) OVER (ORDER BY timestamp ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) as ma_6
+FROM metrics.cpu;
+
+-- Rate of change
+SELECT
+    timestamp,
+    value,
+    (value - LAG(value) OVER (ORDER BY timestamp)) /
+    EXTRACT(EPOCH FROM timestamp - LAG(timestamp) OVER (ORDER BY timestamp)) as rate
+FROM metrics.requests;
+
+-- Time bucketing
+SELECT
+    TIME_BUCKET('15 minutes', timestamp) as bucket,
+    AVG(value) as avg_value,
+    MAX(value) as max_value
+FROM metrics.latency
+GROUP BY bucket
+ORDER BY bucket;
+```
+
+---
+
+## Data Quality
+
+Built-in data quality validation for ensuring data integrity.
+
+### Quality Rules
+
+```sql
+-- Create quality rules
+CREATE QUALITY RULE orders_validation ON shop.orders AS (
+    -- Null checks
+    NOT_NULL(order_id),
+    NOT_NULL(customer_id),
+    NOT_NULL(total),
+
+    -- Range checks
+    RANGE(total, 0, 1000000),
+    RANGE(quantity, 1, 10000),
+
+    -- Pattern checks
+    PATTERN(email, '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$'),
+
+    -- Uniqueness
+    UNIQUE(order_id),
+
+    -- Referential integrity
+    EXISTS(customer_id IN customers.id)
+);
+
+-- Run validation
+SELECT * FROM VALIDATE_QUALITY('shop.orders', 'orders_validation');
+
+-- View validation results
+SELECT
+    rule_name,
+    passed,
+    failed,
+    pass_rate
+FROM system.quality_results
+WHERE table_name = 'shop.orders';
+```
+
+### Anomaly Detection
+
+```sql
+-- Statistical anomaly detection
+SELECT * FROM DETECT_ANOMALIES(
+    'metrics.latency',
+    'value',
+    'zscore',           -- method: zscore, iqr, isolation_forest
+    3.0                 -- threshold (3 standard deviations)
+)
+WHERE timestamp > NOW() - INTERVAL '1 day';
+```
+
+---
+
+## Natural Language Queries
+
+Query your database using natural language (requires NL model configuration).
+
+### Basic Usage
+
+```sql
+-- Natural language query
+SELECT * FROM NL_QUERY('Show me the top 10 customers by total order value');
+
+-- With context
+SELECT * FROM NL_QUERY(
+    'What were our sales last month?',
+    'shop'              -- database context
+);
+```
+
+### Configuration
+
+```bash
+# Enable NL query support
+boyodb-server /data 0.0.0.0:8765 \
+    --nl-model-endpoint http://localhost:8080/v1 \
+    --nl-model-key $API_KEY
+```
+
+---
+
+## Data Catalog
+
+Centralized metadata management for data discovery and governance.
+
+### Registering Assets
+
+```sql
+-- Register a table in the catalog
+INSERT INTO catalog.assets (name, type, location, schema, tags, owner)
+VALUES (
+    'shop.orders',
+    'table',
+    'boyodb://localhost:8765/shop/orders',
+    '{"columns": [...]}',
+    ARRAY['sales', 'transactional'],
+    'data-team'
+);
+
+-- Add column descriptions
+UPDATE catalog.columns
+SET description = 'Unique order identifier'
+WHERE asset_name = 'shop.orders' AND column_name = 'order_id';
+```
+
+### Data Discovery
+
+```sql
+-- Search catalog by keyword
+SELECT * FROM CATALOG_SEARCH('customer orders sales');
+
+-- Search by tag
+SELECT * FROM CATALOG_SEARCH_TAGS(ARRAY['pii', 'sensitive']);
+
+-- View data lineage
+SELECT * FROM CATALOG_LINEAGE('shop.daily_sales', 'upstream', 3);
+```
+
+### Data Profiling
+
+```sql
+-- Generate column statistics
+SELECT * FROM CATALOG_PROFILE('shop.orders');
+
+-- Output includes:
+-- - Null percentage
+-- - Unique count
+-- - Min/max values
+-- - Distribution histograms
+```
+
+---
+
+## Blockchain Audit Ledger
+
+Tamper-evident audit logging using cryptographic hash chains.
+
+### Creating Ledgers
+
+```sql
+-- Create an audit ledger
+CREATE LEDGER compliance_audit;
+
+-- Log transactions
+INSERT INTO LEDGER compliance_audit (
+    transaction_type,
+    entity_id,
+    data,
+    actor
+) VALUES (
+    'DATA_ACCESS',
+    'customer:12345',
+    '{"table": "customers", "columns": ["ssn", "dob"]}',
+    'user:alice'
+);
+```
+
+### Verification
+
+```sql
+-- Verify ledger integrity
+SELECT * FROM VERIFY_LEDGER('compliance_audit');
+
+-- Output:
+-- | block_id | valid | prev_hash_valid | merkle_valid |
+-- |----------|-------|-----------------|--------------|
+-- | 1        | true  | true            | true         |
+-- | 2        | true  | true            | true         |
+
+-- Get proof of inclusion for a transaction
+SELECT * FROM LEDGER_PROOF('compliance_audit', 'tx:abc123');
+```
+
+### Querying Audit History
+
+```sql
+-- Query audit trail
+SELECT * FROM LEDGER_QUERY(
+    'compliance_audit',
+    '{"entity_id": "customer:12345"}',
+    '2024-01-01',
+    '2024-12-31'
+);
+```
+
+---
+
+## Workflow Engine
+
+DAG-based data pipeline orchestration for ETL and data processing.
+
+### Creating Workflows
+
+```sql
+-- Create a workflow
+CREATE WORKFLOW daily_etl AS (
+    -- Define tasks
+    TASK extract_orders (
+        TYPE = 'sql',
+        QUERY = 'SELECT * FROM staging.raw_orders WHERE date = CURRENT_DATE'
+    ),
+
+    TASK transform_orders (
+        TYPE = 'sql',
+        QUERY = 'INSERT INTO warehouse.orders SELECT ... FROM staging.raw_orders',
+        DEPENDS_ON = ['extract_orders']
+    ),
+
+    TASK validate_orders (
+        TYPE = 'quality',
+        TABLE = 'warehouse.orders',
+        RULES = 'orders_validation',
+        DEPENDS_ON = ['transform_orders']
+    ),
+
+    TASK notify_completion (
+        TYPE = 'webhook',
+        URL = 'https://slack.com/api/...',
+        DEPENDS_ON = ['validate_orders']
+    )
+);
+
+-- Schedule the workflow
+ALTER WORKFLOW daily_etl SET SCHEDULE = '0 2 * * *';  -- 2 AM daily
+```
+
+### Running Workflows
+
+```sql
+-- Manual trigger
+RUN WORKFLOW daily_etl;
+
+-- Run with parameters
+RUN WORKFLOW daily_etl WITH (date = '2024-01-15');
+
+-- Check status
+SELECT * FROM WORKFLOW_STATUS('daily_etl');
+
+-- View run history
+SELECT * FROM WORKFLOW_RUNS('daily_etl', 10);
+```
+
+### Task Types
+
+| Type | Description |
+|------|-------------|
+| `sql` | Execute SQL query |
+| `quality` | Run data quality validation |
+| `webhook` | HTTP POST to external URL |
+| `shell` | Execute shell command |
+| `python` | Run Python script |
+
+---
+
+## Vector Search
+
+HNSW-based approximate nearest neighbor search for embeddings and similarity queries.
+
+### Creating Vector Indexes
+
+```sql
+-- Create table with vector column
+CREATE TABLE products.embeddings (
+    product_id INT64,
+    embedding VECTOR(768),  -- 768-dimensional vector
+    metadata JSON
+);
+
+-- Create HNSW index
+CREATE INDEX idx_embeddings ON products.embeddings
+USING HNSW (embedding)
+WITH (
+    m = 16,                 -- connections per layer
+    ef_construction = 200,  -- construction quality
+    metric = 'cosine'       -- cosine, euclidean, dot_product
+);
+```
+
+### Vector Queries
+
+```sql
+-- Find similar items
+SELECT
+    product_id,
+    metadata,
+    VECTOR_DISTANCE(embedding, $query_vector) as distance
+FROM VECTOR_SEARCH(
+    'products.embeddings',
+    'embedding',
+    $query_vector,          -- query vector
+    10,                     -- top K results
+    'cosine'                -- distance metric
+);
+
+-- Hybrid search (vector + filters)
+SELECT * FROM VECTOR_SEARCH(
+    'products.embeddings',
+    'embedding',
+    $query_vector,
+    20,
+    'cosine'
+) WHERE metadata->>'category' = 'electronics';
+```
+
+### Product Quantization
+
+For large-scale deployments, enable product quantization to reduce memory:
+
+```sql
+CREATE INDEX idx_embeddings ON products.embeddings
+USING HNSW (embedding)
+WITH (
+    m = 16,
+    ef_construction = 200,
+    metric = 'cosine',
+    pq_enabled = true,      -- enable product quantization
+    pq_subvectors = 48      -- number of subvectors
+);
+```
+
+---
+
+## Query Federation
+
+Query across multiple data sources with a unified SQL interface.
+
+### Registering Data Sources
+
+```sql
+-- Register PostgreSQL source
+CREATE FOREIGN SERVER postgres_db
+TYPE postgresql
+OPTIONS (
+    host = 'pg.example.com',
+    port = 5432,
+    database = 'production',
+    user = 'readonly',
+    password = '***'
+);
+
+-- Register MySQL source
+CREATE FOREIGN SERVER mysql_db
+TYPE mysql
+OPTIONS (
+    host = 'mysql.example.com',
+    port = 3306,
+    database = 'legacy',
+    user = 'app',
+    password = '***'
+);
+
+-- Register S3 data lake
+CREATE FOREIGN SERVER s3_lake
+TYPE s3
+OPTIONS (
+    bucket = 'analytics-lake',
+    region = 'us-east-1',
+    format = 'parquet'
+);
+```
+
+### Federated Queries
+
+```sql
+-- Query across sources
+SELECT
+    p.customer_id,
+    p.name,
+    o.order_count,
+    l.lifetime_value
+FROM postgres_db.customers p
+JOIN mysql_db.orders_summary o ON p.customer_id = o.customer_id
+JOIN s3_lake.customer_ltv l ON p.customer_id = l.customer_id
+WHERE p.created_at > '2024-01-01';
+
+-- Push-down optimization automatically applied:
+-- - Filters pushed to source databases
+-- - Projections limited to needed columns
+-- - Aggregations computed at source when possible
+```
+
+---
+
+## Real-time Dashboards
+
+WebSocket-based live metrics streaming for operational dashboards.
+
+### Creating Dashboards
+
+```sql
+-- Create a dashboard
+CREATE DASHBOARD ops_metrics AS (
+    WIDGET system_health (
+        TYPE = 'gauge',
+        QUERY = 'SELECT COUNT(*) as active FROM connections WHERE status = ''active''',
+        REFRESH = '5s'
+    ),
+
+    WIDGET query_rate (
+        TYPE = 'timeseries',
+        QUERY = 'SELECT time_bucket(''1m'', timestamp), COUNT(*) FROM queries GROUP BY 1',
+        REFRESH = '10s'
+    ),
+
+    WIDGET error_rate (
+        TYPE = 'counter',
+        QUERY = 'SELECT COUNT(*) FROM errors WHERE timestamp > NOW() - INTERVAL ''1 hour''',
+        REFRESH = '30s'
+    )
+);
+```
+
+### Subscribing to Updates
+
+```javascript
+// WebSocket client example
+const ws = new WebSocket('ws://localhost:8765/dashboard/ops_metrics');
+
+ws.onmessage = (event) => {
+    const update = JSON.parse(event.data);
+    console.log(`Widget ${update.widget}: ${update.value}`);
+};
+```
+
+### Alert Conditions
+
+```sql
+-- Add alert to widget
+ALTER DASHBOARD ops_metrics
+WIDGET error_rate
+ADD ALERT (
+    CONDITION = 'value > 100',
+    SEVERITY = 'warning',
+    WEBHOOK = 'https://pagerduty.com/...'
+);
+```
+
+---
+
+## Data Contracts
+
+Schema versioning and compatibility management for data producers and consumers.
+
+### Creating Contracts
+
+```sql
+-- Create a data contract
+CREATE CONTRACT orders_v1 AS (
+    VERSION = '1.0.0',
+    SCHEMA = (
+        order_id INT64 NOT NULL,
+        customer_id INT64 NOT NULL,
+        total DECIMAL(10,2) NOT NULL,
+        status STRING NOT NULL,
+        created_at TIMESTAMP NOT NULL
+    ),
+    COMPATIBILITY = 'backward',  -- backward, forward, full, none
+    OWNER = 'orders-team'
+);
+
+-- Register table with contract
+ALTER TABLE shop.orders SET CONTRACT = 'orders_v1';
+```
+
+### Schema Evolution
+
+```sql
+-- Evolve contract (backward-compatible change)
+CREATE CONTRACT orders_v2 AS (
+    VERSION = '1.1.0',
+    EXTENDS = 'orders_v1',
+    SCHEMA = (
+        -- All v1 fields plus:
+        shipping_address JSON,          -- new optional field
+        discount_amount DECIMAL(10,2)   -- new optional field
+    ),
+    COMPATIBILITY = 'backward'
+);
+
+-- Check compatibility before migration
+SELECT * FROM CHECK_CONTRACT_COMPATIBILITY('orders_v1', 'orders_v2');
+```
+
+### Breaking Change Detection
+
+```sql
+-- Detect breaking changes
+SELECT * FROM CONTRACT_BREAKING_CHANGES('orders_v1', 'orders_v3');
+
+-- Output:
+-- | change_type      | field      | description                    |
+-- |------------------|------------|--------------------------------|
+-- | REMOVED_FIELD    | status     | Required field removed         |
+-- | TYPE_CHANGE      | total      | Changed from DECIMAL to FLOAT  |
+```
+
+---
+
+## Lakehouse Formats
+
+Native support for Delta Lake and Apache Iceberg table formats.
+
+### Delta Lake
+
+```sql
+-- Create Delta table
+CREATE TABLE warehouse.events
+FORMAT DELTA
+LOCATION 's3://data-lake/events/'
+AS SELECT * FROM staging.events;
+
+-- Time travel queries
+SELECT * FROM warehouse.events VERSION AS OF 5;
+SELECT * FROM warehouse.events TIMESTAMP AS OF '2024-01-15T10:00:00';
+
+-- View table history
+SELECT * FROM DELTA_HISTORY('warehouse.events');
+
+-- Vacuum old versions
+VACUUM warehouse.events RETAIN 168 HOURS;
+
+-- Optimize (compaction)
+OPTIMIZE warehouse.events;
+OPTIMIZE warehouse.events ZORDER BY (date, user_id);
+```
+
+### Apache Iceberg
+
+```sql
+-- Create Iceberg table
+CREATE TABLE warehouse.transactions
+FORMAT ICEBERG
+LOCATION 's3://data-lake/transactions/'
+PARTITIONED BY (YEAR(transaction_date), MONTH(transaction_date));
+
+-- Snapshot queries
+SELECT * FROM warehouse.transactions FOR SYSTEM_TIME AS OF '2024-01-15';
+
+-- View snapshots
+SELECT * FROM ICEBERG_SNAPSHOTS('warehouse.transactions');
+
+-- Expire old snapshots
+ALTER TABLE warehouse.transactions EXPIRE SNAPSHOTS OLDER_THAN '2024-01-01';
+
+-- Schema evolution
+ALTER TABLE warehouse.transactions ADD COLUMN new_field STRING;
+```
+
+### Format Comparison
+
+| Feature | Delta Lake | Iceberg |
+|---------|------------|---------|
+| Time Travel | Yes | Yes |
+| Schema Evolution | Yes | Yes |
+| Partition Evolution | Limited | Full |
+| Hidden Partitioning | No | Yes |
+| Merge-on-Read | Yes | Yes |
+| Copy-on-Write | Yes | Yes |
 
 ---
 

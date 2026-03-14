@@ -1071,3 +1071,513 @@ The executor considers these factors when deciding GPU vs CPU:
 2. **Operation type**: Aggregations and math benefit most from GPU
 3. **Device memory**: Must have sufficient free GPU memory
 4. **Estimated speedup**: Only uses GPU if >20% faster than CPU
+
+---
+
+## Graph Database Operations
+
+### Graph Traverse
+
+Traverse a graph from a starting vertex.
+
+**Request:**
+```json
+{
+  "op": "graph_traverse",
+  "graph": "social",
+  "start_vertex": "user:1",
+  "direction": "OUTBOUND",
+  "min_depth": 1,
+  "max_depth": 3,
+  "edge_filter": "FOLLOWS"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "paths": [
+    {
+      "vertices": ["user:1", "user:2", "user:3"],
+      "edges": ["follows:1", "follows:2"],
+      "depth": 2
+    }
+  ]
+}
+```
+
+### Graph Shortest Path
+
+Find the shortest path between two vertices.
+
+**Request:**
+```json
+{
+  "op": "graph_shortest_path",
+  "graph": "social",
+  "from_vertex": "user:1",
+  "to_vertex": "user:100",
+  "max_depth": 10
+}
+```
+
+---
+
+## Time Series Operations
+
+### Downsample
+
+Reduce time series granularity.
+
+**Request:**
+```json
+{
+  "op": "downsample",
+  "table": "metrics.cpu",
+  "time_column": "timestamp",
+  "bucket_size": "1h",
+  "group_by": ["host"],
+  "aggregations": {
+    "value": ["avg", "max", "min"]
+  },
+  "start_time": "2024-01-01T00:00:00Z",
+  "end_time": "2024-01-02T00:00:00Z"
+}
+```
+
+### Gap Fill
+
+Fill missing time series data points.
+
+**Request:**
+```json
+{
+  "op": "gap_fill",
+  "table": "metrics.temperature",
+  "time_column": "timestamp",
+  "expected_interval": "5m",
+  "fill_method": "linear",
+  "group_by": ["sensor_id"]
+}
+```
+
+---
+
+## Vector Search Operations
+
+### Vector Search
+
+Find nearest neighbors.
+
+**Request:**
+```json
+{
+  "op": "vector_search",
+  "table": "products.embeddings",
+  "column": "embedding",
+  "query_vector": [0.1, 0.2, 0.3, ...],
+  "top_k": 10,
+  "metric": "cosine",
+  "ef_search": 100
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "results": [
+    {"id": 42, "distance": 0.05, "metadata": {...}},
+    {"id": 17, "distance": 0.12, "metadata": {...}}
+  ]
+}
+```
+
+---
+
+## Query Federation Operations
+
+### Register Foreign Server
+
+Register an external data source.
+
+**Request:**
+```json
+{
+  "op": "create_foreign_server",
+  "name": "postgres_db",
+  "type": "postgresql",
+  "options": {
+    "host": "pg.example.com",
+    "port": 5432,
+    "database": "production",
+    "user": "readonly",
+    "password": "***"
+  }
+}
+```
+
+### Federated Query
+
+Query across multiple data sources.
+
+**Request:**
+```json
+{
+  "op": "query",
+  "sql": "SELECT * FROM postgres_db.customers JOIN local.orders ON ...",
+  "federation": true
+}
+```
+
+---
+
+## Data Quality Operations
+
+### Validate Quality
+
+Run data quality validation.
+
+**Request:**
+```json
+{
+  "op": "validate_quality",
+  "table": "shop.orders",
+  "rules": "orders_validation"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "validation_result": {
+    "passed": 9950,
+    "failed": 50,
+    "pass_rate": 0.995,
+    "failures": [
+      {"rule": "NOT_NULL(order_id)", "count": 10},
+      {"rule": "RANGE(total, 0, 1000000)", "count": 40}
+    ]
+  }
+}
+```
+
+---
+
+## Blockchain Audit Operations
+
+### Create Ledger
+
+Create a new audit ledger.
+
+**Request:**
+```json
+{
+  "op": "create_ledger",
+  "name": "compliance_audit"
+}
+```
+
+### Log Transaction
+
+Add a transaction to the ledger.
+
+**Request:**
+```json
+{
+  "op": "ledger_log",
+  "ledger": "compliance_audit",
+  "transaction_type": "DATA_ACCESS",
+  "entity_id": "customer:12345",
+  "data": {"table": "customers", "columns": ["ssn"]},
+  "actor": "user:alice"
+}
+```
+
+### Verify Ledger
+
+Verify ledger integrity.
+
+**Request:**
+```json
+{
+  "op": "verify_ledger",
+  "ledger": "compliance_audit"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "verification": {
+    "valid": true,
+    "blocks_verified": 1000,
+    "hash_chain_valid": true,
+    "merkle_trees_valid": true
+  }
+}
+```
+
+---
+
+## Workflow Operations
+
+### Create Workflow
+
+Create a data pipeline workflow.
+
+**Request:**
+```json
+{
+  "op": "create_workflow",
+  "name": "daily_etl",
+  "tasks": [
+    {
+      "name": "extract",
+      "type": "sql",
+      "query": "SELECT * FROM staging.raw_orders"
+    },
+    {
+      "name": "transform",
+      "type": "sql",
+      "query": "INSERT INTO warehouse.orders ...",
+      "depends_on": ["extract"]
+    }
+  ],
+  "schedule": "0 2 * * *"
+}
+```
+
+### Run Workflow
+
+Trigger workflow execution.
+
+**Request:**
+```json
+{
+  "op": "run_workflow",
+  "name": "daily_etl",
+  "parameters": {"date": "2024-01-15"}
+}
+```
+
+### Workflow Status
+
+Get workflow execution status.
+
+**Request:**
+```json
+{
+  "op": "workflow_status",
+  "name": "daily_etl",
+  "run_id": "run-123"
+}
+```
+
+---
+
+## Data Catalog Operations
+
+### Catalog Search
+
+Search the data catalog.
+
+**Request:**
+```json
+{
+  "op": "catalog_search",
+  "query": "customer orders",
+  "filters": {
+    "type": "table",
+    "tags": ["sales"]
+  }
+}
+```
+
+### Catalog Lineage
+
+Get data lineage for an asset.
+
+**Request:**
+```json
+{
+  "op": "catalog_lineage",
+  "asset": "shop.daily_sales",
+  "direction": "upstream",
+  "depth": 3
+}
+```
+
+---
+
+## Real-time Dashboard Operations
+
+### Create Dashboard
+
+Create a real-time dashboard.
+
+**Request:**
+```json
+{
+  "op": "create_dashboard",
+  "name": "ops_metrics",
+  "widgets": [
+    {
+      "name": "query_rate",
+      "type": "timeseries",
+      "query": "SELECT COUNT(*) FROM queries GROUP BY minute",
+      "refresh_ms": 5000
+    }
+  ]
+}
+```
+
+### Subscribe to Dashboard
+
+WebSocket endpoint for real-time updates.
+
+**WebSocket:** `ws://host:port/dashboard/{name}`
+
+**Message Format:**
+```json
+{
+  "widget": "query_rate",
+  "timestamp": "2024-01-15T10:00:00Z",
+  "value": 1523
+}
+```
+
+---
+
+## Data Contract Operations
+
+### Create Contract
+
+Create a data contract.
+
+**Request:**
+```json
+{
+  "op": "create_contract",
+  "name": "orders_v1",
+  "version": "1.0.0",
+  "schema": {
+    "fields": [
+      {"name": "order_id", "type": "int64", "nullable": false},
+      {"name": "total", "type": "decimal(10,2)", "nullable": false}
+    ]
+  },
+  "compatibility": "backward"
+}
+```
+
+### Check Compatibility
+
+Check contract compatibility.
+
+**Request:**
+```json
+{
+  "op": "check_contract_compatibility",
+  "from_contract": "orders_v1",
+  "to_contract": "orders_v2"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "compatible": true,
+  "breaking_changes": []
+}
+```
+
+---
+
+## Lakehouse Operations
+
+### Delta Lake Operations
+
+**Request (Time Travel):**
+```json
+{
+  "op": "query",
+  "sql": "SELECT * FROM warehouse.events VERSION AS OF 5"
+}
+```
+
+**Request (History):**
+```json
+{
+  "op": "delta_history",
+  "table": "warehouse.events"
+}
+```
+
+**Request (Vacuum):**
+```json
+{
+  "op": "delta_vacuum",
+  "table": "warehouse.events",
+  "retain_hours": 168
+}
+```
+
+### Iceberg Operations
+
+**Request (Snapshots):**
+```json
+{
+  "op": "iceberg_snapshots",
+  "table": "warehouse.transactions"
+}
+```
+
+**Request (Expire Snapshots):**
+```json
+{
+  "op": "iceberg_expire_snapshots",
+  "table": "warehouse.transactions",
+  "older_than": "2024-01-01T00:00:00Z"
+}
+```
+
+---
+
+## Benchmarking Operations
+
+### Run Benchmark
+
+Execute performance benchmarks.
+
+**Request:**
+```json
+{
+  "op": "run_benchmark",
+  "name": "query_throughput",
+  "iterations": 1000,
+  "warmup_iterations": 100,
+  "query": "SELECT COUNT(*) FROM analytics.events"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "benchmark_result": {
+    "name": "query_throughput",
+    "iterations": 1000,
+    "total_time_ms": 5000,
+    "avg_time_ms": 5.0,
+    "p50_ms": 4.5,
+    "p95_ms": 8.2,
+    "p99_ms": 12.1,
+    "throughput_ops_sec": 200.0
+  }
+}
+```
