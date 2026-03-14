@@ -613,3 +613,12 @@ pub use sql_extensions::{
     ExtensionCategory, FunctionCall, Param, ParamType, QueryRewriter, RewriteResult,
     SqlExtension, SqlExtensionRegistry, SqlValue as ExtSqlValue,
 };
+
+// --- Performance & Testing (Phase 37) ---
+pub mod benchmarks;
+
+// Benchmarks
+pub use benchmarks::{
+    BenchmarkResult as PerfBenchmarkResult, BenchmarkRunner, BenchmarkSuite, LatencyHistogram,
+    ThroughputSummary, ThroughputTracker,
+};
