@@ -1,5 +1,8 @@
 # boyodb Python Driver
 
+[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
+
 A Python client library for connecting to boyodb-server.
 
 ## Installation

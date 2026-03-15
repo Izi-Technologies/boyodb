@@ -1,5 +1,8 @@
 # boyodb PHP Driver
 
+[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![PHP](https://img.shields.io/badge/php-8.0+-777BB4.svg)](https://www.php.net/)
+
 A PHP client library for connecting to boyodb-server.
 
 ## Requirements

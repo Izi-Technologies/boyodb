@@ -2,36 +2,30 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.5-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](CHANGELOG.md)
 
 A high-performance columnar database engine built in Rust for real-time analytics, time-series data, and high-throughput OLAP workloads.
 
-## What's New in v0.9.5
+## What's New in v0.9.6
 
-### Machine Learning & AI
-- **Feature Store**: Versioned feature sets, point-in-time lookups, online/offline serving
-- **Model Monitoring**: PSI/KS drift detection, performance metrics, alerting
-- **Embeddings Engine**: Sentence transformers, text embeddings, similarity search
-- **Online Learning**: SGD/Adam optimizers, multi-armed bandits, LinUCB
-- **AutoML**: Hyperparameter optimization, cross-validation, model selection
-- **ML Explainability**: SHAP, LIME, permutation importance, counterfactuals
+### ClickHouse Parity
+- **Approximate Functions**: HyperLogLog, T-Digest, Count-Min Sketch for fast approximate analytics
+- **MergeTree Variants**: Replacing, Collapsing, Aggregating, Summing for specialized workloads
+- **External Tables**: Query S3, HTTP URLs, HDFS, Delta Lake, Iceberg without importing
+- **Async Inserts**: Buffered batch ingestion for high-throughput writes
+- **Query Profiler**: Flame graphs, per-operator timing, memory and I/O tracking
+- **Parallel Replicas**: Distribute query execution across multiple replicas
+- **Zero-Copy Replication**: Share segments via object storage without copying
 
-### Data Platform
-- **Time Series Engine**: Aggregations, gap filling, downsampling, forecasting, anomaly detection
-- **Graph Database**: BFS/DFS traversal, Dijkstra shortest path, PageRank, community detection
-- **Data Quality**: Validation rules, profiling, anomaly detection, quality scoring
-- **Natural Language SQL**: Intent recognition, entity extraction, schema-aware query generation
-- **Data Catalog**: Metadata management, lineage tracking, business glossary, search
-- **Blockchain Ledger**: Immutable audit logs, SHA-256 hash chains, Merkle tree verification
-- **Workflow Engine**: DAG-based pipelines, task dependencies, retry policies
+### PostgreSQL Parity
+- **Exclusion Constraints**: Prevent overlapping ranges (scheduling, bookings)
+- **GIN/GiST Indexes**: Full-text search, spatial indexing, array containment
+- **CDC (Debezium-compatible)**: Change data capture with before/after images
+- **WebAssembly UDFs**: Sandboxed user-defined functions in WASM
 
-### Advanced Analytics
-- **Enhanced Vector Search**: HNSW index, product quantization, filtered search
-- **Query Federation**: Multi-source queries, push-down optimization, result merging
-- **Real-time Dashboards**: WebSocket streaming, live metrics, alert broadcasting
-- **Data Contracts**: Schema versioning, compatibility checking, migration planning
-- **Lakehouse Formats**: Delta Lake, Apache Iceberg, ACID on object storage
-- **Read Replicas**: Offload read queries, manifest sync, automatic failover
+### AI-Powered Optimization
+- **AI Query Optimizer**: ML-based cardinality estimation and plan selection
+- **Tiered JIT Compilation**: Interpreted → Baseline → Optimized → Vectorized
 
 See the [CHANGELOG](CHANGELOG.md) for full release history.
 

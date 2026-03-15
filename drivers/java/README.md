@@ -1,5 +1,8 @@
 # BoyoDB Java Client
 
+[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![Java](https://img.shields.io/badge/java-17+-red.svg)](https://www.oracle.com/java/)
+
 High-performance Java client for BoyoDB analytical database.
 
 ## Features
@@ -19,14 +22,14 @@ High-performance Java client for BoyoDB analytical database.
 <dependency>
     <groupId>io.boyodb</groupId>
     <artifactId>boyodb-client</artifactId>
-    <version>0.9.4</version>
+    <version>0.9.6</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'io.boyodb:boyodb-client:0.9.4'
+implementation 'io.boyodb:boyodb-client:0.9.6'
 ```
 
 ## Quick Start

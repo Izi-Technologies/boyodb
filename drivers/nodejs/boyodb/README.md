@@ -1,5 +1,8 @@
 # boyodb Node.js Driver
 
+[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../../CHANGELOG.md)
+[![Node](https://img.shields.io/badge/node-16+-green.svg)](https://nodejs.org/)
+
 A Node.js client library for connecting to boyodb-server.
 
 ## Installation

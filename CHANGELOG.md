@@ -5,6 +5,98 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6] - 2026-03-14
+
+### Added
+
+#### ClickHouse Parity Features (Phase 38)
+- **Approximate Functions**: Statistical estimation with bounded error
+  - HyperLogLog for cardinality estimation (~2% error, constant memory)
+  - T-Digest for accurate quantile/percentile estimation (p50, p99, p999)
+  - Count-Min Sketch for frequency estimation
+  - Streaming statistics (mean, variance, min, max)
+
+- **MergeTree Variants**: Specialized table engines
+  - ReplacingMergeTree: Deduplication by key with version tracking
+  - CollapsingMergeTree: Sign-based row collapsing for state changes
+  - VersionedCollapsingMergeTree: Versioned collapsing for out-of-order data
+  - AggregatingMergeTree: Pre-aggregation during merge
+  - SummingMergeTree: Automatic sum aggregation
+
+- **External Tables**: Query external data sources directly
+  - S3/Object storage with predicate pushdown
+  - HTTP URL sources (CSV, JSON, Parquet)
+  - HDFS integration
+  - Local file access
+  - Delta Lake and Iceberg format support
+
+- **Async Insert Buffering**: High-throughput ingestion optimization
+  - Configurable buffer size and flush intervals
+  - Per-table buffer limits
+  - Deduplication within buffer
+  - Concurrent flush support
+
+- **Query Profiler**: Deep query execution analysis
+  - Flame graph generation for visualization
+  - Per-operator timing and row counts
+  - Memory allocation tracking
+  - I/O statistics (bytes read, segments scanned)
+  - Wait event tracking (I/O, lock, CPU, network)
+
+- **Parallel Replicas**: Distributed query execution
+  - Query part distribution across replicas
+  - Load balancing strategies (round-robin, least-loaded, weighted)
+  - Automatic failover and retry
+  - Result merging with statistics
+
+- **Zero-Copy Replication**: Storage-efficient replication
+  - Segment sharing via object storage
+  - Reference counting for garbage collection
+  - Local caching with LRU eviction
+  - Optimistic locking for concurrent access
+
+#### PostgreSQL Parity Features (Phase 39)
+- **Exclusion Constraints**: Prevent overlapping data
+  - Range overlap prevention (scheduling, bookings)
+  - GiST index-backed constraints
+  - Multiple column support with different operators
+  - Deferrable constraints
+
+- **GIN/GiST Indexes**: Advanced indexing for complex types
+  - GIN: Full-text search, arrays, JSONB with fast updates
+  - GiST: Spatial indexing with R-tree semantics
+  - Box and range key types
+  - Configurable split strategies
+
+- **Change Data Capture**: Debezium-compatible CDC
+  - Event types: create, update, delete, truncate, schema
+  - Before/after row images
+  - Transaction metadata
+  - Multiple output formats (JSON, Avro, Protobuf)
+
+- **WebAssembly UDFs**: Sandboxed user-defined functions
+  - WASM module registration and execution
+  - Type-safe value passing
+  - Resource limits and timeouts
+  - Built-in functions library
+
+#### AI/ML Query Optimization
+- **AI Query Optimizer**: Machine learning-based optimization
+  - Cardinality estimation with learned models
+  - Cost model calibration from execution history
+  - Plan scoring with multiple weighted factors
+  - Adaptive weight updates based on feedback
+
+- **Tiered JIT Compilation**: Progressive code optimization
+  - Interpreted execution for cold queries
+  - Baseline JIT for warm queries
+  - Optimized JIT with advanced passes
+  - Vectorized SIMD compilation for hot paths
+  - Automatic tier promotion based on execution count
+
+### Changed
+- Updated all driver versions to 0.9.6
+
 ## [0.9.5] - 2026-03-14
 
 ### Added
