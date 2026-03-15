@@ -1,1059 +1,944 @@
-//! Extensions/Plugins System
+//! Extensions API
 //!
-//! Provides CREATE EXTENSION infrastructure with:
-//! - Dynamic library loading
-//! - Extension registry and versioning
-//! - Dependency management
-//! - Upgrade paths
+//! PostgreSQL-compatible extension system for loadable modules.
+//! Supports CREATE EXTENSION syntax and extension management.
 
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
-
-/// Extension error types
-#[derive(Debug, Clone)]
-pub enum ExtensionError {
-    /// Extension not found
-    NotFound(String),
-    /// Extension already installed
-    AlreadyInstalled(String),
-    /// Version not found
-    VersionNotFound(String, String),
-    /// Dependency missing
-    DependencyMissing(String),
-    /// Load failed
-    LoadFailed(String),
-    /// Incompatible version
-    IncompatibleVersion(String),
-    /// Permission denied
-    PermissionDenied(String),
-    /// Invalid extension
-    InvalidExtension(String),
-    /// Upgrade failed
-    UpgradeFailed(String),
-    /// Cannot drop (has dependents)
-    HasDependents(String),
-}
-
-impl std::fmt::Display for ExtensionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound(s) => write!(f, "extension not found: {}", s),
-            Self::AlreadyInstalled(s) => write!(f, "extension already installed: {}", s),
-            Self::VersionNotFound(e, v) => write!(f, "version {} not found for extension {}", v, e),
-            Self::DependencyMissing(s) => write!(f, "dependency missing: {}", s),
-            Self::LoadFailed(s) => write!(f, "load failed: {}", s),
-            Self::IncompatibleVersion(s) => write!(f, "incompatible version: {}", s),
-            Self::PermissionDenied(s) => write!(f, "permission denied: {}", s),
-            Self::InvalidExtension(s) => write!(f, "invalid extension: {}", s),
-            Self::UpgradeFailed(s) => write!(f, "upgrade failed: {}", s),
-            Self::HasDependents(s) => write!(f, "has dependents: {}", s),
-        }
-    }
-}
-
-impl std::error::Error for ExtensionError {}
-
-/// Semantic version
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Version {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub prerelease: Option<String>,
-}
-
-impl Version {
-    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self {
-            major,
-            minor,
-            patch,
-            prerelease: None,
-        }
-    }
-
-    pub fn parse(s: &str) -> Result<Self, ExtensionError> {
-        let s = s.trim();
-        let (version_part, prerelease) = if let Some(pos) = s.find('-') {
-            (&s[..pos], Some(s[pos + 1..].to_string()))
-        } else {
-            (s, None)
-        };
-
-        let parts: Vec<&str> = version_part.split('.').collect();
-        if parts.len() < 2 || parts.len() > 3 {
-            return Err(ExtensionError::InvalidExtension(format!(
-                "invalid version: {}",
-                s
-            )));
-        }
-
-        let major = parts[0]
-            .parse()
-            .map_err(|_| ExtensionError::InvalidExtension(format!("invalid major version: {}", s)))?;
-        let minor = parts[1]
-            .parse()
-            .map_err(|_| ExtensionError::InvalidExtension(format!("invalid minor version: {}", s)))?;
-        let patch = if parts.len() > 2 {
-            parts[2]
-                .parse()
-                .map_err(|_| ExtensionError::InvalidExtension(format!("invalid patch version: {}", s)))?
-        } else {
-            0
-        };
-
-        Ok(Self {
-            major,
-            minor,
-            patch,
-            prerelease,
-        })
-    }
-
-    pub fn is_compatible_with(&self, other: &Version) -> bool {
-        // Same major version, this >= other
-        self.major == other.major && (self.minor > other.minor ||
-            (self.minor == other.minor && self.patch >= other.patch))
-    }
-}
-
-impl std::fmt::Display for Version {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(pre) = &self.prerelease {
-            write!(f, "{}.{}.{}-{}", self.major, self.minor, self.patch, pre)
-        } else {
-            write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
-        }
-    }
-}
 
 /// Extension metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+pub struct Extension {
+    /// Extension name
+    pub name: String,
+    /// Version
+    pub version: String,
+    /// Description
+    pub description: String,
+    /// Schema to install into
+    pub schema: String,
+    /// Whether extension is relocatable
+    pub relocatable: bool,
+    /// Required extensions
+    pub requires: Vec<String>,
+    /// Extension state
+    pub state: ExtensionState,
+    /// Functions provided
+    pub functions: Vec<ExtensionFunction>,
+    /// Types provided
+    pub types: Vec<ExtensionType>,
+    /// Operators provided
+    pub operators: Vec<ExtensionOperator>,
+}
+
+/// Extension state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionState {
+    /// Available but not installed
+    Available,
+    /// Installed and active
+    Installed,
+    /// Disabled
+    Disabled,
+}
+
+/// Function provided by extension
+#[derive(Debug, Clone)]
+pub struct ExtensionFunction {
+    pub name: String,
+    pub args: Vec<FunctionArg>,
+    pub return_type: String,
+    pub volatility: Volatility,
+    pub is_aggregate: bool,
+    pub description: String,
+}
+
+/// Function argument
+#[derive(Debug, Clone)]
+pub struct FunctionArg {
+    pub name: String,
+    pub data_type: String,
+    pub default: Option<String>,
+}
+
+/// Function volatility
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Volatility {
+    Immutable,
+    Stable,
+    Volatile,
+}
+
+/// Type provided by extension
+#[derive(Debug, Clone)]
+pub struct ExtensionType {
+    pub name: String,
+    pub category: TypeCategory,
+    pub input_function: String,
+    pub output_function: String,
+    pub storage: String,
+}
+
+/// Type category
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeCategory {
+    Boolean,
+    Numeric,
+    String,
+    DateTime,
+    Geometric,
+    Network,
+    User,
+    Array,
+    Composite,
+}
+
+/// Operator provided by extension
+#[derive(Debug, Clone)]
+pub struct ExtensionOperator {
+    pub name: String,
+    pub left_type: String,
+    pub right_type: String,
+    pub result_type: String,
+    pub function: String,
+    pub commutator: Option<String>,
+    pub negator: Option<String>,
+}
+
+/// Extension registry
+pub struct ExtensionRegistry {
+    /// Installed extensions
+    extensions: RwLock<HashMap<String, Extension>>,
+    /// Available extensions (from control files)
+    available: RwLock<HashMap<String, ExtensionMetadata>>,
+}
+
+/// Extension control file metadata
+#[derive(Debug, Clone)]
 pub struct ExtensionMetadata {
     pub name: String,
-    pub version: Version,
-    pub description: String,
-    pub author: Option<String>,
-    pub license: Option<String>,
-    pub homepage: Option<String>,
-    pub repository: Option<String>,
-    pub dependencies: Vec<ExtensionDependency>,
-    pub provides: Vec<String>,
+    pub default_version: String,
+    pub comment: String,
+    pub requires: Vec<String>,
     pub relocatable: bool,
     pub schema: Option<String>,
-    pub requires_superuser: bool,
-    pub trusted: bool,
 }
 
-/// Extension dependency
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionDependency {
-    pub name: String,
-    pub version_requirement: VersionRequirement,
-}
-
-/// Version requirement
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VersionRequirement {
-    /// Any version
-    Any,
-    /// Exact version
-    Exact(Version),
-    /// Minimum version
-    AtLeast(Version),
-    /// Version range
-    Range(Version, Version),
-    /// Compatible with (same major)
-    Compatible(Version),
-}
-
-impl VersionRequirement {
-    pub fn satisfies(&self, version: &Version) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Exact(v) => version == v,
-            Self::AtLeast(v) => version >= v,
-            Self::Range(min, max) => version >= min && version <= max,
-            Self::Compatible(v) => version.is_compatible_with(v),
-        }
-    }
-}
-
-/// Installed extension
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstalledExtension {
-    pub name: String,
-    pub version: Version,
-    pub schema: String,
-    pub owner: String,
-    pub installed_at: SystemTime,
-    pub relocatable: bool,
-    pub config: HashMap<String, String>,
-}
-
-/// Available extension (from registry)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AvailableExtension {
-    pub metadata: ExtensionMetadata,
-    pub control_file: PathBuf,
-    pub sql_files: Vec<PathBuf>,
-    pub library: Option<PathBuf>,
-    pub upgrade_paths: Vec<UpgradePath>,
-}
-
-/// Upgrade path between versions
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpgradePath {
-    pub from_version: Version,
-    pub to_version: Version,
-    pub script: PathBuf,
-}
-
-/// Extension object (what the extension provides)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExtensionObject {
-    Function {
-        schema: String,
-        name: String,
-        args: Vec<String>,
-    },
-    Type {
-        schema: String,
-        name: String,
-    },
-    Operator {
-        schema: String,
-        name: String,
-        left_type: Option<String>,
-        right_type: Option<String>,
-    },
-    Table {
-        schema: String,
-        name: String,
-    },
-    View {
-        schema: String,
-        name: String,
-    },
-    Index {
-        schema: String,
-        name: String,
-    },
-    Trigger {
-        schema: String,
-        table: String,
-        name: String,
-    },
-    Cast {
-        source: String,
-        target: String,
-    },
-    Aggregate {
-        schema: String,
-        name: String,
-        args: Vec<String>,
-    },
-    Procedure {
-        schema: String,
-        name: String,
-        args: Vec<String>,
-    },
-}
-
-/// Extension hook type
-pub type ExtensionHook = Box<dyn Fn(&ExtensionContext) -> Result<(), ExtensionError> + Send + Sync>;
-
-/// Extension context for hooks
-pub struct ExtensionContext {
-    pub extension_name: String,
-    pub extension_version: Version,
-    pub schema: String,
-    pub owner: String,
-    pub config: HashMap<String, String>,
-}
-
-/// Extension manager
-pub struct ExtensionManager {
-    /// Installed extensions
-    installed: RwLock<HashMap<String, InstalledExtension>>,
-    /// Available extensions (from filesystem)
-    available: RwLock<HashMap<String, AvailableExtension>>,
-    /// Extension objects
-    objects: RwLock<HashMap<String, Vec<ExtensionObject>>>,
-    /// Extension directory
-    extension_dir: PathBuf,
-    /// Configuration
-    config: ExtensionConfig,
-    /// Hooks
-    hooks: RwLock<ExtensionHooks>,
-}
-
-/// Extension configuration
-#[derive(Debug, Clone)]
-pub struct ExtensionConfig {
-    /// Extension search path
-    pub extension_path: Vec<PathBuf>,
-    /// Allowed extensions (empty = all allowed)
-    pub allowed_extensions: HashSet<String>,
-    /// Blocked extensions
-    pub blocked_extensions: HashSet<String>,
-    /// Allow untrusted extensions
-    pub allow_untrusted: bool,
-    /// Auto-create schema
-    pub auto_create_schema: bool,
-}
-
-impl Default for ExtensionConfig {
-    fn default() -> Self {
-        Self {
-            extension_path: vec![PathBuf::from("/usr/share/boyodb/extension")],
-            allowed_extensions: HashSet::new(),
-            blocked_extensions: HashSet::new(),
-            allow_untrusted: false,
-            auto_create_schema: true,
-        }
-    }
-}
-
-/// Extension hooks
-struct ExtensionHooks {
-    pre_create: Vec<ExtensionHook>,
-    post_create: Vec<ExtensionHook>,
-    pre_drop: Vec<ExtensionHook>,
-    post_drop: Vec<ExtensionHook>,
-    pre_upgrade: Vec<ExtensionHook>,
-    post_upgrade: Vec<ExtensionHook>,
-}
-
-impl Default for ExtensionHooks {
-    fn default() -> Self {
-        Self {
-            pre_create: Vec::new(),
-            post_create: Vec::new(),
-            pre_drop: Vec::new(),
-            post_drop: Vec::new(),
-            pre_upgrade: Vec::new(),
-            post_upgrade: Vec::new(),
-        }
-    }
-}
-
-impl ExtensionManager {
-    pub fn new(extension_dir: PathBuf, config: ExtensionConfig) -> Self {
-        Self {
-            installed: RwLock::new(HashMap::new()),
+impl ExtensionRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self {
+            extensions: RwLock::new(HashMap::new()),
             available: RwLock::new(HashMap::new()),
-            objects: RwLock::new(HashMap::new()),
-            extension_dir,
-            config,
-            hooks: RwLock::new(ExtensionHooks::default()),
-        }
+        };
+        
+        // Register built-in extensions
+        registry.register_builtin_extensions();
+        registry
     }
 
-    /// Scan for available extensions
-    pub fn scan_extensions(&self) -> Result<usize, ExtensionError> {
-        let mut available = self.available.write().unwrap();
-        let mut count = 0;
+    fn register_builtin_extensions(&mut self) {
+        // pgcrypto equivalent
+        self.register_available(ExtensionMetadata {
+            name: "boyocrypto".into(),
+            default_version: "1.0".into(),
+            comment: "Cryptographic functions".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
 
-        for search_path in &self.config.extension_path {
-            if !search_path.exists() {
-                continue;
-            }
+        // uuid-ossp equivalent
+        self.register_available(ExtensionMetadata {
+            name: "uuid_ossp".into(),
+            default_version: "1.0".into(),
+            comment: "UUID generation functions".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
 
-            if let Ok(entries) = std::fs::read_dir(search_path) {
-                for entry in entries.flatten() {
-                    if let Some(ext_name) = entry.file_name().to_str() {
-                        if ext_name.ends_with(".control") {
-                            let name = ext_name.trim_end_matches(".control");
-                            if let Ok(ext) = self.load_extension_metadata(search_path, name) {
-                                available.insert(name.to_string(), ext);
-                                count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // PostGIS equivalent
+        self.register_available(ExtensionMetadata {
+            name: "boyogis".into(),
+            default_version: "1.0".into(),
+            comment: "Geographic/spatial functions".into(),
+            requires: vec![],
+            relocatable: false,
+            schema: Some("boyogis".into()),
+        });
 
-        // Also add built-in extensions
-        for builtin in self.get_builtin_extensions() {
-            available.insert(builtin.metadata.name.clone(), builtin);
-            count += 1;
-        }
+        // pg_stat_statements equivalent
+        self.register_available(ExtensionMetadata {
+            name: "boyo_stat_statements".into(),
+            default_version: "1.0".into(),
+            comment: "Query statistics tracking".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
 
-        Ok(count)
+        // pg_trgm equivalent
+        self.register_available(ExtensionMetadata {
+            name: "boyo_trgm".into(),
+            default_version: "1.0".into(),
+            comment: "Trigram text similarity".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
+
+        // hstore equivalent
+        self.register_available(ExtensionMetadata {
+            name: "hstore".into(),
+            default_version: "1.0".into(),
+            comment: "Key-value pair storage".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
+
+        // vector/pgvector equivalent
+        self.register_available(ExtensionMetadata {
+            name: "vector".into(),
+            default_version: "1.0".into(),
+            comment: "Vector similarity search".into(),
+            requires: vec![],
+            relocatable: true,
+            schema: None,
+        });
+
+        // timescaledb equivalent
+        self.register_available(ExtensionMetadata {
+            name: "boyoscale".into(),
+            default_version: "1.0".into(),
+            comment: "Time-series optimizations".into(),
+            requires: vec![],
+            relocatable: false,
+            schema: Some("boyoscale".into()),
+        });
     }
 
-    fn load_extension_metadata(
-        &self,
-        _dir: &PathBuf,
-        name: &str,
-    ) -> Result<AvailableExtension, ExtensionError> {
-        // Would parse control file and discover SQL files
-        // For now, return a placeholder
-        Ok(AvailableExtension {
-            metadata: ExtensionMetadata {
-                name: name.to_string(),
-                version: Version::new(1, 0, 0),
-                description: format!("{} extension", name),
-                author: None,
-                license: None,
-                homepage: None,
-                repository: None,
-                dependencies: vec![],
-                provides: vec![],
-                relocatable: true,
-                schema: None,
-                requires_superuser: false,
-                trusted: true,
-            },
-            control_file: PathBuf::new(),
-            sql_files: vec![],
-            library: None,
-            upgrade_paths: vec![],
-        })
+    fn register_available(&mut self, metadata: ExtensionMetadata) {
+        self.available.write().unwrap().insert(metadata.name.clone(), metadata);
     }
 
-    fn get_builtin_extensions(&self) -> Vec<AvailableExtension> {
-        vec![
-            // UUID generation
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "uuid-ossp".to_string(),
-                    version: Version::new(1, 1, 0),
-                    description: "Generate UUIDs".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["uuid_generate_v4".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // JSON functions
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "jsonb_extra".to_string(),
-                    version: Version::new(1, 0, 0),
-                    description: "Extra JSONB functions".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["jsonb_merge".to_string(), "jsonb_diff".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // Full-text search
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "fts".to_string(),
-                    version: Version::new(2, 0, 0),
-                    description: "Full-text search support".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["to_tsvector".to_string(), "to_tsquery".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // Vector similarity
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "vector".to_string(),
-                    version: Version::new(0, 5, 0),
-                    description: "Vector similarity search".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["vector".to_string(), "ivfflat".to_string(), "hnsw".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // Statistics
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "tablefunc".to_string(),
-                    version: Version::new(1, 0, 0),
-                    description: "Table functions including crosstab".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["crosstab".to_string(), "normal_rand".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // PostGIS-like
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "geospatial".to_string(),
-                    version: Version::new(3, 0, 0),
-                    description: "Geospatial functions and types".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["geometry".to_string(), "geography".to_string(), "st_distance".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-            // Time series
-            AvailableExtension {
-                metadata: ExtensionMetadata {
-                    name: "timeseries".to_string(),
-                    version: Version::new(1, 0, 0),
-                    description: "Time series functions".to_string(),
-                    author: Some("BoyoDB Team".to_string()),
-                    license: Some("MIT".to_string()),
-                    homepage: None,
-                    repository: None,
-                    dependencies: vec![],
-                    provides: vec!["time_bucket".to_string(), "first".to_string(), "last".to_string()],
-                    relocatable: true,
-                    schema: None,
-                    requires_superuser: false,
-                    trusted: true,
-                },
-                control_file: PathBuf::new(),
-                sql_files: vec![],
-                library: None,
-                upgrade_paths: vec![],
-            },
-        ]
-    }
-
-    /// Create (install) an extension
+    /// Create/install an extension
     pub fn create_extension(
         &self,
         name: &str,
         version: Option<&str>,
         schema: Option<&str>,
         cascade: bool,
-        owner: &str,
     ) -> Result<(), ExtensionError> {
-        // Check if allowed
-        if !self.config.allowed_extensions.is_empty()
-            && !self.config.allowed_extensions.contains(name)
-        {
-            return Err(ExtensionError::PermissionDenied(format!(
-                "extension {} not in allowed list",
-                name
-            )));
-        }
-
-        if self.config.blocked_extensions.contains(name) {
-            return Err(ExtensionError::PermissionDenied(format!(
-                "extension {} is blocked",
-                name
-            )));
-        }
-
-        // Check if already installed
-        if self.installed.read().unwrap().contains_key(name) {
-            return Err(ExtensionError::AlreadyInstalled(name.to_string()));
-        }
-
-        // Get available extension
-        let available = self
-            .available
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExtensionError::NotFound(name.to_string()))?;
-
-        // Check version
-        let target_version = if let Some(v) = version {
-            let parsed = Version::parse(v)?;
-            if parsed != available.metadata.version {
-                return Err(ExtensionError::VersionNotFound(name.to_string(), v.to_string()));
-            }
-            parsed
-        } else {
-            available.metadata.version.clone()
-        };
+        let available = self.available.read().unwrap();
+        let metadata = available.get(name)
+            .ok_or_else(|| ExtensionError::NotFound(name.into()))?;
 
         // Check dependencies
         if cascade {
-            for dep in &available.metadata.dependencies {
-                if !self.installed.read().unwrap().contains_key(&dep.name) {
-                    self.create_extension(&dep.name, None, None, true, owner)?;
+            for req in &metadata.requires {
+                if !self.extensions.read().unwrap().contains_key(req) {
+                    self.create_extension(req, None, None, true)?;
                 }
             }
         } else {
-            for dep in &available.metadata.dependencies {
-                let installed = self.installed.read().unwrap();
-                if let Some(installed_dep) = installed.get(&dep.name) {
-                    if !dep.version_requirement.satisfies(&installed_dep.version) {
-                        return Err(ExtensionError::IncompatibleVersion(format!(
-                            "{} requires {} {:?}",
-                            name, dep.name, dep.version_requirement
-                        )));
-                    }
-                } else {
-                    return Err(ExtensionError::DependencyMissing(dep.name.clone()));
+            for req in &metadata.requires {
+                if !self.extensions.read().unwrap().contains_key(req) {
+                    return Err(ExtensionError::MissingDependency(req.clone()));
                 }
             }
         }
 
-        // Check trusted
-        if !available.metadata.trusted && !self.config.allow_untrusted {
-            return Err(ExtensionError::PermissionDenied(
-                "untrusted extensions not allowed".into(),
-            ));
-        }
+        let version = version.unwrap_or(&metadata.default_version);
+        let schema = schema.unwrap_or(metadata.schema.as_deref().unwrap_or("public"));
 
-        // Determine schema
-        let schema = schema
-            .map(String::from)
-            .or_else(|| available.metadata.schema.clone())
-            .unwrap_or_else(|| "public".to_string());
-
-        // Create context
-        let context = ExtensionContext {
-            extension_name: name.to_string(),
-            extension_version: target_version.clone(),
-            schema: schema.clone(),
-            owner: owner.to_string(),
-            config: HashMap::new(),
-        };
-
-        // Run pre-create hooks
-        for hook in &self.hooks.read().unwrap().pre_create {
-            hook(&context)?;
-        }
-
-        // Install extension
-        let installed = InstalledExtension {
-            name: name.to_string(),
-            version: target_version,
-            schema,
-            owner: owner.to_string(),
-            installed_at: SystemTime::now(),
-            relocatable: available.metadata.relocatable,
-            config: HashMap::new(),
-        };
-
-        // Register objects
-        let objects = self.create_extension_objects(&available, &installed)?;
-        self.objects
-            .write()
-            .unwrap()
-            .insert(name.to_string(), objects);
-
-        self.installed
-            .write()
-            .unwrap()
-            .insert(name.to_string(), installed);
-
-        // Run post-create hooks
-        for hook in &self.hooks.read().unwrap().post_create {
-            hook(&context)?;
-        }
+        let extension = self.build_extension(name, version, schema)?;
+        self.extensions.write().unwrap().insert(name.into(), extension);
 
         Ok(())
-    }
-
-    fn create_extension_objects(
-        &self,
-        available: &AvailableExtension,
-        installed: &InstalledExtension,
-    ) -> Result<Vec<ExtensionObject>, ExtensionError> {
-        let mut objects = Vec::new();
-
-        // Create objects based on what the extension provides
-        for provided in &available.metadata.provides {
-            // Would actually execute SQL scripts
-            // For now, create placeholder objects
-            objects.push(ExtensionObject::Function {
-                schema: installed.schema.clone(),
-                name: provided.clone(),
-                args: vec![],
-            });
-        }
-
-        Ok(objects)
     }
 
     /// Drop an extension
     pub fn drop_extension(&self, name: &str, cascade: bool) -> Result<(), ExtensionError> {
-        // Check if installed
-        let installed = self
-            .installed
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExtensionError::NotFound(name.to_string()))?;
+        let mut extensions = self.extensions.write().unwrap();
+        
+        if !extensions.contains_key(name) {
+            return Err(ExtensionError::NotInstalled(name.into()));
+        }
 
-        // Check dependents
+        // Check reverse dependencies
         if !cascade {
-            let all_installed = self.installed.read().unwrap();
-            for (ext_name, ext) in all_installed.iter() {
-                if ext_name == name {
-                    continue;
+            for (other_name, ext) in extensions.iter() {
+                if ext.requires.contains(&name.to_string()) {
+                    return Err(ExtensionError::DependentExists(other_name.clone()));
                 }
-
-                // Would check if ext depends on name
-                let _ = ext;
+            }
+        } else {
+            // Cascade drop dependencies
+            let dependents: Vec<String> = extensions.iter()
+                .filter(|(_, ext)| ext.requires.contains(&name.to_string()))
+                .map(|(n, _)| n.clone())
+                .collect();
+            
+            for dependent in dependents {
+                extensions.remove(&dependent);
             }
         }
 
-        let context = ExtensionContext {
-            extension_name: name.to_string(),
-            extension_version: installed.version.clone(),
-            schema: installed.schema.clone(),
-            owner: installed.owner.clone(),
-            config: installed.config.clone(),
-        };
-
-        // Run pre-drop hooks
-        for hook in &self.hooks.read().unwrap().pre_drop {
-            hook(&context)?;
-        }
-
-        // Remove objects
-        self.objects.write().unwrap().remove(name);
-
-        // Remove extension
-        self.installed.write().unwrap().remove(name);
-
-        // Run post-drop hooks
-        for hook in &self.hooks.read().unwrap().post_drop {
-            hook(&context)?;
-        }
-
+        extensions.remove(name);
         Ok(())
     }
 
-    /// Upgrade an extension
-    pub fn alter_extension_update(
+    /// Alter extension
+    pub fn alter_extension(
         &self,
         name: &str,
-        new_version: &str,
+        action: AlterExtensionAction,
     ) -> Result<(), ExtensionError> {
-        let installed = self
-            .installed
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExtensionError::NotFound(name.to_string()))?;
+        let mut extensions = self.extensions.write().unwrap();
+        let extension = extensions.get_mut(name)
+            .ok_or_else(|| ExtensionError::NotInstalled(name.into()))?;
 
-        let available = self
-            .available
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| ExtensionError::NotFound(name.to_string()))?;
-
-        let target_version = Version::parse(new_version)?;
-
-        // Find upgrade path
-        let upgrade_path = available
-            .upgrade_paths
-            .iter()
-            .find(|p| p.from_version == installed.version && p.to_version == target_version)
-            .ok_or_else(|| {
-                ExtensionError::UpgradeFailed(format!(
-                    "no upgrade path from {} to {}",
-                    installed.version, target_version
-                ))
-            })?;
-
-        let context = ExtensionContext {
-            extension_name: name.to_string(),
-            extension_version: installed.version.clone(),
-            schema: installed.schema.clone(),
-            owner: installed.owner.clone(),
-            config: installed.config.clone(),
-        };
-
-        // Run pre-upgrade hooks
-        for hook in &self.hooks.read().unwrap().pre_upgrade {
-            hook(&context)?;
-        }
-
-        // Execute upgrade script
-        let _ = upgrade_path;
-
-        // Update version
-        let mut installed_map = self.installed.write().unwrap();
-        if let Some(ext) = installed_map.get_mut(name) {
-            ext.version = target_version;
-        }
-
-        // Run post-upgrade hooks
-        for hook in &self.hooks.read().unwrap().post_upgrade {
-            hook(&context)?;
-        }
-
-        Ok(())
-    }
-
-    /// Set extension schema
-    pub fn alter_extension_set_schema(
-        &self,
-        name: &str,
-        new_schema: &str,
-    ) -> Result<(), ExtensionError> {
-        let mut installed = self.installed.write().unwrap();
-        let ext = installed
-            .get_mut(name)
-            .ok_or_else(|| ExtensionError::NotFound(name.to_string()))?;
-
-        if !ext.relocatable {
-            return Err(ExtensionError::InvalidExtension(
-                "extension is not relocatable".into(),
-            ));
-        }
-
-        // Update schema for all objects
-        let mut objects = self.objects.write().unwrap();
-        if let Some(ext_objects) = objects.get_mut(name) {
-            for obj in ext_objects.iter_mut() {
-                match obj {
-                    ExtensionObject::Function { schema, .. } => *schema = new_schema.to_string(),
-                    ExtensionObject::Type { schema, .. } => *schema = new_schema.to_string(),
-                    ExtensionObject::Table { schema, .. } => *schema = new_schema.to_string(),
-                    ExtensionObject::View { schema, .. } => *schema = new_schema.to_string(),
-                    _ => {}
+        match action {
+            AlterExtensionAction::UpdateTo(version) => {
+                extension.version = version;
+            }
+            AlterExtensionAction::SetSchema(schema) => {
+                if !extension.relocatable {
+                    return Err(ExtensionError::NotRelocatable(name.into()));
                 }
+                extension.schema = schema;
             }
         }
 
-        ext.schema = new_schema.to_string();
-
         Ok(())
-    }
-
-    /// Get installed extension
-    pub fn get_extension(&self, name: &str) -> Option<InstalledExtension> {
-        self.installed.read().unwrap().get(name).cloned()
     }
 
     /// List installed extensions
-    pub fn list_installed(&self) -> Vec<InstalledExtension> {
-        self.installed.read().unwrap().values().cloned().collect()
+    pub fn list_installed(&self) -> Vec<Extension> {
+        self.extensions.read().unwrap().values().cloned().collect()
     }
 
     /// List available extensions
     pub fn list_available(&self) -> Vec<ExtensionMetadata> {
-        self.available
-            .read()
-            .unwrap()
-            .values()
-            .map(|e| e.metadata.clone())
-            .collect()
+        self.available.read().unwrap().values().cloned().collect()
     }
 
-    /// Get extension objects
-    pub fn get_extension_objects(&self, name: &str) -> Vec<ExtensionObject> {
-        self.objects
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+    /// Get extension
+    pub fn get(&self, name: &str) -> Option<Extension> {
+        self.extensions.read().unwrap().get(name).cloned()
     }
 
     /// Check if extension is installed
     pub fn is_installed(&self, name: &str) -> bool {
-        self.installed.read().unwrap().contains_key(name)
+        self.extensions.read().unwrap().contains_key(name)
     }
 
-    /// Add pre-create hook
-    pub fn add_pre_create_hook(&self, hook: ExtensionHook) {
-        self.hooks.write().unwrap().pre_create.push(hook);
+    fn build_extension(&self, name: &str, version: &str, schema: &str) -> Result<Extension, ExtensionError> {
+        // Build extension based on name
+        match name {
+            "uuid_ossp" => Ok(self.build_uuid_ossp(version, schema)),
+            "boyocrypto" => Ok(self.build_boyocrypto(version, schema)),
+            "boyogis" => Ok(self.build_boyogis(version, schema)),
+            "boyo_stat_statements" => Ok(self.build_boyo_stat_statements(version, schema)),
+            "boyo_trgm" => Ok(self.build_boyo_trgm(version, schema)),
+            "hstore" => Ok(self.build_hstore(version, schema)),
+            "vector" => Ok(self.build_vector(version, schema)),
+            "boyoscale" => Ok(self.build_boyoscale(version, schema)),
+            _ => Err(ExtensionError::NotFound(name.into())),
+        }
     }
 
-    /// Add post-create hook
-    pub fn add_post_create_hook(&self, hook: ExtensionHook) {
-        self.hooks.write().unwrap().post_create.push(hook);
+    fn build_uuid_ossp(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "uuid_ossp".into(),
+            version: version.into(),
+            description: "UUID generation functions".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "uuid_generate_v1".into(),
+                    args: vec![],
+                    return_type: "uuid".into(),
+                    volatility: Volatility::Volatile,
+                    is_aggregate: false,
+                    description: "Generate time-based UUID".into(),
+                },
+                ExtensionFunction {
+                    name: "uuid_generate_v4".into(),
+                    args: vec![],
+                    return_type: "uuid".into(),
+                    volatility: Volatility::Volatile,
+                    is_aggregate: false,
+                    description: "Generate random UUID".into(),
+                },
+                ExtensionFunction {
+                    name: "uuid_nil".into(),
+                    args: vec![],
+                    return_type: "uuid".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Return nil UUID".into(),
+                },
+            ],
+            types: vec![],
+            operators: vec![],
+        }
+    }
+
+    fn build_boyocrypto(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "boyocrypto".into(),
+            version: version.into(),
+            description: "Cryptographic functions".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "digest".into(),
+                    args: vec![
+                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "bytea".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Compute hash digest".into(),
+                },
+                ExtensionFunction {
+                    name: "hmac".into(),
+                    args: vec![
+                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "bytea".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Compute HMAC".into(),
+                },
+                ExtensionFunction {
+                    name: "encrypt".into(),
+                    args: vec![
+                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "bytea".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Encrypt data".into(),
+                },
+                ExtensionFunction {
+                    name: "decrypt".into(),
+                    args: vec![
+                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
+                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "bytea".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Decrypt data".into(),
+                },
+                ExtensionFunction {
+                    name: "gen_random_bytes".into(),
+                    args: vec![
+                        FunctionArg { name: "count".into(), data_type: "integer".into(), default: None },
+                    ],
+                    return_type: "bytea".into(),
+                    volatility: Volatility::Volatile,
+                    is_aggregate: false,
+                    description: "Generate random bytes".into(),
+                },
+            ],
+            types: vec![],
+            operators: vec![],
+        }
+    }
+
+    fn build_boyogis(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "boyogis".into(),
+            version: version.into(),
+            description: "Geographic/spatial functions".into(),
+            schema: schema.into(),
+            relocatable: false,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "ST_Distance".into(),
+                    args: vec![
+                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate distance between geometries".into(),
+                },
+                ExtensionFunction {
+                    name: "ST_Contains".into(),
+                    args: vec![
+                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                    ],
+                    return_type: "boolean".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Check if geometry contains another".into(),
+                },
+                ExtensionFunction {
+                    name: "ST_Within".into(),
+                    args: vec![
+                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                    ],
+                    return_type: "boolean".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Check if geometry is within another".into(),
+                },
+                ExtensionFunction {
+                    name: "ST_Area".into(),
+                    args: vec![
+                        FunctionArg { name: "geom".into(), data_type: "geometry".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate area of geometry".into(),
+                },
+            ],
+            types: vec![
+                ExtensionType {
+                    name: "geometry".into(),
+                    category: TypeCategory::Geometric,
+                    input_function: "geometry_in".into(),
+                    output_function: "geometry_out".into(),
+                    storage: "external".into(),
+                },
+                ExtensionType {
+                    name: "geography".into(),
+                    category: TypeCategory::Geometric,
+                    input_function: "geography_in".into(),
+                    output_function: "geography_out".into(),
+                    storage: "external".into(),
+                },
+            ],
+            operators: vec![],
+        }
+    }
+
+    fn build_boyo_stat_statements(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "boyo_stat_statements".into(),
+            version: version.into(),
+            description: "Query statistics tracking".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "boyo_stat_statements_reset".into(),
+                    args: vec![],
+                    return_type: "void".into(),
+                    volatility: Volatility::Volatile,
+                    is_aggregate: false,
+                    description: "Reset query statistics".into(),
+                },
+            ],
+            types: vec![],
+            operators: vec![],
+        }
+    }
+
+    fn build_boyo_trgm(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "boyo_trgm".into(),
+            version: version.into(),
+            description: "Trigram text similarity".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "similarity".into(),
+                    args: vec![
+                        FunctionArg { name: "text1".into(), data_type: "text".into(), default: None },
+                        FunctionArg { name: "text2".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "real".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate trigram similarity".into(),
+                },
+                ExtensionFunction {
+                    name: "show_trgm".into(),
+                    args: vec![
+                        FunctionArg { name: "text".into(), data_type: "text".into(), default: None },
+                    ],
+                    return_type: "text[]".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Show trigrams".into(),
+                },
+            ],
+            types: vec![],
+            operators: vec![
+                ExtensionOperator {
+                    name: "%".into(),
+                    left_type: "text".into(),
+                    right_type: "text".into(),
+                    result_type: "boolean".into(),
+                    function: "similarity_op".into(),
+                    commutator: Some("%".into()),
+                    negator: None,
+                },
+            ],
+        }
+    }
+
+    fn build_hstore(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "hstore".into(),
+            version: version.into(),
+            description: "Key-value pair storage".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "hstore".into(),
+                    args: vec![
+                        FunctionArg { name: "keys".into(), data_type: "text[]".into(), default: None },
+                        FunctionArg { name: "values".into(), data_type: "text[]".into(), default: None },
+                    ],
+                    return_type: "hstore".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Create hstore from arrays".into(),
+                },
+                ExtensionFunction {
+                    name: "akeys".into(),
+                    args: vec![
+                        FunctionArg { name: "hs".into(), data_type: "hstore".into(), default: None },
+                    ],
+                    return_type: "text[]".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Get all keys".into(),
+                },
+                ExtensionFunction {
+                    name: "avals".into(),
+                    args: vec![
+                        FunctionArg { name: "hs".into(), data_type: "hstore".into(), default: None },
+                    ],
+                    return_type: "text[]".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Get all values".into(),
+                },
+            ],
+            types: vec![
+                ExtensionType {
+                    name: "hstore".into(),
+                    category: TypeCategory::User,
+                    input_function: "hstore_in".into(),
+                    output_function: "hstore_out".into(),
+                    storage: "extended".into(),
+                },
+            ],
+            operators: vec![
+                ExtensionOperator {
+                    name: "->".into(),
+                    left_type: "hstore".into(),
+                    right_type: "text".into(),
+                    result_type: "text".into(),
+                    function: "hstore_fetchval".into(),
+                    commutator: None,
+                    negator: None,
+                },
+                ExtensionOperator {
+                    name: "?".into(),
+                    left_type: "hstore".into(),
+                    right_type: "text".into(),
+                    result_type: "boolean".into(),
+                    function: "hstore_exists".into(),
+                    commutator: None,
+                    negator: None,
+                },
+            ],
+        }
+    }
+
+    fn build_vector(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "vector".into(),
+            version: version.into(),
+            description: "Vector similarity search".into(),
+            schema: schema.into(),
+            relocatable: true,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "vector".into(),
+                    args: vec![
+                        FunctionArg { name: "arr".into(), data_type: "real[]".into(), default: None },
+                    ],
+                    return_type: "vector".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Create vector from array".into(),
+                },
+                ExtensionFunction {
+                    name: "vector_dims".into(),
+                    args: vec![
+                        FunctionArg { name: "vec".into(), data_type: "vector".into(), default: None },
+                    ],
+                    return_type: "integer".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Get vector dimensions".into(),
+                },
+                ExtensionFunction {
+                    name: "vector_norm".into(),
+                    args: vec![
+                        FunctionArg { name: "vec".into(), data_type: "vector".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate L2 norm".into(),
+                },
+                ExtensionFunction {
+                    name: "cosine_distance".into(),
+                    args: vec![
+                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
+                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate cosine distance".into(),
+                },
+                ExtensionFunction {
+                    name: "l2_distance".into(),
+                    args: vec![
+                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
+                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate L2/Euclidean distance".into(),
+                },
+                ExtensionFunction {
+                    name: "inner_product".into(),
+                    args: vec![
+                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
+                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Calculate inner/dot product".into(),
+                },
+            ],
+            types: vec![
+                ExtensionType {
+                    name: "vector".into(),
+                    category: TypeCategory::User,
+                    input_function: "vector_in".into(),
+                    output_function: "vector_out".into(),
+                    storage: "extended".into(),
+                },
+            ],
+            operators: vec![
+                ExtensionOperator {
+                    name: "<->".into(),
+                    left_type: "vector".into(),
+                    right_type: "vector".into(),
+                    result_type: "double precision".into(),
+                    function: "l2_distance".into(),
+                    commutator: Some("<->".into()),
+                    negator: None,
+                },
+                ExtensionOperator {
+                    name: "<=>".into(),
+                    left_type: "vector".into(),
+                    right_type: "vector".into(),
+                    result_type: "double precision".into(),
+                    function: "cosine_distance".into(),
+                    commutator: Some("<=>".into()),
+                    negator: None,
+                },
+                ExtensionOperator {
+                    name: "<#>".into(),
+                    left_type: "vector".into(),
+                    right_type: "vector".into(),
+                    result_type: "double precision".into(),
+                    function: "inner_product".into(),
+                    commutator: Some("<#>".into()),
+                    negator: None,
+                },
+            ],
+        }
+    }
+
+    fn build_boyoscale(&self, version: &str, schema: &str) -> Extension {
+        Extension {
+            name: "boyoscale".into(),
+            version: version.into(),
+            description: "Time-series optimizations".into(),
+            schema: schema.into(),
+            relocatable: false,
+            requires: vec![],
+            state: ExtensionState::Installed,
+            functions: vec![
+                ExtensionFunction {
+                    name: "time_bucket".into(),
+                    args: vec![
+                        FunctionArg { name: "bucket_width".into(), data_type: "interval".into(), default: None },
+                        FunctionArg { name: "ts".into(), data_type: "timestamp".into(), default: None },
+                    ],
+                    return_type: "timestamp".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Bucket timestamps".into(),
+                },
+                ExtensionFunction {
+                    name: "first".into(),
+                    args: vec![
+                        FunctionArg { name: "value".into(), data_type: "anyelement".into(), default: None },
+                        FunctionArg { name: "time".into(), data_type: "timestamp".into(), default: None },
+                    ],
+                    return_type: "anyelement".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: true,
+                    description: "First value by time".into(),
+                },
+                ExtensionFunction {
+                    name: "last".into(),
+                    args: vec![
+                        FunctionArg { name: "value".into(), data_type: "anyelement".into(), default: None },
+                        FunctionArg { name: "time".into(), data_type: "timestamp".into(), default: None },
+                    ],
+                    return_type: "anyelement".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: true,
+                    description: "Last value by time".into(),
+                },
+                ExtensionFunction {
+                    name: "interpolate".into(),
+                    args: vec![
+                        FunctionArg { name: "value".into(), data_type: "double precision".into(), default: None },
+                    ],
+                    return_type: "double precision".into(),
+                    volatility: Volatility::Immutable,
+                    is_aggregate: false,
+                    description: "Interpolate missing values".into(),
+                },
+            ],
+            types: vec![],
+            operators: vec![],
+        }
     }
 }
 
-impl Default for ExtensionManager {
+impl Default for ExtensionRegistry {
     fn default() -> Self {
-        Self::new(
-            PathBuf::from("/usr/share/boyodb/extension"),
-            ExtensionConfig::default(),
-        )
+        Self::new()
     }
 }
+
+/// Alter extension action
+#[derive(Debug, Clone)]
+pub enum AlterExtensionAction {
+    /// Update to new version
+    UpdateTo(String),
+    /// Set schema
+    SetSchema(String),
+}
+
+/// Extension error
+#[derive(Debug, Clone)]
+pub enum ExtensionError {
+    NotFound(String),
+    NotInstalled(String),
+    AlreadyInstalled(String),
+    MissingDependency(String),
+    DependentExists(String),
+    NotRelocatable(String),
+    VersionNotFound(String),
+}
+
+impl std::fmt::Display for ExtensionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(n) => write!(f, "Extension '{}' not found", n),
+            Self::NotInstalled(n) => write!(f, "Extension '{}' is not installed", n),
+            Self::AlreadyInstalled(n) => write!(f, "Extension '{}' is already installed", n),
+            Self::MissingDependency(n) => write!(f, "Missing required extension '{}'", n),
+            Self::DependentExists(n) => write!(f, "Extension '{}' depends on this extension", n),
+            Self::NotRelocatable(n) => write!(f, "Extension '{}' is not relocatable", n),
+            Self::VersionNotFound(v) => write!(f, "Version '{}' not found", v),
+        }
+    }
+}
+
+impl std::error::Error for ExtensionError {}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_version_parse() {
-        let v1 = Version::parse("1.2.3").unwrap();
-        assert_eq!(v1.major, 1);
-        assert_eq!(v1.minor, 2);
-        assert_eq!(v1.patch, 3);
-
-        let v2 = Version::parse("2.0").unwrap();
-        assert_eq!(v2.major, 2);
-        assert_eq!(v2.minor, 0);
-        assert_eq!(v2.patch, 0);
-
-        let v3 = Version::parse("1.0.0-beta").unwrap();
-        assert_eq!(v3.prerelease, Some("beta".to_string()));
-    }
-
-    #[test]
-    fn test_version_compatibility() {
-        let v1 = Version::new(1, 2, 3);
-        let v2 = Version::new(1, 2, 0);
-        let v3 = Version::new(1, 3, 0);
-        let v4 = Version::new(2, 0, 0);
-
-        assert!(v1.is_compatible_with(&v2));
-        assert!(v3.is_compatible_with(&v2));
-        assert!(!v4.is_compatible_with(&v1));
-    }
-
-    #[test]
-    fn test_version_requirement() {
-        let v = Version::new(1, 2, 3);
-
-        assert!(VersionRequirement::Any.satisfies(&v));
-        assert!(VersionRequirement::Exact(Version::new(1, 2, 3)).satisfies(&v));
-        assert!(!VersionRequirement::Exact(Version::new(1, 2, 4)).satisfies(&v));
-        assert!(VersionRequirement::AtLeast(Version::new(1, 0, 0)).satisfies(&v));
-        assert!(!VersionRequirement::AtLeast(Version::new(2, 0, 0)).satisfies(&v));
-    }
-
-    #[test]
-    fn test_extension_manager() {
-        let manager = ExtensionManager::default();
-
-        // Scan for extensions
-        manager.scan_extensions().unwrap();
-
-        // List available
-        let available = manager.list_available();
-        assert!(!available.is_empty());
-
-        // Check built-ins exist
-        let names: Vec<_> = available.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"uuid-ossp"));
-        assert!(names.contains(&"vector"));
-        assert!(names.contains(&"geospatial"));
-    }
-
-    #[test]
     fn test_create_extension() {
-        let manager = ExtensionManager::default();
-        manager.scan_extensions().unwrap();
-
-        // Install extension
-        manager
-            .create_extension("uuid-ossp", None, Some("public"), false, "admin")
-            .unwrap();
-
-        assert!(manager.is_installed("uuid-ossp"));
-
-        let installed = manager.get_extension("uuid-ossp").unwrap();
-        assert_eq!(installed.schema, "public");
-        assert_eq!(installed.owner, "admin");
-
-        // Try to install again
-        let result = manager.create_extension("uuid-ossp", None, None, false, "admin");
-        assert!(matches!(result, Err(ExtensionError::AlreadyInstalled(_))));
+        let registry = ExtensionRegistry::new();
+        
+        assert!(!registry.is_installed("uuid_ossp"));
+        
+        registry.create_extension("uuid_ossp", None, None, false).unwrap();
+        
+        assert!(registry.is_installed("uuid_ossp"));
+        
+        let ext = registry.get("uuid_ossp").unwrap();
+        assert_eq!(ext.functions.len(), 3);
     }
 
     #[test]
     fn test_drop_extension() {
-        let manager = ExtensionManager::default();
-        manager.scan_extensions().unwrap();
-
-        manager
-            .create_extension("fts", None, None, false, "admin")
-            .unwrap();
-        assert!(manager.is_installed("fts"));
-
-        manager.drop_extension("fts", false).unwrap();
-        assert!(!manager.is_installed("fts"));
+        let registry = ExtensionRegistry::new();
+        
+        registry.create_extension("hstore", None, None, false).unwrap();
+        assert!(registry.is_installed("hstore"));
+        
+        registry.drop_extension("hstore", false).unwrap();
+        assert!(!registry.is_installed("hstore"));
     }
 
     #[test]
-    fn test_extension_objects() {
-        let manager = ExtensionManager::default();
-        manager.scan_extensions().unwrap();
-
-        manager
-            .create_extension("timeseries", None, None, false, "admin")
-            .unwrap();
-
-        let objects = manager.get_extension_objects("timeseries");
-        assert!(!objects.is_empty());
-
-        // Check that functions are created
-        let function_names: Vec<_> = objects
-            .iter()
-            .filter_map(|o| match o {
-                ExtensionObject::Function { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
-            .collect();
-
-        assert!(function_names.contains(&"time_bucket"));
+    fn test_list_available() {
+        let registry = ExtensionRegistry::new();
+        let available = registry.list_available();
+        
+        assert!(available.len() >= 8);
+        assert!(available.iter().any(|e| e.name == "uuid_ossp"));
+        assert!(available.iter().any(|e| e.name == "vector"));
     }
 }

@@ -622,3 +622,96 @@ pub use benchmarks::{
     BenchmarkResult as PerfBenchmarkResult, BenchmarkRunner, BenchmarkSuite, LatencyHistogram,
     ThroughputSummary, ThroughputTracker,
 };
+
+// --- Gap Analysis Features (Phase 38: ClickHouse & PostgreSQL Parity) ---
+pub mod approximate;
+pub mod cdc;
+pub mod wasm_udf;
+pub mod query_profiler;
+pub mod async_insert;
+pub mod external_tables;
+
+// Approximate Functions (HyperLogLog, T-Digest, Count-Min Sketch)
+pub use approximate::{
+    approx_count_distinct, approx_median, approx_quantile, CountMinSketch, HyperLogLog, TDigest,
+};
+
+// Change Data Capture (Debezium-compatible)
+pub use cdc::{
+    CdcConnector, CdcConnectorConfig, CdcError as CdcErrorV2, CdcEvent as CdcEventV2,
+    CdcEventType as CdcEventTypeV2, CdcPayload, CdcSchema, CdcSchemaField, CdcSink as CdcSinkV2,
+    CdcSource, CdcStats, CdcTransaction, DecimalHandling, MemorySink, OutputFormat, SnapshotMode,
+};
+
+// WebAssembly UDFs
+pub use wasm_udf::{
+    WasmContext, WasmError, WasmModule, WasmSignature, WasmType, WasmUdfRegistry, WasmValue,
+};
+
+// Query Profiler (Flame Graphs)
+pub use query_profiler::{
+    IoProfile, MemoryProfile, OperatorProfile as QueryOperatorProfile, PhaseGuard, ProfileBuilder,
+    ProfilePhase, QueryProfile as DetailedQueryProfile, QueryProfiler as DetailedQueryProfiler,
+    RowProfile, WaitEvent, WaitEventType,
+};
+
+// Async Insert Buffering
+pub use async_insert::{
+    AsyncInsertBuffer, AsyncInsertConfig, AsyncInsertStats, BufferResult, BufferStatus,
+    BufferedRow, FlushCallback, FlushResult, TableBuffer,
+};
+
+// External Tables (S3, URL, HDFS, File)
+pub use external_tables::{
+    ColumnDef as ExternalColumnDef, ExternalScanOptions, ExternalScanner, ExternalTableConfig,
+    ExternalTableError as ExternalTableErrorV2, ExternalTableRegistry, ExternalTableType as ExternalTableTypeV2,
+    FileFormat as ExtFileFormat, S3Options, ScanBatch,
+};
+
+// --- Gap Analysis Features (Phase 39: Advanced Features) ---
+pub mod parallel_replicas;
+pub mod zero_copy_replication;
+pub mod exclusion_constraints;
+pub mod gin_gist_indexes;
+pub mod ai_query_optimizer;
+pub mod tiered_compilation;
+
+// Parallel Replicas (ClickHouse-style)
+pub use parallel_replicas::{
+    CoordinatorStats, LoadBalanceStrategy as ReplicaLoadBalanceStrategy, MergedResult,
+    ParallelQueryPlan, ParallelReplicaConfig, ParallelReplicaCoordinator, ParallelReplicaError,
+    PartResult, QueryPart as ReplicaQueryPart, ReplicaEndpoint,
+};
+
+// Zero-Copy Replication
+pub use zero_copy_replication::{
+    GcResult, LockType, SegmentHandle, SegmentRef, StorageTier as ZeroCopyStorageTier,
+    SyncResult, ZeroCopyConfig, ZeroCopyError, ZeroCopyManager, ZeroCopyMetadata, ZeroCopyStats,
+};
+
+// Exclusion Constraints (PostgreSQL-compatible)
+pub use exclusion_constraints::{
+    ColumnType as ExclusionColumnType, ConstraintValue, ExclusionConstraint, ExclusionConstraintManager,
+    ExclusionElement, ExclusionError, ExclusionOperator, ExclusionStats, ExclusionViolation,
+    IndexMethod, RangeValue, RowId,
+};
+
+// GIN/GiST Indexes
+pub use gin_gist_indexes::{
+    AdvancedIndexMeta, AdvancedIndexRegistry, AdvancedIndexType, BoxKey, GinConfig, GinIndex,
+    GinStats, GistConfig, GistEntry, GistIndex, GistKey, GistNode, GistStats, RangeKey,
+};
+
+// AI Query Optimizer
+pub use ai_query_optimizer::{
+    AiQueryOptimizer, CardinalityModel, ColumnStats as AiColumnStats, CostModel, ExecutionHistory,
+    HistogramBucket as AiHistogramBucket, OptimizationResult, OptimizerStats as AiOptimizerStats,
+    PlanAlternative, PlanScoringWeights, Predicate, PredicateOp, QueryFeatures, TableStats as AiTableStats,
+};
+
+// Tiered Compilation
+pub use tiered_compilation::{
+    CacheInfo, CompilationError, CompilationRequest, CompilationStats, CompilationTier,
+    CompiledCode, IRAggregate, IROp, IRPredicate, IRValue, QueryIR, TieredCompilationConfig,
+    TieredCompilationManager,
+};
