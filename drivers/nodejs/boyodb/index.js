@@ -2127,6 +2127,110 @@ class Client {
     }
   }
 
+  /**
+   * Create a transaction wrapper.
+   * @param {Object} [options={}] - Transaction options
+   * @param {IsolationLevel} [options.isolationLevel] - Isolation level
+   * @param {boolean} [options.readOnly=false] - Read-only transaction
+   * @returns {Transaction}
+   *
+   * @example
+   * const tx = client.transaction();
+   * try {
+   *   await tx.begin();
+   *   await tx.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')");
+   *   await tx.commit();
+   * } catch (err) {
+   *   await tx.rollback();
+   *   throw err;
+   * }
+   */
+  transaction(options = {}) {
+    // Lazy require to avoid circular dependencies at module load time
+    const { Transaction } = require('./transactions');
+    return new Transaction(this, options);
+  }
+
+  /**
+   * Execute a function within an auto-managed transaction.
+   * Commits on success, rolls back on error.
+   * @param {Function} fn - Async function receiving transaction object
+   * @param {Object} [options={}] - Transaction options
+   * @returns {Promise<*>} - Result of the function
+   *
+   * @example
+   * await client.withTransaction(async (tx) => {
+   *   await tx.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')");
+   *   await tx.execute("UPDATE accounts SET balance = balance - 100");
+   * });
+   */
+  async withTransaction(fn, options = {}) {
+    const tx = this.transaction(options);
+    await tx.begin();
+    try {
+      const result = await fn(tx);
+      await tx.commit();
+      return result;
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  }
+
+  /**
+   * Get approximate analytics functions.
+   * @returns {ApproximateFunctions}
+   */
+  get approximate() {
+    const { ApproximateFunctions } = require('./analytics');
+    return new ApproximateFunctions(this);
+  }
+
+  /**
+   * Get time series analytics functions.
+   * @returns {TimeSeriesAnalytics}
+   */
+  get timeseries() {
+    const { TimeSeriesAnalytics } = require('./analytics');
+    return new TimeSeriesAnalytics(this);
+  }
+
+  /**
+   * Get graph analytics functions.
+   * @returns {GraphAnalytics}
+   */
+  get graph() {
+    const { GraphAnalytics } = require('./analytics');
+    return new GraphAnalytics(this);
+  }
+
+  /**
+   * Get external tables helper.
+   * @returns {ExternalTables}
+   */
+  get external() {
+    const { ExternalTables } = require('./external');
+    return new ExternalTables(this);
+  }
+
+  /**
+   * Get vector search helper.
+   * @returns {VectorSearch}
+   */
+  get vector() {
+    const { VectorSearch } = require('./external');
+    return new VectorSearch(this);
+  }
+
+  /**
+   * Get pub/sub publisher.
+   * @returns {Publisher}
+   */
+  get publisher() {
+    const { Publisher } = require('./subscriptions');
+    return new Publisher(this);
+  }
+
   // Vector Search Support
 
   /**
@@ -2322,6 +2426,11 @@ class Client {
 }
 
 const { PoolConfig, ConnectionPool, PooledClient } = require('./pool');
+const { IsolationLevel, Transaction } = require('./transactions');
+const { AsyncInsertBuffer } = require('./async_insert');
+const { ChangeType, Subscriber, CDCSubscriber, Publisher } = require('./subscriptions');
+const { ApproximateFunctions, TimeSeriesAnalytics, GraphAnalytics } = require('./analytics');
+const { ExternalTables, VectorSearch } = require('./external');
 
 // Vector Utility Functions
 
@@ -2619,10 +2728,33 @@ function listEmbeddingModels() {
 }
 
 module.exports = {
+  // Core client
   Client,
   PoolConfig,
   ConnectionPool,
   PooledClient,
+
+  // Transactions
+  IsolationLevel,
+  Transaction,
+
+  // Async inserts
+  AsyncInsertBuffer,
+
+  // Pub/Sub and CDC
+  ChangeType,
+  Subscriber,
+  CDCSubscriber,
+  Publisher,
+
+  // Analytics
+  ApproximateFunctions,
+  TimeSeriesAnalytics,
+  GraphAnalytics,
+
+  // External data
+  ExternalTables,
+  VectorSearch,
 
   // Vector utilities
   cosineSimilarity,

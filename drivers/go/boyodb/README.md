@@ -3,7 +3,18 @@
 [![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../../CHANGELOG.md)
 [![Go](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev/)
 
-A Go client library for connecting to boyodb-server.
+A Go client library for connecting to boyodb-server with support for transactions, analytics, external tables, and vector search.
+
+## Features
+
+- Connection pooling for concurrent access
+- Binary protocol with Arrow IPC support
+- TLS encryption with certificate verification
+- ACID transactions with savepoints and isolation levels
+- Approximate analytics (HyperLogLog, T-Digest)
+- Time series and graph analytics
+- External tables (S3, URL, HDFS, File)
+- Vector similarity search
 
 ## Installation
 
@@ -320,6 +331,170 @@ if err != nil {
     log.Fatal(err)
 }
 defer result.Close()
+```
+
+## Transactions
+
+ACID transactions with savepoints:
+
+```go
+client, err := boyodb.NewClient("localhost:8765", nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+// Manual transaction
+tx := client.Transaction(&boyodb.TxOptions{
+    IsolationLevel: boyodb.Serializable,
+})
+if err := tx.Begin(); err != nil {
+    log.Fatal(err)
+}
+
+if err := tx.Exec("INSERT INTO users (id, name) VALUES (1, 'Alice')"); err != nil {
+    tx.Rollback()
+    log.Fatal(err)
+}
+if err := tx.Commit(); err != nil {
+    log.Fatal(err)
+}
+
+// Auto-managed transaction
+err = client.WithTransaction(func(tx *boyodb.Transaction) error {
+    if err := tx.Exec("INSERT INTO orders (id, user_id) VALUES (1, 1)"); err != nil {
+        return err
+    }
+    tx.Savepoint("sp1")
+    if err := tx.Exec("INSERT INTO order_items (order_id) VALUES (1)"); err != nil {
+        tx.RollbackTo("sp1")
+    }
+    return nil
+}, nil)
+```
+
+## Approximate Analytics
+
+Fast approximate aggregations:
+
+```go
+client, err := boyodb.NewClient("localhost:8765", nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+// HyperLogLog distinct count
+approx := client.Approximate()
+estimate, err := approx.CountDistinct("events", "user_id", "", 14)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Unique users: ~%d (±%.1f%%)\n", estimate.Estimate, estimate.RelativeError*100)
+
+// T-Digest percentiles
+percentiles, err := approx.Percentile("orders", "amount", []float64{50, 90, 99}, "", 0)
+for _, p := range percentiles {
+    fmt.Printf("P%.0f: %.2f\n", p.Quantile, p.Value)
+}
+
+// Top-K items
+topEvents, err := approx.TopK("events", "event_type", 5, "")
+for _, item := range topEvents {
+    fmt.Printf("%s: %d\n", item.Item, item.Count)
+}
+```
+
+## Time Series Analytics
+
+```go
+ts := client.TimeSeries()
+
+// Aggregate by time buckets
+hourly, err := ts.AggregateByTime(
+    "metrics", "timestamp", "cpu_usage", "1 hour", "avg", "")
+
+// Moving average
+ma, err := ts.MovingAverage("metrics", "timestamp", "value", 7, "")
+
+// Anomaly detection
+anomalies, err := ts.DetectAnomalies("metrics", "timestamp", "value", 3.0, "")
+```
+
+## Graph Analytics
+
+```go
+graph := client.Graph()
+
+// Shortest path
+path, err := graph.ShortestPath("edges", "from_node", "to_node", "weight", 1, 10)
+
+// PageRank
+rankings, err := graph.PageRank("edges", "from_node", "to_node", 0.85, 20, 10)
+
+// Connected components
+components, err := graph.ConnectedComponents("edges", "from_node", "to_node")
+```
+
+## External Tables
+
+Query external data without importing:
+
+```go
+ext := client.External()
+
+// Query S3
+result, err := ext.QueryS3(
+    "s3://my-bucket/data/events.parquet",
+    "SELECT event_type, COUNT(*) FROM data GROUP BY event_type",
+    &boyodb.QueryS3Options{Format: "parquet"})
+
+// Query URL
+result, err = ext.QueryURL(
+    "https://example.com/data.csv",
+    "SELECT * FROM data WHERE value > 100",
+    nil)
+
+// Query local file
+result, err = ext.QueryFile("/data/logs.json", "SELECT *", nil)
+
+// Create external table
+err = ext.CreateExternalTable("events_s3", boyodb.CreateExternalTableOptions{
+    SourceType: "s3",
+    Location:   "bucket/events/",
+    Format:     "parquet",
+    Columns: []boyodb.ExternalTableColumn{
+        {Name: "id", Type: "INT64"},
+        {Name: "event", Type: "STRING"},
+        {Name: "ts", Type: "TIMESTAMP"},
+    },
+    PartitionColumns: []string{"date"},
+})
+```
+
+## Vector Search
+
+```go
+vec := client.Vector()
+
+// Create vector index
+err := vec.CreateIndex("documents", "embedding", &boyodb.VectorIndexOptions{
+    DistanceMetric: "cosine",
+    M:              16,
+    EfConstruction: 200,
+})
+
+// Search for similar vectors
+queryVec := []float64{0.1, 0.2, 0.3}
+result, err := vec.Search("documents", "embedding", queryVec, &boyodb.VectorSearchOptions{
+    K:     10,
+    Where: "category = 'tech'",
+})
+
+// Hybrid search (vector + full-text)
+result, err = vec.HybridSearch(
+    "documents", "embedding", "content", queryVec, "machine learning tutorial",
+    &boyodb.HybridSearchOptions{K: 10, VectorWeight: 0.7, TextWeight: 0.3})
 ```
 
 ## Query Execution Plan

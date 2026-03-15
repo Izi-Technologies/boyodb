@@ -6,7 +6,12 @@
   "types": "index.d.ts",
   "exports": {
     ".": "./index.js",
-    "./pool": "./pool.js"
+    "./pool": "./pool.js",
+    "./transactions": "./transactions.js",
+    "./async_insert": "./async_insert.js",
+    "./subscriptions": "./subscriptions.js",
+    "./analytics": "./analytics.js",
+    "./external": "./external.js"
   },
   "scripts": {
     "test": "node test.js"
@@ -17,7 +22,14 @@
     "columnar",
     "arrow",
     "analytics",
-    "time-series"
+    "time-series",
+    "transactions",
+    "pub-sub",
+    "cdc",
+    "vector-search",
+    "external-tables",
+    "s3",
+    "graph-analytics"
   ],
   "author": "",
   "license": "Apache-2.0",
