@@ -1902,6 +1902,41 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     engine_cfg.write_buffer_max_bytes = cfg.write_buffer_max_bytes;
     let db = Arc::new(Db::open(engine_cfg).map_err(|e| format!("db open failed: {e}"))?);
 
+    // Set up shutdown signal handler early so all spawned tasks can use it
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    tokio::select! {
+                        _ = ctrl_c => {
+                            info!("received SIGINT, initiating graceful shutdown");
+                        }
+                        _ = sigterm.recv() => {
+                            info!("received SIGTERM, initiating graceful shutdown");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to register SIGTERM handler: {e}, falling back to SIGINT only");
+                    let _ = ctrl_c.await;
+                    info!("received SIGINT, initiating graceful shutdown");
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+            info!("received shutdown signal, initiating graceful shutdown");
+        }
+
+        shutdown_signal.notify_waiters();
+    });
+
     // Log replica mode
     if cfg.replica_mode {
         info!(
@@ -2122,6 +2157,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         let auth_for_pg = auth_manager.clone();
         let pg_bind_ip = cfg.bind_addr.split(':').next().unwrap_or("0.0.0.0");
         let pg_addr = format!("{}:{}", pg_bind_ip, pg_port);
+        let pg_shutdown = shutdown.clone();
 
         info!("Starting PostgreSQL interface on {}", pg_addr);
 
@@ -2136,57 +2172,41 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
 
             use crate::server_pg::{BoyodbPgAuthHandler, MakeBoyodbPgHandler};
             use pgwire::api::MakeHandler;
-            // Try referencing commonly available path
-            // If tokio module is not found in api, try top level or just assume impl
-
-            // Actually, we called process_socket(stream, None, factory, factory, factory)
-            // This function signature is likely:
-            // process_socket(socket, ssl, startup_maker, query_maker, extended_maker)
-
-            // Let's assume the function is in `pgwire::api`? Or `pgwire::messages`?
-            // "could not find tokio in api" -> pgwire::api::tokio doesn't exist.
-            // Maybe pgwire::api::process_socket exists?
-
-            // To be safe, I'll use full path if I can guess.
-            // But better: check valid paths.
-            // I'll try `pgwire::api::process_socket`.
 
             let factory = Arc::new(MakeBoyodbPgHandler::new(db_pg));
 
             loop {
-                match listener.accept().await {
-                    Ok((stream, _addr)) => {
-                        let factory = factory.clone();
-                        let auth_for_pg = auth_for_pg.clone();
-                        tokio::spawn(async move {
-                            // Using fully qualified path to avoid import error if possible, or try common one
-                            // pgwire 0.24 usually exposes it at root or api logic.
-                            // pgwire 0.20 uses api::process_socket and single factory
-                            // pgwire 0.20 tokio::process_socket requires 3 handlers (Startup, Simple, Extended)
-                            // We use the same handler instance for all.
-                            let handler = factory.make();
-                            // Probe Md5PasswordAuthStartupHandler
-                            // use pgwire::api::auth::md5pass::Md5PasswordAuthStartupHandler;
-                            // let startup_handler = Arc::new(Md5PasswordAuthStartupHandler::new(factory.clone()));
-                            // Use Cleartext Auth
-                            // Use Cleartext Auth
-                            let startup_handler = Arc::new(BoyodbPgAuthHandler::new(auth_for_pg));
-                            if let Err(e) = pgwire::tokio::process_socket(
-                                stream,
-                                None,
-                                startup_handler,
-                                handler.clone(),
-                                handler.clone(),
-                            )
-                            .await
-                            {
-                                debug!("PG connection error: {}", e);
+                tokio::select! {
+                    result = listener.accept() => {
+                        match result {
+                            Ok((stream, _addr)) => {
+                                let factory = factory.clone();
+                                let auth_for_pg = auth_for_pg.clone();
+                                tokio::spawn(async move {
+                                    let handler = factory.make();
+                                    let startup_handler = Arc::new(BoyodbPgAuthHandler::new(auth_for_pg));
+                                    if let Err(e) = pgwire::tokio::process_socket(
+                                        stream,
+                                        None,
+                                        startup_handler,
+                                        handler.clone(),
+                                        handler.clone(),
+                                    )
+                                    .await
+                                    {
+                                        debug!("PG connection error: {}", e);
+                                    }
+                                });
                             }
-                        });
+                            Err(e) => {
+                                error!("PG accept error: {}", e);
+                                sleep(Duration::from_millis(100)).await;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        error!("PG accept error: {}", e);
-                        sleep(Duration::from_millis(100)).await;
+                    _ = pg_shutdown.notified() => {
+                        info!("PostgreSQL interface shutting down");
+                        break;
                     }
                 }
             }
@@ -2350,41 +2370,6 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let cfg = Arc::new(cfg);
-
-    // Set up shutdown signal handler
-    let shutdown = Arc::new(tokio::sync::Notify::new());
-    let shutdown_clone = shutdown.clone();
-    tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-        #[cfg(unix)]
-        {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut sigterm) => {
-                    tokio::select! {
-                        _ = ctrl_c => {
-                            info!("received SIGINT, initiating graceful shutdown");
-                        }
-                        _ = sigterm.recv() => {
-                            info!("received SIGTERM, initiating graceful shutdown");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("failed to register SIGTERM handler: {e}, falling back to SIGINT only");
-                    let _ = ctrl_c.await;
-                    info!("received SIGINT, initiating graceful shutdown");
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = ctrl_c.await;
-            info!("received shutdown signal, initiating graceful shutdown");
-        }
-
-        shutdown_clone.notify_waiters();
-    });
 
     if cfg.maintenance_interval_ms > 0 {
         let db_clone = db.clone();
@@ -2872,14 +2857,22 @@ async fn handle_conn(
                         resp.status = "ok";
                         if !response.records_ipc.is_empty() {
                             if accept_compression.as_deref() == Some("zstd") {
-                                let compressed = zstd::stream::encode_all(
+                                match zstd::stream::encode_all(
                                     std::io::Cursor::new(&response.records_ipc),
                                     3,
-                                )
-                                .unwrap_or_default();
-                                resp.ipc_base64 =
-                                    Some(general_purpose::STANDARD.encode(compressed));
-                                resp.compression = Some("zstd".to_string());
+                                ) {
+                                    Ok(compressed) => {
+                                        resp.ipc_base64 =
+                                            Some(general_purpose::STANDARD.encode(compressed));
+                                        resp.compression = Some("zstd".to_string());
+                                    }
+                                    Err(e) => {
+                                        // Fall back to uncompressed on compression failure
+                                        warn!("zstd compression failed, falling back to uncompressed: {}", e);
+                                        resp.ipc_base64 =
+                                            Some(general_purpose::STANDARD.encode(&response.records_ipc));
+                                    }
+                                }
                                 resp.ipc_len = Some(response.records_ipc.len() as u64);
                             } else {
                                 resp.ipc_base64 =
@@ -5020,9 +5013,10 @@ async fn process_query_binary_stream(
                         }
                     }
                     Err(e) => {
+                        // Send empty frame to signal end of stream, then return the error
                         let _ = write_frame_bytes(stream, &[], timeout_dur, max_frame_len).await;
-                        let _ = e;
-                        return Ok(());
+                        warn!("streaming query error: {}", e);
+                        return Err(e);
                     }
                 }
             }
@@ -5272,9 +5266,10 @@ async fn process_execute_prepared_binary_stream(
                         }
                     }
                     Err(e) => {
+                        // Send empty frame to signal end of stream, then return the error
                         let _ = write_frame_bytes(stream, &[], timeout_dur, max_frame_len).await;
-                        let _ = e;
-                        return Ok(());
+                        warn!("streaming query error: {}", e);
+                        return Err(e);
                     }
                 }
             }
