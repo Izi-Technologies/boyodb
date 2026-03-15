@@ -9,7 +9,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -366,7 +367,7 @@ impl Coordinator {
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
         let gtid = GlobalTransactionId::new(&self.config.node_id, seq);
 
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
 
         if txns.len() >= self.config.max_transactions {
             return Err(TwoPhaseCommitError::CoordinatorFailure(
@@ -402,15 +403,15 @@ impl Coordinator {
         self.log_action(&gtid, LogAction::Begin, &participants);
 
         // Update stats
-        self.stats.write().unwrap().total_transactions += 1;
-        self.stats.write().unwrap().in_progress_transactions += 1;
+        self.stats.write().total_transactions += 1;
+        self.stats.write().in_progress_transactions += 1;
 
         Ok(gtid)
     }
 
     /// Prepare phase - request all participants to prepare
     pub fn prepare(&self, gtid: &GlobalTransactionId) -> Result<bool, TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -444,7 +445,7 @@ impl Coordinator {
         participant: &ParticipantId,
         vote: Vote,
     ) -> Result<Option<TransactionState>, TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -491,7 +492,7 @@ impl Coordinator {
 
     /// Commit phase - tell all participants to commit
     pub fn commit(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -526,7 +527,7 @@ impl Coordinator {
         gtid: &GlobalTransactionId,
         participant: &ParticipantId,
     ) -> Result<Option<TransactionState>, TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -545,7 +546,7 @@ impl Coordinator {
 
             // Update stats
             drop(txns);
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.committed_transactions += 1;
             stats.in_progress_transactions = stats.in_progress_transactions.saturating_sub(1);
 
@@ -557,7 +558,7 @@ impl Coordinator {
 
     /// Rollback a transaction
     pub fn rollback(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -592,7 +593,7 @@ impl Coordinator {
         gtid: &GlobalTransactionId,
         participant: &ParticipantId,
     ) -> Result<Option<TransactionState>, TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -611,7 +612,7 @@ impl Coordinator {
 
             // Update stats
             drop(txns);
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.aborted_transactions += 1;
             stats.in_progress_transactions = stats.in_progress_transactions.saturating_sub(1);
 
@@ -623,13 +624,13 @@ impl Coordinator {
 
     /// Get transaction state
     pub fn get_state(&self, gtid: &GlobalTransactionId) -> Option<TransactionState> {
-        let txns = self.transactions.read().unwrap();
+        let txns = self.transactions.read();
         txns.get(gtid).map(|r| r.state.clone())
     }
 
     /// Check for timed-out transactions
     pub fn check_timeouts(&self) -> Vec<GlobalTransactionId> {
-        let txns = self.transactions.read().unwrap();
+        let txns = self.transactions.read();
         let mut timed_out = Vec::new();
 
         for (gtid, record) in txns.iter() {
@@ -645,33 +646,33 @@ impl Coordinator {
 
     /// Make heuristic decision for stuck transaction
     pub fn heuristic_commit(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
         record.state = TransactionState::HeuristicCommit;
 
-        self.stats.write().unwrap().heuristic_decisions += 1;
+        self.stats.write().heuristic_decisions += 1;
 
         Ok(())
     }
 
     /// Make heuristic rollback decision
     pub fn heuristic_rollback(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
         record.state = TransactionState::HeuristicRollback;
 
-        self.stats.write().unwrap().heuristic_decisions += 1;
+        self.stats.write().heuristic_decisions += 1;
 
         Ok(())
     }
 
     /// Forget a completed transaction
     pub fn forget(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         txns.remove(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -681,7 +682,7 @@ impl Coordinator {
 
     /// Recover transactions from log
     pub fn recover(&self) -> Result<Vec<GlobalTransactionId>, TwoPhaseCommitError> {
-        let log = self.transaction_log.read().unwrap();
+        let log = self.transaction_log.read();
         let mut in_doubt: HashMap<GlobalTransactionId, LogAction> = HashMap::new();
 
         // Replay log to find incomplete transactions
@@ -741,12 +742,12 @@ impl Coordinator {
             participants: participants.to_vec(),
         };
 
-        self.transaction_log.write().unwrap().push(entry);
+        self.transaction_log.write().push(entry);
     }
 
     /// Get coordinator statistics
     pub fn stats(&self) -> CoordinatorStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 
@@ -850,7 +851,7 @@ impl Participant {
 
     /// Start participating in a distributed transaction
     pub fn begin(&self, gtid: GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
 
         if txns.contains_key(&gtid) {
             return Err(TwoPhaseCommitError::TransactionExists(gtid));
@@ -875,7 +876,7 @@ impl Participant {
         redo_data: Vec<u8>,
         undo_data: Vec<u8>,
     ) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -905,7 +906,7 @@ impl Participant {
 
     /// Prepare to commit (vote)
     pub fn prepare(&self, gtid: &GlobalTransactionId) -> Result<Vote, TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -933,7 +934,7 @@ impl Participant {
             redo_data: Vec::new(), // Would serialize redo log
         };
 
-        self.prepare_log.write().unwrap().push(prepare_entry);
+        self.prepare_log.write().push(prepare_entry);
 
         record.state = ParticipantTransactionState::Prepared;
         record.prepared_at = Some(Instant::now());
@@ -943,7 +944,7 @@ impl Participant {
 
     /// Commit the transaction
     pub fn commit(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -963,7 +964,7 @@ impl Participant {
         record.undo_log.clear();
 
         // Remove from prepare log
-        self.prepare_log.write().unwrap()
+        self.prepare_log.write()
             .retain(|e| e.gtid != *gtid);
 
         Ok(())
@@ -971,7 +972,7 @@ impl Participant {
 
     /// Rollback the transaction
     pub fn rollback(&self, gtid: &GlobalTransactionId) -> Result<(), TwoPhaseCommitError> {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let record = txns.get_mut(gtid)
             .ok_or_else(|| TwoPhaseCommitError::TransactionNotFound(gtid.clone()))?;
 
@@ -988,7 +989,7 @@ impl Participant {
         record.undo_log.clear();
 
         // Remove from prepare log
-        self.prepare_log.write().unwrap()
+        self.prepare_log.write()
             .retain(|e| e.gtid != *gtid);
 
         Ok(())
@@ -996,13 +997,13 @@ impl Participant {
 
     /// Get transaction state
     pub fn get_state(&self, gtid: &GlobalTransactionId) -> Option<ParticipantTransactionState> {
-        let txns = self.transactions.read().unwrap();
+        let txns = self.transactions.read();
         txns.get(gtid).map(|r| r.state.clone())
     }
 
     /// Find in-doubt transactions for recovery
     pub fn get_in_doubt_transactions(&self) -> Vec<GlobalTransactionId> {
-        let prepare_log = self.prepare_log.read().unwrap();
+        let prepare_log = self.prepare_log.read();
         prepare_log.iter()
             .map(|e| e.gtid.clone())
             .collect()
@@ -1026,7 +1027,7 @@ impl Participant {
 
     /// Clean up completed transactions
     pub fn cleanup(&self, max_age: Duration) {
-        let mut txns = self.transactions.write().unwrap();
+        let mut txns = self.transactions.write();
         let now = Instant::now();
 
         txns.retain(|_, record| {
@@ -1074,7 +1075,7 @@ impl DistributedTransactionManager {
 
     /// Register a remote participant
     pub fn register_participant(&self, id: ParticipantId, address: String) {
-        self.remote_participants.write().unwrap().insert(
+        self.remote_participants.write().insert(
             id.clone(),
             RemoteParticipant {
                 id,

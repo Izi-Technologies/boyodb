@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Online DDL error types
@@ -303,7 +304,7 @@ impl OnlineDdlManager {
         &self,
         operation: OnlineOperation,
     ) -> Result<String, OnlineDdlError> {
-        let operations = self.operations.read().unwrap();
+        let operations = self.operations.read();
         if operations.len() >= self.config.max_concurrent_operations {
             return Err(OnlineDdlError::OperationInProgress(
                 "maximum concurrent operations reached".into(),
@@ -341,8 +342,8 @@ impl OnlineDdlManager {
             started_at: Instant::now(),
         });
 
-        self.operations.write().unwrap().insert(id.clone(), context);
-        self.stats.write().unwrap().operations_started += 1;
+        self.operations.write().insert(id.clone(), context);
+        self.stats.write().operations_started += 1;
 
         Ok(id)
     }
@@ -665,7 +666,6 @@ impl OnlineDdlManager {
     fn get_operation(&self, id: &str) -> Result<Arc<OnlineOperationContext>, OnlineDdlError> {
         self.operations
             .read()
-            .unwrap()
             .get(id)
             .cloned()
             .ok_or_else(|| OnlineDdlError::OperationFailed(format!("operation not found: {}", id)))
@@ -673,8 +673,8 @@ impl OnlineDdlManager {
 
     fn check_cancelled(&self, context: &OnlineOperationContext) -> Result<(), OnlineDdlError> {
         if context.cancelled.load(Ordering::SeqCst) {
-            *context.state.write().unwrap() = OperationState::Cancelled;
-            self.stats.write().unwrap().operations_cancelled += 1;
+            *context.state.write() = OperationState::Cancelled;
+            self.stats.write().operations_cancelled += 1;
             return Err(OnlineDdlError::Cancelled(context.id.clone()));
         }
         Ok(())
@@ -686,9 +686,9 @@ impl OnlineDdlManager {
         state: OperationState,
         phase: &str,
     ) -> Result<(), OnlineDdlError> {
-        *context.state.write().unwrap() = state;
+        *context.state.write() = state;
 
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         progress.state = state;
         progress.current_phase = phase.to_string();
         progress.updated_at = SystemTime::now();
@@ -701,7 +701,7 @@ impl OnlineDdlManager {
     where
         F: FnOnce(&mut OperationProgress),
     {
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         f(&mut progress);
         progress.updated_at = SystemTime::now();
         Ok(())
@@ -712,7 +712,7 @@ impl OnlineDdlManager {
         context: &OnlineOperationContext,
         total_rows: u64,
     ) -> Result<(), OnlineDdlError> {
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         progress.rows_total = Some(total_rows);
         drop(progress);
 
@@ -723,7 +723,7 @@ impl OnlineDdlManager {
             self.check_cancelled(context)?;
 
             let rows = (i + 1) * rows_per_batch;
-            let mut progress = context.progress.write().unwrap();
+            let mut progress = context.progress.write();
             progress.rows_processed = rows.min(total_rows);
             progress.updated_at = SystemTime::now();
 
@@ -737,10 +737,10 @@ impl OnlineDdlManager {
             }
         }
 
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         progress.rows_processed = total_rows;
 
-        self.stats.write().unwrap().total_rows_processed += total_rows;
+        self.stats.write().total_rows_processed += total_rows;
 
         Ok(())
     }
@@ -756,9 +756,9 @@ impl OnlineDdlManager {
     }
 
     fn complete_operation(&self, context: &OnlineOperationContext) -> Result<(), OnlineDdlError> {
-        *context.state.write().unwrap() = OperationState::Completed;
+        *context.state.write() = OperationState::Completed;
 
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         progress.state = OperationState::Completed;
         progress.current_phase = "Completed".into();
         progress.updated_at = SystemTime::now();
@@ -766,7 +766,7 @@ impl OnlineDdlManager {
 
         let elapsed = context.started_at.elapsed();
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.operations_completed += 1;
         stats.total_time_seconds += elapsed.as_secs();
 
@@ -774,14 +774,14 @@ impl OnlineDdlManager {
         let progress_snapshot = progress.clone();
         drop(progress);
 
-        let mut history = self.history.write().unwrap();
+        let mut history = self.history.write();
         if history.len() >= self.config.history_size {
             history.pop_front();
         }
         history.push_back(progress_snapshot);
 
         // Remove from active operations
-        self.operations.write().unwrap().remove(&context.id);
+        self.operations.write().remove(&context.id);
 
         Ok(())
     }
@@ -791,25 +791,25 @@ impl OnlineDdlManager {
         context: &OnlineOperationContext,
         error: &str,
     ) -> Result<(), OnlineDdlError> {
-        *context.state.write().unwrap() = OperationState::Failed;
+        *context.state.write() = OperationState::Failed;
 
-        let mut progress = context.progress.write().unwrap();
+        let mut progress = context.progress.write();
         progress.state = OperationState::Failed;
         progress.error = Some(error.to_string());
         progress.updated_at = SystemTime::now();
 
-        self.stats.write().unwrap().operations_failed += 1;
+        self.stats.write().operations_failed += 1;
 
         let progress_snapshot = progress.clone();
         drop(progress);
 
-        let mut history = self.history.write().unwrap();
+        let mut history = self.history.write();
         if history.len() >= self.config.history_size {
             history.pop_front();
         }
         history.push_back(progress_snapshot);
 
-        self.operations.write().unwrap().remove(&context.id);
+        self.operations.write().remove(&context.id);
 
         Ok(())
     }
@@ -829,18 +829,16 @@ impl OnlineDdlManager {
     pub fn get_progress(&self, id: &str) -> Option<OperationProgress> {
         self.operations
             .read()
-            .unwrap()
             .get(id)
-            .map(|ctx| ctx.progress.read().unwrap().clone())
+            .map(|ctx| ctx.progress.read().clone())
     }
 
     /// List active operations
     pub fn list_operations(&self) -> Vec<OperationProgress> {
         self.operations
             .read()
-            .unwrap()
             .values()
-            .map(|ctx| ctx.progress.read().unwrap().clone())
+            .map(|ctx| ctx.progress.read().clone())
             .collect()
     }
 
@@ -848,7 +846,6 @@ impl OnlineDdlManager {
     pub fn get_history(&self, limit: usize) -> Vec<OperationProgress> {
         self.history
             .read()
-            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -858,7 +855,7 @@ impl OnlineDdlManager {
 
     /// Get statistics
     pub fn stats(&self) -> OnlineDdlStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -235,20 +236,20 @@ impl PlanCache {
 
     /// Get cached plan for query
     pub fn get(&self, fingerprint: &QueryFingerprint) -> Option<CachedPlan> {
-        let mut plans = self.plans.write().unwrap();
+        let mut plans = self.plans.write();
 
         if let Some(entry) = plans.get_mut(&fingerprint.hash) {
             // Check TTL
             if entry.plan.created_at.elapsed() > self.config.entry_ttl {
                 self.remove_entry(&mut plans, fingerprint.hash);
-                self.stats.write().unwrap().misses += 1;
+                self.stats.write().misses += 1;
                 return None;
             }
 
             // Check version
             if entry.plan.version < self.global_version.load(Ordering::SeqCst) {
                 self.remove_entry(&mut plans, fingerprint.hash);
-                self.stats.write().unwrap().invalidations += 1;
+                self.stats.write().invalidations += 1;
                 return None;
             }
 
@@ -261,17 +262,17 @@ impl PlanCache {
             drop(plans);
             self.move_to_head(hash);
 
-            let plans = self.plans.read().unwrap();
+            let plans = self.plans.read();
             let plan = plans.get(&hash).map(|e| e.plan.clone());
 
             if self.config.enable_stats {
-                self.stats.write().unwrap().hits += 1;
+                self.stats.write().hits += 1;
             }
 
             plan
         } else {
             if self.config.enable_stats {
-                self.stats.write().unwrap().misses += 1;
+                self.stats.write().misses += 1;
             }
             None
         }
@@ -310,7 +311,7 @@ impl PlanCache {
 
         // Check entry limit
         {
-            let plans = self.plans.read().unwrap();
+            let plans = self.plans.read();
             if plans.len() >= self.config.max_entries && !plans.contains_key(&hash) {
                 drop(plans);
                 if !self.evict_one() {
@@ -320,8 +321,8 @@ impl PlanCache {
         }
 
         // Insert
-        let mut plans = self.plans.write().unwrap();
-        let old_head = *self.head.read().unwrap();
+        let mut plans = self.plans.write();
+        let old_head = *self.head.read();
 
         let entry = CacheEntry {
             plan,
@@ -336,17 +337,17 @@ impl PlanCache {
         }
 
         plans.insert(hash, entry);
-        *self.head.write().unwrap() = Some(hash);
+        *self.head.write() = Some(hash);
 
-        if self.tail.read().unwrap().is_none() {
-            *self.tail.write().unwrap() = Some(hash);
+        if self.tail.read().is_none() {
+            *self.tail.write() = Some(hash);
         }
 
         self.memory_usage.fetch_add(plan_size as u64, Ordering::SeqCst);
 
         // Update stats
         if self.config.enable_stats {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_plans = plans.len();
             stats.memory_bytes = self.memory_usage.load(Ordering::SeqCst);
         }
@@ -354,7 +355,7 @@ impl PlanCache {
 
     /// Record execution time for a plan
     pub fn record_execution(&self, fingerprint: &QueryFingerprint, execution_time: Duration) {
-        let mut plans = self.plans.write().unwrap();
+        let mut plans = self.plans.write();
         if let Some(entry) = plans.get_mut(&fingerprint.hash) {
             entry.plan.execution_count += 1;
             entry.plan.total_execution_time += execution_time;
@@ -366,8 +367,8 @@ impl PlanCache {
         self.global_version.fetch_add(1, Ordering::SeqCst);
 
         if self.config.enable_stats {
-            let plans = self.plans.read().unwrap();
-            self.stats.write().unwrap().invalidations += plans.len() as u64;
+            let plans = self.plans.read();
+            self.stats.write().invalidations += plans.len() as u64;
         }
     }
 
@@ -380,14 +381,14 @@ impl PlanCache {
 
     /// Clear the cache
     pub fn clear(&self) {
-        let mut plans = self.plans.write().unwrap();
+        let mut plans = self.plans.write();
         plans.clear();
-        *self.head.write().unwrap() = None;
-        *self.tail.write().unwrap() = None;
+        *self.head.write() = None;
+        *self.tail.write() = None;
         self.memory_usage.store(0, Ordering::SeqCst);
 
         if self.config.enable_stats {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_plans = 0;
             stats.memory_bytes = 0;
         }
@@ -395,7 +396,7 @@ impl PlanCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> PlanCacheStats {
-        let mut stats = self.stats.read().unwrap().clone();
+        let mut stats = self.stats.read().clone();
 
         let total = stats.hits + stats.misses;
         stats.hit_rate = if total > 0 {
@@ -412,14 +413,14 @@ impl PlanCache {
     }
 
     fn evict_one(&self) -> bool {
-        let tail = *self.tail.read().unwrap();
+        let tail = *self.tail.read();
 
         if let Some(tail_hash) = tail {
-            let mut plans = self.plans.write().unwrap();
+            let mut plans = self.plans.write();
             self.remove_entry(&mut plans, tail_hash);
 
             if self.config.enable_stats {
-                self.stats.write().unwrap().evictions += 1;
+                self.stats.write().evictions += 1;
             }
 
             true
@@ -441,7 +442,7 @@ impl PlanCache {
                     prev_entry.next = entry.next;
                 }
             } else {
-                *self.head.write().unwrap() = entry.next;
+                *self.head.write() = entry.next;
             }
 
             if let Some(next) = entry.next {
@@ -449,13 +450,13 @@ impl PlanCache {
                     next_entry.prev = entry.prev;
                 }
             } else {
-                *self.tail.write().unwrap() = entry.prev;
+                *self.tail.write() = entry.prev;
             }
         }
     }
 
     fn move_to_head(&self, hash: u64) {
-        let mut plans = self.plans.write().unwrap();
+        let mut plans = self.plans.write();
 
         let (prev, next) = if let Some(entry) = plans.get(&hash) {
             (entry.prev, entry.next)
@@ -480,11 +481,11 @@ impl PlanCache {
                 next_entry.prev = prev;
             }
         } else {
-            *self.tail.write().unwrap() = prev;
+            *self.tail.write() = prev;
         }
 
         // Move to head
-        let old_head = *self.head.read().unwrap();
+        let old_head = *self.head.read();
 
         if let Some(entry) = plans.get_mut(&hash) {
             entry.prev = None;
@@ -497,12 +498,12 @@ impl PlanCache {
             }
         }
 
-        *self.head.write().unwrap() = Some(hash);
+        *self.head.write() = Some(hash);
     }
 
     /// Get top N most executed plans
     pub fn top_plans(&self, n: usize) -> Vec<CachedPlan> {
-        let plans = self.plans.read().unwrap();
+        let plans = self.plans.read();
         let mut sorted: Vec<_> = plans.values().map(|e| &e.plan).collect();
         sorted.sort_by(|a, b| b.execution_count.cmp(&a.execution_count));
         sorted.into_iter().take(n).cloned().collect()
@@ -692,7 +693,7 @@ impl SlowQueryLog {
 
         // Add to log
         {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write();
             entries.push_back(entry.clone());
 
             // Enforce max entries
@@ -703,7 +704,7 @@ impl SlowQueryLog {
 
         // Update statistics
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_slow_queries += 1;
             stats.total_execution_time += execution_time;
 
@@ -773,7 +774,7 @@ impl SlowQueryLog {
         }
 
         // Fire alerts
-        let handlers = self.alert_handlers.read().unwrap();
+        let handlers = self.alert_handlers.read();
         for alert in alerts {
             for handler in handlers.iter() {
                 handler(alert.clone());
@@ -786,18 +787,18 @@ impl SlowQueryLog {
     where
         F: Fn(SlowQueryAlert) + Send + Sync + 'static,
     {
-        self.alert_handlers.write().unwrap().push(Arc::new(handler));
+        self.alert_handlers.write().push(Arc::new(handler));
     }
 
     /// Get recent slow queries
     pub fn get_recent(&self, limit: usize) -> Vec<SlowQueryEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.iter().rev().take(limit).cloned().collect()
     }
 
     /// Get slow queries by fingerprint
     pub fn get_by_fingerprint(&self, fingerprint_hash: u64) -> Vec<SlowQueryEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.iter()
             .filter(|e| e.fingerprint_hash == fingerprint_hash)
             .cloned()
@@ -806,12 +807,12 @@ impl SlowQueryLog {
 
     /// Get statistics
     pub fn stats(&self) -> SlowQueryStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get top slow query patterns
     pub fn top_patterns(&self, n: usize) -> Vec<(u64, u64, Duration)> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         let mut patterns: HashMap<u64, (u64, Duration)> = HashMap::new();
 
         for entry in entries.iter() {
@@ -833,12 +834,12 @@ impl SlowQueryLog {
 
     /// Clear log
     pub fn clear(&self) {
-        self.entries.write().unwrap().clear();
+        self.entries.write().clear();
     }
 
     /// Export to JSON
     pub fn export_json(&self) -> String {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         serde_json::to_string_pretty(&*entries).unwrap_or_default()
     }
 }
@@ -976,7 +977,7 @@ impl QueryPerformanceAnalyzer {
 
         // Update execution history with bounded size to prevent memory leak
         {
-            let mut history = self.execution_history.write().unwrap();
+            let mut history = self.execution_history.write();
 
             // Check if entry exists or if we have room for new entries
             if history.contains_key(&fingerprint.hash) {
@@ -1008,7 +1009,7 @@ impl QueryPerformanceAnalyzer {
     pub fn analyze(&self) -> Vec<PerformanceRecommendation> {
         let mut recommendations = Vec::new();
 
-        let history = self.execution_history.read().unwrap();
+        let history = self.execution_history.read();
         let slow_stats = self.slow_query_log.stats();
 
         // Analyze slow query patterns
@@ -1097,14 +1098,14 @@ impl QueryPerformanceAnalyzer {
 
     /// Get execution history for a query pattern
     pub fn get_history(&self, fingerprint_hash: u64) -> Option<QueryExecutionHistory> {
-        self.execution_history.read().unwrap()
+        self.execution_history.read()
             .get(&fingerprint_hash)
             .cloned()
     }
 
     /// Get top queries by total time
     pub fn top_queries_by_time(&self, n: usize) -> Vec<QueryExecutionHistory> {
-        let history = self.execution_history.read().unwrap();
+        let history = self.execution_history.read();
         let mut entries: Vec<_> = history.values().cloned().collect();
         entries.sort_by(|a, b| b.total_time.cmp(&a.total_time));
         entries.truncate(n);
@@ -1113,7 +1114,7 @@ impl QueryPerformanceAnalyzer {
 
     /// Get top queries by execution count
     pub fn top_queries_by_count(&self, n: usize) -> Vec<QueryExecutionHistory> {
-        let history = self.execution_history.read().unwrap();
+        let history = self.execution_history.read();
         let mut entries: Vec<_> = history.values().cloned().collect();
         entries.sort_by(|a, b| b.execution_count.cmp(&a.execution_count));
         entries.truncate(n);

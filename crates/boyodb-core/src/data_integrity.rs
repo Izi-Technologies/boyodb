@@ -25,7 +25,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -973,12 +974,12 @@ impl IntegrityManager {
             last_modified: None,
             status: VerificationStatus::Unknown,
         };
-        self.file_cache.write().unwrap().insert(path.to_string(), integrity);
+        self.file_cache.write().insert(path.to_string(), integrity);
     }
 
     /// Verify a registered file
     pub fn verify_registered_file(&self, path: &str) -> Result<bool, IntegrityError> {
-        let cache = self.file_cache.read().unwrap();
+        let cache = self.file_cache.read();
         let integrity = cache
             .get(path)
             .ok_or_else(|| IntegrityError::FileNotFound(path.to_string()))?;
@@ -989,7 +990,7 @@ impl IntegrityManager {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_verifications += 1;
             if result {
                 stats.passed_verifications += 1;
@@ -1001,7 +1002,7 @@ impl IntegrityManager {
 
         // Update cache
         {
-            let mut cache = self.file_cache.write().unwrap();
+            let mut cache = self.file_cache.write();
             if let Some(entry) = cache.get_mut(path) {
                 entry.status = if result {
                     VerificationStatus::Valid
@@ -1018,25 +1019,25 @@ impl IntegrityManager {
     /// Report corruption
     pub fn report_corruption(&self, report: CorruptionReport) {
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.corruptions_detected += 1;
         }
-        self.corruption_reports.write().unwrap().push(report);
+        self.corruption_reports.write().push(report);
     }
 
     /// Get all corruption reports
     pub fn get_corruption_reports(&self) -> Vec<CorruptionReport> {
-        self.corruption_reports.read().unwrap().clone()
+        self.corruption_reports.read().clone()
     }
 
     /// Get statistics
     pub fn stats(&self) -> IntegrityStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Clear corruption reports
     pub fn clear_reports(&self) {
-        self.corruption_reports.write().unwrap().clear();
+        self.corruption_reports.write().clear();
     }
 }
 

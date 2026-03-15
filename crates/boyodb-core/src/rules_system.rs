@@ -7,7 +7,8 @@
 //! - Conditional rules with WHERE clauses
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // RULE TYPES
@@ -225,8 +226,8 @@ impl RulesManager {
     pub fn create_rule(&self, rule: Rule) -> Result<(), RuleError> {
         let key = (rule.qualified_relation(), rule.event);
 
-        let mut rules = self.rules.write().unwrap();
-        let mut by_name = self.rules_by_name.write().unwrap();
+        let mut rules = self.rules.write();
+        let mut by_name = self.rules_by_name.write();
 
         // Check for duplicate name
         if by_name.contains_key(&rule.name) {
@@ -242,8 +243,8 @@ impl RulesManager {
 
     /// Drop a rule
     pub fn drop_rule(&self, name: &str) -> Result<(), RuleError> {
-        let mut rules = self.rules.write().unwrap();
-        let mut by_name = self.rules_by_name.write().unwrap();
+        let mut rules = self.rules.write();
+        let mut by_name = self.rules_by_name.write();
 
         let rule = by_name
             .remove(name)
@@ -259,8 +260,8 @@ impl RulesManager {
 
     /// Enable/disable a rule
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), RuleError> {
-        let mut rules = self.rules.write().unwrap();
-        let mut by_name = self.rules_by_name.write().unwrap();
+        let mut rules = self.rules.write();
+        let mut by_name = self.rules_by_name.write();
 
         let rule = by_name
             .get_mut(name)
@@ -283,7 +284,7 @@ impl RulesManager {
 
     /// Get rules for a relation and event
     pub fn get_rules(&self, relation: &str, event: RuleEvent) -> Vec<Rule> {
-        let rules = self.rules.read().unwrap();
+        let rules = self.rules.read();
         let key = (relation.to_string(), event);
 
         rules
@@ -294,13 +295,13 @@ impl RulesManager {
 
     /// Get rule by name
     pub fn get_rule(&self, name: &str) -> Option<Rule> {
-        let by_name = self.rules_by_name.read().unwrap();
+        let by_name = self.rules_by_name.read();
         by_name.get(name).cloned()
     }
 
     /// List all rules for a relation
     pub fn list_rules_for_relation(&self, relation: &str) -> Vec<Rule> {
-        let by_name = self.rules_by_name.read().unwrap();
+        let by_name = self.rules_by_name.read();
         by_name
             .values()
             .filter(|r| r.qualified_relation() == relation || r.relation == relation)
@@ -310,7 +311,7 @@ impl RulesManager {
 
     /// List all rules
     pub fn list_all_rules(&self) -> Vec<Rule> {
-        let by_name = self.rules_by_name.read().unwrap();
+        let by_name = self.rules_by_name.read();
         by_name.values().cloned().collect()
     }
 
@@ -332,7 +333,7 @@ impl RulesManager {
 
     /// Check if relation has any rules
     pub fn has_rules(&self, relation: &str) -> bool {
-        let by_name = self.rules_by_name.read().unwrap();
+        let by_name = self.rules_by_name.read();
         by_name
             .values()
             .any(|r| r.qualified_relation() == relation || r.relation == relation)

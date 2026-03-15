@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::Instant;
 
 use crate::procedures::{
@@ -512,7 +513,7 @@ impl TriggerManager {
             trigger.table.clone()
         };
 
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
         let table_triggers = triggers.entry(table_key).or_insert_with(Vec::new);
 
         // Check for duplicate name
@@ -539,7 +540,7 @@ impl TriggerManager {
             table.to_string()
         };
 
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
         if let Some(table_triggers) = triggers.get_mut(&table_key) {
             let len_before = table_triggers.len();
             table_triggers.retain(|t| t.name != name);
@@ -556,7 +557,7 @@ impl TriggerManager {
         timing: TriggerTiming,
         event: TriggerEvent,
     ) -> Vec<TriggerDefinition> {
-        if !*self.enabled.read().unwrap() {
+        if !*self.enabled.read() {
             return Vec::new();
         }
 
@@ -566,7 +567,7 @@ impl TriggerManager {
             table.to_string()
         };
 
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         triggers.get(&table_key)
             .map(|ts| {
                 ts.iter()
@@ -589,7 +590,7 @@ impl TriggerManager {
             table.to_string()
         };
 
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
         if let Some(table_triggers) = triggers.get_mut(&table_key) {
             if let Some(trigger) = table_triggers.iter_mut().find(|t| t.name == name) {
                 trigger.enabled = enabled;
@@ -601,7 +602,7 @@ impl TriggerManager {
 
     /// Enable/disable all triggers
     pub fn set_all_enabled(&self, enabled: bool) {
-        *self.enabled.write().unwrap() = enabled;
+        *self.enabled.write() = enabled;
     }
 
     /// Execute triggers for an operation
@@ -627,7 +628,7 @@ impl TriggerManager {
         for trigger in triggers {
             let result = executor.execute(&trigger, &current_ctx);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_executions += 1;
 
             match result {
@@ -655,19 +656,19 @@ impl TriggerManager {
         }
 
         let elapsed = start.elapsed().as_micros() as u64;
-        self.stats.write().unwrap().total_execution_time_us += elapsed;
+        self.stats.write().total_execution_time_us += elapsed;
 
         Ok(final_result)
     }
 
     /// Get trigger statistics
     pub fn stats(&self) -> TriggerStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        *self.stats.write().unwrap() = TriggerStats::default();
+        *self.stats.write() = TriggerStats::default();
     }
 
     /// List all triggers for a table
@@ -678,13 +679,13 @@ impl TriggerManager {
             table.to_string()
         };
 
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         triggers.get(&table_key).cloned().unwrap_or_default()
     }
 
     /// List all triggers
     pub fn list_all(&self) -> Vec<(String, TriggerDefinition)> {
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         let mut result = Vec::new();
 
         for (table, trigs) in triggers.iter() {

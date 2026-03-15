@@ -10,7 +10,8 @@
 //! - Workflow monitoring and logging
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Workflow definition
@@ -876,7 +877,6 @@ impl WorkflowRegistry {
     pub fn register(&self, workflow: Workflow) -> Result<(), WorkflowError> {
         self.engine
             .write()
-            .map_err(|e| WorkflowError::ExecutionError(e.to_string()))?
             .register_workflow(workflow)
     }
 
@@ -889,7 +889,6 @@ impl WorkflowRegistry {
     ) -> Result<String, WorkflowError> {
         self.engine
             .write()
-            .map_err(|e| WorkflowError::ExecutionError(e.to_string()))?
             .start_run(workflow_id, trigger, params)
     }
 
@@ -897,7 +896,6 @@ impl WorkflowRegistry {
     pub fn get_run_stats(&self, run_id: &str) -> Result<RunStats, WorkflowError> {
         self.engine
             .read()
-            .map_err(|e| WorkflowError::ExecutionError(e.to_string()))?
             .get_run_stats(run_id)
     }
 
@@ -905,8 +903,7 @@ impl WorkflowRegistry {
     pub fn list_workflows(&self) -> Result<Vec<String>, WorkflowError> {
         let engine = self
             .engine
-            .read()
-            .map_err(|e| WorkflowError::ExecutionError(e.to_string()))?;
+            .read();
         Ok(engine.workflows.keys().cloned().collect())
     }
 }

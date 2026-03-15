@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
+use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -283,7 +284,7 @@ impl MemoryContext {
             allow_allocations: AtomicBool::new(true),
         });
 
-        let mut children = parent.children.write().unwrap();
+        let mut children = parent.children.write();
         children.push(child.clone());
 
         child
@@ -317,7 +318,7 @@ impl MemoryContext {
     /// Get total usage including children
     pub fn total_usage(&self) -> u64 {
         let mut total = self.current_usage();
-        let children = self.children.read().unwrap();
+        let children = self.children.read();
         for child in children.iter() {
             total += child.total_usage();
         }
@@ -392,9 +393,9 @@ impl MemoryContext {
         let ptr_addr = ptr as usize;
 
         {
-            let mut blocks = self.blocks.write().unwrap();
-            let mut free_slots = self.free_slots.write().unwrap();
-            let mut block_map = self.block_map.write().unwrap();
+            let mut blocks = self.blocks.write();
+            let mut free_slots = self.free_slots.write();
+            let mut block_map = self.block_map.write();
 
             // Try to reuse a freed slot
             let idx = if let Some(free_idx) = free_slots.pop() {
@@ -446,9 +447,9 @@ impl MemoryContext {
     pub fn dealloc(&self, ptr: *mut u8) -> bool {
         let ptr_addr = ptr as usize;
 
-        let mut block_map = self.block_map.write().unwrap();
-        let mut blocks = self.blocks.write().unwrap();
-        let mut free_slots = self.free_slots.write().unwrap();
+        let mut block_map = self.block_map.write();
+        let mut blocks = self.blocks.write();
+        let mut free_slots = self.free_slots.write();
 
         if let Some(idx) = block_map.remove(&ptr_addr) {
             if idx < blocks.len() {
@@ -478,16 +479,16 @@ impl MemoryContext {
     /// Reset the context, freeing all allocations
     pub fn reset(&self) {
         // Reset all children first
-        let children = self.children.read().unwrap();
+        let children = self.children.read();
         for child in children.iter() {
             child.reset();
         }
         drop(children);
 
         // Clear our allocations
-        let mut blocks = self.blocks.write().unwrap();
-        let mut block_map = self.block_map.write().unwrap();
-        let mut free_slots = self.free_slots.write().unwrap();
+        let mut blocks = self.blocks.write();
+        let mut block_map = self.block_map.write();
+        let mut free_slots = self.free_slots.write();
 
         blocks.clear();
         block_map.clear();
@@ -524,17 +525,17 @@ impl MemoryContext {
 
     /// Get number of children
     pub fn child_count(&self) -> usize {
-        self.children.read().unwrap().len()
+        self.children.read().len()
     }
 
     /// Get all child contexts
     pub fn children(&self) -> Vec<Arc<MemoryContext>> {
-        self.children.read().unwrap().clone()
+        self.children.read().clone()
     }
 
     /// Get number of active blocks
     pub fn block_count(&self) -> usize {
-        self.blocks.read().unwrap().len()
+        self.blocks.read().len()
     }
 
     /// Print context tree
@@ -548,7 +549,7 @@ impl MemoryContext {
             self.block_count()
         );
 
-        let children = self.children.read().unwrap();
+        let children = self.children.read();
         for child in children.iter() {
             result.push_str(&child.print_tree(indent + 2));
         }
@@ -772,7 +773,7 @@ impl MemoryContextManager {
             work_mem,
         ));
 
-        let mut contexts = self.query_contexts.write().unwrap();
+        let mut contexts = self.query_contexts.write();
         contexts.insert(query_id, ctx.clone());
 
         self.stats.contexts_created.fetch_add(1, Ordering::Relaxed);
@@ -783,13 +784,13 @@ impl MemoryContextManager {
 
     /// Get a query context
     pub fn get_query_context(&self, query_id: u64) -> Option<Arc<QueryMemoryContext>> {
-        let contexts = self.query_contexts.read().unwrap();
+        let contexts = self.query_contexts.read();
         contexts.get(&query_id).cloned()
     }
 
     /// Release a query context
     pub fn release_query_context(&self, query_id: u64) {
-        let mut contexts = self.query_contexts.write().unwrap();
+        let mut contexts = self.query_contexts.write();
         if let Some(ctx) = contexts.remove(&query_id) {
             ctx.reset();
             self.stats.contexts_destroyed.fetch_add(1, Ordering::Relaxed);
@@ -825,7 +826,7 @@ impl MemoryContextManager {
 
     /// List all query contexts
     pub fn list_query_contexts(&self) -> Vec<(u64, u64)> {
-        let contexts = self.query_contexts.read().unwrap();
+        let contexts = self.query_contexts.read();
         contexts
             .iter()
             .map(|(id, ctx)| (*id, ctx.total_usage()))
@@ -839,7 +840,7 @@ impl MemoryContextManager {
 
     /// Reset all contexts
     pub fn reset_all(&self) {
-        let mut contexts = self.query_contexts.write().unwrap();
+        let mut contexts = self.query_contexts.write();
         let count = contexts.len();
         for (_id, ctx) in contexts.drain() {
             ctx.reset();
@@ -918,19 +919,19 @@ impl AllocationTracker {
         };
 
         {
-            let mut by_size = self.by_size.write().unwrap();
+            let mut by_size = self.by_size.write();
             *by_size.entry(bucket).or_insert(0) += 1;
         }
 
         // Track by context
         {
-            let mut by_context = self.by_context.write().unwrap();
+            let mut by_context = self.by_context.write();
             *by_context.entry(context_name.to_string()).or_insert(0) += 1;
         }
 
         // Track large allocations
         if size > 1024 * 1024 {
-            let mut large = self.large_allocations.write().unwrap();
+            let mut large = self.large_allocations.write();
             large.push((context_name.to_string(), size, description.to_string()));
         }
     }
@@ -938,17 +939,17 @@ impl AllocationTracker {
     /// Get allocation summary
     pub fn summary(&self) -> AllocationSummary {
         AllocationSummary {
-            by_size: self.by_size.read().unwrap().clone(),
-            by_context: self.by_context.read().unwrap().clone(),
-            large_allocations: self.large_allocations.read().unwrap().clone(),
+            by_size: self.by_size.read().clone(),
+            by_context: self.by_context.read().clone(),
+            large_allocations: self.large_allocations.read().clone(),
         }
     }
 
     /// Reset tracking data
     pub fn reset(&self) {
-        self.by_size.write().unwrap().clear();
-        self.by_context.write().unwrap().clear();
-        self.large_allocations.write().unwrap().clear();
+        self.by_size.write().clear();
+        self.by_context.write().clear();
+        self.large_allocations.write().clear();
     }
 }
 

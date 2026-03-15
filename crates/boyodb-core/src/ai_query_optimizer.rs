@@ -4,7 +4,9 @@
 //! Uses features like cardinality estimation, cost prediction, and adaptive plan selection.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Query feature vector for ML model
@@ -475,7 +477,7 @@ impl AiQueryOptimizer {
         alternatives: &[PlanAlternative],
     ) -> OptimizationResult {
         let start = Instant::now();
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.queries_optimized += 1;
         stats.plans_generated += alternatives.len() as u64;
         drop(stats);
@@ -499,8 +501,8 @@ impl AiQueryOptimizer {
         }
 
         // Score each alternative
-        let weights = self.weights.read().unwrap();
-        let history = self.history.read().unwrap();
+        let weights = self.weights.read();
+        let history = self.history.read();
 
         let mut scores: Vec<(u32, f64, String)> = alternatives.iter().map(|alt| {
             let mut score = 0.0;
@@ -545,7 +547,7 @@ impl AiQueryOptimizer {
             0.0
         };
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         if confidence > 0.5 {
             stats.ml_selections += 1;
         } else {
@@ -586,7 +588,7 @@ impl AiQueryOptimizer {
 
     /// Record execution result for learning
     pub fn record_execution(&self, history_entry: ExecutionHistory) {
-        let mut history = self.history.write().unwrap();
+        let mut history = self.history.write();
 
         // Limit history size
         if history.len() >= self.history_limit {
@@ -597,10 +599,10 @@ impl AiQueryOptimizer {
         drop(history);
 
         // Update cardinality model
-        let mut cardinality = self.cardinality.write().unwrap();
+        let mut cardinality = self.cardinality.write();
         cardinality.update_from_execution(&history_entry);
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.model_updates += 1;
     }
 
@@ -610,7 +612,7 @@ impl AiQueryOptimizer {
             return; // Prediction was correct
         }
 
-        let mut weights = self.weights.write().unwrap();
+        let mut weights = self.weights.write();
         let lr = weights.learning_rate;
 
         // Find the alternatives
@@ -643,27 +645,27 @@ impl AiQueryOptimizer {
 
     /// Get cardinality estimate
     pub fn estimate_cardinality(&self, table: &str, predicates: &[Predicate]) -> u64 {
-        self.cardinality.read().unwrap().estimate_scan(table, predicates)
+        self.cardinality.read().estimate_scan(table, predicates)
     }
 
     /// Add table statistics
     pub fn add_table_stats(&self, table: String, stats: TableStats) {
-        self.cardinality.write().unwrap().add_table_stats(table, stats);
+        self.cardinality.write().add_table_stats(table, stats);
     }
 
     /// Add column statistics
     pub fn add_column_stats(&self, table: &str, column: &str, stats: ColumnStats) {
-        self.cardinality.write().unwrap().add_column_stats(table, column, stats);
+        self.cardinality.write().add_column_stats(table, column, stats);
     }
 
     /// Get optimizer statistics
     pub fn stats(&self) -> OptimizerStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get current weights
     pub fn get_weights(&self) -> PlanScoringWeights {
-        self.weights.read().unwrap().clone()
+        self.weights.read().clone()
     }
 }
 

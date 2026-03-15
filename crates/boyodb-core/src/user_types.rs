@@ -9,7 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 /// User type error
@@ -419,7 +420,7 @@ impl UserTypeManager {
         before: Option<&str>,
         after: Option<&str>,
     ) -> Result<(), UserTypeError> {
-        let mut types = self.types.write().unwrap();
+        let mut types = self.types.write();
         let user_type = types
             .get_mut(id)
             .ok_or_else(|| UserTypeError::TypeNotFound(id.full_name()))?;
@@ -516,7 +517,7 @@ impl UserTypeManager {
     /// Drop a user type
     pub fn drop_type(&self, id: &TypeId, cascade: bool) -> Result<(), UserTypeError> {
         // Check dependents
-        let deps = self.dependencies.read().unwrap();
+        let deps = self.dependencies.read();
         if let Some(dependents) = deps.get(id) {
             if !dependents.is_empty() && !cascade {
                 return Err(UserTypeError::HasDependents(format!(
@@ -537,7 +538,6 @@ impl UserTypeManager {
             let dependents = self
                 .dependencies
                 .read()
-                .unwrap()
                 .get(id)
                 .cloned()
                 .unwrap_or_default();
@@ -548,13 +548,13 @@ impl UserTypeManager {
         }
 
         // Remove type
-        let mut types = self.types.write().unwrap();
+        let mut types = self.types.write();
         types
             .remove(id)
             .ok_or_else(|| UserTypeError::TypeNotFound(id.full_name()))?;
 
         // Clean up dependencies
-        let mut deps = self.dependencies.write().unwrap();
+        let mut deps = self.dependencies.write();
         deps.remove(id);
         for dependents in deps.values_mut() {
             dependents.retain(|d| d != id);
@@ -565,14 +565,13 @@ impl UserTypeManager {
 
     /// Get a type
     pub fn get_type(&self, id: &TypeId) -> Option<UserType> {
-        self.types.read().unwrap().get(id).cloned()
+        self.types.read().get(id).cloned()
     }
 
     /// List all types in schema
     pub fn list_types(&self, schema: &str) -> Vec<UserType> {
         self.types
             .read()
-            .unwrap()
             .values()
             .filter(|t| t.id.schema == schema)
             .cloned()
@@ -581,7 +580,7 @@ impl UserTypeManager {
 
     /// Check if a type exists
     pub fn type_exists(&self, id: &TypeId) -> bool {
-        self.types.read().unwrap().contains_key(id)
+        self.types.read().contains_key(id)
     }
 
     /// Create a type cast
@@ -594,7 +593,7 @@ impl UserTypeManager {
             return Err(UserTypeError::TypeNotFound(cast.target.full_name()));
         }
 
-        let mut casts = self.casts.write().unwrap();
+        let mut casts = self.casts.write();
         casts.insert((cast.source.clone(), cast.target.clone()), cast);
 
         Ok(())
@@ -602,7 +601,7 @@ impl UserTypeManager {
 
     /// Drop a cast
     pub fn drop_cast(&self, source: &TypeId, target: &TypeId) -> Result<(), UserTypeError> {
-        let mut casts = self.casts.write().unwrap();
+        let mut casts = self.casts.write();
         casts
             .remove(&(source.clone(), target.clone()))
             .ok_or_else(|| UserTypeError::CastNotFound(source.full_name(), target.full_name()))?;
@@ -613,7 +612,6 @@ impl UserTypeManager {
     pub fn get_cast(&self, source: &TypeId, target: &TypeId) -> Option<TypeCast> {
         self.casts
             .read()
-            .unwrap()
             .get(&(source.clone(), target.clone()))
             .cloned()
     }
@@ -702,7 +700,7 @@ impl UserTypeManager {
     // Private helpers
 
     fn register_type(&self, user_type: UserType) -> Result<(), UserTypeError> {
-        let mut types = self.types.write().unwrap();
+        let mut types = self.types.write();
 
         if types.contains_key(&user_type.id) {
             return Err(UserTypeError::TypeAlreadyExists(user_type.id.full_name()));

@@ -7,7 +7,8 @@
 //! - Constraint inheritance
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // INHERITANCE TYPES
@@ -331,14 +332,14 @@ impl InheritanceManager {
 
         // Update parent's children list
         for parent in &table.parents {
-            let mut children_map = self.children_map.write().unwrap();
+            let mut children_map = self.children_map.write();
             children_map
                 .entry(parent.parent.clone())
                 .or_default()
                 .push(qualified_name.clone());
         }
 
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         tables.insert(qualified_name, table);
 
         Ok(())
@@ -346,13 +347,13 @@ impl InheritanceManager {
 
     /// Get a table
     pub fn get_table(&self, qualified_name: &str) -> Option<InheritedTable> {
-        let tables = self.tables.read().unwrap();
+        let tables = self.tables.read();
         tables.get(qualified_name).cloned()
     }
 
     /// Get children of a table
     pub fn get_children(&self, qualified_name: &str) -> Vec<String> {
-        let children_map = self.children_map.read().unwrap();
+        let children_map = self.children_map.read();
         children_map
             .get(qualified_name)
             .cloned()
@@ -418,8 +419,8 @@ impl InheritanceManager {
             });
         }
 
-        let mut tables = self.tables.write().unwrap();
-        let mut children_map = self.children_map.write().unwrap();
+        let mut tables = self.tables.write();
+        let mut children_map = self.children_map.write();
 
         // Get parent table columns to inherit
         let parent_table = tables
@@ -492,8 +493,8 @@ impl InheritanceManager {
         child: &str,
         parent: &str,
     ) -> Result<(), InheritanceError> {
-        let mut tables = self.tables.write().unwrap();
-        let mut children_map = self.children_map.write().unwrap();
+        let mut tables = self.tables.write();
+        let mut children_map = self.children_map.write();
 
         // Update child table
         let child_table = tables

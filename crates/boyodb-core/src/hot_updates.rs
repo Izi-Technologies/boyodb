@@ -8,7 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -347,25 +348,25 @@ impl HotUpdateManager {
 
     /// Add an indexed column
     pub fn add_indexed_column(&self, column: &str) {
-        let mut indexed = self.indexed_columns.write().unwrap();
+        let mut indexed = self.indexed_columns.write();
         indexed.insert(column.to_string());
     }
 
     /// Remove an indexed column
     pub fn remove_indexed_column(&self, column: &str) {
-        let mut indexed = self.indexed_columns.write().unwrap();
+        let mut indexed = self.indexed_columns.write();
         indexed.remove(column);
     }
 
     /// Get indexed columns
     pub fn indexed_columns(&self) -> Vec<String> {
-        let indexed = self.indexed_columns.read().unwrap();
+        let indexed = self.indexed_columns.read();
         indexed.iter().cloned().collect()
     }
 
     /// Check if an update can be HOT
     pub fn can_hot_update(&self, modified_columns: &[&str]) -> Result<bool, HotError> {
-        let indexed = self.indexed_columns.read().unwrap();
+        let indexed = self.indexed_columns.read();
 
         for col in modified_columns {
             if indexed.contains(*col) {
@@ -382,7 +383,7 @@ impl HotUpdateManager {
         let tuple = HeapTuple::new(tid, 0, 0, xid, data);
         let tuple_size = tuple.size();
 
-        let mut pages = self.pages.write().unwrap();
+        let mut pages = self.pages.write();
 
         // Find a page with enough space
         let target_space = (self.page_size as f64 * self.fill_factor) as usize;
@@ -410,7 +411,7 @@ impl HotUpdateManager {
             (new_page_id, offset)
         };
 
-        let mut locations = self.tuple_locations.write().unwrap();
+        let mut locations = self.tuple_locations.write();
         locations.insert(tid, (page_id, offset));
 
         Ok(tid)
@@ -434,14 +435,14 @@ impl HotUpdateManager {
             Err(e) => return Err(e),
         };
 
-        let locations = self.tuple_locations.read().unwrap();
+        let locations = self.tuple_locations.read();
         let (page_id, offset) = locations
             .get(&tid)
             .copied()
             .ok_or(HotError::RowNotFound(tid))?;
         drop(locations);
 
-        let mut pages = self.pages.write().unwrap();
+        let mut pages = self.pages.write();
         let page = pages.get_mut(&page_id).ok_or(HotError::RowNotFound(tid))?;
 
         if can_hot {
@@ -470,7 +471,7 @@ impl HotUpdateManager {
                 }
 
                 // Update location mapping
-                let mut locations = self.tuple_locations.write().unwrap();
+                let mut locations = self.tuple_locations.write();
                 locations.insert(tid, (page_id, new_offset));
 
                 self.stats.hot_updates.fetch_add(1, Ordering::Relaxed);
@@ -521,7 +522,7 @@ impl HotUpdateManager {
         };
 
         // Update location
-        let mut locations = self.tuple_locations.write().unwrap();
+        let mut locations = self.tuple_locations.write();
         locations.insert(tid, (new_page_id, new_offset));
 
         Ok(HotUpdateResult::NonHot {
@@ -535,14 +536,14 @@ impl HotUpdateManager {
 
     /// Delete a tuple
     pub fn delete(&self, tid: u64, xid: u64) -> Result<(), HotError> {
-        let locations = self.tuple_locations.read().unwrap();
+        let locations = self.tuple_locations.read();
         let (page_id, offset) = locations
             .get(&tid)
             .copied()
             .ok_or(HotError::RowNotFound(tid))?;
         drop(locations);
 
-        let mut pages = self.pages.write().unwrap();
+        let mut pages = self.pages.write();
         let page = pages.get_mut(&page_id).ok_or(HotError::RowNotFound(tid))?;
 
         if let Some(tuple) = page.get_tuple_mut(offset) {
@@ -555,11 +556,11 @@ impl HotUpdateManager {
 
     /// Get a tuple by ID
     pub fn get(&self, tid: u64, xid: u64) -> Option<HeapTuple> {
-        let locations = self.tuple_locations.read().ok()?;
+        let locations = self.tuple_locations.read();
         let (page_id, offset) = locations.get(&tid).copied()?;
         drop(locations);
 
-        let pages = self.pages.read().ok()?;
+        let pages = self.pages.read();
         let page = pages.get(&page_id)?;
 
         // Follow HOT chain to find visible tuple
@@ -582,7 +583,7 @@ impl HotUpdateManager {
 
     /// Prune HOT chains on all pages
     pub fn prune_all(&self, oldest_active_xid: u64) -> usize {
-        let mut pages = self.pages.write().unwrap();
+        let mut pages = self.pages.write();
         let mut total_pruned = 0;
 
         for page in pages.values_mut() {
@@ -602,12 +603,12 @@ impl HotUpdateManager {
 
     /// Get number of pages
     pub fn page_count(&self) -> usize {
-        self.pages.read().unwrap().len()
+        self.pages.read().len()
     }
 
     /// Get total tuples
     pub fn tuple_count(&self) -> usize {
-        self.tuple_locations.read().unwrap().len()
+        self.tuple_locations.read().len()
     }
 }
 

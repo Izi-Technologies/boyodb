@@ -10,7 +10,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -294,7 +295,6 @@ impl BackupManager {
 
         self.backups
             .write()
-            .unwrap()
             .insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
@@ -310,7 +310,7 @@ impl BackupManager {
     ) -> Result<String, BackupError> {
         // Verify base backup exists
         {
-            let backups = self.backups.read().unwrap();
+            let backups = self.backups.read();
             if !backups.contains_key(base_backup_id) {
                 return Err(BackupError::BaseBackupNotFound(base_backup_id.to_string()));
             }
@@ -338,7 +338,6 @@ impl BackupManager {
 
         self.backups
             .write()
-            .unwrap()
             .insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
@@ -352,7 +351,7 @@ impl BackupManager {
         config: &RestoreConfig,
     ) -> Result<RestoreResult, BackupError> {
         let manifest = {
-            let backups = self.backups.read().unwrap();
+            let backups = self.backups.read();
             backups
                 .get(backup_id)
                 .cloned()
@@ -384,17 +383,17 @@ impl BackupManager {
 
     /// Get backup manifest
     pub fn get_backup(&self, backup_id: &str) -> Option<BackupManifest> {
-        self.backups.read().unwrap().get(backup_id).cloned()
+        self.backups.read().get(backup_id).cloned()
     }
 
     /// List all backups
     pub fn list_backups(&self) -> Vec<BackupManifest> {
-        self.backups.read().unwrap().values().cloned().collect()
+        self.backups.read().values().cloned().collect()
     }
 
     /// Delete a backup
     pub fn delete_backup(&self, backup_id: &str) -> Result<(), BackupError> {
-        let mut backups = self.backups.write().unwrap();
+        let mut backups = self.backups.write();
 
         // Check if any incremental depends on this backup
         let has_dependents = backups
@@ -414,7 +413,7 @@ impl BackupManager {
 
     /// Get current backup progress
     pub fn get_progress(&self) -> Option<BackupProgress> {
-        self.progress.read().unwrap().clone()
+        self.progress.read().clone()
     }
 }
 
@@ -547,13 +546,13 @@ impl TtlManager {
 
     /// Add a TTL rule
     pub fn add_rule(&self, rule: TtlRule) {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write();
         rules.entry(rule.table.clone()).or_default().push(rule);
     }
 
     /// Remove a TTL rule
     pub fn remove_rule(&self, table: &str, rule_name: &str) -> bool {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write();
         if let Some(table_rules) = rules.get_mut(table) {
             let len_before = table_rules.len();
             table_rules.retain(|r| r.name != rule_name);
@@ -566,7 +565,6 @@ impl TtlManager {
     pub fn get_rules(&self, table: &str) -> Vec<TtlRule> {
         self.rules
             .read()
-            .unwrap()
             .get(table)
             .cloned()
             .unwrap_or_default()
@@ -578,7 +576,7 @@ impl TtlManager {
             return false;
         }
 
-        let last_scan = self.last_scan.read().unwrap();
+        let last_scan = self.last_scan.read();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -600,7 +598,6 @@ impl TtlManager {
         // Update last scan time
         self.last_scan
             .write()
-            .unwrap()
             .insert(table.to_string(), now);
 
         let rules = self.get_rules(table);
@@ -801,14 +798,13 @@ impl QuotaManager {
 
     /// Set quota for a user
     pub fn set_quota(&self, user: &str, quota: ResourceQuota) {
-        self.quotas.write().unwrap().insert(user.to_string(), quota);
+        self.quotas.write().insert(user.to_string(), quota);
     }
 
     /// Get quota for a user
     pub fn get_quota(&self, user: &str) -> ResourceQuota {
         self.quotas
             .read()
-            .unwrap()
             .get(user)
             .cloned()
             .unwrap_or_else(|| self.default_quota.clone())
@@ -816,7 +812,7 @@ impl QuotaManager {
 
     /// Remove quota for a user (falls back to default)
     pub fn remove_quota(&self, user: &str) {
-        self.quotas.write().unwrap().remove(user);
+        self.quotas.write().remove(user);
     }
 
     /// Check if starting a new query is allowed
@@ -862,7 +858,7 @@ impl QuotaManager {
 
         // Check execution time
         if let Some(limit) = quota.max_execution_time_ms {
-            let start_times = self.query_start_times.read().unwrap();
+            let start_times = self.query_start_times.read();
             if let Some(start) = start_times.get(query_id) {
                 let elapsed = start.elapsed().as_millis() as u64;
                 if elapsed > limit {
@@ -921,7 +917,6 @@ impl QuotaManager {
     pub fn get_usage(&self, user: &str) -> ResourceUsage {
         self.usage
             .read()
-            .unwrap()
             .get(user)
             .cloned()
             .unwrap_or_default()
@@ -931,19 +926,18 @@ impl QuotaManager {
     pub fn start_query(&self, user: &str, query_id: &str) {
         self.query_start_times
             .write()
-            .unwrap()
             .insert(query_id.to_string(), Instant::now());
 
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         let user_usage = usage.entry(user.to_string()).or_default();
         user_usage.active_queries += 1;
     }
 
     /// End tracking a query
     pub fn end_query(&self, user: &str, query_id: &str) {
-        self.query_start_times.write().unwrap().remove(query_id);
+        self.query_start_times.write().remove(query_id);
 
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         if let Some(user_usage) = usage.get_mut(user) {
             user_usage.active_queries = user_usage.active_queries.saturating_sub(1);
         }
@@ -951,7 +945,7 @@ impl QuotaManager {
 
     /// Update memory usage
     pub fn update_memory(&self, user: &str, delta: i64) {
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         let user_usage = usage.entry(user.to_string()).or_default();
         if delta >= 0 {
             user_usage.memory_used = user_usage.memory_used.saturating_add(delta as u64);
@@ -962,7 +956,7 @@ impl QuotaManager {
 
     /// Update scan statistics
     pub fn update_scan_stats(&self, user: &str, rows: u64, bytes: u64) {
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         let user_usage = usage.entry(user.to_string()).or_default();
         user_usage.rows_scanned += rows;
         user_usage.bytes_scanned += bytes;
@@ -970,7 +964,7 @@ impl QuotaManager {
 
     /// Update result statistics
     pub fn update_result_stats(&self, user: &str, rows: u64, size: u64) {
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         let user_usage = usage.entry(user.to_string()).or_default();
         user_usage.result_rows += rows;
         user_usage.result_size += size;
@@ -978,7 +972,7 @@ impl QuotaManager {
 
     /// Reset usage statistics for a user
     pub fn reset_usage(&self, user: &str) {
-        self.usage.write().unwrap().remove(user);
+        self.usage.write().remove(user);
     }
 }
 
@@ -1226,13 +1220,12 @@ impl QueryProfiler {
         let profile = QueryProfile::new(query_id, sql);
         self.active_profiles
             .write()
-            .unwrap()
             .insert(query_id.to_string(), profile);
     }
 
     /// Add an operator to the profile
     pub fn add_operator(&self, query_id: &str, operator: OperatorProfile) {
-        if let Some(profile) = self.active_profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.active_profiles.write().get_mut(query_id) {
             profile.operators.push(operator);
         }
     }
@@ -1246,7 +1239,7 @@ impl QueryProfiler {
         input_rows: u64,
         output_rows: u64,
     ) {
-        if let Some(profile) = self.active_profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.active_profiles.write().get_mut(query_id) {
             if let Some(op) = profile.operators.iter_mut().find(|o| o.id == operator_id) {
                 op.wall_time_ns += wall_time_ns;
                 op.input_rows += input_rows;
@@ -1258,7 +1251,7 @@ impl QueryProfiler {
 
     /// Update memory statistics
     pub fn update_memory(&self, query_id: &str, memory: u64) {
-        if let Some(profile) = self.active_profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.active_profiles.write().get_mut(query_id) {
             if memory > profile.peak_memory {
                 profile.peak_memory = memory;
             }
@@ -1267,21 +1260,21 @@ impl QueryProfiler {
 
     /// Set planning time
     pub fn set_planning_time(&self, query_id: &str, time_ns: u64) {
-        if let Some(profile) = self.active_profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.active_profiles.write().get_mut(query_id) {
             profile.planning_time_ns = time_ns;
         }
     }
 
     /// Add a warning
     pub fn add_warning(&self, query_id: &str, warning: &str) {
-        if let Some(profile) = self.active_profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.active_profiles.write().get_mut(query_id) {
             profile.warnings.push(warning.to_string());
         }
     }
 
     /// Complete a query profile
     pub fn complete_query(&self, query_id: &str, rows_returned: u64) -> Option<QueryProfile> {
-        let mut profile = self.active_profiles.write().unwrap().remove(query_id)?;
+        let mut profile = self.active_profiles.write().remove(query_id)?;
 
         profile.complete();
         profile.rows_returned = rows_returned;
@@ -1291,7 +1284,7 @@ impl QueryProfiler {
 
         // Check if profile meets threshold
         if profile.total_time_ns >= self.min_time_threshold.load(Ordering::Relaxed) {
-            let mut history = self.history.write().unwrap();
+            let mut history = self.history.write();
             history.push_back(profile.clone());
             if history.len() > self.max_history {
                 history.pop_front();
@@ -1303,19 +1296,18 @@ impl QueryProfiler {
 
     /// Cancel a query profile
     pub fn cancel_query(&self, query_id: &str) {
-        self.active_profiles.write().unwrap().remove(query_id);
+        self.active_profiles.write().remove(query_id);
     }
 
     /// Get active profile
     pub fn get_active(&self, query_id: &str) -> Option<QueryProfile> {
-        self.active_profiles.read().unwrap().get(query_id).cloned()
+        self.active_profiles.read().get(query_id).cloned()
     }
 
     /// Get profile history
     pub fn get_history(&self, limit: usize) -> Vec<QueryProfile> {
         self.history
             .read()
-            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -1325,7 +1317,7 @@ impl QueryProfiler {
 
     /// Get slowest queries from history
     pub fn slowest_queries(&self, limit: usize) -> Vec<QueryProfile> {
-        let history = self.history.read().unwrap();
+        let history = self.history.read();
         let mut queries: Vec<_> = history.iter().cloned().collect();
         queries.sort_by(|a, b| b.total_time_ns.cmp(&a.total_time_ns));
         queries.truncate(limit);
@@ -1345,7 +1337,7 @@ impl QueryProfiler {
 
     /// Clear history
     pub fn clear_history(&self) {
-        self.history.write().unwrap().clear();
+        self.history.write().clear();
     }
 }
 
@@ -1505,7 +1497,7 @@ impl OnlineSchemaChangeManager {
     pub fn start_change(&self, mut change: SchemaChange) -> Result<String, SchemaChangeError> {
         // Check if another change is in progress for this table
         {
-            let active = self.active_changes.read().unwrap();
+            let active = self.active_changes.read();
             let table_changes = active
                 .values()
                 .filter(|c| c.table == change.table && c.database == change.database)
@@ -1518,7 +1510,7 @@ impl OnlineSchemaChangeManager {
 
         // Get current schema version
         let version = {
-            let versions = self.schema_versions.read().unwrap();
+            let versions = self.schema_versions.read();
             let key = format!("{}.{}", change.database, change.table);
             *versions.get(&key).unwrap_or(&0)
         };
@@ -1529,7 +1521,6 @@ impl OnlineSchemaChangeManager {
         let change_id = change.id.clone();
         self.active_changes
             .write()
-            .unwrap()
             .insert(change_id.clone(), change);
 
         Ok(change_id)
@@ -1538,7 +1529,7 @@ impl OnlineSchemaChangeManager {
     /// Execute a schema change (simplified - real implementation would be async)
     pub fn execute_change(&self, change_id: &str) -> Result<(), SchemaChangeError> {
         let mut change = {
-            let mut active = self.active_changes.write().unwrap();
+            let mut active = self.active_changes.write();
             active
                 .get_mut(change_id)
                 .ok_or_else(|| SchemaChangeError::ChangeNotFound(change_id.to_string()))?
@@ -1567,7 +1558,7 @@ impl OnlineSchemaChangeManager {
 
         // Update schema version
         {
-            let mut versions = self.schema_versions.write().unwrap();
+            let mut versions = self.schema_versions.write();
             let key = format!("{}.{}", change.database, change.table);
             let new_version = versions.get(&key).unwrap_or(&0) + 1;
             versions.insert(key, new_version);
@@ -1580,7 +1571,7 @@ impl OnlineSchemaChangeManager {
 
     /// Cancel a schema change
     pub fn cancel_change(&self, change_id: &str) -> Result<(), SchemaChangeError> {
-        let mut active = self.active_changes.write().unwrap();
+        let mut active = self.active_changes.write();
         let change = active
             .get_mut(change_id)
             .ok_or_else(|| SchemaChangeError::ChangeNotFound(change_id.to_string()))?;
@@ -1598,7 +1589,7 @@ impl OnlineSchemaChangeManager {
         );
 
         let change = active.remove(change_id).unwrap();
-        self.history.write().unwrap().push_back(change);
+        self.history.write().push_back(change);
 
         Ok(())
     }
@@ -1607,13 +1598,11 @@ impl OnlineSchemaChangeManager {
     pub fn get_change(&self, change_id: &str) -> Option<SchemaChange> {
         self.active_changes
             .read()
-            .unwrap()
             .get(change_id)
             .cloned()
             .or_else(|| {
                 self.history
                     .read()
-                    .unwrap()
                     .iter()
                     .find(|c| c.id == change_id)
                     .cloned()
@@ -1622,7 +1611,7 @@ impl OnlineSchemaChangeManager {
 
     /// Get progress of a change
     pub fn get_progress(&self, change_id: &str) -> Option<SchemaChangeProgress> {
-        let change = self.active_changes.read().unwrap().get(change_id)?.clone();
+        let change = self.active_changes.read().get(change_id)?.clone();
 
         // Simulated progress
         let progress = match change.state {
@@ -1677,7 +1666,6 @@ impl OnlineSchemaChangeManager {
     pub fn list_active(&self) -> Vec<SchemaChange> {
         self.active_changes
             .read()
-            .unwrap()
             .values()
             .cloned()
             .collect()
@@ -1687,7 +1675,6 @@ impl OnlineSchemaChangeManager {
     pub fn list_history(&self, limit: usize) -> Vec<SchemaChange> {
         self.history
             .read()
-            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -1698,13 +1685,12 @@ impl OnlineSchemaChangeManager {
     fn update_change(&self, change: &SchemaChange) {
         self.active_changes
             .write()
-            .unwrap()
             .insert(change.id.clone(), change.clone());
     }
 
     fn complete_change(&self, change: SchemaChange) {
-        self.active_changes.write().unwrap().remove(&change.id);
-        self.history.write().unwrap().push_back(change);
+        self.active_changes.write().remove(&change.id);
+        self.history.write().push_back(change);
     }
 }
 

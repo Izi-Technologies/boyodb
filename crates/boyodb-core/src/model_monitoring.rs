@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Statistical test types for drift detection
@@ -336,7 +337,6 @@ impl ModelMonitor {
 
         self.reference_distributions
             .write()
-            .unwrap()
             .insert(feature.to_string(), reference);
     }
 
@@ -344,7 +344,7 @@ impl ModelMonitor {
     pub fn log_prediction(&self, log: PredictionLog) {
         self.stats.total_predictions.fetch_add(1, Ordering::Relaxed);
 
-        let mut predictions = self.predictions.write().unwrap();
+        let mut predictions = self.predictions.write();
         predictions.push(log);
 
         // Evict old predictions if over limit
@@ -357,7 +357,7 @@ impl ModelMonitor {
     pub fn check_drift(&self, feature: &str, current_values: &[f64]) -> Option<DriftResult> {
         self.stats.drift_checks.fetch_add(1, Ordering::Relaxed);
 
-        let refs = self.reference_distributions.read().unwrap();
+        let refs = self.reference_distributions.read();
         let reference = refs.get(feature)?;
 
         let current_stats = self.compute_stats(current_values);
@@ -385,8 +385,8 @@ impl ModelMonitor {
 
     /// Check all features for drift
     pub fn check_all_drift(&self) -> Vec<DriftResult> {
-        let predictions = self.predictions.read().unwrap();
-        let refs = self.reference_distributions.read().unwrap();
+        let predictions = self.predictions.read();
+        let refs = self.reference_distributions.read();
 
         let mut results = Vec::new();
 
@@ -533,7 +533,7 @@ impl ModelMonitor {
 
         let window_start = now - window_seconds * 1000;
 
-        let predictions = self.predictions.read().unwrap();
+        let predictions = self.predictions.read();
         let window_preds: Vec<_> = predictions
             .iter()
             .filter(|p| p.timestamp >= window_start && p.ground_truth.is_some())
@@ -609,12 +609,12 @@ impl ModelMonitor {
 
     /// Add an alert configuration
     pub fn add_alert(&self, config: AlertConfig) {
-        self.alerts.write().unwrap().push(config);
+        self.alerts.write().push(config);
     }
 
     /// Check alerts and trigger if needed
     pub fn check_alerts(&self, metrics: &PerformanceMetrics) -> Vec<Alert> {
-        let alerts = self.alerts.read().unwrap();
+        let alerts = self.alerts.read();
         let mut triggered = Vec::new();
 
         for config in alerts.iter() {
@@ -660,7 +660,7 @@ impl ModelMonitor {
         }
 
         // Store triggered alerts
-        self.triggered_alerts.write().unwrap().extend(triggered.clone());
+        self.triggered_alerts.write().extend(triggered.clone());
 
         triggered
     }
@@ -676,7 +676,7 @@ impl ModelMonitor {
 
     /// Get triggered alerts
     pub fn get_alerts(&self, acknowledged: Option<bool>) -> Vec<Alert> {
-        let alerts = self.triggered_alerts.read().unwrap();
+        let alerts = self.triggered_alerts.read();
         match acknowledged {
             Some(ack) => alerts.iter().filter(|a| a.acknowledged == ack).cloned().collect(),
             None => alerts.clone(),
@@ -685,7 +685,7 @@ impl ModelMonitor {
 
     /// Acknowledge an alert
     pub fn acknowledge_alert(&self, alert_id: u64) -> bool {
-        let mut alerts = self.triggered_alerts.write().unwrap();
+        let mut alerts = self.triggered_alerts.write();
         if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
             alert.acknowledged = true;
             true
@@ -711,17 +711,16 @@ impl MonitoringRegistry {
         let monitor = Arc::new(ModelMonitor::new(model_name, max_predictions));
         self.monitors
             .write()
-            .unwrap()
             .insert(model_name.to_string(), Arc::clone(&monitor));
         monitor
     }
 
     pub fn get(&self, model_name: &str) -> Option<Arc<ModelMonitor>> {
-        self.monitors.read().unwrap().get(model_name).cloned()
+        self.monitors.read().get(model_name).cloned()
     }
 
     pub fn list(&self) -> Vec<String> {
-        self.monitors.read().unwrap().keys().cloned().collect()
+        self.monitors.read().keys().cloned().collect()
     }
 }
 

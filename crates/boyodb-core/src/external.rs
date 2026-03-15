@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -259,7 +260,6 @@ impl ObjectStore for InMemoryObjectStore {
         let key = Self::key(path);
         self.objects
             .read()
-            .unwrap()
             .get(&key)
             .map(|(data, _)| data.clone())
             .ok_or_else(|| StorageError::NotFound(path.clone()))
@@ -290,27 +290,25 @@ impl ObjectStore for InMemoryObjectStore {
         };
         self.objects
             .write()
-            .unwrap()
             .insert(key, (data.to_vec(), meta));
         Ok(())
     }
 
     fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let key = Self::key(path);
-        self.objects.write().unwrap().remove(&key);
+        self.objects.write().remove(&key);
         Ok(())
     }
 
     fn exists(&self, path: &ObjectPath) -> Result<bool, StorageError> {
         let key = Self::key(path);
-        Ok(self.objects.read().unwrap().contains_key(&key))
+        Ok(self.objects.read().contains_key(&key))
     }
 
     fn head(&self, path: &ObjectPath) -> Result<ObjectMeta, StorageError> {
         let key = Self::key(path);
         self.objects
             .read()
-            .unwrap()
             .get(&key)
             .map(|(_, meta)| meta.clone())
             .ok_or_else(|| StorageError::NotFound(path.clone()))
@@ -322,7 +320,7 @@ impl ObjectStore for InMemoryObjectStore {
         _continuation_token: Option<&str>,
     ) -> Result<ListResult, StorageError> {
         let prefix = Self::key(path);
-        let objects = self.objects.read().unwrap();
+        let objects = self.objects.read();
 
         let matching: Vec<_> = objects
             .iter()
@@ -364,7 +362,6 @@ impl ObjectStore for InMemoryObjectStore {
 
         self.multipart_uploads
             .write()
-            .unwrap()
             .insert(upload_id.clone(), upload);
         Ok(upload_id)
     }
@@ -385,7 +382,7 @@ impl ObjectStore for InMemoryObjectStore {
             upload_id,
             part_number
         );
-        self.objects.write().unwrap().insert(
+        self.objects.write().insert(
             part_key,
             (
                 data.to_vec(),
@@ -401,7 +398,7 @@ impl ObjectStore for InMemoryObjectStore {
         );
 
         // Track part in upload
-        let mut uploads = self.multipart_uploads.write().unwrap();
+        let mut uploads = self.multipart_uploads.write();
         if let Some(upload) = uploads.get_mut(upload_id) {
             upload.parts.push(UploadPart {
                 part_number,
@@ -429,7 +426,7 @@ impl ObjectStore for InMemoryObjectStore {
                 upload_id,
                 part.part_number
             );
-            if let Some((data, _)) = self.objects.read().unwrap().get(&part_key) {
+            if let Some((data, _)) = self.objects.read().get(&part_key) {
                 combined.extend_from_slice(data);
             }
         }
@@ -445,16 +442,16 @@ impl ObjectStore for InMemoryObjectStore {
                 upload_id,
                 part.part_number
             );
-            self.objects.write().unwrap().remove(&part_key);
+            self.objects.write().remove(&part_key);
         }
 
-        self.multipart_uploads.write().unwrap().remove(upload_id);
+        self.multipart_uploads.write().remove(upload_id);
         Ok(())
     }
 
     fn abort_multipart(&self, path: &ObjectPath, upload_id: &str) -> Result<(), StorageError> {
         // Clean up parts
-        let uploads = self.multipart_uploads.read().unwrap();
+        let uploads = self.multipart_uploads.read();
         if let Some(upload) = uploads.get(upload_id) {
             for part in &upload.parts {
                 let part_key = format!(
@@ -463,12 +460,12 @@ impl ObjectStore for InMemoryObjectStore {
                     upload_id,
                     part.part_number
                 );
-                self.objects.write().unwrap().remove(&part_key);
+                self.objects.write().remove(&part_key);
             }
         }
         drop(uploads);
 
-        self.multipart_uploads.write().unwrap().remove(upload_id);
+        self.multipart_uploads.write().remove(upload_id);
         Ok(())
     }
 }
@@ -546,7 +543,7 @@ impl CachedObjectStore {
     }
 
     fn evict_if_needed(&self) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         let total_size: usize = cache.values().map(|e| e.size).sum();
 
         if total_size > self.max_cache_size {
@@ -576,7 +573,7 @@ impl ObjectStore for CachedObjectStore {
 
         // Check cache
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read();
             if let Some(entry) = cache.get(&key) {
                 if entry.cached_at.elapsed() < self.ttl {
                     return Ok(entry.data.clone());
@@ -590,7 +587,7 @@ impl ObjectStore for CachedObjectStore {
         // Cache the result
         self.evict_if_needed();
         {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write();
             cache.insert(
                 key,
                 CacheEntry {
@@ -612,13 +609,13 @@ impl ObjectStore for CachedObjectStore {
     fn put(&self, path: &ObjectPath, data: &[u8]) -> Result<(), StorageError> {
         // Invalidate cache on write
         let key = Self::cache_key(path);
-        self.cache.write().unwrap().remove(&key);
+        self.cache.write().remove(&key);
         self.inner.put(path, data)
     }
 
     fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let key = Self::cache_key(path);
-        self.cache.write().unwrap().remove(&key);
+        self.cache.write().remove(&key);
         self.inner.delete(path)
     }
 
@@ -663,7 +660,7 @@ impl ObjectStore for CachedObjectStore {
         parts: &[UploadPart],
     ) -> Result<(), StorageError> {
         let key = Self::cache_key(path);
-        self.cache.write().unwrap().remove(&key);
+        self.cache.write().remove(&key);
         self.inner.complete_multipart(path, upload_id, parts)
     }
 
@@ -1399,35 +1396,34 @@ impl DictionaryManager {
     pub fn register(&self, dict: DictionaryTable) {
         self.dictionaries
             .write()
-            .unwrap()
             .insert(dict.name.clone(), dict);
     }
 
     /// Unregister a dictionary
     pub fn unregister(&self, name: &str) -> Option<DictionaryTable> {
-        self.dictionaries.write().unwrap().remove(name)
+        self.dictionaries.write().remove(name)
     }
 
     /// Get a dictionary (for reading)
     pub fn get(&self, name: &str) -> Option<DictionaryTable> {
-        self.dictionaries.read().unwrap().get(name).cloned()
+        self.dictionaries.read().get(name).cloned()
     }
 
     /// Lookup in a dictionary
     pub fn lookup(&self, dict_name: &str, key: &DictionaryKey) -> Option<Vec<DictionaryValue>> {
-        let mut dicts = self.dictionaries.write().unwrap();
+        let mut dicts = self.dictionaries.write();
         dicts.get_mut(dict_name)?.lookup(key).cloned()
     }
 
     /// List all dictionaries
     pub fn list(&self) -> Vec<String> {
-        self.dictionaries.read().unwrap().keys().cloned().collect()
+        self.dictionaries.read().keys().cloned().collect()
     }
 
     /// Refresh all dictionaries that need it
     pub fn refresh_all(&self) -> HashMap<String, Result<usize, DictionaryError>> {
         let mut results = HashMap::new();
-        let mut dicts = self.dictionaries.write().unwrap();
+        let mut dicts = self.dictionaries.write();
 
         for (name, dict) in dicts.iter_mut() {
             if dict.needs_refresh() {
@@ -1665,7 +1661,7 @@ impl ExternalTableManager {
     pub fn create_table(&self, table: ExternalTable) -> Result<(), ExternalTableError> {
         let key = format!("{}.{}", table.database, table.name);
 
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         if tables.contains_key(&key) {
             return Err(ExternalTableError::AlreadyExists(key));
         }
@@ -1684,7 +1680,6 @@ impl ExternalTableManager {
 
         self.tables
             .write()
-            .unwrap()
             .remove(&key)
             .ok_or_else(|| ExternalTableError::NotFound(key))
     }
@@ -1692,7 +1687,7 @@ impl ExternalTableManager {
     /// Get external table definition
     pub fn get_table(&self, database: &str, name: &str) -> Option<ExternalTable> {
         let key = format!("{}.{}", database, name);
-        self.tables.read().unwrap().get(&key).cloned()
+        self.tables.read().get(&key).cloned()
     }
 
     /// List external tables in a database
@@ -1700,7 +1695,6 @@ impl ExternalTableManager {
         let prefix = format!("{}.", database);
         self.tables
             .read()
-            .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, v)| v.clone())

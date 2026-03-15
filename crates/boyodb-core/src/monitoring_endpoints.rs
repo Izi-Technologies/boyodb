@@ -19,7 +19,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -257,14 +258,14 @@ impl Counter {
 
     /// Add a value
     pub fn add(&self, labels: Vec<String>, value: u64) {
-        let values = self.values.read().unwrap();
+        let values = self.values.read();
         if let Some(counter) = values.get(&labels) {
             counter.fetch_add(value, Ordering::Relaxed);
             return;
         }
         drop(values);
 
-        let mut values = self.values.write().unwrap();
+        let mut values = self.values.write();
         values
             .entry(labels)
             .or_insert_with(|| AtomicU64::new(0))
@@ -275,7 +276,6 @@ impl Counter {
     pub fn get(&self, labels: &[String]) -> u64 {
         self.values
             .read()
-            .unwrap()
             .get(labels)
             .map(|v| v.load(Ordering::Relaxed))
             .unwrap_or(0)
@@ -287,7 +287,7 @@ impl Counter {
         output.push_str(&format!("# HELP {} {}\n", self.def.name, self.def.help));
         output.push_str(&format!("# TYPE {} counter\n", self.def.name));
 
-        let values = self.values.read().unwrap();
+        let values = self.values.read();
         for (labels, value) in values.iter() {
             let label_str = self.format_labels(labels);
             output.push_str(&format!(
@@ -342,7 +342,7 @@ impl Gauge {
 
     /// Set value
     pub fn set(&self, labels: Vec<String>, value: i64) {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.values.write();
         values
             .entry(labels)
             .or_insert_with(|| AtomicI64::new(0))
@@ -361,14 +361,14 @@ impl Gauge {
 
     /// Add value
     pub fn add(&self, labels: Vec<String>, value: i64) {
-        let values = self.values.read().unwrap();
+        let values = self.values.read();
         if let Some(gauge) = values.get(&labels) {
             gauge.fetch_add(value, Ordering::Relaxed);
             return;
         }
         drop(values);
 
-        let mut values = self.values.write().unwrap();
+        let mut values = self.values.write();
         values
             .entry(labels)
             .or_insert_with(|| AtomicI64::new(0))
@@ -379,7 +379,6 @@ impl Gauge {
     pub fn get(&self, labels: &[String]) -> i64 {
         self.values
             .read()
-            .unwrap()
             .get(labels)
             .map(|v| v.load(Ordering::Relaxed))
             .unwrap_or(0)
@@ -391,7 +390,7 @@ impl Gauge {
         output.push_str(&format!("# HELP {} {}\n", self.def.name, self.def.help));
         output.push_str(&format!("# TYPE {} gauge\n", self.def.name));
 
-        let values = self.values.read().unwrap();
+        let values = self.values.read();
         for (labels, value) in values.iter() {
             let label_str = self.format_labels(labels);
             output.push_str(&format!(
@@ -467,7 +466,7 @@ impl Histogram {
     pub fn observe(&self, labels: Vec<String>, value: f64) {
         // Update buckets
         {
-            let counts = self.bucket_counts.read().unwrap();
+            let counts = self.bucket_counts.read();
             if let Some(bucket_vec) = counts.get(&labels) {
                 for (i, &boundary) in self.buckets.iter().enumerate() {
                     if value <= boundary {
@@ -486,7 +485,7 @@ impl Histogram {
 
         // Update sum
         {
-            let sums = self.sums.read().unwrap();
+            let sums = self.sums.read();
             if let Some(sum) = sums.get(&labels) {
                 sum.fetch_add((value * 1000.0) as u64, Ordering::Relaxed);
             }
@@ -494,7 +493,7 @@ impl Histogram {
 
         // Update count
         {
-            let counts = self.counts.read().unwrap();
+            let counts = self.counts.read();
             if let Some(count) = counts.get(&labels) {
                 count.fetch_add(1, Ordering::Relaxed);
             }
@@ -502,7 +501,7 @@ impl Histogram {
     }
 
     fn init_buckets(&self, labels: Vec<String>) {
-        let mut bucket_counts = self.bucket_counts.write().unwrap();
+        let mut bucket_counts = self.bucket_counts.write();
         let bucket_vec: Vec<AtomicU64> = (0..=self.buckets.len())
             .map(|_| AtomicU64::new(0))
             .collect();
@@ -510,9 +509,8 @@ impl Histogram {
 
         self.sums
             .write()
-            .unwrap()
             .insert(labels.clone(), AtomicU64::new(0));
-        self.counts.write().unwrap().insert(labels, AtomicU64::new(0));
+        self.counts.write().insert(labels, AtomicU64::new(0));
     }
 
     /// Format as Prometheus
@@ -521,9 +519,9 @@ impl Histogram {
         output.push_str(&format!("# HELP {} {}\n", self.def.name, self.def.help));
         output.push_str(&format!("# TYPE {} histogram\n", self.def.name));
 
-        let bucket_counts = self.bucket_counts.read().unwrap();
-        let sums = self.sums.read().unwrap();
-        let counts = self.counts.read().unwrap();
+        let bucket_counts = self.bucket_counts.read();
+        let sums = self.sums.read();
+        let counts = self.counts.read();
 
         for (labels, bucket_vec) in bucket_counts.iter() {
             let base_label_str = self.format_labels(labels);
@@ -633,7 +631,7 @@ impl MetricsRegistry {
     pub fn register_counter(&self, counter: Counter) -> Arc<Counter> {
         let name = counter.def.name.clone();
         let arc = Arc::new(counter);
-        self.counters.write().unwrap().insert(name, Arc::clone(&arc));
+        self.counters.write().insert(name, Arc::clone(&arc));
         arc
     }
 
@@ -641,7 +639,7 @@ impl MetricsRegistry {
     pub fn register_gauge(&self, gauge: Gauge) -> Arc<Gauge> {
         let name = gauge.def.name.clone();
         let arc = Arc::new(gauge);
-        self.gauges.write().unwrap().insert(name, Arc::clone(&arc));
+        self.gauges.write().insert(name, Arc::clone(&arc));
         arc
     }
 
@@ -649,38 +647,38 @@ impl MetricsRegistry {
     pub fn register_histogram(&self, histogram: Histogram) -> Arc<Histogram> {
         let name = histogram.def.name.clone();
         let arc = Arc::new(histogram);
-        self.histograms.write().unwrap().insert(name, Arc::clone(&arc));
+        self.histograms.write().insert(name, Arc::clone(&arc));
         arc
     }
 
     /// Get a counter
     pub fn get_counter(&self, name: &str) -> Option<Arc<Counter>> {
-        self.counters.read().unwrap().get(name).cloned()
+        self.counters.read().get(name).cloned()
     }
 
     /// Get a gauge
     pub fn get_gauge(&self, name: &str) -> Option<Arc<Gauge>> {
-        self.gauges.read().unwrap().get(name).cloned()
+        self.gauges.read().get(name).cloned()
     }
 
     /// Get a histogram
     pub fn get_histogram(&self, name: &str) -> Option<Arc<Histogram>> {
-        self.histograms.read().unwrap().get(name).cloned()
+        self.histograms.read().get(name).cloned()
     }
 
     /// Export all metrics in Prometheus format
     pub fn export_prometheus(&self) -> String {
         let mut output = String::new();
 
-        for counter in self.counters.read().unwrap().values() {
+        for counter in self.counters.read().values() {
             output.push_str(&counter.to_prometheus());
         }
 
-        for gauge in self.gauges.read().unwrap().values() {
+        for gauge in self.gauges.read().values() {
             output.push_str(&gauge.to_prometheus());
         }
 
-        for histogram in self.histograms.read().unwrap().values() {
+        for histogram in self.histograms.read().values() {
             output.push_str(&histogram.to_prometheus());
         }
 
@@ -691,7 +689,7 @@ impl MetricsRegistry {
     pub fn export_json(&self) -> String {
         let mut metrics = Vec::new();
 
-        for (name, counter) in self.counters.read().unwrap().iter() {
+        for (name, counter) in self.counters.read().iter() {
             metrics.push(format!(
                 r#"{{"name":"{}","type":"counter","value":{}}}"#,
                 name,
@@ -699,7 +697,7 @@ impl MetricsRegistry {
             ));
         }
 
-        for (name, gauge) in self.gauges.read().unwrap().iter() {
+        for (name, gauge) in self.gauges.read().iter() {
             metrics.push(format!(
                 r#"{{"name":"{}","type":"gauge","value":{}}}"#,
                 name,
@@ -774,7 +772,6 @@ impl MonitoringManager {
     pub fn register_health_check(&self, name: &str, check: HealthCheckFn) {
         self.health_checks
             .write()
-            .unwrap()
             .insert(name.to_string(), check);
     }
 
@@ -805,7 +802,7 @@ impl MonitoringManager {
 
     /// Perform health check
     pub fn health_check(&self) -> HealthCheckResult {
-        let checks = self.health_checks.read().unwrap();
+        let checks = self.health_checks.read();
         let mut components = HashMap::new();
         let mut overall_status = HealthStatus::Healthy;
 

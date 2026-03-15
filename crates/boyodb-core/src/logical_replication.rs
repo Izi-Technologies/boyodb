@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Logical replication error types
@@ -503,7 +504,7 @@ impl LogicalReplicationManager {
 
     /// Create a publication
     pub fn create_publication(&self, publication: Publication) -> Result<(), ReplicationError> {
-        let mut publications = self.publications.write().unwrap();
+        let mut publications = self.publications.write();
 
         if publications.contains_key(&publication.name) {
             return Err(ReplicationError::InvalidOperation(format!(
@@ -518,7 +519,7 @@ impl LogicalReplicationManager {
 
     /// Drop a publication
     pub fn drop_publication(&self, name: &str) -> Result<Publication, ReplicationError> {
-        let mut publications = self.publications.write().unwrap();
+        let mut publications = self.publications.write();
 
         publications
             .remove(name)
@@ -531,7 +532,7 @@ impl LogicalReplicationManager {
         name: &str,
         tables: Vec<PublicationTable>,
     ) -> Result<(), ReplicationError> {
-        let mut publications = self.publications.write().unwrap();
+        let mut publications = self.publications.write();
 
         let publication = publications
             .get_mut(name)
@@ -560,7 +561,7 @@ impl LogicalReplicationManager {
         name: &str,
         tables: Vec<(String, String)>,
     ) -> Result<(), ReplicationError> {
-        let mut publications = self.publications.write().unwrap();
+        let mut publications = self.publications.write();
 
         let publication = publications
             .get_mut(name)
@@ -583,12 +584,12 @@ impl LogicalReplicationManager {
 
     /// Get publication
     pub fn get_publication(&self, name: &str) -> Option<Publication> {
-        self.publications.read().unwrap().get(name).cloned()
+        self.publications.read().get(name).cloned()
     }
 
     /// List all publications
     pub fn list_publications(&self) -> Vec<Publication> {
-        self.publications.read().unwrap().values().cloned().collect()
+        self.publications.read().values().cloned().collect()
     }
 
     /// Check if table is in publication
@@ -598,7 +599,7 @@ impl LogicalReplicationManager {
         schema: &str,
         table: &str,
     ) -> Result<bool, ReplicationError> {
-        let publications = self.publications.read().unwrap();
+        let publications = self.publications.read();
         let pub_def = publications
             .get(publication)
             .ok_or_else(|| ReplicationError::PublicationNotFound(publication.to_string()))?;
@@ -621,7 +622,7 @@ impl LogicalReplicationManager {
 
     /// Create a subscription
     pub fn create_subscription(&self, subscription: Subscription) -> Result<(), ReplicationError> {
-        let mut subscriptions = self.subscriptions.write().unwrap();
+        let mut subscriptions = self.subscriptions.write();
 
         if subscriptions.contains_key(&subscription.name) {
             return Err(ReplicationError::InvalidOperation(format!(
@@ -648,7 +649,7 @@ impl LogicalReplicationManager {
 
     /// Drop a subscription
     pub fn drop_subscription(&self, name: &str) -> Result<Subscription, ReplicationError> {
-        let mut subscriptions = self.subscriptions.write().unwrap();
+        let mut subscriptions = self.subscriptions.write();
 
         let subscription = subscriptions
             .remove(name)
@@ -658,7 +659,7 @@ impl LogicalReplicationManager {
         let _ = self.drop_replication_slot(&subscription.slot_name);
 
         // Clean up relation states
-        let mut states = self.relation_states.write().unwrap();
+        let mut states = self.relation_states.write();
         states.retain(|(sub, _, _), _| sub != name);
 
         Ok(subscription)
@@ -666,7 +667,7 @@ impl LogicalReplicationManager {
 
     /// Enable subscription
     pub fn enable_subscription(&self, name: &str) -> Result<(), ReplicationError> {
-        let mut subscriptions = self.subscriptions.write().unwrap();
+        let mut subscriptions = self.subscriptions.write();
 
         let subscription = subscriptions
             .get_mut(name)
@@ -679,7 +680,7 @@ impl LogicalReplicationManager {
 
     /// Disable subscription
     pub fn disable_subscription(&self, name: &str) -> Result<(), ReplicationError> {
-        let mut subscriptions = self.subscriptions.write().unwrap();
+        let mut subscriptions = self.subscriptions.write();
 
         let subscription = subscriptions
             .get_mut(name)
@@ -696,7 +697,7 @@ impl LogicalReplicationManager {
         name: &str,
         copy_data: bool,
     ) -> Result<(), ReplicationError> {
-        let subscriptions = self.subscriptions.read().unwrap();
+        let subscriptions = self.subscriptions.read();
 
         let _subscription = subscriptions
             .get(name)
@@ -714,14 +715,13 @@ impl LogicalReplicationManager {
 
     /// Get subscription
     pub fn get_subscription(&self, name: &str) -> Option<Subscription> {
-        self.subscriptions.read().unwrap().get(name).cloned()
+        self.subscriptions.read().get(name).cloned()
     }
 
     /// List all subscriptions
     pub fn list_subscriptions(&self) -> Vec<Subscription> {
         self.subscriptions
             .read()
-            .unwrap()
             .values()
             .cloned()
             .collect()
@@ -741,7 +741,7 @@ impl LogicalReplicationManager {
         temporary: bool,
         two_phase: bool,
     ) -> Result<LSN, ReplicationError> {
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
 
         if slots.contains_key(name) {
             return Err(ReplicationError::SlotAlreadyExists(name.to_string()));
@@ -767,7 +767,6 @@ impl LogicalReplicationManager {
         // Initialize pending changes queue
         self.pending_changes
             .write()
-            .unwrap()
             .insert(name.to_string(), VecDeque::new());
 
         Ok(lsn)
@@ -775,7 +774,7 @@ impl LogicalReplicationManager {
 
     /// Drop a replication slot
     pub fn drop_replication_slot(&self, name: &str) -> Result<(), ReplicationError> {
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
 
         let slot = slots
             .get(name)
@@ -788,14 +787,14 @@ impl LogicalReplicationManager {
         }
 
         slots.remove(name);
-        self.pending_changes.write().unwrap().remove(name);
+        self.pending_changes.write().remove(name);
 
         Ok(())
     }
 
     /// Advance replication slot
     pub fn advance_slot(&self, name: &str, lsn: LSN) -> Result<(), ReplicationError> {
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
 
         let slot = slots
             .get_mut(name)
@@ -810,12 +809,12 @@ impl LogicalReplicationManager {
 
     /// Get slot
     pub fn get_slot(&self, name: &str) -> Option<ReplicationSlot> {
-        self.slots.read().unwrap().get(name).cloned()
+        self.slots.read().get(name).cloned()
     }
 
     /// List all slots
     pub fn list_slots(&self) -> Vec<ReplicationSlot> {
-        self.slots.read().unwrap().values().cloned().collect()
+        self.slots.read().values().cloned().collect()
     }
 
     // ========================================================================
@@ -824,7 +823,7 @@ impl LogicalReplicationManager {
 
     /// Create replication origin
     pub fn create_origin(&self, name: &str) -> Result<(), ReplicationError> {
-        let mut origins = self.origins.write().unwrap();
+        let mut origins = self.origins.write();
 
         if origins.contains_key(name) {
             return Err(ReplicationError::InvalidOperation(format!(
@@ -847,7 +846,7 @@ impl LogicalReplicationManager {
 
     /// Drop replication origin
     pub fn drop_origin(&self, name: &str) -> Result<(), ReplicationError> {
-        let mut origins = self.origins.write().unwrap();
+        let mut origins = self.origins.write();
 
         origins
             .remove(name)
@@ -863,7 +862,7 @@ impl LogicalReplicationManager {
         remote_lsn: LSN,
         local_lsn: LSN,
     ) -> Result<(), ReplicationError> {
-        let mut origins = self.origins.write().unwrap();
+        let mut origins = self.origins.write();
 
         let origin = origins
             .get_mut(name)
@@ -879,7 +878,6 @@ impl LogicalReplicationManager {
     pub fn get_origin_progress(&self, name: &str) -> Option<(LSN, LSN)> {
         self.origins
             .read()
-            .unwrap()
             .get(name)
             .map(|o| (o.remote_lsn, o.local_lsn))
     }
@@ -890,7 +888,7 @@ impl LogicalReplicationManager {
 
     /// Send change to slot
     pub fn send_change(&self, slot_name: &str, change: ChangeEvent) -> Result<(), ReplicationError> {
-        let mut pending = self.pending_changes.write().unwrap();
+        let mut pending = self.pending_changes.write();
 
         let queue = pending
             .get_mut(slot_name)
@@ -898,7 +896,7 @@ impl LogicalReplicationManager {
 
         queue.push_back(change);
 
-        self.stats.write().unwrap().changes_sent += 1;
+        self.stats.write().changes_sent += 1;
 
         Ok(())
     }
@@ -909,7 +907,7 @@ impl LogicalReplicationManager {
         slot_name: &str,
         max_changes: usize,
     ) -> Result<Vec<ChangeEvent>, ReplicationError> {
-        let mut pending = self.pending_changes.write().unwrap();
+        let mut pending = self.pending_changes.write();
 
         let queue = pending
             .get_mut(slot_name)
@@ -925,7 +923,7 @@ impl LogicalReplicationManager {
         }
 
         let count = changes.len() as u64;
-        self.stats.write().unwrap().changes_received += count;
+        self.stats.write().changes_received += count;
 
         Ok(changes)
     }
@@ -937,7 +935,7 @@ impl LogicalReplicationManager {
         change: &ChangeEvent,
     ) -> Result<ApplyResult, ReplicationError> {
         // Check if we should apply based on origin
-        let subscriptions = self.subscriptions.read().unwrap();
+        let subscriptions = self.subscriptions.read();
         let sub = subscriptions
             .get(subscription)
             .ok_or_else(|| ReplicationError::SubscriptionNotFound(subscription.to_string()))?;
@@ -968,28 +966,28 @@ impl LogicalReplicationManager {
             Change::Insert { schema, table, .. } => {
                 // Check for conflicts (duplicate key)
                 // If conflict, resolve based on strategy
-                self.stats.write().unwrap().changes_applied += 1;
+                self.stats.write().changes_applied += 1;
                 ApplyResult::Applied {
                     schema: schema.clone(),
                     table: table.clone(),
                 }
             }
             Change::Update { schema, table, .. } => {
-                self.stats.write().unwrap().changes_applied += 1;
+                self.stats.write().changes_applied += 1;
                 ApplyResult::Applied {
                     schema: schema.clone(),
                     table: table.clone(),
                 }
             }
             Change::Delete { schema, table, .. } => {
-                self.stats.write().unwrap().changes_applied += 1;
+                self.stats.write().changes_applied += 1;
                 ApplyResult::Applied {
                     schema: schema.clone(),
                     table: table.clone(),
                 }
             }
             Change::Commit { xid, .. } => {
-                self.stats.write().unwrap().transactions_committed += 1;
+                self.stats.write().transactions_committed += 1;
                 ApplyResult::Committed { xid: *xid }
             }
             _ => ApplyResult::Skipped("unhandled change type".into()),
@@ -1004,14 +1002,14 @@ impl LogicalReplicationManager {
         conflict: &Conflict,
         resolution: ConflictResolution,
     ) -> Result<(), ReplicationError> {
-        let mut conflicts = self.conflicts.write().unwrap();
+        let mut conflicts = self.conflicts.write();
 
         let mut resolved_conflict = conflict.clone();
         resolved_conflict.resolution = Some(resolution);
 
         conflicts.push(resolved_conflict);
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.conflicts_total += 1;
         stats.conflicts_resolved += 1;
 
@@ -1024,7 +1022,7 @@ impl LogicalReplicationManager {
 
     /// Get replication lag for subscription
     pub fn get_replication_lag(&self, subscription: &str) -> Result<Duration, ReplicationError> {
-        let subscriptions = self.subscriptions.read().unwrap();
+        let subscriptions = self.subscriptions.read();
         let _sub = subscriptions
             .get(subscription)
             .ok_or_else(|| ReplicationError::SubscriptionNotFound(subscription.to_string()))?;
@@ -1037,7 +1035,6 @@ impl LogicalReplicationManager {
     pub fn get_subscription_tables(&self, subscription: &str) -> Vec<SubscriptionRelation> {
         self.relation_states
             .read()
-            .unwrap()
             .iter()
             .filter(|((sub, _, _), _)| sub == subscription)
             .map(|(_, rel)| rel.clone())
@@ -1048,7 +1045,6 @@ impl LogicalReplicationManager {
     pub fn get_conflicts(&self, limit: usize) -> Vec<Conflict> {
         self.conflicts
             .read()
-            .unwrap()
             .iter()
             .rev()
             .take(limit)
@@ -1058,17 +1054,17 @@ impl LogicalReplicationManager {
 
     /// Get statistics
     pub fn stats(&self) -> ReplicationStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get slot statistics
     pub fn get_slot_stats(&self, slot_name: &str) -> Result<SlotStats, ReplicationError> {
-        let slots = self.slots.read().unwrap();
+        let slots = self.slots.read();
         let slot = slots
             .get(slot_name)
             .ok_or_else(|| ReplicationError::SlotNotFound(slot_name.to_string()))?;
 
-        let pending = self.pending_changes.read().unwrap();
+        let pending = self.pending_changes.read();
         let pending_count = pending.get(slot_name).map(|q| q.len()).unwrap_or(0);
 
         Ok(SlotStats {

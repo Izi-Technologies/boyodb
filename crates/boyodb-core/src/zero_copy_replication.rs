@@ -4,7 +4,8 @@
 //! Replicas share segment files through S3/MinIO instead of copying data.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Object storage reference for a segment
@@ -192,7 +193,7 @@ impl ZeroCopyManager {
         partition: &str,
         segment: SegmentRef,
     ) -> Result<(), ZeroCopyError> {
-        let mut metadata = self.metadata.write().unwrap();
+        let mut metadata = self.metadata.write();
         let key = format!("{}/{}", table, partition);
 
         let entry = metadata.entry(key).or_insert_with(|| ZeroCopyMetadata {
@@ -214,7 +215,7 @@ impl ZeroCopyManager {
         entry.last_modified = SystemTime::now();
 
         // Update stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.segments_referenced += 1;
         stats.bytes_shared += size;
         stats.s3_writes += 1;
@@ -224,7 +225,7 @@ impl ZeroCopyManager {
 
     /// Get object path for a segment
     pub fn get_segment_path(&self, table: &str, partition: &str, segment_id: &str) -> Option<String> {
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
         let key = format!("{}/{}", table, partition);
 
         metadata.get(&key)
@@ -241,7 +242,7 @@ impl ZeroCopyManager {
     ) -> Result<SegmentHandle, ZeroCopyError> {
         // Find segment
         let path = {
-            let mut metadata = self.metadata.write().unwrap();
+            let mut metadata = self.metadata.write();
             let key = format!("{}/{}", table, partition);
 
             let entry = metadata.get_mut(&key)
@@ -256,8 +257,8 @@ impl ZeroCopyManager {
         };
 
         // Check local cache
-        let mut stats = self.stats.write().unwrap();
-        let mut cache = self.local_cache.write().unwrap();
+        let mut stats = self.stats.write();
+        let mut cache = self.local_cache.write();
 
         if let Some(entry) = cache.get_mut(segment_id) {
             entry.last_access = Instant::now();
@@ -301,7 +302,7 @@ impl ZeroCopyManager {
         partition: &str,
         segment_id: &str,
     ) -> Result<(), ZeroCopyError> {
-        let mut metadata = self.metadata.write().unwrap();
+        let mut metadata = self.metadata.write();
         let key = format!("{}/{}", table, partition);
 
         let entry = metadata.get_mut(&key)
@@ -320,7 +321,7 @@ impl ZeroCopyManager {
 
     /// Get segment metadata
     pub fn get_metadata(&self, table: &str, partition: &str) -> Option<ZeroCopyMetadata> {
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
         let key = format!("{}/{}", table, partition);
         metadata.get(&key).cloned()
     }
@@ -335,7 +336,7 @@ impl ZeroCopyManager {
         let removed = 0u64;
 
         // Simulate sync
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
         added += metadata.len() as u64;
         updated += 0;
 
@@ -355,7 +356,7 @@ impl ZeroCopyManager {
         let mut bytes_freed = 0u64;
 
         // Remove unreferenced segments past retention
-        let mut metadata = self.metadata.write().unwrap();
+        let mut metadata = self.metadata.write();
         for entry in metadata.values_mut() {
             entry.segments.retain(|s| {
                 if s.ref_count > 0 {
@@ -375,7 +376,7 @@ impl ZeroCopyManager {
 
         // Clean up local cache (LRU eviction)
         if self.config.enable_local_cache {
-            let mut cache = self.local_cache.write().unwrap();
+            let mut cache = self.local_cache.write();
             let total_size: u64 = cache.values().map(|e| e.size_bytes).sum();
 
             if total_size > self.config.local_cache_size {
@@ -397,7 +398,7 @@ impl ZeroCopyManager {
         }
 
         // Update stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.gc_runs += 1;
         stats.segments_gc += collected;
 
@@ -411,7 +412,7 @@ impl ZeroCopyManager {
     /// Acquire lock for exclusive write access
     pub fn acquire_write_lock(&self, table: &str, partition: &str) -> Result<(), ZeroCopyError> {
         let key = format!("{}/{}", table, partition);
-        let mut locks = self.locks.write().unwrap();
+        let mut locks = self.locks.write();
 
         if let Some(lock) = locks.get(&key) {
             if lock.lock_type == LockType::Exclusive {
@@ -431,7 +432,7 @@ impl ZeroCopyManager {
     /// Release write lock
     pub fn release_write_lock(&self, table: &str, partition: &str) {
         let key = format!("{}/{}", table, partition);
-        let mut locks = self.locks.write().unwrap();
+        let mut locks = self.locks.write();
 
         if let Some(lock) = locks.get(&key) {
             if lock.holder == self.replica_id {
@@ -442,12 +443,12 @@ impl ZeroCopyManager {
 
     /// Get statistics
     pub fn stats(&self) -> ZeroCopyStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get tables using zero-copy
     pub fn tables(&self) -> Vec<String> {
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
         let mut tables: HashSet<String> = HashSet::new();
         for entry in metadata.values() {
             tables.insert(entry.table.clone());
@@ -457,7 +458,7 @@ impl ZeroCopyManager {
 
     /// Get total shared bytes
     pub fn total_shared_bytes(&self) -> u64 {
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
         metadata.values()
             .flat_map(|m| m.segments.iter())
             .map(|s| s.size_bytes)

@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -157,19 +158,18 @@ impl IndexBuildProgress {
     pub fn elapsed(&self) -> Duration {
         self.start_time
             .read()
-            .unwrap()
             .map(|t| t.elapsed())
             .unwrap_or_default()
     }
 
     /// Get current state
     pub fn current_state(&self) -> IndexBuildState {
-        *self.state.read().unwrap()
+        *self.state.read()
     }
 
     /// Set state
     pub fn set_state(&self, state: IndexBuildState) {
-        *self.state.write().unwrap() = state;
+        *self.state.write() = state;
     }
 
     /// Cancel the build
@@ -184,7 +184,7 @@ impl IndexBuildProgress {
 
     /// Set error
     pub fn set_error(&self, error: String) {
-        *self.error.write().unwrap() = Some(error);
+        *self.error.write() = Some(error);
         self.set_state(IndexBuildState::Failed);
     }
 
@@ -199,7 +199,7 @@ impl IndexBuildProgress {
             changes_caught_up: self.changes_caught_up.load(Ordering::Relaxed),
             elapsed: self.elapsed(),
             completion_ratio: self.completion_ratio(),
-            error: self.error.read().unwrap().clone(),
+            error: self.error.read().clone(),
         }
     }
 }
@@ -349,7 +349,7 @@ impl ChangeTracker {
     /// Record a change
     pub fn record_change(&self, change: ConcurrentChange) {
         if self.is_active() {
-            let mut changes = self.changes.write().unwrap();
+            let mut changes = self.changes.write();
             changes.push(change);
             self.current_lsn.fetch_add(1, Ordering::SeqCst);
         }
@@ -357,18 +357,18 @@ impl ChangeTracker {
 
     /// Get all recorded changes
     pub fn get_changes(&self) -> Vec<ConcurrentChange> {
-        self.changes.read().unwrap().clone()
+        self.changes.read().clone()
     }
 
     /// Clear recorded changes up to a point
     pub fn clear_changes_up_to(&self, lsn: u64) {
-        let mut changes = self.changes.write().unwrap();
+        let mut changes = self.changes.write();
         changes.retain(|c| c.timestamp > lsn);
     }
 
     /// Number of pending changes
     pub fn pending_count(&self) -> usize {
-        self.changes.read().unwrap().len()
+        self.changes.read().len()
     }
 }
 
@@ -509,7 +509,7 @@ impl ParallelIndexBuilder {
         self.stats.builds_started.fetch_add(1, Ordering::Relaxed);
 
         let start = Instant::now();
-        *self.progress.start_time.write().unwrap() = Some(start);
+        *self.progress.start_time.write() = Some(start);
 
         // Phase 1: Parallel scan
         self.progress.set_state(IndexBuildState::Phase1Scanning);
@@ -520,7 +520,7 @@ impl ParallelIndexBuilder {
             return Err(e);
         }
 
-        *self.progress.phase1_duration.write().unwrap() = Some(phase1_start.elapsed());
+        *self.progress.phase1_duration.write() = Some(phase1_start.elapsed());
 
         // Check cancellation
         if self.progress.is_cancelled() {
@@ -536,7 +536,7 @@ impl ParallelIndexBuilder {
             return Err(e);
         }
 
-        *self.progress.phase2_duration.write().unwrap() = Some(phase2_start.elapsed());
+        *self.progress.phase2_duration.write() = Some(phase2_start.elapsed());
 
         // Check cancellation
         if self.progress.is_cancelled() {
@@ -553,7 +553,7 @@ impl ParallelIndexBuilder {
                 return Err(e);
             }
 
-            *self.progress.phase3_duration.write().unwrap() = Some(phase3_start.elapsed());
+            *self.progress.phase3_duration.write() = Some(phase3_start.elapsed());
         }
 
         // Finalize
@@ -573,9 +573,9 @@ impl ParallelIndexBuilder {
             index_name: self.index_name.clone(),
             entries_created: entries,
             duration: start.elapsed(),
-            phase1_duration: self.progress.phase1_duration.read().unwrap().unwrap_or_default(),
-            phase2_duration: self.progress.phase2_duration.read().unwrap().unwrap_or_default(),
-            phase3_duration: self.progress.phase3_duration.read().unwrap().unwrap_or_default(),
+            phase1_duration: self.progress.phase1_duration.read().unwrap_or_default(),
+            phase2_duration: self.progress.phase2_duration.read().unwrap_or_default(),
+            phase3_duration: self.progress.phase3_duration.read().unwrap_or_default(),
             concurrent_changes_processed: self.progress.changes_caught_up.load(Ordering::Relaxed),
         })
     }
@@ -661,7 +661,7 @@ impl ParallelIndexBuilder {
 
     fn run_phase3(&self) -> Result<(), ParallelIndexError> {
         // Validate index entries
-        let entries = self.index_entries.read().unwrap();
+        let entries = self.index_entries.read();
 
         // Check for duplicates (for unique indexes)
         let mut seen_keys: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -678,7 +678,7 @@ impl ParallelIndexBuilder {
 
     fn finalize(&self) -> Result<(), ParallelIndexError> {
         // Sort the index entries
-        let mut entries = self.index_entries.write().unwrap();
+        let mut entries = self.index_entries.write();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         // In a real implementation, this would:
@@ -690,12 +690,12 @@ impl ParallelIndexBuilder {
     }
 
     fn add_entry(&self, key: Vec<u8>, heap_tid: (u32, u16)) {
-        let mut entries = self.index_entries.write().unwrap();
+        let mut entries = self.index_entries.write();
         entries.push((key, heap_tid));
     }
 
     fn apply_change(&self, change: &ConcurrentChange) -> Result<(), ParallelIndexError> {
-        let mut entries = self.index_entries.write().unwrap();
+        let mut entries = self.index_entries.write();
 
         match &change.change_type {
             ChangeType::Insert => {
@@ -740,7 +740,7 @@ impl ParallelIndexBuilder {
 
     /// Get number of entries built
     pub fn entry_count(&self) -> usize {
-        self.index_entries.read().unwrap().len()
+        self.index_entries.read().len()
     }
 }
 
@@ -797,7 +797,7 @@ impl IndexBuildManager {
         key_columns: Vec<String>,
         config: ParallelIndexConfig,
     ) -> Result<Arc<ParallelIndexBuilder>, ParallelIndexError> {
-        let builds = self.builds.read().unwrap();
+        let builds = self.builds.read();
         if builds.contains_key(index_name) {
             return Err(ParallelIndexError::IndexExists(index_name.to_string()));
         }
@@ -815,7 +815,7 @@ impl IndexBuildManager {
             config,
         )?);
 
-        let mut builds = self.builds.write().unwrap();
+        let mut builds = self.builds.write();
         builds.insert(index_name.to_string(), builder.clone());
 
         Ok(builder)
@@ -823,13 +823,13 @@ impl IndexBuildManager {
 
     /// Get progress for a build
     pub fn get_progress(&self, index_name: &str) -> Option<IndexBuildProgressSnapshot> {
-        let builds = self.builds.read().unwrap();
+        let builds = self.builds.read();
         builds.get(index_name).map(|b| b.progress.snapshot())
     }
 
     /// Cancel a build
     pub fn cancel_build(&self, index_name: &str) -> bool {
-        let builds = self.builds.read().unwrap();
+        let builds = self.builds.read();
         if let Some(builder) = builds.get(index_name) {
             builder.progress.cancel();
             true
@@ -840,7 +840,7 @@ impl IndexBuildManager {
 
     /// Remove a completed or failed build
     pub fn remove_build(&self, index_name: &str) -> bool {
-        let mut builds = self.builds.write().unwrap();
+        let mut builds = self.builds.write();
         if let Some(builder) = builds.get(index_name) {
             if builder.progress.current_state().is_finished() {
                 builds.remove(index_name);
@@ -852,7 +852,7 @@ impl IndexBuildManager {
 
     /// List active builds
     pub fn list_builds(&self) -> Vec<(String, IndexBuildProgressSnapshot)> {
-        let builds = self.builds.read().unwrap();
+        let builds = self.builds.read();
         builds
             .iter()
             .map(|(name, builder)| (name.clone(), builder.progress.snapshot()))
@@ -1093,24 +1093,24 @@ mod tests {
 
         // Add entry
         {
-            let mut e = entries.write().unwrap();
+            let mut e = entries.write();
             e.push((vec![1u8], (0u32, 0u16)));
         }
 
         // Update entry
         {
-            let mut e = entries.write().unwrap();
+            let mut e = entries.write();
             e.retain(|(k, _)| k != &vec![1u8]);
             e.push((vec![2u8], (0u32, 1u16)));
         }
 
         // Delete entry
         {
-            let mut e = entries.write().unwrap();
+            let mut e = entries.write();
             e.retain(|(k, _)| k != &vec![2u8]);
         }
 
-        let e = entries.read().unwrap();
+        let e = entries.read();
         assert_eq!(e.len(), 0);
     }
 

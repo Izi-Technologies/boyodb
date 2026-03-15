@@ -4,7 +4,9 @@
 //! Supports session-level and transaction-level locks with shared/exclusive modes.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Advisory lock key (64-bit or two 32-bit integers)
@@ -170,9 +172,9 @@ impl AdvisoryLockManager {
 
     /// Release all transaction locks
     pub fn release_transaction_locks(&self, session_id: u64, transaction_id: u64) {
-        let mut locks = self.locks.write().unwrap();
-        let mut session_locks = self.session_locks.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
+        let mut locks = self.locks.write();
+        let mut session_locks = self.session_locks.write();
+        let mut stats = self.stats.write();
 
         let mut keys_to_check: Vec<LockKey> = Vec::new();
 
@@ -206,18 +208,18 @@ impl AdvisoryLockManager {
 
     /// Check if lock is held
     pub fn is_locked(&self, key: LockKey) -> bool {
-        let locks = self.locks.read().unwrap();
+        let locks = self.locks.read();
         locks.get(&key).map(|v| !v.is_empty()).unwrap_or(false)
     }
 
     /// Get lock statistics
     pub fn stats(&self) -> LockStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// List all locks for a session
     pub fn list_session_locks(&self, session_id: u64) -> Vec<(LockKey, LockMode, LockScope)> {
-        let locks = self.locks.read().unwrap();
+        let locks = self.locks.read();
         let mut result = Vec::new();
 
         for (key, entries) in locks.iter() {
@@ -251,14 +253,14 @@ impl AdvisoryLockManager {
             // Check timeout
             if let Some(deadline) = deadline {
                 if Instant::now() >= deadline {
-                    self.stats.write().unwrap().lock_timeouts += 1;
+                    self.stats.write().lock_timeouts += 1;
                     return false;
                 }
             }
 
             // Wait a bit before retrying
             std::thread::sleep(Duration::from_millis(10));
-            self.stats.write().unwrap().lock_waits += 1;
+            self.stats.write().lock_waits += 1;
         }
     }
 
@@ -270,8 +272,8 @@ impl AdvisoryLockManager {
         mode: LockMode,
         scope: LockScope,
     ) -> bool {
-        let mut locks = self.locks.write().unwrap();
-        let mut session_locks = self.session_locks.write().unwrap();
+        let mut locks = self.locks.write();
+        let mut session_locks = self.session_locks.write();
 
         let entries = locks.entry(key).or_default();
 
@@ -311,13 +313,13 @@ impl AdvisoryLockManager {
         // Track session locks
         session_locks.entry(session_id).or_default().insert(key);
 
-        self.stats.write().unwrap().locks_acquired += 1;
+        self.stats.write().locks_acquired += 1;
         true
     }
 
     fn release_lock(&self, session_id: u64, key: LockKey, mode: LockMode) -> bool {
-        let mut locks = self.locks.write().unwrap();
-        let mut session_locks = self.session_locks.write().unwrap();
+        let mut locks = self.locks.write();
+        let mut session_locks = self.session_locks.write();
 
         if let Some(entries) = locks.get_mut(&key) {
             if let Some(pos) = entries.iter().position(|e| {
@@ -326,7 +328,7 @@ impl AdvisoryLockManager {
                 entries[pos].ref_count -= 1;
                 if entries[pos].ref_count == 0 {
                     entries.remove(pos);
-                    self.stats.write().unwrap().locks_released += 1;
+                    self.stats.write().locks_released += 1;
 
                     if entries.is_empty() {
                         locks.remove(&key);
@@ -343,9 +345,9 @@ impl AdvisoryLockManager {
     }
 
     fn release_all_session_locks(&self, session_id: u64) {
-        let mut locks = self.locks.write().unwrap();
-        let mut session_locks = self.session_locks.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
+        let mut locks = self.locks.write();
+        let mut session_locks = self.session_locks.write();
+        let mut stats = self.stats.write();
 
         if let Some(keys) = session_locks.remove(&session_id) {
             for key in keys {

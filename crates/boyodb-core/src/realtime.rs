@@ -7,7 +7,8 @@
 //! - Exactly-once ingestion with deduplication
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================

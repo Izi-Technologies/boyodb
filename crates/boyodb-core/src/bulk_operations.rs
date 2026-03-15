@@ -11,6 +11,7 @@ use std::io::{Read, Write, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -629,7 +630,7 @@ impl Default for BackupProgress {
 pub struct Dumper {
     options: DumpOptions,
     catalog: BackupCatalog,
-    progress: Arc<std::sync::RwLock<BackupProgress>>,
+    progress: Arc<RwLock<BackupProgress>>,
     cancelled: AtomicBool,
 }
 
@@ -639,7 +640,7 @@ impl Dumper {
         Self {
             options,
             catalog: BackupCatalog::new(database),
-            progress: Arc::new(std::sync::RwLock::new(BackupProgress::new())),
+            progress: Arc::new(RwLock::new(BackupProgress::new())),
             cancelled: AtomicBool::new(false),
         }
     }
@@ -656,7 +657,7 @@ impl Dumper {
 
     /// Get progress
     pub fn progress(&self) -> BackupProgress {
-        self.progress.read().unwrap().clone()
+        self.progress.read().clone()
     }
 
     /// Add a table to dump
@@ -836,7 +837,7 @@ impl Default for RestoreProgress {
 pub struct Restorer {
     options: RestoreOptions,
     catalog: Option<BackupCatalog>,
-    progress: Arc<std::sync::RwLock<RestoreProgress>>,
+    progress: Arc<RwLock<RestoreProgress>>,
     cancelled: AtomicBool,
 }
 
@@ -846,7 +847,7 @@ impl Restorer {
         Self {
             options,
             catalog: None,
-            progress: Arc::new(std::sync::RwLock::new(RestoreProgress::new())),
+            progress: Arc::new(RwLock::new(RestoreProgress::new())),
             cancelled: AtomicBool::new(false),
         }
     }
@@ -863,7 +864,7 @@ impl Restorer {
 
     /// Get progress
     pub fn progress(&self) -> RestoreProgress {
-        self.progress.read().unwrap().clone()
+        self.progress.read().clone()
     }
 
     /// Load catalog from custom format backup

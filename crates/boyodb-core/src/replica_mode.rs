@@ -42,7 +42,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -408,36 +409,36 @@ impl ManifestTracker {
 
     /// Update current manifest version
     pub fn update_current(&self, version: ManifestVersion) {
-        let mut history = self.version_history.write().unwrap();
+        let mut history = self.version_history.write();
         history.push(version.clone());
         if history.len() > self.max_history {
             history.remove(0);
         }
 
-        let mut current = self.current_version.write().unwrap();
+        let mut current = self.current_version.write();
         *current = Some(version);
     }
 
     /// Update primary manifest version
     pub fn update_primary(&self, version: ManifestVersion) {
-        let mut primary = self.primary_version.write().unwrap();
+        let mut primary = self.primary_version.write();
         *primary = Some(version);
     }
 
     /// Get current version
     pub fn current(&self) -> Option<ManifestVersion> {
-        self.current_version.read().unwrap().clone()
+        self.current_version.read().clone()
     }
 
     /// Get primary version
     pub fn primary(&self) -> Option<ManifestVersion> {
-        self.primary_version.read().unwrap().clone()
+        self.primary_version.read().clone()
     }
 
     /// Calculate lag in versions
     pub fn version_lag(&self) -> u64 {
-        let current = self.current_version.read().unwrap();
-        let primary = self.primary_version.read().unwrap();
+        let current = self.current_version.read();
+        let primary = self.primary_version.read();
 
         match (&*current, &*primary) {
             (Some(c), Some(p)) => p.version.saturating_sub(c.version),
@@ -447,8 +448,8 @@ impl ManifestTracker {
 
     /// Calculate lag in milliseconds (estimated)
     pub fn estimated_lag_ms(&self) -> u64 {
-        let current = self.current_version.read().unwrap();
-        let primary = self.primary_version.read().unwrap();
+        let current = self.current_version.read();
+        let primary = self.primary_version.read();
 
         match (&*current, &*primary) {
             (Some(c), Some(p)) => {
@@ -522,12 +523,12 @@ impl ReplicaManager {
 
     /// Get current state
     pub fn state(&self) -> ReplicaState {
-        *self.state.read().unwrap()
+        *self.state.read()
     }
 
     /// Get metrics
     pub fn metrics(&self) -> ReplicaMetrics {
-        self.metrics.read().unwrap().clone()
+        self.metrics.read().clone()
     }
 
     /// Get config
@@ -547,7 +548,7 @@ impl ReplicaManager {
         }
 
         if is_write_sql(sql) {
-            let mut metrics = self.metrics.write().unwrap();
+            let mut metrics = self.metrics.write();
             metrics.write_rejections += 1;
             return Err(ReplicaError::ReadOnlyReplica(format!(
                 "cannot execute {} on read replica",
@@ -559,7 +560,7 @@ impl ReplicaManager {
         if self.config.reject_on_high_lag && self.config.max_lag_ms > 0 {
             let lag = self.manifest_tracker.estimated_lag_ms();
             if lag > self.config.max_lag_ms {
-                let mut metrics = self.metrics.write().unwrap();
+                let mut metrics = self.metrics.write();
                 metrics.lag_rejections += 1;
                 return Err(ReplicaError::LagTooHigh {
                     current_lag_ms: lag,
@@ -574,13 +575,13 @@ impl ReplicaManager {
     /// Start sync worker
     pub fn start(&self) {
         self.running.store(true, Ordering::SeqCst);
-        *self.state.write().unwrap() = ReplicaState::Initializing;
+        *self.state.write() = ReplicaState::Initializing;
     }
 
     /// Stop sync worker
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        *self.state.write().unwrap() = ReplicaState::Stopped;
+        *self.state.write() = ReplicaState::Stopped;
     }
 
     /// Check if running
@@ -590,7 +591,7 @@ impl ReplicaManager {
 
     /// Record successful sync
     pub fn record_sync_success(&self, duration_ms: u64, bytes: u64, segments: u64) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         metrics.total_syncs += 1;
         metrics.successful_syncs += 1;
         metrics.bytes_synced += bytes;
@@ -606,7 +607,7 @@ impl ReplicaManager {
         }
 
         // Update state
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
         if self.config.max_lag_ms > 0 && lag > self.config.max_lag_ms {
             *state = ReplicaState::Lagging;
         } else {
@@ -614,17 +615,17 @@ impl ReplicaManager {
         }
 
         // Clear error
-        *self.last_error.write().unwrap() = None;
+        *self.last_error.write() = None;
     }
 
     /// Record sync failure
     pub fn record_sync_failure(&self, error: &str) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         metrics.total_syncs += 1;
         metrics.failed_syncs += 1;
 
-        *self.state.write().unwrap() = ReplicaState::Error;
-        *self.last_error.write().unwrap() = Some(error.to_string());
+        *self.state.write() = ReplicaState::Error;
+        *self.last_error.write() = Some(error.to_string());
     }
 
     /// Update manifest versions
@@ -647,8 +648,8 @@ impl ReplicaManager {
 
     /// Get status for health checks
     pub fn get_status(&self) -> ReplicaStatus {
-        let metrics = self.metrics.read().unwrap();
-        let state = *self.state.read().unwrap();
+        let metrics = self.metrics.read();
+        let state = *self.state.read();
         let lag = self.get_lag();
 
         ReplicaStatus {
@@ -660,7 +661,7 @@ impl ReplicaManager {
             total_syncs: metrics.total_syncs,
             failed_syncs: metrics.failed_syncs,
             write_rejections: metrics.write_rejections,
-            last_error: self.last_error.read().unwrap().clone(),
+            last_error: self.last_error.read().clone(),
         }
     }
 }

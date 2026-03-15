@@ -4,7 +4,8 @@
 //! Supports lazy loading, predicate pushdown, and parallel scanning.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// External table type
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,12 +113,12 @@ impl ExternalTableRegistry {
 
     /// Configure S3 options
     pub fn configure_s3(&self, options: S3Options) {
-        *self.s3_options.write().unwrap() = options;
+        *self.s3_options.write() = options;
     }
 
     /// Register an external table
     pub fn register(&self, config: ExternalTableConfig) -> Result<(), ExternalTableError> {
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         
         if tables.contains_key(&config.name) {
             return Err(ExternalTableError::AlreadyExists(config.name.clone()));
@@ -132,7 +133,7 @@ impl ExternalTableRegistry {
 
     /// Unregister an external table
     pub fn unregister(&self, name: &str) -> Result<(), ExternalTableError> {
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         
         if tables.remove(name).is_none() {
             return Err(ExternalTableError::NotFound(name.into()));
@@ -143,12 +144,12 @@ impl ExternalTableRegistry {
 
     /// Get table config
     pub fn get(&self, name: &str) -> Option<ExternalTableConfig> {
-        self.tables.read().unwrap().get(name).cloned()
+        self.tables.read().get(name).cloned()
     }
 
     /// List all external tables
     pub fn list(&self) -> Vec<ExternalTableConfig> {
-        self.tables.read().unwrap().values().cloned().collect()
+        self.tables.read().values().cloned().collect()
     }
 
     /// Create table function (for s3(), url(), file() functions)
@@ -179,7 +180,7 @@ impl ExternalTableRegistry {
         };
 
         let mut options = HashMap::new();
-        let s3_opts = self.s3_options.read().unwrap();
+        let s3_opts = self.s3_options.read();
         
         if let Some(ref region) = s3_opts.region {
             options.insert("region".into(), region.clone());

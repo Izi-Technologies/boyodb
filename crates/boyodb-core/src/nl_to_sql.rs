@@ -7,7 +7,7 @@
 //! - Query disambiguation
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// Table schema for NL understanding
 #[derive(Debug, Clone)]
@@ -250,7 +250,7 @@ impl NLToSQL {
 
     /// Register a table schema
     pub fn register_schema(&self, schema: TableSchema) {
-        let mut mappings = self.word_mappings.write().unwrap();
+        let mut mappings = self.word_mappings.write();
 
         // Add table synonyms
         for synonym in &schema.synonyms {
@@ -278,7 +278,7 @@ impl NLToSQL {
             );
         }
 
-        self.schemas.write().unwrap().insert(schema.name.clone(), schema);
+        self.schemas.write().insert(schema.name.clone(), schema);
     }
 
     /// Convert natural language to SQL
@@ -377,7 +377,7 @@ impl NLToSQL {
     /// Extract entities from query
     fn extract_entities(&self, query: &str, words: &[&str]) -> Vec<Entity> {
         let mut entities = Vec::new();
-        let mappings = self.word_mappings.read().unwrap();
+        let mappings = self.word_mappings.read();
 
         // Look for known tables and columns
         for (i, word) in words.iter().enumerate() {
@@ -505,7 +505,7 @@ impl NLToSQL {
 
         // If no table found, try to infer from schema
         if table.is_none() && !columns.is_empty() {
-            let mappings = self.word_mappings.read().unwrap();
+            let mappings = self.word_mappings.read();
             for col in &columns {
                 if let Some((tbl, _)) = mappings.get(&col.to_lowercase()) {
                     table = Some(tbl.clone());
@@ -580,7 +580,7 @@ impl NLToSQL {
                 let after = &query[pos + pattern.len()..];
 
                 // Try to find a column name
-                let mappings = self.word_mappings.read().unwrap();
+                let mappings = self.word_mappings.read();
                 let mut column = None;
 
                 for word in before.split_whitespace().rev() {
@@ -643,7 +643,7 @@ impl NLToSQL {
             for pattern in patterns {
                 if let Some(pos) = query.find(pattern) {
                     let after = &query[pos + pattern.len()..];
-                    let mappings = self.word_mappings.read().unwrap();
+                    let mappings = self.word_mappings.read();
 
                     for word in after.split_whitespace().take(3) {
                         let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
@@ -680,7 +680,7 @@ impl NLToSQL {
         for pattern in order_patterns {
             if let Some(pos) = query.find(pattern) {
                 let after = &query[pos + pattern.len()..];
-                let mappings = self.word_mappings.read().unwrap();
+                let mappings = self.word_mappings.read();
 
                 for word in after.split_whitespace().take(2) {
                     let clean = word.trim_matches(|c: char| !c.is_alphanumeric());

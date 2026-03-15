@@ -9,7 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -496,7 +497,7 @@ impl OAuth2Provider {
         let url = format!("{}?{}", self.config.authorization_url, query);
 
         // Store pending auth
-        self.pending_states.write().unwrap().insert(
+        self.pending_states.write().insert(
             state.clone(),
             PendingAuth {
                 created_at: Instant::now(),
@@ -517,7 +518,7 @@ impl OAuth2Provider {
     /// Exchange authorization code for tokens
     pub fn exchange_code(&self, code: &str, state: &str) -> Result<AuthResult, AuthError> {
         // Verify state
-        let pending = self.pending_states.write().unwrap().remove(state)
+        let pending = self.pending_states.write().remove(state)
             .ok_or_else(|| AuthError::TokenInvalid("invalid state".into()))?;
 
         // Check expiry (states expire after 10 minutes)
@@ -634,7 +635,7 @@ impl OAuth2Provider {
 
     /// Cleanup expired pending authorizations
     pub fn cleanup_expired(&self) {
-        let mut states = self.pending_states.write().unwrap();
+        let mut states = self.pending_states.write();
         states.retain(|_, pending| pending.created_at.elapsed() < Duration::from_secs(600));
     }
 }
@@ -779,7 +780,7 @@ impl SamlProvider {
         }
 
         // Store pending request
-        self.pending_requests.write().unwrap().insert(
+        self.pending_requests.write().insert(
             request_id.clone(),
             PendingSamlAuth {
                 request_id: request_id.clone(),
@@ -1132,7 +1133,7 @@ impl MfaManager {
             enrolled_at: None,
         };
 
-        self.enrollments.write().unwrap()
+        self.enrollments.write()
             .entry(user_id.to_string())
             .or_insert_with(Vec::new)
             .push(enrollment);
@@ -1146,7 +1147,7 @@ impl MfaManager {
 
     /// Verify TOTP code and complete enrollment
     pub fn verify_totp_enrollment(&self, user_id: &str, code: &str) -> Result<(), AuthError> {
-        let mut enrollments = self.enrollments.write().unwrap();
+        let mut enrollments = self.enrollments.write();
         let user_enrollments = enrollments.get_mut(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
@@ -1173,7 +1174,7 @@ impl MfaManager {
 
     /// Verify TOTP code
     pub fn verify_totp(&self, user_id: &str, code: &str) -> Result<bool, AuthError> {
-        let enrollments = self.enrollments.read().unwrap();
+        let enrollments = self.enrollments.read();
         let user_enrollments = enrollments.get(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
@@ -1207,7 +1208,7 @@ impl MfaManager {
             ),
         };
 
-        self.enrollments.write().unwrap()
+        self.enrollments.write()
             .entry(user_id.to_string())
             .or_insert_with(Vec::new)
             .push(enrollment);
@@ -1217,7 +1218,7 @@ impl MfaManager {
 
     /// Verify backup code
     pub fn verify_backup_code(&self, user_id: &str, code: &str) -> Result<bool, AuthError> {
-        let mut enrollments = self.enrollments.write().unwrap();
+        let mut enrollments = self.enrollments.write();
         let user_enrollments = enrollments.get_mut(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
@@ -1406,25 +1407,25 @@ impl EnterpriseAuthManager {
 
     /// Register LDAP provider
     pub fn register_ldap(&self, name: &str, config: LdapConfig) {
-        self.ldap_providers.write().unwrap()
+        self.ldap_providers.write()
             .insert(name.to_string(), Arc::new(LdapProvider::new(config)));
     }
 
     /// Register OAuth 2.0 provider
     pub fn register_oauth(&self, name: &str, config: OAuth2Config) {
-        self.oauth_providers.write().unwrap()
+        self.oauth_providers.write()
             .insert(name.to_string(), Arc::new(OAuth2Provider::new(config)));
     }
 
     /// Register SAML provider
     pub fn register_saml(&self, name: &str, config: SamlConfig) {
-        self.saml_providers.write().unwrap()
+        self.saml_providers.write()
             .insert(name.to_string(), Arc::new(SamlProvider::new(config)));
     }
 
     /// Authenticate with LDAP
     pub fn authenticate_ldap(&self, provider: &str, username: &str, password: &str) -> Result<AuthResult, AuthError> {
-        let providers = self.ldap_providers.read().unwrap();
+        let providers = self.ldap_providers.read();
         let provider = providers.get(provider)
             .ok_or_else(|| AuthError::ConfigError(format!("LDAP provider not found: {}", provider)))?;
 
@@ -1446,7 +1447,7 @@ impl EnterpriseAuthManager {
 
     /// Start OAuth authorization
     pub fn start_oauth(&self, provider: &str) -> Result<AuthorizationRequest, AuthError> {
-        let providers = self.oauth_providers.read().unwrap();
+        let providers = self.oauth_providers.read();
         let provider = providers.get(provider)
             .ok_or_else(|| AuthError::ConfigError(format!("OAuth provider not found: {}", provider)))?;
 
@@ -1455,7 +1456,7 @@ impl EnterpriseAuthManager {
 
     /// Complete OAuth authentication
     pub fn complete_oauth(&self, provider: &str, code: &str, state: &str) -> Result<AuthResult, AuthError> {
-        let providers = self.oauth_providers.read().unwrap();
+        let providers = self.oauth_providers.read();
         let provider = providers.get(provider)
             .ok_or_else(|| AuthError::ConfigError(format!("OAuth provider not found: {}", provider)))?;
 
@@ -1464,7 +1465,7 @@ impl EnterpriseAuthManager {
 
     /// Start SAML authentication
     pub fn start_saml(&self, provider: &str, relay_state: Option<String>) -> Result<SamlAuthRequest, AuthError> {
-        let providers = self.saml_providers.read().unwrap();
+        let providers = self.saml_providers.read();
         let provider = providers.get(provider)
             .ok_or_else(|| AuthError::ConfigError(format!("SAML provider not found: {}", provider)))?;
 
@@ -1473,7 +1474,7 @@ impl EnterpriseAuthManager {
 
     /// Complete SAML authentication
     pub fn complete_saml(&self, provider: &str, response: &str, relay_state: Option<&str>) -> Result<AuthResult, AuthError> {
-        let providers = self.saml_providers.read().unwrap();
+        let providers = self.saml_providers.read();
         let provider = providers.get(provider)
             .ok_or_else(|| AuthError::ConfigError(format!("SAML provider not found: {}", provider)))?;
 
@@ -1506,14 +1507,14 @@ impl EnterpriseAuthManager {
             user_agent: None,
         };
 
-        self.sessions.write().unwrap().insert(session_id.clone(), session);
+        self.sessions.write().insert(session_id.clone(), session);
 
         Ok(session_id)
     }
 
     /// Validate session
     pub fn validate_session(&self, session_id: &str) -> Result<Identity, AuthError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write();
         let session = sessions.get_mut(session_id)
             .ok_or(AuthError::SessionExpired)?;
 
@@ -1537,7 +1538,7 @@ impl EnterpriseAuthManager {
 
     /// End session
     pub fn end_session(&self, session_id: &str) {
-        self.sessions.write().unwrap().remove(session_id);
+        self.sessions.write().remove(session_id);
     }
 
     /// Get MFA manager
@@ -1547,7 +1548,7 @@ impl EnterpriseAuthManager {
 
     /// List active sessions for user
     pub fn list_user_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read();
         sessions.values()
             .filter(|s| s.identity.user_id == user_id)
             .cloned()
@@ -1561,7 +1562,7 @@ impl EnterpriseAuthManager {
             .unwrap()
             .as_secs();
 
-        self.sessions.write().unwrap()
+        self.sessions.write()
             .retain(|_, s| s.expires_at > now);
     }
 }

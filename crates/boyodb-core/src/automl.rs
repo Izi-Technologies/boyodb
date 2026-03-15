@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// AutoML task types
@@ -466,7 +466,7 @@ impl AutoML {
 
     /// Run AutoML on the given data
     pub fn fit(&self, data: &TrainingData) -> AutoMLResult {
-        *self.start_time.write().unwrap() = Some(Instant::now());
+        *self.start_time.write() = Some(Instant::now());
 
         let start = Instant::now();
         let timeout = Duration::from_secs(self.config.time_budget_seconds);
@@ -493,17 +493,17 @@ impl AutoML {
                 let trial_id = self.trial_counter.fetch_add(1, Ordering::Relaxed);
                 let result = self.run_trial(trial_id, model_type.clone(), data, trial_num as u64);
 
-                self.trials.write().unwrap().push(result.clone());
+                self.trials.write().push(result.clone());
 
                 // Update best score
                 let is_better = if self.config.metric.higher_is_better() {
-                    result.mean_score > *self.best_score.read().unwrap()
+                    result.mean_score > *self.best_score.read()
                 } else {
-                    result.mean_score < *self.best_score.read().unwrap()
+                    result.mean_score < *self.best_score.read()
                 };
 
                 if is_better && result.status == TrialStatus::Completed {
-                    *self.best_score.write().unwrap() = result.mean_score;
+                    *self.best_score.write() = result.mean_score;
                 }
             }
         }
@@ -696,7 +696,7 @@ impl AutoML {
 
     /// Compile final results
     fn compile_results(&self, data: &TrainingData, total_time: f64) -> AutoMLResult {
-        let trials = self.trials.read().unwrap();
+        let trials = self.trials.read();
         let completed: Vec<_> = trials.iter()
             .filter(|t| t.status == TrialStatus::Completed)
             .collect();
@@ -762,12 +762,12 @@ impl AutoML {
 
     /// Get current best score
     pub fn best_score(&self) -> f64 {
-        *self.best_score.read().unwrap()
+        *self.best_score.read()
     }
 
     /// Get all trials
     pub fn get_trials(&self) -> Vec<TrialResult> {
-        self.trials.read().unwrap().clone()
+        self.trials.read().clone()
     }
 }
 
@@ -787,16 +787,16 @@ impl AutoMLRegistry {
 
     pub fn create_job(&self, name: &str, config: AutoMLConfig) -> String {
         let automl = AutoML::new(config);
-        self.jobs.write().unwrap().insert(name.to_string(), automl);
+        self.jobs.write().insert(name.to_string(), automl);
         name.to_string()
     }
 
     pub fn run_job(&self, name: &str, data: &TrainingData) -> Option<AutoMLResult> {
-        let jobs = self.jobs.read().unwrap();
+        let jobs = self.jobs.read();
         if let Some(automl) = jobs.get(name) {
             let result = automl.fit(data);
             drop(jobs);
-            self.results.write().unwrap().insert(name.to_string(), result.clone());
+            self.results.write().insert(name.to_string(), result.clone());
             Some(result)
         } else {
             None
@@ -804,11 +804,11 @@ impl AutoMLRegistry {
     }
 
     pub fn get_result(&self, name: &str) -> Option<AutoMLResult> {
-        self.results.read().unwrap().get(name).cloned()
+        self.results.read().get(name).cloned()
     }
 
     pub fn list_jobs(&self) -> Vec<String> {
-        self.jobs.read().unwrap().keys().cloned().collect()
+        self.jobs.read().keys().cloned().collect()
     }
 }
 

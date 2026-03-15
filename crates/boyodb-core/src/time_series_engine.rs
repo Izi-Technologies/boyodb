@@ -7,7 +7,8 @@
 //! - Forecasting and trend analysis
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Time series data point
 #[derive(Debug, Clone)]
@@ -541,14 +542,14 @@ impl TimeSeriesStore {
 
     /// Write a data point
     pub fn write(&self, metric: &str, timestamp: i64, value: f64, tags: HashMap<String, String>) {
-        let mut series = self.series.write().unwrap();
+        let mut series = self.series.write();
         let ts = series.entry(metric.to_string()).or_insert_with(|| TimeSeries::new(metric));
         ts.points.push(DataPoint { timestamp, value, tags });
     }
 
     /// Query time series
     pub fn query(&self, query: &TimeSeriesQuery) -> Vec<TimeSeries> {
-        let series = self.series.read().unwrap();
+        let series = self.series.read();
         let mut results = Vec::new();
 
         for (name, ts) in series.iter() {
@@ -606,13 +607,13 @@ impl TimeSeriesStore {
 
     /// Set retention policy
     pub fn set_retention_policy(&self, metric: &str, policy: DownsamplePolicy) {
-        self.retention_policies.write().unwrap().insert(metric.to_string(), policy);
+        self.retention_policies.write().insert(metric.to_string(), policy);
     }
 
     /// Apply retention policies
     pub fn apply_retention(&self) {
-        let policies = self.retention_policies.read().unwrap().clone();
-        let mut series = self.series.write().unwrap();
+        let policies = self.retention_policies.read().clone();
+        let mut series = self.series.write();
 
         for (metric, policy) in policies {
             if let Some(ts) = series.get_mut(&metric) {

@@ -24,7 +24,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
@@ -718,13 +719,13 @@ impl ConnectionManager {
     /// Create a connection pool
     pub fn create_pool(&self, config: PoolConfig) -> Arc<ConnectionPool> {
         let pool = Arc::new(ConnectionPool::new(config.clone()));
-        self.pools.write().unwrap().insert(config.name.clone(), Arc::clone(&pool));
+        self.pools.write().insert(config.name.clone(), Arc::clone(&pool));
         pool
     }
 
     /// Get a connection pool
     pub fn get_pool(&self, name: &str) -> Option<Arc<ConnectionPool>> {
-        self.pools.read().unwrap().get(name).cloned()
+        self.pools.read().get(name).cloned()
     }
 
     /// Register a new connection
@@ -736,7 +737,7 @@ impl ConnectionManager {
         is_superuser: bool,
     ) -> Result<ConnectionInfo, ConnectionError> {
         // Check limits
-        let connections = self.connections.read().unwrap();
+        let connections = self.connections.read();
         let current = connections.len();
         drop(connections);
 
@@ -748,7 +749,7 @@ impl ConnectionManager {
         };
 
         if current >= effective_max {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.rejected_connections += 1;
             return Err(ConnectionError::TooManyConnections {
                 current,
@@ -758,10 +759,10 @@ impl ConnectionManager {
 
         // Check per-user limit
         if self.limits.max_connections_per_user > 0 {
-            let user_conns = self.user_connections.read().unwrap();
+            let user_conns = self.user_connections.read();
             let user_count = user_conns.get(username).copied().unwrap_or(0);
             if user_count >= self.limits.max_connections_per_user {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.rejected_connections += 1;
                 return Err(ConnectionError::TooManyUserConnections {
                     user: username.to_string(),
@@ -773,10 +774,10 @@ impl ConnectionManager {
 
         // Check per-database limit
         if self.limits.max_connections_per_database > 0 {
-            let db_conns = self.database_connections.read().unwrap();
+            let db_conns = self.database_connections.read();
             let db_count = db_conns.get(database).copied().unwrap_or(0);
             if db_count >= self.limits.max_connections_per_database {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.rejected_connections += 1;
                 return Err(ConnectionError::TooManyDatabaseConnections {
                     database: database.to_string(),
@@ -794,27 +795,27 @@ impl ConnectionManager {
 
         // Register
         {
-            let mut connections = self.connections.write().unwrap();
+            let mut connections = self.connections.write();
             connections.insert(id, info.clone());
         }
         {
-            let mut pid_map = self.pid_to_id.write().unwrap();
+            let mut pid_map = self.pid_to_id.write();
             pid_map.insert(pid, id);
         }
         {
-            let mut user_conns = self.user_connections.write().unwrap();
+            let mut user_conns = self.user_connections.write();
             *user_conns.entry(username.to_string()).or_insert(0) += 1;
         }
         {
-            let mut db_conns = self.database_connections.write().unwrap();
+            let mut db_conns = self.database_connections.write();
             *db_conns.entry(database.to_string()).or_insert(0) += 1;
         }
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_connections += 1;
-            stats.active_connections = self.connections.read().unwrap().len();
+            stats.active_connections = self.connections.read().len();
             if stats.active_connections > stats.peak_connections {
                 stats.peak_connections = stats.active_connections;
             }
@@ -826,19 +827,19 @@ impl ConnectionManager {
     /// Unregister a connection
     pub fn unregister_connection(&self, id: ConnectionId) -> Option<ConnectionInfo> {
         let info = {
-            let mut connections = self.connections.write().unwrap();
+            let mut connections = self.connections.write();
             connections.remove(&id)
         };
 
         if let Some(ref info) = info {
             // Remove PID mapping
             {
-                let mut pid_map = self.pid_to_id.write().unwrap();
+                let mut pid_map = self.pid_to_id.write();
                 pid_map.remove(&info.pid);
             }
             // Decrement user count
             {
-                let mut user_conns = self.user_connections.write().unwrap();
+                let mut user_conns = self.user_connections.write();
                 if let Some(count) = user_conns.get_mut(&info.username) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -848,7 +849,7 @@ impl ConnectionManager {
             }
             // Decrement database count
             {
-                let mut db_conns = self.database_connections.write().unwrap();
+                let mut db_conns = self.database_connections.write();
                 if let Some(count) = db_conns.get_mut(&info.database) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
@@ -858,8 +859,8 @@ impl ConnectionManager {
             }
             // Update stats
             {
-                let mut stats = self.stats.write().unwrap();
-                stats.active_connections = self.connections.read().unwrap().len();
+                let mut stats = self.stats.write();
+                stats.active_connections = self.connections.read().len();
             }
         }
 
@@ -868,14 +869,14 @@ impl ConnectionManager {
 
     /// Get connection by ID
     pub fn get_connection(&self, id: ConnectionId) -> Option<ConnectionInfo> {
-        self.connections.read().unwrap().get(&id).cloned()
+        self.connections.read().get(&id).cloned()
     }
 
     /// Get connection by PID
     pub fn get_connection_by_pid(&self, pid: BackendPid) -> Option<ConnectionInfo> {
-        let pid_map = self.pid_to_id.read().unwrap();
+        let pid_map = self.pid_to_id.read();
         if let Some(id) = pid_map.get(&pid) {
-            self.connections.read().unwrap().get(id).cloned()
+            self.connections.read().get(id).cloned()
         } else {
             None
         }
@@ -883,7 +884,7 @@ impl ConnectionManager {
 
     /// Get all connections (pg_stat_activity)
     pub fn get_all_connections(&self) -> Vec<ConnectionInfo> {
-        self.connections.read().unwrap().values().cloned().collect()
+        self.connections.read().values().cloned().collect()
     }
 
     /// Update connection info
@@ -891,7 +892,7 @@ impl ConnectionManager {
     where
         F: FnOnce(&mut ConnectionInfo),
     {
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write();
         if let Some(info) = connections.get_mut(&id) {
             f(info);
             true
@@ -903,7 +904,7 @@ impl ConnectionManager {
     /// Terminate a connection (pg_terminate_backend)
     pub fn terminate_backend(&self, pid: BackendPid) -> bool {
         let id = {
-            let pid_map = self.pid_to_id.read().unwrap();
+            let pid_map = self.pid_to_id.read();
             pid_map.get(&pid).copied()
         };
 
@@ -915,7 +916,7 @@ impl ConnectionManager {
 
             // Actually terminate
             if self.unregister_connection(id).is_some() {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.terminated_connections += 1;
                 return true;
             }
@@ -927,7 +928,7 @@ impl ConnectionManager {
     /// Cancel a query (pg_cancel_backend)
     pub fn cancel_backend(&self, pid: BackendPid) -> bool {
         let id = {
-            let pid_map = self.pid_to_id.read().unwrap();
+            let pid_map = self.pid_to_id.read();
             pid_map.get(&pid).copied()
         };
 
@@ -949,7 +950,7 @@ impl ConnectionManager {
         }
 
         let connections_to_terminate: Vec<ConnectionId> = {
-            let connections = self.connections.read().unwrap();
+            let connections = self.connections.read();
             connections
                 .iter()
                 .filter(|(_, info)| {
@@ -984,7 +985,7 @@ impl ConnectionManager {
         let count = connections_to_terminate.len();
         for id in connections_to_terminate {
             if let Some(info) = self.unregister_connection(id) {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.timed_out_connections += 1;
             }
         }
@@ -994,22 +995,22 @@ impl ConnectionManager {
 
     /// Get connection manager statistics
     pub fn stats(&self) -> ConnectionManagerStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get connection count
     pub fn connection_count(&self) -> usize {
-        self.connections.read().unwrap().len()
+        self.connections.read().len()
     }
 
     /// Get connections per user
     pub fn connections_by_user(&self) -> HashMap<String, usize> {
-        self.user_connections.read().unwrap().clone()
+        self.user_connections.read().clone()
     }
 
     /// Get connections per database
     pub fn connections_by_database(&self) -> HashMap<String, usize> {
-        self.database_connections.read().unwrap().clone()
+        self.database_connections.read().clone()
     }
 }
 

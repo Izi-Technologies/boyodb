@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// Explanation types
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -798,7 +798,6 @@ impl ExplainabilityRegistry {
         let explainer = ShapExplainer::new(background_data, feature_names);
         self.shap_explainers
             .write()
-            .unwrap()
             .insert(name.to_string(), explainer);
     }
 
@@ -806,7 +805,6 @@ impl ExplainabilityRegistry {
         let explainer = LimeExplainer::new(feature_names);
         self.lime_explainers
             .write()
-            .unwrap()
             .insert(name.to_string(), explainer);
     }
 
@@ -819,7 +817,6 @@ impl ExplainabilityRegistry {
         self.explanations_generated.fetch_add(1, Ordering::Relaxed);
         self.shap_explainers
             .read()
-            .unwrap()
             .get(name)
             .map(|exp| exp.explain(model, instance))
     }
@@ -833,7 +830,6 @@ impl ExplainabilityRegistry {
         self.explanations_generated.fetch_add(1, Ordering::Relaxed);
         self.lime_explainers
             .read()
-            .unwrap()
             .get(name)
             .map(|exp| exp.explain(model, instance))
     }

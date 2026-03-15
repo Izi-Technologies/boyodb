@@ -32,7 +32,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::Arc;
+use parking_lot::{RwLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -441,12 +442,12 @@ impl QueryManager {
 
     /// Set default timeout configuration
     pub fn set_default_timeout(&self, config: TimeoutConfig) {
-        *self.default_timeout.write().unwrap() = config;
+        *self.default_timeout.write() = config;
     }
 
     /// Get default timeout configuration
     pub fn get_default_timeout(&self) -> TimeoutConfig {
-        self.default_timeout.read().unwrap().clone()
+        self.default_timeout.read().clone()
     }
 
     /// Set long query threshold
@@ -466,12 +467,12 @@ impl QueryManager {
         let context = QueryContext::new(query_id, backend_pid, sql, config);
 
         {
-            let mut queries = self.queries.write().unwrap();
+            let mut queries = self.queries.write();
             queries.insert(query_id, context);
         }
 
         {
-            let mut pid_queries = self.pid_queries.write().unwrap();
+            let mut pid_queries = self.pid_queries.write();
             pid_queries
                 .entry(backend_pid)
                 .or_insert_with(Vec::new)
@@ -479,7 +480,7 @@ impl QueryManager {
         }
 
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_queries += 1;
             stats.running_queries += 1;
         }
@@ -489,7 +490,7 @@ impl QueryManager {
 
     /// Complete a query
     pub fn complete_query(&self, query_id: QueryId, success: bool, error: Option<&str>) {
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
         if let Some(context) = queries.get_mut(&query_id) {
             if success {
                 context.mark_completed();
@@ -500,7 +501,7 @@ impl QueryManager {
 
         // Remove from tracking
         if let Some(context) = queries.remove(&query_id) {
-            let mut pid_queries = self.pid_queries.write().unwrap();
+            let mut pid_queries = self.pid_queries.write();
             if let Some(query_ids) = pid_queries.get_mut(&context.backend_pid) {
                 query_ids.retain(|&id| id != query_id);
                 if query_ids.is_empty() {
@@ -508,7 +509,7 @@ impl QueryManager {
                 }
             }
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.running_queries = stats.running_queries.saturating_sub(1);
             if success {
                 stats.completed_queries += 1;
@@ -520,7 +521,7 @@ impl QueryManager {
 
     /// Get query context
     pub fn get_query(&self, query_id: QueryId) -> Option<QueryContext> {
-        self.queries.read().unwrap().get(&query_id).map(|ctx| QueryContext {
+        self.queries.read().get(&query_id).map(|ctx| QueryContext {
             query_id: ctx.query_id,
             backend_pid: ctx.backend_pid,
             sql: ctx.sql.clone(),
@@ -536,7 +537,7 @@ impl QueryManager {
 
     /// Check query timeouts and cancellation
     pub fn check_query(&self, query_id: QueryId) -> Result<(), QuerySafetyError> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         if let Some(context) = queries.get(&query_id) {
             context.check()
         } else {
@@ -546,11 +547,11 @@ impl QueryManager {
 
     /// Cancel a query by ID
     pub fn cancel_query(&self, query_id: QueryId) -> Result<(), QuerySafetyError> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         if let Some(context) = queries.get(&query_id) {
             context.request_cancel();
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.cancelled_queries += 1;
 
             Ok(())
@@ -561,16 +562,16 @@ impl QueryManager {
 
     /// Cancel all queries for a backend (pg_cancel_backend)
     pub fn pg_cancel_backend(&self, pid: BackendPid) -> bool {
-        let pid_queries = self.pid_queries.read().unwrap();
+        let pid_queries = self.pid_queries.read();
         if let Some(query_ids) = pid_queries.get(&pid) {
-            let queries = self.queries.read().unwrap();
+            let queries = self.queries.read();
             for &query_id in query_ids {
                 if let Some(context) = queries.get(&query_id) {
                     context.request_cancel();
                 }
             }
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.cancelled_queries += query_ids.len() as u64;
 
             true
@@ -586,17 +587,17 @@ impl QueryManager {
 
         // Remove from tracking
         let query_ids: Vec<QueryId> = {
-            let mut pid_queries = self.pid_queries.write().unwrap();
+            let mut pid_queries = self.pid_queries.write();
             pid_queries.remove(&pid).unwrap_or_default()
         };
 
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
         for query_id in &query_ids {
             queries.remove(query_id);
         }
 
         if !query_ids.is_empty() {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.running_queries = stats.running_queries.saturating_sub(query_ids.len());
         }
 
@@ -605,7 +606,7 @@ impl QueryManager {
 
     /// Get all running queries
     pub fn get_running_queries(&self) -> Vec<QueryInfo> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         queries
             .values()
             .filter(|ctx| ctx.state == QueryState::Running || ctx.state == QueryState::WaitingLock)
@@ -624,7 +625,7 @@ impl QueryManager {
     /// Get long-running queries (exceeding threshold)
     pub fn get_long_running_queries(&self) -> Vec<QueryInfo> {
         let threshold = self.long_query_threshold_ms.load(Ordering::Relaxed);
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         queries
             .values()
             .filter(|ctx| {
@@ -645,7 +646,7 @@ impl QueryManager {
 
     /// Check all queries for timeouts
     pub fn check_all_timeouts(&self) -> Vec<(QueryId, QuerySafetyError)> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         let mut timed_out = Vec::new();
 
         for (query_id, context) in queries.iter() {
@@ -655,7 +656,7 @@ impl QueryManager {
         }
 
         if !timed_out.is_empty() {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.timed_out_queries += timed_out.len() as u64;
         }
 
@@ -664,29 +665,29 @@ impl QueryManager {
 
     /// Start lock wait for a query
     pub fn start_lock_wait(&self, query_id: QueryId) {
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
         if let Some(context) = queries.get_mut(&query_id) {
             context.start_lock_wait();
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.waiting_queries += 1;
         }
     }
 
     /// End lock wait for a query
     pub fn end_lock_wait(&self, query_id: QueryId) {
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
         if let Some(context) = queries.get_mut(&query_id) {
             context.end_lock_wait();
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.waiting_queries = stats.waiting_queries.saturating_sub(1);
         }
     }
 
     /// Get statistics
     pub fn stats(&self) -> QueryManagerStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -604,7 +605,7 @@ impl PreparedStatementCache {
         sql: &str,
         param_types: Vec<String>,
     ) -> Result<(), PrepareError> {
-        let mut stmts = self.statements.write().unwrap();
+        let mut stmts = self.statements.write();
 
         if stmts.len() >= self.max_statements && !stmts.contains_key(name) {
             return Err(PrepareError::CacheFull);
@@ -617,7 +618,7 @@ impl PreparedStatementCache {
 
     /// Get a prepared statement
     pub fn get(&self, name: &str) -> Option<PreparedStatement> {
-        let stmts = self.statements.read().unwrap();
+        let stmts = self.statements.read();
         if let Some(stmt) = stmts.get(name) {
             self.hit_count.fetch_add(1, Ordering::Relaxed);
             Some(stmt.clone())
@@ -634,7 +635,7 @@ impl PreparedStatementCache {
         // Simulate execution
         let duration = start.elapsed();
 
-        let mut stmts = self.statements.write().unwrap();
+        let mut stmts = self.statements.write();
         if let Some(stmt) = stmts.get_mut(name) {
             stmt.record_execution(duration);
             Ok(duration)
@@ -645,7 +646,7 @@ impl PreparedStatementCache {
 
     /// Deallocate a prepared statement
     pub fn deallocate(&self, name: &str) -> Result<(), PrepareError> {
-        let mut stmts = self.statements.write().unwrap();
+        let mut stmts = self.statements.write();
         if stmts.remove(name).is_some() {
             Ok(())
         } else {
@@ -655,19 +656,19 @@ impl PreparedStatementCache {
 
     /// Deallocate all prepared statements
     pub fn deallocate_all(&self) {
-        let mut stmts = self.statements.write().unwrap();
+        let mut stmts = self.statements.write();
         stmts.clear();
     }
 
     /// List all prepared statements
     pub fn list(&self) -> Vec<PreparedStatement> {
-        let stmts = self.statements.read().unwrap();
+        let stmts = self.statements.read();
         stmts.values().cloned().collect()
     }
 
     /// Cache statistics
     pub fn stats(&self) -> CacheStats {
-        let stmts = self.statements.read().unwrap();
+        let stmts = self.statements.read();
         CacheStats {
             statement_count: stmts.len(),
             max_statements: self.max_statements,

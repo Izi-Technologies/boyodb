@@ -2420,7 +2420,7 @@ mod tests {
 // ============================================================================
 
 use std::collections::HashSet;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Types of index recommendations
@@ -2590,7 +2590,7 @@ impl IndexAdvisor {
         used_index: bool,
     ) {
         let key = format!("{}.{}", database, table);
-        let mut patterns = self.patterns.write().unwrap();
+        let mut patterns = self.patterns.write();
 
         let pattern = patterns.entry(key).or_insert_with(TableAccessPattern::default);
         pattern.total_queries += 1;
@@ -2662,13 +2662,13 @@ impl IndexAdvisor {
     /// Update table statistics
     pub fn update_stats(&self, database: &str, table: &str, stats: TableStats) {
         let key = format!("{}.{}", database, table);
-        self.table_stats.write().unwrap().insert(key, stats);
+        self.table_stats.write().insert(key, stats);
     }
 
     /// Register an existing index
     pub fn register_index(&self, database: &str, table: &str, index: ExistingIndex) {
         let key = format!("{}.{}", database, table);
-        self.existing_indexes.write().unwrap()
+        self.existing_indexes.write()
             .entry(key)
             .or_insert_with(Vec::new)
             .push(index);
@@ -2676,9 +2676,9 @@ impl IndexAdvisor {
 
     /// Generate index recommendations
     pub fn recommend(&self) -> Vec<IndexRecommendation> {
-        let patterns = self.patterns.read().unwrap();
-        let existing = self.existing_indexes.read().unwrap();
-        let stats = self.table_stats.read().unwrap();
+        let patterns = self.patterns.read();
+        let existing = self.existing_indexes.read();
+        let stats = self.table_stats.read();
 
         let mut recommendations = Vec::new();
 
@@ -2908,7 +2908,7 @@ impl IndexAdvisor {
 
     /// Get summary statistics
     pub fn stats(&self) -> IndexAdvisorStats {
-        let patterns = self.patterns.read().unwrap();
+        let patterns = self.patterns.read();
 
         let mut total_tables = 0;
         let mut total_queries = 0;
@@ -2934,7 +2934,7 @@ impl IndexAdvisor {
 
     /// Clear old patterns
     pub fn cleanup(&self) {
-        let mut last = self.last_cleanup.write().unwrap();
+        let mut last = self.last_cleanup.write();
         if last.elapsed() < Duration::from_secs(3600) {
             return; // Only cleanup once per hour
         }
@@ -2942,7 +2942,7 @@ impl IndexAdvisor {
 
         // For now, just clear patterns older than retention
         // In production, you'd track timestamps per pattern
-        let mut patterns = self.patterns.write().unwrap();
+        let mut patterns = self.patterns.write();
         patterns.retain(|_, p| p.total_queries > self.config.min_query_count);
     }
 }
@@ -3235,7 +3235,7 @@ impl QueryStore {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
 
         // Enforce size limit
         if queries.len() >= self.config.max_queries && !queries.contains_key(&fingerprint) {
@@ -3274,7 +3274,7 @@ impl QueryStore {
 
     /// Get top queries by total time
     pub fn top_by_total_time(&self, limit: usize) -> Vec<StoredQuery> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         let mut sorted: Vec<_> = queries.values().cloned().collect();
         sorted.sort_by(|a, b| b.stats.total_time_us.cmp(&a.stats.total_time_us));
         sorted.truncate(limit);
@@ -3283,7 +3283,7 @@ impl QueryStore {
 
     /// Get top queries by average time
     pub fn top_by_avg_time(&self, limit: usize) -> Vec<StoredQuery> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         let mut sorted: Vec<_> = queries.values().cloned().collect();
         sorted.sort_by(|a, b| {
             b.stats.avg_time_us().partial_cmp(&a.stats.avg_time_us())
@@ -3295,7 +3295,7 @@ impl QueryStore {
 
     /// Get queries with detected regressions
     pub fn detect_regressions(&self) -> Vec<(StoredQuery, f64)> {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
         queries.values()
             .filter_map(|q| {
                 q.detect_regression(self.config.regression_threshold_pct)
@@ -3306,12 +3306,12 @@ impl QueryStore {
 
     /// Get query by fingerprint
     pub fn get(&self, fingerprint: &QueryFingerprint) -> Option<StoredQuery> {
-        self.queries.read().unwrap().get(fingerprint).cloned()
+        self.queries.read().get(fingerprint).cloned()
     }
 
     /// Get summary statistics
     pub fn summary(&self) -> QueryStoreSummary {
-        let queries = self.queries.read().unwrap();
+        let queries = self.queries.read();
 
         let total_queries = queries.len();
         let total_executions: u64 = queries.values().map(|q| q.stats.execution_count).sum();
@@ -3338,7 +3338,7 @@ impl QueryStore {
 
         let cutoff = now.saturating_sub(self.config.retention_secs);
 
-        let mut queries = self.queries.write().unwrap();
+        let mut queries = self.queries.write();
         queries.retain(|_, q| q.stats.last_execution >= cutoff);
     }
 }
@@ -3505,12 +3505,12 @@ impl CostModelTuner {
 
     /// Get current parameters
     pub fn params(&self) -> CostModelParams {
-        self.params.read().unwrap().clone()
+        self.params.read().clone()
     }
 
     /// Update a specific parameter
     pub fn set_param(&self, name: &str, value: f64) -> Result<(), String> {
-        let mut params = self.params.write().unwrap();
+        let mut params = self.params.write();
         match name {
             "seq_page_cost" => params.seq_page_cost = value,
             "random_page_cost" => params.random_page_cost = value,
@@ -3530,7 +3530,7 @@ impl CostModelTuner {
 
     /// Record calibration data point
     pub fn record_calibration(&self, estimated: f64, actual: f64) {
-        let mut data = self.calibration_data.write().unwrap();
+        let mut data = self.calibration_data.write();
         data.push_back((estimated, actual));
         if data.len() > 1000 {
             data.pop_front();
@@ -3539,7 +3539,7 @@ impl CostModelTuner {
 
     /// Get calibration statistics
     pub fn calibration_stats(&self) -> CostCalibrationStats {
-        let data = self.calibration_data.read().unwrap();
+        let data = self.calibration_data.read();
 
         if data.is_empty() {
             return CostCalibrationStats::default();
@@ -3583,7 +3583,7 @@ impl CostModelTuner {
             return; // Not enough data
         }
 
-        let mut params = self.params.write().unwrap();
+        let mut params = self.params.write();
 
         // If consistently underestimating, increase costs
         if stats.avg_ratio > 1.3 {
@@ -3751,12 +3751,12 @@ impl AdaptiveExecutor {
 
         let count = self.adaptation_count.load(std::sync::atomic::Ordering::SeqCst);
         if count >= self.config.max_adaptations {
-            self.checkpoints.write().unwrap().push(checkpoint);
+            self.checkpoints.write().push(checkpoint);
             return AdaptiveDecision::Continue;
         }
 
         if checkpoint.stats.rows_processed < self.config.min_rows_for_adaptation {
-            self.checkpoints.write().unwrap().push(checkpoint);
+            self.checkpoints.write().push(checkpoint);
             return AdaptiveDecision::Continue;
         }
 
@@ -3764,10 +3764,10 @@ impl AdaptiveExecutor {
 
         if decision != AdaptiveDecision::Continue {
             self.adaptation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.decisions.write().unwrap().push((checkpoint.clone(), decision.clone()));
+            self.decisions.write().push((checkpoint.clone(), decision.clone()));
         }
 
-        self.checkpoints.write().unwrap().push(checkpoint);
+        self.checkpoints.write().push(checkpoint);
         decision
     }
 
@@ -3804,8 +3804,8 @@ impl AdaptiveExecutor {
     }
 
     pub fn summary(&self) -> AdaptiveExecutionSummary {
-        let checkpoints = self.checkpoints.read().unwrap();
-        let decisions = self.decisions.read().unwrap();
+        let checkpoints = self.checkpoints.read();
+        let decisions = self.decisions.read();
         AdaptiveExecutionSummary {
             total_checkpoints: checkpoints.len(),
             adaptations_made: decisions.len(),
@@ -3814,8 +3814,8 @@ impl AdaptiveExecutor {
     }
 
     pub fn reset(&self) {
-        self.checkpoints.write().unwrap().clear();
-        self.decisions.write().unwrap().clear();
+        self.checkpoints.write().clear();
+        self.decisions.write().clear();
         self.adaptation_count.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -3892,11 +3892,11 @@ impl TenantResourceManager {
     }
 
     pub fn set_quota(&self, tenant_id: &str, quota: TenantQuota) {
-        self.quotas.write().unwrap().insert(tenant_id.to_string(), quota);
+        self.quotas.write().insert(tenant_id.to_string(), quota);
     }
 
     pub fn get_quota(&self, tenant_id: &str) -> TenantQuota {
-        self.quotas.read().unwrap()
+        self.quotas.read()
             .get(tenant_id)
             .cloned()
             .unwrap_or_else(|| {
@@ -3913,7 +3913,7 @@ impl TenantResourceManager {
             return Err(TenantQuotaError::TenantDisabled);
         }
 
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         let tenant_usage = usage.entry(tenant_id.to_string()).or_default();
 
         if tenant_usage.concurrent_queries >= quota.max_concurrent_queries {
@@ -3945,7 +3945,7 @@ impl TenantResourceManager {
     }
 
     pub fn release(&self, token: TenantQueryToken, rows_processed: u64, cpu_time_us: u64) {
-        let mut usage = self.usage.write().unwrap();
+        let mut usage = self.usage.write();
         if let Some(tenant_usage) = usage.get_mut(&token.tenant_id) {
             tenant_usage.concurrent_queries = tenant_usage.concurrent_queries.saturating_sub(1);
             tenant_usage.memory_used = tenant_usage.memory_used.saturating_sub(token.memory_reserved);
@@ -3955,12 +3955,12 @@ impl TenantResourceManager {
     }
 
     pub fn get_usage(&self, tenant_id: &str) -> TenantUsage {
-        self.usage.read().unwrap().get(tenant_id).cloned().unwrap_or_default()
+        self.usage.read().get(tenant_id).cloned().unwrap_or_default()
     }
 
     pub fn all_stats(&self) -> Vec<(String, TenantQuota, TenantUsage)> {
-        let quotas = self.quotas.read().unwrap();
-        let usage = self.usage.read().unwrap();
+        let quotas = self.quotas.read();
+        let usage = self.usage.read();
         quotas.iter().map(|(id, quota)| {
             let u = usage.get(id).cloned().unwrap_or_default();
             (id.clone(), quota.clone(), u)

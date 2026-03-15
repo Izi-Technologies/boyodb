@@ -9,7 +9,8 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // Collation Types
@@ -479,8 +480,8 @@ impl CollationManager {
         for (oid, config) in builtins {
             let name = config.name.clone();
             let collation = Arc::new(Collation::new(oid, config));
-            self.collations.write().unwrap().insert(oid, collation);
-            self.name_index.write().unwrap().insert(name, oid);
+            self.collations.write().insert(oid, collation);
+            self.name_index.write().insert(name, oid);
         }
     }
 
@@ -493,7 +494,7 @@ impl CollationManager {
 
         // Check for duplicates
         {
-            let name_index = self.name_index.read().unwrap();
+            let name_index = self.name_index.read();
             if name_index.contains_key(&config.name) {
                 return Err(CollationError::AlreadyExists(config.name.clone()));
             }
@@ -501,7 +502,7 @@ impl CollationManager {
 
         // Allocate OID
         let oid = {
-            let mut next_oid = self.next_oid.write().unwrap();
+            let mut next_oid = self.next_oid.write();
             let oid = *next_oid;
             *next_oid += 1;
             oid
@@ -509,8 +510,8 @@ impl CollationManager {
 
         let collation = Arc::new(Collation::new(oid, config.clone()));
 
-        self.collations.write().unwrap().insert(oid, collation.clone());
-        self.name_index.write().unwrap().insert(config.name, oid);
+        self.collations.write().insert(oid, collation.clone());
+        self.name_index.write().insert(config.name, oid);
 
         Ok(collation)
     }
@@ -518,7 +519,7 @@ impl CollationManager {
     /// Drop a collation
     pub fn drop_collation(&self, name: &str) -> Result<(), CollationError> {
         let oid = {
-            let name_index = self.name_index.read().unwrap();
+            let name_index = self.name_index.read();
             *name_index.get(name)
                 .ok_or_else(|| CollationError::NotFound(name.to_string()))?
         };
@@ -528,22 +529,22 @@ impl CollationManager {
             return Err(CollationError::CannotDropBuiltin(name.to_string()));
         }
 
-        self.collations.write().unwrap().remove(&oid);
-        self.name_index.write().unwrap().remove(name);
+        self.collations.write().remove(&oid);
+        self.name_index.write().remove(name);
 
         Ok(())
     }
 
     /// Get a collation by name
     pub fn get_collation(&self, name: &str) -> Option<Arc<Collation>> {
-        let name_index = self.name_index.read().unwrap();
+        let name_index = self.name_index.read();
         let oid = name_index.get(name)?;
-        self.collations.read().unwrap().get(oid).cloned()
+        self.collations.read().get(oid).cloned()
     }
 
     /// Get a collation by OID
     pub fn get_collation_by_oid(&self, oid: u32) -> Option<Arc<Collation>> {
-        self.collations.read().unwrap().get(&oid).cloned()
+        self.collations.read().get(&oid).cloned()
     }
 
     /// Get the default collation
@@ -560,12 +561,12 @@ impl CollationManager {
 
     /// List all collations
     pub fn list_collations(&self) -> Vec<Arc<Collation>> {
-        self.collations.read().unwrap().values().cloned().collect()
+        self.collations.read().values().cloned().collect()
     }
 
     /// Find collations matching a locale pattern
     pub fn find_by_locale(&self, locale_pattern: &str) -> Vec<Arc<Collation>> {
-        self.collations.read().unwrap()
+        self.collations.read()
             .values()
             .filter(|c| c.config.locale.starts_with(locale_pattern))
             .cloned()

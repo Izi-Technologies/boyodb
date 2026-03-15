@@ -10,7 +10,8 @@
 //! - Audit trail queries
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Sha256, Digest};
@@ -619,7 +620,7 @@ impl LedgerRegistry {
 
     /// Create new ledger
     pub fn create_ledger(&self, name: &str, block_size: usize) -> Result<(), String> {
-        let mut ledgers = self.ledgers.write().map_err(|e| e.to_string())?;
+        let mut ledgers = self.ledgers.write();
         if ledgers.contains_key(name) {
             return Err(format!("Ledger '{}' already exists", name));
         }
@@ -629,7 +630,7 @@ impl LedgerRegistry {
 
     /// Add transaction to ledger
     pub fn add_transaction(&self, ledger_name: &str, tx: Transaction) -> Result<String, String> {
-        let mut ledgers = self.ledgers.write().map_err(|e| e.to_string())?;
+        let mut ledgers = self.ledgers.write();
         let ledger = ledgers
             .get_mut(ledger_name)
             .ok_or_else(|| format!("Ledger '{}' not found", ledger_name))?;
@@ -638,7 +639,7 @@ impl LedgerRegistry {
 
     /// Mine block in ledger
     pub fn mine_block(&self, ledger_name: &str) -> Result<Option<u64>, String> {
-        let mut ledgers = self.ledgers.write().map_err(|e| e.to_string())?;
+        let mut ledgers = self.ledgers.write();
         let ledger = ledgers
             .get_mut(ledger_name)
             .ok_or_else(|| format!("Ledger '{}' not found", ledger_name))?;
@@ -647,7 +648,7 @@ impl LedgerRegistry {
 
     /// Verify ledger chain
     pub fn verify_chain(&self, ledger_name: &str) -> Result<ChainVerification, String> {
-        let ledgers = self.ledgers.read().map_err(|e| e.to_string())?;
+        let ledgers = self.ledgers.read();
         let ledger = ledgers
             .get(ledger_name)
             .ok_or_else(|| format!("Ledger '{}' not found", ledger_name))?;
@@ -656,7 +657,7 @@ impl LedgerRegistry {
 
     /// Get ledger stats
     pub fn get_stats(&self, ledger_name: &str) -> Result<LedgerStats, String> {
-        let ledgers = self.ledgers.read().map_err(|e| e.to_string())?;
+        let ledgers = self.ledgers.read();
         let ledger = ledgers
             .get(ledger_name)
             .ok_or_else(|| format!("Ledger '{}' not found", ledger_name))?;
@@ -665,7 +666,7 @@ impl LedgerRegistry {
 
     /// Get audit trail
     pub fn get_audit_trail(&self, ledger_name: &str, target: &str) -> Result<AuditTrail, String> {
-        let ledgers = self.ledgers.read().map_err(|e| e.to_string())?;
+        let ledgers = self.ledgers.read();
         let ledger = ledgers
             .get(ledger_name)
             .ok_or_else(|| format!("Ledger '{}' not found", ledger_name))?;
@@ -674,7 +675,7 @@ impl LedgerRegistry {
 
     /// List all ledgers
     pub fn list_ledgers(&self) -> Result<Vec<String>, String> {
-        let ledgers = self.ledgers.read().map_err(|e| e.to_string())?;
+        let ledgers = self.ledgers.read();
         Ok(ledgers.keys().cloned().collect())
     }
 }

@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// FDW Error types
@@ -498,7 +499,7 @@ impl FdwRegistry {
     }
 
     fn register_builtin_handlers(&self) {
-        let mut handlers = self.handlers.write().unwrap();
+        let mut handlers = self.handlers.write();
         handlers.insert("postgres_fdw".to_string(), Arc::new(PostgresFdwHandler));
         handlers.insert("mysql_fdw".to_string(), Arc::new(MySqlFdwHandler));
         handlers.insert("mongo_fdw".to_string(), Arc::new(MongoFdwHandler));
@@ -509,7 +510,7 @@ impl FdwRegistry {
 
     /// Create a foreign data wrapper
     pub fn create_wrapper(&self, wrapper: ForeignDataWrapper) -> Result<(), FdwError> {
-        let mut wrappers = self.wrappers.write().unwrap();
+        let mut wrappers = self.wrappers.write();
 
         if wrappers.contains_key(&wrapper.name) {
             return Err(FdwError::InvalidOption(format!(
@@ -525,7 +526,7 @@ impl FdwRegistry {
     /// Drop a foreign data wrapper
     pub fn drop_wrapper(&self, name: &str, cascade: bool) -> Result<(), FdwError> {
         // Check for dependent servers
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         let dependent_servers: Vec<_> = servers
             .values()
             .filter(|s| s.wrapper_name == name)
@@ -548,7 +549,7 @@ impl FdwRegistry {
             }
         }
 
-        let mut wrappers = self.wrappers.write().unwrap();
+        let mut wrappers = self.wrappers.write();
         wrappers
             .remove(name)
             .ok_or_else(|| FdwError::WrapperNotFound(name.to_string()))?;
@@ -559,20 +560,20 @@ impl FdwRegistry {
     /// Create a foreign server
     pub fn create_server(&self, server: ForeignServer) -> Result<(), FdwError> {
         // Validate wrapper exists
-        let wrappers = self.wrappers.read().unwrap();
+        let wrappers = self.wrappers.read();
         if !wrappers.contains_key(&server.wrapper_name) {
             return Err(FdwError::WrapperNotFound(server.wrapper_name.clone()));
         }
         drop(wrappers);
 
         // Validate options
-        let handlers = self.handlers.read().unwrap();
+        let handlers = self.handlers.read();
         if let Some(handler) = handlers.get(&server.wrapper_name) {
             handler.validate_server_options(&server.options)?;
         }
         drop(handlers);
 
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         if servers.contains_key(&server.name) {
             return Err(FdwError::InvalidOption(format!(
                 "server '{}' already exists",
@@ -587,7 +588,7 @@ impl FdwRegistry {
     /// Drop a foreign server
     pub fn drop_server(&self, name: &str, cascade: bool) -> Result<(), FdwError> {
         // Check for dependent foreign tables
-        let tables = self.foreign_tables.read().unwrap();
+        let tables = self.foreign_tables.read();
         let dependent_tables: Vec<_> = tables
             .values()
             .filter(|t| t.server_name == name)
@@ -611,16 +612,16 @@ impl FdwRegistry {
         }
 
         // Remove user mappings
-        let mut mappings = self.user_mappings.write().unwrap();
+        let mut mappings = self.user_mappings.write();
         mappings.retain(|(_, server), _| server != name);
         drop(mappings);
 
         // Close connections
-        let mut pool = self.connection_pool.write().unwrap();
+        let mut pool = self.connection_pool.write();
         pool.remove(name);
         drop(pool);
 
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write();
         servers
             .remove(name)
             .ok_or_else(|| FdwError::ServerNotFound(name.to_string()))?;
@@ -631,13 +632,13 @@ impl FdwRegistry {
     /// Create user mapping
     pub fn create_user_mapping(&self, mapping: UserMapping) -> Result<(), FdwError> {
         // Validate server exists
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         if !servers.contains_key(&mapping.server_name) {
             return Err(FdwError::ServerNotFound(mapping.server_name.clone()));
         }
         drop(servers);
 
-        let mut mappings = self.user_mappings.write().unwrap();
+        let mut mappings = self.user_mappings.write();
         let key = (mapping.local_user.clone(), mapping.server_name.clone());
 
         if mappings.contains_key(&key) {
@@ -653,7 +654,7 @@ impl FdwRegistry {
 
     /// Drop user mapping
     pub fn drop_user_mapping(&self, user: &str, server: &str) -> Result<(), FdwError> {
-        let mut mappings = self.user_mappings.write().unwrap();
+        let mut mappings = self.user_mappings.write();
         let key = (user.to_string(), server.to_string());
 
         mappings
@@ -666,13 +667,13 @@ impl FdwRegistry {
     /// Create foreign table
     pub fn create_foreign_table(&self, table: ForeignTable) -> Result<(), FdwError> {
         // Validate server exists
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         if !servers.contains_key(&table.server_name) {
             return Err(FdwError::ServerNotFound(table.server_name.clone()));
         }
         drop(servers);
 
-        let mut tables = self.foreign_tables.write().unwrap();
+        let mut tables = self.foreign_tables.write();
         if tables.contains_key(&table.name) {
             return Err(FdwError::InvalidOption(format!(
                 "foreign table '{}' already exists",
@@ -686,7 +687,7 @@ impl FdwRegistry {
 
     /// Drop foreign table
     pub fn drop_foreign_table(&self, name: &str) -> Result<(), FdwError> {
-        let mut tables = self.foreign_tables.write().unwrap();
+        let mut tables = self.foreign_tables.write();
         tables
             .remove(name)
             .ok_or_else(|| FdwError::TableNotFound(name.to_string()))?;
@@ -701,7 +702,7 @@ impl FdwRegistry {
     ) -> Result<Box<dyn FdwConnection>, FdwError> {
         // Try connection pool first
         {
-            let mut pool = self.connection_pool.write().unwrap();
+            let mut pool = self.connection_pool.write();
             if let Some(connections) = pool.get_mut(server_name) {
                 if let Some(conn) = connections.pop() {
                     if conn.is_valid() {
@@ -715,7 +716,6 @@ impl FdwRegistry {
         let server = self
             .servers
             .read()
-            .unwrap()
             .get(server_name)
             .cloned()
             .ok_or_else(|| FdwError::ServerNotFound(server_name.to_string()))?;
@@ -723,7 +723,6 @@ impl FdwRegistry {
         let mapping = self
             .user_mappings
             .read()
-            .unwrap()
             .get(&(local_user.to_string(), server_name.to_string()))
             .cloned()
             .ok_or_else(|| {
@@ -733,14 +732,13 @@ impl FdwRegistry {
         let handler = self
             .handlers
             .read()
-            .unwrap()
             .get(&server.wrapper_name)
             .cloned()
             .ok_or_else(|| FdwError::WrapperNotFound(server.wrapper_name.clone()))?;
 
         let conn = handler.connect(&server, &mapping)?;
 
-        self.stats.write().unwrap().connection_opens += 1;
+        self.stats.write().connection_opens += 1;
 
         Ok(conn)
     }
@@ -748,7 +746,7 @@ impl FdwRegistry {
     /// Return connection to pool
     pub fn return_connection(&self, server_name: &str, conn: Box<dyn FdwConnection>) {
         if conn.is_valid() {
-            let mut pool = self.connection_pool.write().unwrap();
+            let mut pool = self.connection_pool.write();
             pool.entry(server_name.to_string())
                 .or_insert_with(Vec::new)
                 .push(conn);
@@ -792,7 +790,6 @@ impl FdwRegistry {
         let table = self
             .foreign_tables
             .read()
-            .unwrap()
             .get(table_name)
             .cloned()
             .ok_or_else(|| FdwError::TableNotFound(table_name.to_string()))?;
@@ -804,7 +801,7 @@ impl FdwRegistry {
 
         let cursor = conn.execute_query(&query)?;
 
-        self.stats.write().unwrap().total_queries += 1;
+        self.stats.write().total_queries += 1;
 
         Ok(ForeignScanState {
             table,
@@ -969,7 +966,6 @@ impl FdwRegistry {
         let table = self
             .foreign_tables
             .read()
-            .unwrap()
             .get(table_name)
             .cloned()
             .ok_or_else(|| FdwError::TableNotFound(table_name.to_string()))?;
@@ -981,7 +977,7 @@ impl FdwRegistry {
 
         let cursor = conn.execute_query(&query)?;
 
-        self.stats.write().unwrap().total_queries += 1;
+        self.stats.write().total_queries += 1;
 
         Ok(ForeignScanState {
             table,
@@ -1071,17 +1067,17 @@ impl FdwRegistry {
 
     /// Get foreign table
     pub fn get_foreign_table(&self, name: &str) -> Option<ForeignTable> {
-        self.foreign_tables.read().unwrap().get(name).cloned()
+        self.foreign_tables.read().get(name).cloned()
     }
 
     /// List foreign tables
     pub fn list_foreign_tables(&self) -> Vec<ForeignTable> {
-        self.foreign_tables.read().unwrap().values().cloned().collect()
+        self.foreign_tables.read().values().cloned().collect()
     }
 
     /// Get statistics
     pub fn stats(&self) -> FdwStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

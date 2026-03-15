@@ -40,7 +40,8 @@ use std::io::{BufWriter, Cursor, ErrorKind, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+use parking_lot::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use tempfile::tempdir;
@@ -2456,47 +2457,43 @@ impl Metrics {
 #[derive(Debug, Default)]
 pub struct CompactionState {
     /// Last compaction time per table (database.table -> timestamp)
-    last_compaction: std::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>,
+    last_compaction: RwLock<std::collections::HashMap<String, std::time::Instant>>,
     /// Currently running compactions count
     active_compactions: AtomicU64,
     /// Condvar for event-driven compaction notification
     /// Compaction threads wait on this instead of polling
-    work_available: std::sync::Condvar,
+    work_available: parking_lot::Condvar,
     /// Mutex paired with Condvar
-    work_mutex: std::sync::Mutex<bool>,
+    work_mutex: Mutex<bool>,
 }
 
 impl CompactionState {
     pub fn new() -> Self {
         Self {
-            last_compaction: std::sync::RwLock::new(std::collections::HashMap::new()),
+            last_compaction: RwLock::new(std::collections::HashMap::new()),
             active_compactions: AtomicU64::new(0),
-            work_available: std::sync::Condvar::new(),
-            work_mutex: std::sync::Mutex::new(false),
+            work_available: parking_lot::Condvar::new(),
+            work_mutex: Mutex::new(false),
         }
     }
 
     /// Notify waiting compaction threads that new work may be available
     /// Called after new segments are added
     pub fn notify_work_available(&self) {
-        if let Ok(mut has_work) = self.work_mutex.lock() {
-            *has_work = true;
-        }
+        let mut has_work = self.work_mutex.lock();
+        *has_work = true;
         self.work_available.notify_all();
     }
 
     /// Wait for work notification with timeout
     /// Returns true if notified, false if timed out
     pub fn wait_for_work(&self, timeout: std::time::Duration) -> bool {
-        if let Ok(guard) = self.work_mutex.lock() {
-            // Wait with timeout - returns immediately if already signaled
-            let result = self.work_available.wait_timeout(guard, timeout);
-            if let Ok((mut has_work, wait_result)) = result {
-                if !wait_result.timed_out() {
-                    *has_work = false; // Reset signal
-                    return true;
-                }
-            }
+        let mut guard = self.work_mutex.lock();
+        // Wait with timeout - returns immediately if already signaled
+        let wait_result = self.work_available.wait_for(&mut guard, timeout);
+        if !wait_result.timed_out() {
+            *guard = false; // Reset signal
+            return true;
         }
         false
     }
@@ -2509,10 +2506,9 @@ impl CompactionState {
     /// Check if a table is in cooldown period
     pub fn is_table_in_cooldown(&self, database: &str, table: &str, cooldown_secs: u64) -> bool {
         let key = format!("{}.{}", database, table);
-        if let Ok(map) = self.last_compaction.read() {
-            if let Some(last_time) = map.get(&key) {
-                return last_time.elapsed().as_secs() < cooldown_secs;
-            }
+        let map = self.last_compaction.read();
+        if let Some(last_time) = map.get(&key) {
+            return last_time.elapsed().as_secs() < cooldown_secs;
         }
         false
     }
@@ -2521,9 +2517,8 @@ impl CompactionState {
     pub fn start_compaction(&self, database: &str, table: &str) {
         self.active_compactions.fetch_add(1, Ordering::SeqCst);
         let key = format!("{}.{}", database, table);
-        if let Ok(mut map) = self.last_compaction.write() {
-            map.insert(key, std::time::Instant::now());
-        }
+        let mut map = self.last_compaction.write();
+        map.insert(key, std::time::Instant::now());
     }
 
     /// Mark a compaction as finished
@@ -2989,17 +2984,17 @@ impl Drop for Db {
         let _ = self.flush_all_memtables();
 
         // Flush WAL to ensure all entries are written to disk
-        if let Ok(mut wal) = self.wal.lock() {
+        {
+            let mut wal = self.wal.lock();
             let _ = wal.flush_sync();
         }
 
         // Persist manifest if it has changed since last persistence
-        let current_version = self.manifest.read().map(|m| m.version).unwrap_or(0);
+        let current_version = self.manifest.read().version;
         let last_persisted = self.last_persisted_version.load(Ordering::Acquire);
         if current_version > last_persisted {
-            if let Ok(manifest) = self.manifest.read() {
-                let _ = persist_manifest(&self.cfg.manifest_path, &manifest);
-            }
+            let manifest = self.manifest.read();
+            let _ = persist_manifest(&self.cfg.manifest_path, &manifest);
         }
     }
 }
@@ -3645,9 +3640,8 @@ impl Db {
     }
 
     pub fn set_cluster_manager(&self, cm: std::sync::Weak<crate::cluster::ClusterManager>) {
-        if let Ok(mut lock) = self.cluster_manager.write() {
-            *lock = Some(cm);
-        }
+        let mut lock = self.cluster_manager.write();
+        *lock = Some(cm);
     }
 
     /// Get the transaction manager, creating it if necessary
@@ -3746,10 +3740,7 @@ impl Db {
 
         // Get table metadata
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .tables
                 .iter()
@@ -3820,11 +3811,7 @@ impl Db {
         let recovery_mgr = self.get_or_create_recovery_manager()?;
 
         // Get current LSN from WAL
-        let current_lsn = self
-            .wal
-            .lock()
-            .map(|wal| Some(wal.current_lsn()))
-            .unwrap_or(None);
+        let current_lsn = Some(self.wal.lock().current_lsn());
 
         recovery_mgr.create_backup(&self.cfg.data_dir, label, current_lsn)
     }
@@ -3992,10 +3979,7 @@ impl Db {
 
         // Lookup existing schema for enforcement (if any).
         let existing_table = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .tables
                 .iter()
@@ -4127,12 +4111,12 @@ impl Db {
             // Existing logic was mix64(hint) % len. We should respect explicit override if it looks like a shard ID?
             // Or assume hint is a partition key?
             // Let's assume hint is a partition key (like tenant_id) to be consistent with get_shard_id.
-            self.shard_map.read().unwrap().get_shard_id(hint)
+            self.shard_map.read().get_shard_id(hint)
         } else if let Some(tid) = stats.tenant_id_min {
-            self.shard_map.read().unwrap().get_shard_id(tid)
+            self.shard_map.read().get_shard_id(tid)
         } else {
             // No partition key, round robin across global shards
-            (seq % self.shard_map.read().unwrap().total_shards.max(1) as u64) as u16
+            (seq % self.shard_map.read().total_shards.max(1) as u64) as u16
         };
 
         // Map global shard to local concurrency lane (write lock)
@@ -4187,10 +4171,7 @@ impl Db {
         }
 
         let (entry, _current_version, should_persist) = {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             if !manifest.databases.iter().any(|d| d.name == db_name) {
                 manifest.databases.push(crate::replication::DatabaseMeta {
                     name: db_name.into(),
@@ -4250,10 +4231,7 @@ impl Db {
             let entry_index = manifest.entries.len();
             manifest.entries.push(entry.clone());
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 index.add_entry(entry_index, &entry);
             }
             let current_version = manifest.version;
@@ -4270,10 +4248,7 @@ impl Db {
         // With group commit enabled, multiple writes are batched together for a single fsync.
         // This dramatically improves throughput for workloads with many small writes.
         {
-            let mut wal = self
-                .wal
-                .lock()
-                .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+            let mut wal = self.wal.lock();
 
             // Use group commit if enabled, otherwise direct write
             let _group_seq = wal.append_segment_grouped(&entry, &stored_payload)?;
@@ -4352,13 +4327,10 @@ impl Db {
 
     /// Get segment count for a specific table
     fn get_table_segment_count(&self, database: &str, table: &str) -> usize {
-        if let Ok(index) = self.manifest_index.read() {
-            index.get_table_entries(database, table)
-                .map(|entries| entries.len())
-                .unwrap_or(0)
-        } else {
-            0
-        }
+        let index = self.manifest_index.read();
+        index.get_table_entries(database, table)
+            .map(|entries| entries.len())
+            .unwrap_or(0)
     }
 
     /// Run a single compaction pass for a specific table
@@ -4463,10 +4435,7 @@ impl Db {
 
             // Look up existing schema
             let existing_table = {
-                let manifest = self
-                    .manifest
-                    .read()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let manifest = self.manifest.read();
                 manifest
                     .tables
                     .iter()
@@ -4503,11 +4472,11 @@ impl Db {
             // Choose shard
             let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
             let global_shard_id = if let Some(hint) = batch.shard_override {
-                self.shard_map.read().unwrap().get_shard_id(hint)
+                self.shard_map.read().get_shard_id(hint)
             } else if let Some(tid) = stats.tenant_id_min {
-                self.shard_map.read().unwrap().get_shard_id(tid)
+                self.shard_map.read().get_shard_id(tid)
             } else {
-                (seq % self.shard_map.read().unwrap().total_shards.max(1) as u64) as u16
+                (seq % self.shard_map.read().total_shards.max(1) as u64) as u16
             };
 
             let segment_id = format!("seg-{global_shard_id}-{seq}");
@@ -4564,10 +4533,7 @@ impl Db {
         // Phase 3: Update manifest (single lock acquisition for all entries)
         let entries_for_wal: Vec<(ManifestEntry, Vec<u8>)>;
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             entries_for_wal = validated_entries
                 .iter()
@@ -4602,7 +4568,7 @@ impl Db {
                     manifest.entries.push(entry.clone());
 
                     // Update index
-                    let mut index = self.manifest_index.write().unwrap();
+                    let mut index = self.manifest_index.write();
                     index.add_entry(entry_index, &entry);
 
                     (entry, payload.clone())
@@ -4612,10 +4578,7 @@ impl Db {
 
         // Phase 4: WAL writes (single fsync for all entries with group commit)
         {
-            let mut wal = self
-                .wal
-                .lock()
-                .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+            let mut wal = self.wal.lock();
 
             // Write all entries to WAL
             for (entry, payload) in &entries_for_wal {
@@ -4815,10 +4778,7 @@ impl Db {
         // Phase 1: Quick manifest update (short write lock duration)
         // Collect entries to add and their indices for index update
         let (entries_to_index, should_persist) = {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             let mut entries_to_index: Vec<(usize, ManifestEntry)> = Vec::new();
 
@@ -4848,9 +4808,7 @@ impl Db {
 
         // Phase 2: Index update (can overlap with reads, shorter critical section)
         if !entries_to_index.is_empty() {
-            let mut index = self.manifest_index.write().map_err(|_| {
-                EngineError::Internal("manifest index lock poisoned".into())
-            })?;
+            let mut index = self.manifest_index.write();
             for (entry_index, entry) in &entries_to_index {
                 index.add_entry(*entry_index, entry);
             }
@@ -4863,13 +4821,10 @@ impl Db {
     }
 
     fn maybe_persist_manifest(&self) -> Result<(), EngineError> {
-        if let Ok(_guard) = self.manifest_persist_lock.try_lock() {
+        if let Some(_guard) = self.manifest_persist_lock.try_lock() {
             let last_persisted = self.last_persisted_version.load(Ordering::Acquire);
             let current_version = {
-                let manifest = self
-                    .manifest
-                    .read()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let manifest = self.manifest.read();
                 manifest.version
             };
             if current_version > last_persisted {
@@ -4880,10 +4835,7 @@ impl Db {
                 self.flush_all_memtables()?;
 
                 let manifest_snapshot = {
-                    let manifest = self
-                        .manifest
-                        .read()
-                        .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                    let manifest = self.manifest.read();
                     manifest.clone()
                 };
                 persist_manifest(&self.cfg.manifest_path, &manifest_snapshot)?;
@@ -4898,15 +4850,9 @@ impl Db {
     /// Force persist manifest to disk. Call this on shutdown to ensure all entries are saved.
     pub fn flush_manifest(&self) -> Result<(), EngineError> {
         self.flush_all_memtables()?;
-        let _guard = self
-            .manifest_persist_lock
-            .lock()
-            .map_err(|_| EngineError::Internal("manifest persist lock poisoned".into()))?;
+        let _guard = self.manifest_persist_lock.lock();
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
@@ -4918,10 +4864,7 @@ impl Db {
     pub fn checkpoint(&self) -> Result<(), EngineError> {
         self.require_writable()?;
         self.flush_manifest()?;
-        let mut wal = self
-            .wal
-            .lock()
-            .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+        let mut wal = self.wal.lock();
         wal.checkpoint()
     }
 
@@ -4938,10 +4881,7 @@ impl Db {
 
         // Get current manifest version for cache key validation
         let manifest_version = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest.version
         };
 
@@ -4987,7 +4927,7 @@ impl Db {
         let plan = self.get_or_parse_plan(&request.sql)?;
 
         // Try distributed execution if clustered
-        if self.cluster_manager.read().map_or(false, |g| g.is_some()) {
+        if self.cluster_manager.read().is_some() {
             if let Some((local, global)) = crate::planner_distributed::distribute_plan(&plan.kind) {
                 use crate::executor_distributed::DistributedExecutor;
                 let executor = DistributedExecutor::new();
@@ -5113,10 +5053,7 @@ impl Db {
             ));
         }
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let expected_schema: Option<Vec<TableFieldSpec>> = manifest
             .tables
@@ -5147,10 +5084,7 @@ impl Db {
             })
             .collect();
 
-        let manifest_index = self
-            .manifest_index
-            .read()
-            .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+        let manifest_index = self.manifest_index.read();
 
         let table_indices = manifest_index.get_table_entries(
             db.as_deref().unwrap_or("default"),
@@ -5462,10 +5396,7 @@ impl Db {
         } else {
             None
         };
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // Handle scalar queries (no table source)
         if database.is_none() && table.is_none() {
@@ -5618,10 +5549,7 @@ impl Db {
             .collect();
 
         // OPTIMIZATION: Use manifest index for O(1) table lookup instead of O(n) linear scan
-        let manifest_index = self
-            .manifest_index
-            .read()
-            .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+        let manifest_index = self.manifest_index.read();
 
         let table_indices = manifest_index
             .get_table_entries(
@@ -8569,10 +8497,7 @@ impl Db {
     ) -> Result<Vec<ManifestEntry>, EngineError> {
         use crate::mvcc::MvccVisibility;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let matching: Vec<_> = manifest
             .entries
@@ -8659,10 +8584,7 @@ impl Db {
         table: &str,
         columns: &[String],
     ) -> Result<Vec<SqlValue>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let table_meta = manifest
             .tables
@@ -9337,10 +9259,7 @@ impl Db {
         let projection = parse_projection(sql)?;
         let filter = parse_filters(sql)?;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // Collect matching segments
         let matching: Vec<ManifestEntry> = manifest
@@ -9527,10 +9446,7 @@ impl Db {
             TableStats,
         };
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // First, check if we have ANALYZE-generated statistics (preferred - has histograms)
         let analyze_stats = manifest
@@ -9880,10 +9796,7 @@ impl Db {
 
     fn prune_by_retention(&self) -> Result<(), EngineError> {
         if let Some(cutoff) = self.cfg.retention_watermark_micros {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let mut removed = Vec::new();
             manifest.entries.retain(|e| {
                 let keep = e.watermark_micros >= cutoff || e.watermark_micros == 0;
@@ -9897,10 +9810,7 @@ impl Db {
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
                 snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
                 // Rebuild manifest index after entries removed
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
             drop(manifest);
@@ -9926,10 +9836,7 @@ impl Db {
         let mut changed_tables: HashSet<(String, String)> = HashSet::new();
         let mut recompress_jobs: Vec<(ManifestEntry, Option<String>)> = Vec::new();
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             for entry in manifest.entries.iter_mut() {
                 let Some(age) = segment_age_micros(entry, now) else {
                     continue;
@@ -9964,10 +9871,7 @@ impl Db {
                 manifest.bump_version();
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
                 snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
         }
@@ -9987,10 +9891,7 @@ impl Db {
                 ));
             }
 
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             for (segment_id, size_bytes, checksum, compression) in &updates {
                 if let Some(entry) = manifest
                     .entries
@@ -10006,10 +9907,7 @@ impl Db {
                 manifest.bump_version();
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
                 snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
 
@@ -10056,10 +9954,7 @@ impl Db {
         min_segments: usize,
         filter_table: Option<(String, String)>,
     ) -> Result<Option<(Vec<ManifestEntry>, Option<TableMeta>)>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut best: Option<(Vec<ManifestEntry>, Option<TableMeta>)> = None;
         let mut best_bytes = 0u64;
@@ -10150,18 +10045,12 @@ impl Db {
 
     /// Get the total number of segments in the manifest
     pub fn segment_count(&self) -> usize {
-        self.manifest
-            .read()
-            .map(|m| m.entries.len())
-            .unwrap_or(0)
+        self.manifest.read().entries.len()
     }
 
     /// Get segment counts per table
     pub fn segment_counts_per_table(&self) -> HashMap<(String, String), usize> {
-        let manifest = match self.manifest.read() {
-            Ok(m) => m,
-            Err(_) => return HashMap::new(),
-        };
+        let manifest = self.manifest.read();
         let mut counts: HashMap<(String, String), usize> = HashMap::new();
         for entry in manifest.entries.iter() {
             *counts.entry((entry.database.clone(), entry.table.clone())).or_insert(0) += 1;
@@ -10359,10 +10248,7 @@ impl Db {
 
         // Get list of all unique database.table pairs
         let tables: Vec<(String, String)> = {
-            let manifest = self.manifest.read().map_err(|_| {
-                EngineError::Internal("manifest lock poisoned".into())
-            })?;
-
+            let manifest = self.manifest.read();
             let mut tables = std::collections::HashSet::new();
             for entry in &manifest.entries {
                 tables.insert((entry.database.clone(), entry.table.clone()));
@@ -10513,10 +10399,7 @@ impl Db {
 
         persist_segment_ipc(&self.storage, &segment_id, &stored_payload)?;
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = entries.iter().map(|e| e.segment_id.clone()).collect();
             manifest
                 .entries
@@ -10527,10 +10410,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             // Rebuild manifest index after compaction
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -10553,10 +10433,7 @@ impl Db {
     }
 
     pub fn plan_bundle(&self, request: BundleRequest) -> Result<BundlePlan, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         if let Some(sv) = request.since_version {
             if sv > manifest.version {
                 return Err(EngineError::InvalidArgument(format!(
@@ -10604,10 +10481,7 @@ impl Db {
     }
 
     pub fn validate_bundle(&self, payload: &BundlePayload) -> Result<(), EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         self.validate_bundle_plan(payload, &manifest)?;
         for seg in &payload.segments {
             self.validate_bundle_segment(seg)?;
@@ -10617,10 +10491,7 @@ impl Db {
 
     pub fn apply_bundle(&self, payload: BundlePayload) -> Result<(), EngineError> {
         {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             self.validate_bundle_plan(&payload, &manifest)?;
         }
 
@@ -10637,10 +10508,7 @@ impl Db {
             .collect();
         let _added = self.append_manifest_entries(entries)?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if manifest.version < payload.plan.manifest_version {
             manifest.version = payload.plan.manifest_version;
         }
@@ -10790,10 +10658,7 @@ impl Db {
     }
 
     pub fn export_manifest(&self) -> Result<Vec<u8>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         serde_json::to_vec(&*manifest)
             .map_err(|e| EngineError::Internal(format!("manifest serialize failed: {e}")))
     }
@@ -10807,10 +10672,7 @@ impl Db {
         let new_manifest: Manifest = serde_json::from_slice(payload)
             .map_err(|e| EngineError::InvalidArgument(format!("invalid manifest: {e}")))?;
         validate_manifest(&new_manifest)?;
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if overwrite {
             *manifest = new_manifest;
         } else {
@@ -10843,10 +10705,7 @@ impl Db {
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
         // Rebuild manifest index after import
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         Ok(())
@@ -10855,10 +10714,7 @@ impl Db {
     pub fn create_database(&self, name: &str) -> Result<(), EngineError> {
         self.require_writable()?;
         validate_identifier(name, "database")?;
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if manifest.databases.iter().any(|db| db.name == name) {
             return Ok(());
         }
@@ -10883,10 +10739,7 @@ impl Db {
             Some(schema) => Some(canonical_schema_from_json(schema)?.json),
             None => None,
         };
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if !manifest.databases.iter().any(|db| db.name == database) {
             return Err(EngineError::NotFound(format!(
                 "database not found: {database}"
@@ -10932,10 +10785,7 @@ impl Db {
                 "view query SQL required".into(),
             ));
         }
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if !manifest.databases.iter().any(|db| db.name == database) {
             return Err(EngineError::NotFound(format!(
                 "database not found: {database}"
@@ -10978,10 +10828,7 @@ impl Db {
                 "database and view name required".into(),
             ));
         }
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         if let Some(idx) = manifest
             .views
             .iter()
@@ -11005,10 +10852,7 @@ impl Db {
         &self,
         database: Option<&str>,
     ) -> Result<Vec<(String, String, String)>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let views: Vec<(String, String, String)> = manifest
             .views
             .iter()
@@ -11020,10 +10864,7 @@ impl Db {
 
     /// Get a view's query SQL by database and name
     pub fn get_view(&self, database: &str, name: &str) -> Result<Option<String>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         Ok(manifest
             .views
             .iter()
@@ -11052,10 +10893,7 @@ impl Db {
             ));
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         if !manifest.databases.iter().any(|db| db.name == database) {
             return Err(EngineError::NotFound(format!(
@@ -11106,10 +10944,7 @@ impl Db {
             ));
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         if let Some(idx) = manifest
             .materialized_views
@@ -11146,10 +10981,7 @@ impl Db {
 
         // Get the view's query
         let query_sql = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .materialized_views
                 .iter()
@@ -11184,10 +11016,7 @@ impl Db {
                 .map_err(|e| EngineError::Io(format!("write mv segment failed: {e}")))?;
 
             // Update the manifest
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             // Find and update the materialized view
             if let Some(mv_idx) = manifest
@@ -11270,10 +11099,7 @@ impl Db {
 
         // Get the view's query and last refresh timestamp
         let (query_sql, last_refresh_micros, old_segment_id) = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .materialized_views
                 .iter()
@@ -11314,10 +11140,7 @@ impl Db {
                 .unwrap_or_default()
                 .as_micros() as u64;
 
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             if let Some(mv_idx) = manifest
                 .materialized_views
@@ -11370,10 +11193,7 @@ impl Db {
             fs::write(&segment_path, payload)
                 .map_err(|e| EngineError::Io(format!("write mv segment failed: {e}")))?;
 
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             if let Some(mv_idx) = manifest
                 .materialized_views
@@ -11440,10 +11260,7 @@ impl Db {
         &self,
         database: Option<&str>,
     ) -> Result<Vec<(String, String, String, u64)>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let views: Vec<(String, String, String, u64)> = manifest
             .materialized_views
             .iter()
@@ -11466,10 +11283,7 @@ impl Db {
         database: &str,
         name: &str,
     ) -> Result<Option<Vec<u8>>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mv = manifest
             .materialized_views
@@ -11517,10 +11331,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<HashMap<String, String>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let schema_json = manifest
             .tables
             .iter()
@@ -11899,10 +11710,7 @@ impl Db {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         let mut updated = false;
         for idx in &mut manifest.indexes {
             if idx.database == database && idx.table == table && idx.name == name {
@@ -11971,13 +11779,7 @@ impl Db {
         let tbl_name = table.to_string();
         let seg_id = segment_id.to_string();
         let (entry, indexes) = {
-            let manifest = match self.manifest.read() {
-                Ok(m) => m,
-                Err(_) => {
-                    tracing::warn!("manifest lock poisoned");
-                    return;
-                }
-            };
+            let manifest = self.manifest.read();
             let entry = manifest
                 .entries
                 .iter()
@@ -12054,10 +11856,7 @@ impl Db {
 
         let index_meta =
             {
-                let mut manifest = self
-                    .manifest
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let mut manifest = self.manifest.write();
 
                 // Verify table exists
                 let table_exists = manifest
@@ -12117,10 +11916,7 @@ impl Db {
         if_exists: bool,
     ) -> Result<(), EngineError> {
         let removed = {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let initial_len = manifest.indexes.len();
             manifest.indexes.retain(|idx| {
                 idx.database != database || idx.table != table || idx.name != index_name
@@ -12155,10 +11951,7 @@ impl Db {
         table: Option<&str>,
     ) -> Result<Vec<(String, String, String, Vec<String>, crate::sql::IndexType)>, EngineError>
     {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut out = Vec::new();
         for idx in &manifest.indexes {
@@ -12202,10 +11995,7 @@ impl Db {
 
         // Get segment entries for this table
         let entries: Vec<crate::replication::ManifestEntry> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             // Verify table exists
             let table_exists = manifest
@@ -12679,10 +12469,7 @@ impl Db {
 
         // Store statistics in manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             // Remove existing stats for this table
             manifest
@@ -12848,10 +12635,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Option<crate::replication::TableStatsMeta>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         Ok(manifest
             .table_stats
@@ -12882,10 +12666,7 @@ impl Db {
         force: bool,
     ) -> Result<VacuumResult, EngineError> {
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             // Verify table exists
             let table_meta = manifest
@@ -12906,10 +12687,7 @@ impl Db {
 
         // Collect segments for this table
         let segments_to_vacuum: Vec<ManifestEntry> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest
                 .entries
@@ -12979,10 +12757,7 @@ impl Db {
 
             // Remove old segments from manifest
             {
-                let mut manifest = self
-                    .manifest
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let mut manifest = self.manifest.write();
                 let drop_set: std::collections::HashSet<String> = segments_to_vacuum
                     .iter()
                     .map(|e| e.segment_id.clone())
@@ -13018,10 +12793,7 @@ impl Db {
             })?;
 
             let new_bytes: u64 = {
-                let manifest = self
-                    .manifest
-                    .read()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let manifest = self.manifest.read();
                 manifest
                     .entries
                     .iter()
@@ -13031,10 +12803,7 @@ impl Db {
             };
 
             let new_count = {
-                let manifest = self
-                    .manifest
-                    .read()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let manifest = self.manifest.read();
                 manifest
                     .entries
                     .iter()
@@ -13100,10 +12869,7 @@ impl Db {
             }
 
             let new_bytes: u64 = {
-                let manifest = self
-                    .manifest
-                    .read()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let manifest = self.manifest.read();
                 manifest
                     .entries
                     .iter()
@@ -13133,10 +12899,7 @@ impl Db {
     /// Get list of tables that are candidates for compaction, sorted by priority
     /// This helps implement intelligent background compaction that avoids merge storms
     pub fn get_compaction_candidates(&self) -> Result<Vec<CompactionCandidate>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let target_bytes = self.cfg.compaction_target_bytes;
         let min_segments = self.cfg.compact_min_segments;
@@ -13215,10 +12978,7 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let base_bytes = self.cfg.level_base_bytes;
         let multiplier = self.cfg.level_multiplier;
@@ -13470,8 +13230,7 @@ impl Db {
         }
 
         // Load all segments to merge
-        let manifest = self.manifest.read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let entries_to_merge: Vec<ManifestEntry> = segment_ids
             .iter()
@@ -13511,8 +13270,7 @@ impl Db {
 
         // Get compression from table settings
         let compression = {
-            let manifest = self.manifest.read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest.tables.iter()
                 .find(|t| t.database == database && t.name == table)
                 .and_then(|t| t.compression.clone())
@@ -13580,8 +13338,7 @@ impl Db {
 
         // Update manifest: remove old segments, add new
         {
-            let mut manifest = self.manifest.write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             // Remove old segments
             let old_ids: std::collections::HashSet<_> = segment_ids.iter().collect();
@@ -13596,8 +13353,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
             // Update index
-            let mut index = self.manifest_index.write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -13625,8 +13381,7 @@ impl Db {
         use arrow_ord::sort::{lexsort_to_indices, SortColumn};
 
         // Get primary key columns from table schema
-        let manifest = self.manifest.read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let pk_cols: Vec<String> = manifest.tables.iter()
             .find(|t| t.database == database && t.name == table)
@@ -13688,10 +13443,7 @@ impl Db {
         compression: Option<String>,
     ) -> Result<(), EngineError> {
         let comp = normalize_compression(compression)?;
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         let tbl = manifest
             .tables
             .iter_mut()
@@ -13714,10 +13466,7 @@ impl Db {
         table: &str,
         config: Option<crate::sql::DeduplicationConfig>,
     ) -> Result<(), EngineError> {
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         let tbl = manifest
             .tables
             .iter_mut()
@@ -13749,10 +13498,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Option<crate::sql::DeduplicationConfig>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let tbl = manifest
             .tables
             .iter()
@@ -13770,10 +13516,7 @@ impl Db {
     ) -> Result<(), EngineError> {
         use crate::sql::TableConstraint;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // First, check if table exists and verify foreign key referenced table exists (before mutable borrow)
         let table_idx = manifest
@@ -13937,10 +13680,7 @@ impl Db {
     ) -> Result<(), EngineError> {
         use crate::sql::TableConstraint;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let tbl = manifest
             .tables
@@ -13982,10 +13722,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Vec<crate::sql::TableConstraint>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let tbl = manifest
             .tables
             .iter()
@@ -14016,10 +13753,7 @@ impl Db {
         self.validate_identifier(database, "database")?;
         self.validate_identifier(name, "sequence")?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Check if database exists
         if !manifest.databases.iter().any(|db| db.name == database) {
@@ -14077,10 +13811,7 @@ impl Db {
         self.validate_identifier(database, "database")?;
         self.validate_identifier(name, "sequence")?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let idx = manifest
             .sequences
@@ -14119,10 +13850,7 @@ impl Db {
         self.validate_identifier(database, "database")?;
         self.validate_identifier(name, "sequence")?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let seq = manifest
             .sequences
@@ -14153,10 +13881,7 @@ impl Db {
         self.validate_identifier(database, "database")?;
         self.validate_identifier(name, "sequence")?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let seq = manifest
             .sequences
@@ -14206,10 +13931,7 @@ impl Db {
         self.validate_identifier(database, "database")?;
         self.validate_identifier(name, "sequence")?;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let seq = manifest
             .sequences
@@ -14230,10 +13952,7 @@ impl Db {
         &self,
         database: &str,
     ) -> Result<Vec<crate::replication::SequenceMeta>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         Ok(manifest
             .sequences
@@ -14607,8 +14326,7 @@ impl Db {
         }
 
         // Verify target table exists while holding both locks to prevent TOCTOU race
-        let manifest = self.manifest.read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let table_exists = manifest.tables.iter()
             .any(|t| t.database == target_database && t.name == target_table);
@@ -14775,10 +14493,7 @@ impl Db {
     fn query_information_schema_schemata(&self) -> Result<QueryResponse, EngineError> {
         use arrow_array::builder::StringBuilder;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut catalog_name = StringBuilder::new();
         let mut schema_name = StringBuilder::new();
@@ -14835,10 +14550,7 @@ impl Db {
     fn query_information_schema_tables(&self) -> Result<QueryResponse, EngineError> {
         use arrow_array::builder::StringBuilder;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut table_catalog = StringBuilder::new();
         let mut table_schema = StringBuilder::new();
@@ -14903,10 +14615,7 @@ impl Db {
     fn query_information_schema_columns(&self) -> Result<QueryResponse, EngineError> {
         use arrow_array::builder::{Int64Builder, StringBuilder};
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut table_catalog = StringBuilder::new();
         let mut table_schema = StringBuilder::new();
@@ -15004,10 +14713,7 @@ impl Db {
         use crate::sql::TableConstraint;
         use arrow_array::builder::StringBuilder;
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut constraint_catalog = StringBuilder::new();
         let mut constraint_schema = StringBuilder::new();
@@ -15100,10 +14806,7 @@ impl Db {
         use crate::sql::TableConstraint;
         use arrow_array::builder::{Int64Builder, StringBuilder};
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut constraint_catalog = StringBuilder::new();
         let mut constraint_schema = StringBuilder::new();
@@ -15274,10 +14977,7 @@ impl Db {
     /// Returns number of duplicate rows removed
     pub fn deduplicate_table(&self, database: &str, table: &str) -> Result<usize, EngineError> {
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .tables
                 .iter()
@@ -15296,10 +14996,7 @@ impl Db {
 
         // Get all segments for this table
         let segments: Vec<ManifestEntry> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -15360,10 +15057,7 @@ impl Db {
 
         // Remove old segments
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = segments.iter().map(|e| e.segment_id.clone()).collect();
             manifest
                 .entries
@@ -15411,10 +15105,7 @@ impl Db {
             ));
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Check if database exists
         if !manifest.databases.iter().any(|db| db.name == name) {
@@ -15447,10 +15138,7 @@ impl Db {
 
         // Rebuild manifest index and invalidate cache
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         {
@@ -15484,10 +15172,7 @@ impl Db {
             ));
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Check if table exists
         let table_exists = manifest
@@ -15527,10 +15212,7 @@ impl Db {
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
 
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         {
@@ -15572,10 +15254,7 @@ impl Db {
             return Ok(()); // Nothing to do
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Check if source table exists
         let table_idx = manifest
@@ -15631,10 +15310,7 @@ impl Db {
 
         // Rebuild manifest index
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -15663,10 +15339,7 @@ impl Db {
 
         // Check if table already exists
         {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             if manifest
                 .tables
@@ -16594,10 +16267,7 @@ impl Db {
             ));
         }
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Check if table exists
         let table_exists = manifest
@@ -16630,10 +16300,7 @@ impl Db {
 
         // Rebuild manifest index after entries changed
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -16669,10 +16336,7 @@ impl Db {
 
         // Get current schema
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             let tbl = manifest
                 .tables
                 .iter()
@@ -16713,10 +16377,7 @@ impl Db {
         let new_schema_json = serde_json::to_string(&canonical_fields)
             .map_err(|e| EngineError::Internal(format!("serialize schema failed: {e}")))?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         manifest.bump_version();
         if let Some(tbl) = manifest
             .tables
@@ -16728,10 +16389,7 @@ impl Db {
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         {
@@ -16754,10 +16412,7 @@ impl Db {
         }
 
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             let tbl = manifest
                 .tables
                 .iter()
@@ -16796,10 +16451,7 @@ impl Db {
         let new_schema_json = serde_json::to_string(&canonical_fields)
             .map_err(|e| EngineError::Internal(format!("serialize schema failed: {e}")))?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         manifest.bump_version();
         if let Some(tbl) = manifest
             .tables
@@ -16811,10 +16463,7 @@ impl Db {
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         {
@@ -16845,10 +16494,7 @@ impl Db {
         }
 
         let table_meta = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             let tbl = manifest
                 .tables
                 .iter()
@@ -16894,10 +16540,7 @@ impl Db {
         let new_schema_json = serde_json::to_string(&canonical_fields)
             .map_err(|e| EngineError::Internal(format!("serialize schema failed: {e}")))?;
 
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
         manifest.bump_version();
         if let Some(tbl) = manifest
             .tables
@@ -16909,10 +16552,7 @@ impl Db {
         persist_manifest(&self.cfg.manifest_path, &manifest)?;
         snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
         {
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
         {
@@ -16970,10 +16610,7 @@ impl Db {
         new_column: &str,
     ) -> Result<(), EngineError> {
         let entries = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -17037,10 +16674,7 @@ impl Db {
 
             // Remove old segment
             {
-                let mut manifest = self
-                    .manifest
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+                let mut manifest = self.manifest.write();
                 manifest.entries.retain(|e| e.segment_id != entry.segment_id);
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
             }
@@ -17371,10 +17005,7 @@ impl Db {
             .collect::<Result<_, _>>()?;
 
         let (table_meta, entries) = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             let tbl = manifest
                 .tables
                 .iter()
@@ -17423,10 +17054,7 @@ impl Db {
         }
 
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             manifest.bump_version();
             for entry in manifest
                 .entries
@@ -17446,10 +17074,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
         }
@@ -17480,10 +17105,7 @@ impl Db {
 
         // Check for foreign key constraints that reference this table (ON DELETE RESTRICT)
         let referencing_tables: Vec<(String, String, TableConstraint)> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest
                 .tables
@@ -17594,10 +17216,7 @@ impl Db {
         }
 
         let entries = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             if !manifest
                 .tables
                 .iter()
@@ -17652,10 +17271,7 @@ impl Db {
 
         // Remove affected segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
             manifest
                 .entries
@@ -17664,10 +17280,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
             {
@@ -17710,10 +17323,7 @@ impl Db {
         }
 
         let entries = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             if !manifest
                 .tables
                 .iter()
@@ -17772,10 +17382,7 @@ impl Db {
 
         // Remove affected segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
             manifest
                 .entries
@@ -17784,10 +17391,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
             {
@@ -17845,10 +17449,7 @@ impl Db {
 
         // Check for foreign key constraints that reference this table's updated columns (ON UPDATE RESTRICT)
         let referencing_tables: Vec<(String, String, TableConstraint)> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest
                 .tables
@@ -17998,10 +17599,7 @@ impl Db {
         }
 
         let entries = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             if !manifest
                 .tables
                 .iter()
@@ -18054,10 +17652,7 @@ impl Db {
 
         // Remove affected segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
             manifest
                 .entries
@@ -18066,10 +17661,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
             {
@@ -18118,10 +17710,7 @@ impl Db {
         }
 
         let entries = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
             if !manifest
                 .tables
                 .iter()
@@ -18181,10 +17770,7 @@ impl Db {
 
         // Remove affected segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = segments_to_drop.iter().cloned().collect();
             manifest
                 .entries
@@ -18193,10 +17779,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
             snapshot_manifest(&self.cfg.manifest_snapshot_path, &self.cfg.manifest_path)?;
             {
-                let mut index = self
-                    .manifest_index
-                    .write()
-                    .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+                let mut index = self.manifest_index.write();
                 *index = ManifestIndex::build(&manifest.entries);
             }
             {
@@ -18673,10 +18256,7 @@ impl Db {
 
         // Remove old segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             manifest
                 .entries
                 .retain(|e| !old_segment_ids.contains(&e.segment_id));
@@ -18716,14 +18296,8 @@ impl Db {
 
         // Rebuild manifest index
         {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let manifest = self.manifest.read();
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -18858,10 +18432,7 @@ impl Db {
     }
 
     pub fn list_databases(&self) -> Result<Vec<String>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         Ok(manifest.databases.iter().map(|d| d.name.clone()).collect())
     }
 
@@ -18869,10 +18440,7 @@ impl Db {
         &self,
         database: Option<&str>,
     ) -> Result<Vec<crate::replication::TableMeta>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         let tables = manifest
             .tables
             .iter()
@@ -18891,25 +18459,19 @@ impl Db {
     /// Get the current/default database name.
     /// Returns the first database if one exists, otherwise "boyodb".
     pub fn current_database(&self) -> Option<String> {
-        let manifest = self.manifest.read().ok()?;
+        let manifest = self.manifest.read();
         manifest.databases.first().map(|d| d.name.clone())
     }
 
     /// Get the current manifest version.
     pub fn get_manifest_version(&self) -> Result<u64, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         Ok(manifest.version)
     }
 
     /// Get the current manifest version (convenience method).
     pub fn manifest_version(&self) -> u64 {
-        self.manifest
-            .read()
-            .map(|m| m.version)
-            .unwrap_or(0)
+        self.manifest.read().version
     }
 
     /// Reload manifest from storage (for read replicas).
@@ -18921,10 +18483,7 @@ impl Db {
 
         // Get current manifest to compare
         let (segments_added, bytes_loaded) = {
-            let current_manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let current_manifest = self.manifest.read();
 
             if new_manifest.version <= current_manifest.version {
                 // No new data
@@ -18952,17 +18511,11 @@ impl Db {
 
         // Update manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             *manifest = new_manifest;
 
             // Rebuild index
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -19000,19 +18553,12 @@ impl Db {
     /// Get the current WAL LSN (Log Sequence Number).
     /// Returns 0 if WAL is not available or empty.
     pub fn wal_lsn(&self) -> u64 {
-        self.wal
-            .lock()
-            .ok()
-            .map(|wal| wal.current_lsn())
-            .unwrap_or(0)
+        self.wal.lock().current_lsn()
     }
 
     /// Get server information including version and statistics
     pub fn get_server_info(&self) -> Result<ServerInfo, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
         Ok(ServerInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             database_count: manifest.databases.len(),
@@ -19029,10 +18575,7 @@ impl Db {
         database: Option<&str>,
         table: Option<&str>,
     ) -> Result<Vec<MissingSegment>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut missing = Vec::new();
         for entry in &manifest.entries {
@@ -19068,10 +18611,7 @@ impl Db {
         database: Option<&str>,
         table: Option<&str>,
     ) -> Result<Vec<CorruptedSegment>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut corrupted = Vec::new();
         for entry in &manifest.entries {
@@ -19185,18 +18725,13 @@ impl Db {
 
         // Remove from manifest and rebuild index
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
             // Rebuild the entire index since entry indices have changed
-            let mut index = self.manifest_index.write().map_err(|_| {
-                EngineError::Internal("manifest_index lock poisoned".into())
-            })?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -19208,10 +18743,7 @@ impl Db {
 
     /// Check manifest integrity and return a summary of issues
     pub fn check_manifest(&self) -> Result<ManifestCheckResult, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let missing = self.find_missing_segments(None, None)?;
         let corrupted = self.find_corrupted_segments(None, None)?;
@@ -19280,10 +18812,7 @@ impl Db {
         retention_seconds: u64,
         time_column: Option<String>,
     ) -> Result<(), EngineError> {
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         // Find the table
         let table_meta = manifest
@@ -19306,10 +18835,7 @@ impl Db {
 
     /// Remove retention policy from a table
     pub fn remove_retention_policy(&self, database: &str, table: &str) -> Result<(), EngineError> {
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let table_meta = manifest
             .tables
@@ -19329,10 +18855,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Option<crate::replication::RetentionPolicy>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let table_meta = manifest
             .tables
@@ -19350,10 +18873,7 @@ impl Db {
         table: &str,
         max_deletes: usize,
     ) -> Result<RetentionResult, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // Get retention policy
         let table_meta = manifest
@@ -19423,10 +18943,7 @@ impl Db {
 
         // Delete segments from manifest
         {
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
 
             let id_set: std::collections::HashSet<String> = segment_ids.iter().cloned().collect();
             manifest.entries.retain(|e| !id_set.contains(&e.segment_id));
@@ -19434,10 +18951,7 @@ impl Db {
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
             // Rebuild index
-            let mut index = self
-                .manifest_index
-                .write()
-                .map_err(|_| EngineError::Internal("manifest_index lock poisoned".into()))?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -19467,10 +18981,7 @@ impl Db {
         max_deletes_per_table: usize,
     ) -> Result<Vec<RetentionResult>, EngineError> {
         let tables_with_retention: Vec<(String, String)> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest
                 .tables
@@ -19515,10 +19026,7 @@ impl Db {
         granularity: crate::replication::PartitionGranularity,
         time_column: String,
     ) -> Result<(), EngineError> {
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let table_meta = manifest
             .tables
@@ -19539,10 +19047,7 @@ impl Db {
 
     /// Remove partition configuration from a table
     pub fn remove_partition_config(&self, database: &str, table: &str) -> Result<(), EngineError> {
-        let mut manifest = self
-            .manifest
-            .write()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let mut manifest = self.manifest.write();
 
         let table_meta = manifest
             .tables
@@ -19562,10 +19067,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Option<crate::replication::PartitionConfig>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let table_meta = manifest
             .tables
@@ -19581,10 +19083,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<Vec<PartitionInfo>, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // Get partition config
         let partition_config = manifest
@@ -19647,10 +19146,7 @@ impl Db {
         table: &str,
         specific_column: Option<&str>,
     ) -> Result<TableStatistics, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let mut total_rows: u64 = 0;
         let mut total_bytes: u64 = 0;
@@ -19729,10 +19225,7 @@ impl Db {
     /// Try to recover a damaged segment from WAL
     /// Returns Ok(true) if recovered, Ok(false) if not found in WAL, Err on failure
     pub fn recover_segment_from_wal(&self, segment_id: &str) -> Result<bool, EngineError> {
-        let wal = self
-            .wal
-            .lock()
-            .map_err(|_| EngineError::Internal("wal lock poisoned".into()))?;
+        let wal = self.wal.lock();
 
         // Search WAL files for the segment
         let wal_paths = crate::wal::wal_paths_for_replay(&self.cfg.wal_path)?;
@@ -19864,18 +19357,13 @@ impl Db {
         if !removed_ids.is_empty() {
             let remove_set: std::collections::HashSet<String> = removed_ids.iter().cloned().collect();
 
-            let mut manifest = self
-                .manifest
-                .write()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let mut manifest = self.manifest.write();
             manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
             // Rebuild index
-            let mut index = self.manifest_index.write().map_err(|_| {
-                EngineError::Internal("manifest_index lock poisoned".into())
-            })?;
+            let mut index = self.manifest_index.write();
             *index = ManifestIndex::build(&manifest.entries);
         }
 
@@ -19889,10 +19377,7 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         let manifest_segment_ids: std::collections::HashSet<String> = manifest
             .entries
@@ -19967,10 +19452,7 @@ impl Db {
     pub fn scrub_segments(&self, batch_size: usize) -> Result<Vec<String>, EngineError> {
         // Collect segment info (id and checksum) while holding lock, then release
         let entries_to_scrub: Vec<(String, u64)> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest
                 .entries
@@ -20050,10 +19532,7 @@ impl Db {
     /// More thorough than scrub_segments but slower
     pub fn deep_scrub_segments(&self, batch_size: usize) -> Result<DeepScrubResult, EngineError> {
         let entries_to_scrub: Vec<ManifestEntry> = {
-            let manifest = self
-                .manifest
-                .read()
-                .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+            let manifest = self.manifest.read();
 
             manifest.entries.iter().take(batch_size).cloned().collect()
         };
@@ -20356,10 +19835,7 @@ impl Db {
         database: &str,
         table: &str,
     ) -> Result<TableDescription, EngineError> {
-        let manifest = self
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = self.manifest.read();
 
         // Find the table metadata
         let table_meta = manifest
@@ -31761,10 +31237,7 @@ fn build_insert_ipc(
 
     // Get table schema
     let table_meta = {
-        let manifest = db
-            .manifest
-            .read()
-            .map_err(|_| EngineError::Internal("manifest lock poisoned".into()))?;
+        let manifest = db.manifest.read();
         manifest
             .tables
             .iter()

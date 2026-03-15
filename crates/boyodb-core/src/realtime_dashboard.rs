@@ -9,7 +9,8 @@
 //! - Query result streaming
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Dashboard configuration
@@ -636,75 +637,62 @@ impl StreamingHub {
 
     /// Record metric
     pub fn record_metric(&self, name: &str, value: f64, labels: HashMap<String, String>) {
-        if let Ok(mut metrics) = self.metrics.write() {
-            metrics.record(name, value, labels);
-        }
+        let mut metrics = self.metrics.write();
+        metrics.record(name, value, labels);
     }
 
     /// Broadcast alert
     pub fn broadcast_alert(&self, alert: Alert) {
-        if let Ok(mut alerts) = self.alerts.write() {
-            alerts.push(alert);
+        let mut alerts = self.alerts.write();
+        alerts.push(alert);
 
-            // Trim if needed
-            if alerts.len() > self.max_alerts {
-                alerts.remove(0);
-            }
+        // Trim if needed
+        if alerts.len() > self.max_alerts {
+            alerts.remove(0);
         }
     }
 
     /// Get recent alerts
     pub fn get_alerts(&self, limit: usize) -> Vec<Alert> {
-        self.alerts
-            .read()
-            .map(|a| a.iter().rev().take(limit).cloned().collect())
-            .unwrap_or_default()
+        let alerts = self.alerts.read();
+        alerts.iter().rev().take(limit).cloned().collect()
     }
 
     /// Subscribe to updates
     pub fn subscribe(&self, client_id: &str, sub_type: SubscriptionType, filter: &str) -> Result<String, String> {
-        self.subscriptions
-            .write()
-            .map_err(|e| e.to_string())
-            .map(|mut subs| subs.subscribe(client_id, sub_type, filter))
+        let mut subs = self.subscriptions.write();
+        Ok(subs.subscribe(client_id, sub_type, filter))
     }
 
     /// Unsubscribe
     pub fn unsubscribe(&self, sub_id: &str) -> Result<bool, String> {
-        self.subscriptions
-            .write()
-            .map_err(|e| e.to_string())
-            .map(|mut subs| subs.unsubscribe(sub_id))
+        let mut subs = self.subscriptions.write();
+        Ok(subs.unsubscribe(sub_id))
     }
 
     /// Get metrics for dashboard widget
     pub fn get_widget_data(&self, query: &str, since: u64) -> Vec<MetricSeries> {
         // Simplified - in production, parse and execute query
-        if let Ok(metrics) = self.metrics.read() {
-            metrics
-                .list_names()
-                .iter()
-                .filter(|name| name.contains(query) || query.is_empty())
-                .map(|name| {
-                    let points = metrics.get_history(name, since);
-                    MetricSeries {
-                        name: (*name).clone(),
-                        points,
-                        metadata: HashMap::new(),
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let metrics = self.metrics.read();
+        metrics
+            .list_names()
+            .iter()
+            .filter(|name| name.contains(query) || query.is_empty())
+            .map(|name| {
+                let points = metrics.get_history(name, since);
+                MetricSeries {
+                    name: (*name).clone(),
+                    points,
+                    metadata: HashMap::new(),
+                }
+            })
+            .collect()
     }
 
     /// Get subscription count
     pub fn subscription_count(&self) -> usize {
-        self.subscriptions
-            .read()
-            .map(|s| s.count())
-            .unwrap_or(0)
+        let subs = self.subscriptions.read();
+        subs.count()
     }
 }
 

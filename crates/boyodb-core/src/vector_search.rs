@@ -10,7 +10,8 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::cmp::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Vector with ID
 #[derive(Debug, Clone)]
@@ -746,7 +747,7 @@ impl VectorIndexRegistry {
 
     /// Create new index
     pub fn create_index(&self, name: &str, config: HnswConfig) -> Result<(), String> {
-        let mut indexes = self.indexes.write().map_err(|e| e.to_string())?;
+        let mut indexes = self.indexes.write();
         if indexes.contains_key(name) {
             return Err(format!("Index '{}' already exists", name));
         }
@@ -756,7 +757,7 @@ impl VectorIndexRegistry {
 
     /// Insert vector into index
     pub fn insert(&self, index_name: &str, vector: Vector) -> Result<(), String> {
-        let mut indexes = self.indexes.write().map_err(|e| e.to_string())?;
+        let mut indexes = self.indexes.write();
         let index = indexes
             .get_mut(index_name)
             .ok_or_else(|| format!("Index '{}' not found", index_name))?;
@@ -765,7 +766,7 @@ impl VectorIndexRegistry {
 
     /// Search index
     pub fn search(&self, index_name: &str, query: &[f32], k: usize) -> Result<Vec<SearchResult>, String> {
-        let indexes = self.indexes.read().map_err(|e| e.to_string())?;
+        let indexes = self.indexes.read();
         let index = indexes
             .get(index_name)
             .ok_or_else(|| format!("Index '{}' not found", index_name))?;
@@ -774,7 +775,7 @@ impl VectorIndexRegistry {
 
     /// Get index stats
     pub fn stats(&self, index_name: &str) -> Result<HnswStats, String> {
-        let indexes = self.indexes.read().map_err(|e| e.to_string())?;
+        let indexes = self.indexes.read();
         let index = indexes
             .get(index_name)
             .ok_or_else(|| format!("Index '{}' not found", index_name))?;
@@ -783,13 +784,13 @@ impl VectorIndexRegistry {
 
     /// List all indexes
     pub fn list_indexes(&self) -> Result<Vec<String>, String> {
-        let indexes = self.indexes.read().map_err(|e| e.to_string())?;
+        let indexes = self.indexes.read();
         Ok(indexes.keys().cloned().collect())
     }
 
     /// Delete index
     pub fn delete_index(&self, name: &str) -> Result<bool, String> {
-        let mut indexes = self.indexes.write().map_err(|e| e.to_string())?;
+        let mut indexes = self.indexes.write();
         Ok(indexes.remove(name).is_some())
     }
 }

@@ -7,7 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -356,37 +357,37 @@ impl Subscription {
 
     /// Get current state
     pub fn state(&self) -> SubscriptionState {
-        *self.state.read().unwrap()
+        *self.state.read()
     }
 
     /// Set state
     pub fn set_state(&self, state: SubscriptionState) {
-        *self.state.write().unwrap() = state;
+        *self.state.write() = state;
     }
 
     /// Add a table to subscribe
     pub fn add_table(&self, schema: &str, table: &str) {
         let full_name = format!("{}.{}", schema, table);
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         tables.insert(full_name, SubscribedTable::new(schema, table));
     }
 
     /// Remove a table
     pub fn remove_table(&self, schema: &str, table: &str) -> bool {
         let full_name = format!("{}.{}", schema, table);
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         tables.remove(&full_name).is_some()
     }
 
     /// Get table count
     pub fn table_count(&self) -> usize {
-        self.tables.read().unwrap().len()
+        self.tables.read().len()
     }
 
     /// Get table sync state
     pub fn get_table_state(&self, schema: &str, table: &str) -> Option<TableSyncState> {
         let full_name = format!("{}.{}", schema, table);
-        let tables = self.tables.read().unwrap();
+        let tables = self.tables.read();
         tables.get(&full_name).map(|t| t.state)
     }
 
@@ -416,7 +417,7 @@ impl Subscription {
         // Update table stats if applicable
         if let (Some(schema), Some(table)) = (&msg.schema, &msg.table) {
             let full_name = format!("{}.{}", schema, table);
-            let mut tables = self.tables.write().unwrap();
+            let mut tables = self.tables.write();
             if let Some(t) = tables.get_mut(&full_name) {
                 t.changes_applied += 1;
                 t.last_sync = Some(Instant::now());
@@ -459,7 +460,7 @@ impl Subscription {
 
     /// Set error
     pub fn set_error(&self, error: &str) {
-        *self.last_error.write().unwrap() = Some(error.to_string());
+        *self.last_error.write() = Some(error.to_string());
         self.stats.errors.fetch_add(1, Ordering::Relaxed);
         if self.config.disable_on_error {
             self.disable();
@@ -469,12 +470,12 @@ impl Subscription {
 
     /// Get last error
     pub fn last_error(&self) -> Option<String> {
-        self.last_error.read().unwrap().clone()
+        self.last_error.read().clone()
     }
 
     /// Clear error
     pub fn clear_error(&self) {
-        *self.last_error.write().unwrap() = None;
+        *self.last_error.write() = None;
     }
 
     /// Get statistics
@@ -495,7 +496,7 @@ impl Subscription {
             ));
         }
 
-        *self.started_at.write().unwrap() = Some(Instant::now());
+        *self.started_at.write() = Some(Instant::now());
 
         if self.config.copy_data {
             self.set_state(SubscriptionState::CopyingData);
@@ -514,13 +515,13 @@ impl Subscription {
 
     /// Get all tables
     pub fn tables(&self) -> Vec<SubscribedTable> {
-        self.tables.read().unwrap().values().cloned().collect()
+        self.tables.read().values().cloned().collect()
     }
 
     /// Update table sync state
     pub fn set_table_state(&self, schema: &str, table: &str, state: TableSyncState) {
         let full_name = format!("{}.{}", schema, table);
-        let mut tables = self.tables.write().unwrap();
+        let mut tables = self.tables.write();
         if let Some(t) = tables.get_mut(&full_name) {
             t.state = state;
         }
@@ -564,7 +565,7 @@ impl SubscriptionManager {
         name: &str,
         config: SubscriptionConfig,
     ) -> Result<Arc<Subscription>, SubscriptionError> {
-        let mut subs = self.subscriptions.write().unwrap();
+        let mut subs = self.subscriptions.write();
 
         if subs.contains_key(name) {
             return Err(SubscriptionError::AlreadyExists(name.to_string()));
@@ -582,7 +583,7 @@ impl SubscriptionManager {
 
     /// Drop a subscription
     pub fn drop_subscription(&self, name: &str) -> Result<(), SubscriptionError> {
-        let mut subs = self.subscriptions.write().unwrap();
+        let mut subs = self.subscriptions.write();
 
         if let Some(sub) = subs.remove(name) {
             sub.disable();
@@ -594,13 +595,13 @@ impl SubscriptionManager {
 
     /// Get a subscription
     pub fn get_subscription(&self, name: &str) -> Option<Arc<Subscription>> {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         subs.get(name).cloned()
     }
 
     /// List all subscriptions
     pub fn list_subscriptions(&self) -> Vec<(String, SubscriptionState)> {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         subs.iter()
             .map(|(name, sub)| (name.clone(), sub.state()))
             .collect()
@@ -608,7 +609,7 @@ impl SubscriptionManager {
 
     /// Enable a subscription
     pub fn enable_subscription(&self, name: &str) -> Result<(), SubscriptionError> {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         let sub = subs
             .get(name)
             .ok_or_else(|| SubscriptionError::SubscriptionNotFound(name.to_string()))?;
@@ -617,7 +618,7 @@ impl SubscriptionManager {
 
     /// Disable a subscription
     pub fn disable_subscription(&self, name: &str) -> Result<(), SubscriptionError> {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         let sub = subs
             .get(name)
             .ok_or_else(|| SubscriptionError::SubscriptionNotFound(name.to_string()))?;
@@ -627,13 +628,13 @@ impl SubscriptionManager {
 
     /// Get active subscription count
     pub fn active_count(&self) -> usize {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         subs.values().filter(|s| s.state().is_active()).count()
     }
 
     /// Get total subscription count
     pub fn total_count(&self) -> usize {
-        self.subscriptions.read().unwrap().len()
+        self.subscriptions.read().len()
     }
 
     /// Refresh tables from publication
@@ -642,7 +643,7 @@ impl SubscriptionManager {
         name: &str,
         tables: Vec<(String, String)>,
     ) -> Result<(), SubscriptionError> {
-        let subs = self.subscriptions.read().unwrap();
+        let subs = self.subscriptions.read();
         let sub = subs
             .get(name)
             .ok_or_else(|| SubscriptionError::SubscriptionNotFound(name.to_string()))?;
@@ -704,13 +705,13 @@ impl ApplyWorker {
 
     /// Queue a message for processing
     pub fn queue_message(&self, msg: ReplicationMessage) {
-        let mut queue = self.message_queue.write().unwrap();
+        let mut queue = self.message_queue.write();
         queue.push(msg);
     }
 
     /// Process queued messages
     pub fn process_queue(&self) -> Result<usize, SubscriptionError> {
-        let mut queue = self.message_queue.write().unwrap();
+        let mut queue = self.message_queue.write();
         let messages: Vec<_> = queue.drain(..).collect();
         drop(queue);
 
@@ -728,13 +729,13 @@ impl ApplyWorker {
         match msg.op {
             ReplicationOp::Begin => {
                 // Start collecting transaction messages
-                let mut current = self.current_tx.write().unwrap();
+                let mut current = self.current_tx.write();
                 current.clear();
                 current.push(msg);
             }
             ReplicationOp::Commit => {
                 // Apply all messages in transaction
-                let mut current = self.current_tx.write().unwrap();
+                let mut current = self.current_tx.write();
                 current.push(msg.clone());
 
                 for m in current.iter() {
@@ -746,12 +747,12 @@ impl ApplyWorker {
             }
             ReplicationOp::Rollback => {
                 // Discard transaction messages
-                let mut current = self.current_tx.write().unwrap();
+                let mut current = self.current_tx.write();
                 current.clear();
             }
             _ => {
                 // Add to current transaction or apply immediately
-                let mut current = self.current_tx.write().unwrap();
+                let mut current = self.current_tx.write();
                 if !current.is_empty() {
                     current.push(msg);
                 } else {
@@ -767,7 +768,7 @@ impl ApplyWorker {
 
     /// Get queue size
     pub fn queue_size(&self) -> usize {
-        self.message_queue.read().unwrap().len()
+        self.message_queue.read().len()
     }
 }
 

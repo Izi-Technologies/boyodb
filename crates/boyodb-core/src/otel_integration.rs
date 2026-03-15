@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// OpenTelemetry configuration
@@ -336,7 +337,7 @@ impl Tracer {
 
     /// Start a child span
     pub fn start_child_span(&self, name: &str, kind: SpanKind, parent_span_id: u64) -> u64 {
-        let parent = self.active_spans.read().unwrap().get(&parent_span_id).cloned();
+        let parent = self.active_spans.read().get(&parent_span_id).cloned();
         let trace_id = parent.map(|p| p.trace_id).unwrap_or_else(|| self.id_gen.next_trace_id());
         self.start_span_with_context(name, kind, trace_id, parent_span_id)
     }
@@ -370,8 +371,8 @@ impl Tracer {
             links: Vec::new(),
         };
 
-        self.active_spans.write().unwrap().insert(span_id, span);
-        *self.current_span.write().unwrap() = Some(span_id);
+        self.active_spans.write().insert(span_id, span);
+        *self.current_span.write() = Some(span_id);
 
         span_id
     }
@@ -392,7 +393,7 @@ impl Tracer {
 
     /// Set span attribute
     pub fn set_attribute(&self, span_id: u64, key: &str, value: impl Into<AttributeValue>) {
-        if let Some(span) = self.active_spans.write().unwrap().get_mut(&span_id) {
+        if let Some(span) = self.active_spans.write().get_mut(&span_id) {
             span.attributes.insert(key.to_string(), value.into());
         }
     }
@@ -404,7 +405,7 @@ impl Tracer {
             .unwrap_or_default()
             .as_nanos() as u64;
 
-        if let Some(span) = self.active_spans.write().unwrap().get_mut(&span_id) {
+        if let Some(span) = self.active_spans.write().get_mut(&span_id) {
             span.events.push(SpanEvent {
                 name: name.to_string(),
                 timestamp_ns: now,
@@ -431,7 +432,7 @@ impl Tracer {
 
     /// Set span status
     pub fn set_status(&self, span_id: u64, status: SpanStatus, message: Option<String>) {
-        if let Some(span) = self.active_spans.write().unwrap().get_mut(&span_id) {
+        if let Some(span) = self.active_spans.write().get_mut(&span_id) {
             span.status = status;
             span.status_message = message;
         }
@@ -444,20 +445,20 @@ impl Tracer {
             .unwrap_or_default()
             .as_nanos() as u64;
 
-        if let Some(mut span) = self.active_spans.write().unwrap().remove(&span_id) {
+        if let Some(mut span) = self.active_spans.write().remove(&span_id) {
             span.end_time_ns = now;
             if span.status == SpanStatus::Unset {
                 span.status = SpanStatus::Ok;
             }
-            self.completed_spans.write().unwrap().push(span);
+            self.completed_spans.write().push(span);
         }
     }
 
     /// Get current trace context for propagation
     pub fn current_context(&self) -> Option<TraceContext> {
-        let current_id = *self.current_span.read().unwrap();
+        let current_id = *self.current_span.read();
         current_id.and_then(|id| {
-            self.active_spans.read().unwrap().get(&id).map(|span| TraceContext {
+            self.active_spans.read().get(&id).map(|span| TraceContext {
                 trace_id: span.trace_id,
                 span_id: span.span_id,
                 trace_flags: 0x01, // sampled
@@ -468,7 +469,7 @@ impl Tracer {
 
     /// Drain completed spans for export
     pub fn drain_completed(&self) -> Vec<Span> {
-        let mut spans = self.completed_spans.write().unwrap();
+        let mut spans = self.completed_spans.write();
         spans.drain(..).collect()
     }
 }
@@ -501,7 +502,7 @@ impl Meter {
 
     /// Increment a counter
     pub fn counter_add(&self, name: &str, value: u64) {
-        let mut counters = self.counters.write().unwrap();
+        let mut counters = self.counters.write();
         counters
             .entry(name.to_string())
             .or_insert_with(|| AtomicU64::new(0))
@@ -510,12 +511,12 @@ impl Meter {
 
     /// Set a gauge value
     pub fn gauge_set(&self, name: &str, value: f64) {
-        self.gauges.write().unwrap().insert(name.to_string(), value);
+        self.gauges.write().insert(name.to_string(), value);
     }
 
     /// Record a histogram value
     pub fn histogram_record(&self, name: &str, value: f64, buckets: &[f64]) {
-        let mut histograms = self.histograms.write().unwrap();
+        let mut histograms = self.histograms.write();
         let data = histograms.entry(name.to_string()).or_insert_with(|| {
             let mut sorted_buckets = buckets.to_vec();
             sorted_buckets.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -551,7 +552,7 @@ impl Meter {
         let mut points = Vec::new();
 
         // Collect counters
-        for (name, counter) in self.counters.read().unwrap().iter() {
+        for (name, counter) in self.counters.read().iter() {
             points.push(MetricDataPoint {
                 name: format!("{}.{}", self.name, name),
                 description: String::new(),
@@ -567,7 +568,7 @@ impl Meter {
         }
 
         // Collect gauges
-        for (name, &value) in self.gauges.read().unwrap().iter() {
+        for (name, &value) in self.gauges.read().iter() {
             points.push(MetricDataPoint {
                 name: format!("{}.{}", self.name, name),
                 description: String::new(),
@@ -583,7 +584,7 @@ impl Meter {
         }
 
         // Collect histograms
-        for (name, data) in self.histograms.read().unwrap().iter() {
+        for (name, data) in self.histograms.read().iter() {
             let buckets: Vec<(f64, u64)> = data.buckets
                 .iter()
                 .zip(data.counts.iter())

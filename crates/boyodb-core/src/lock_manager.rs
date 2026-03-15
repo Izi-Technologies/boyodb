@@ -463,7 +463,7 @@ pub struct LockManager {
     per_lock_waiters: Mutex<HashMap<u64, HashSet<TransactionId>>>,
 
     /// Condition variable per transaction for efficient wake-up
-    waiters: Mutex<HashMap<TransactionId, Arc<std::sync::Condvar>>>,
+    waiters: Mutex<HashMap<TransactionId, Arc<parking_lot::Condvar>>>,
 }
 
 impl LockManager {
@@ -535,12 +535,12 @@ impl LockManager {
             let mut waiters = self.waiters.lock();
             waiters
                 .entry(txn_id)
-                .or_insert_with(|| Arc::new(std::sync::Condvar::new()))
+                .or_insert_with(|| Arc::new(parking_lot::Condvar::new()))
                 .clone()
         };
 
         // Create a mutex for the condition variable to use
-        let wait_mutex = std::sync::Mutex::new(false);
+        let wait_mutex = parking_lot::Mutex::new(false);
 
         // Helper to cleanup waiters atomically
         let cleanup_waiter = |this: &Self, target: &LockTarget| {
@@ -599,8 +599,8 @@ impl LockManager {
                     let wait_time = remaining.min(Duration::from_millis(base_wait_ms.min(10)));
                     wait_iteration = wait_iteration.saturating_add(1);
 
-                    let guard = wait_mutex.lock().unwrap();
-                    let _ = condvar.wait_timeout(guard, wait_time);
+                    let mut guard = wait_mutex.lock();
+                    condvar.wait_for(&mut guard, wait_time);
                 }
             }
         }

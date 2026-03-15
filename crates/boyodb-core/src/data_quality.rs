@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// Data types for validation
 #[derive(Debug, Clone, PartialEq)]
@@ -284,7 +284,7 @@ impl DataQualityEngine {
     /// Add validation rule
     pub fn add_rule(&self, table: &str, column: &str, rule: ValidationRule) {
         let key = format!("{}.{}", table, column);
-        self.rules.write().unwrap()
+        self.rules.write()
             .entry(key)
             .or_default()
             .push(rule);
@@ -295,7 +295,7 @@ impl DataQualityEngine {
         self.stats.validations_run.fetch_add(1, Ordering::Relaxed);
 
         let key = format!("{}.{}", table, column);
-        let rules = self.rules.read().unwrap();
+        let rules = self.rules.read();
 
         let column_rules = match rules.get(&key) {
             Some(r) => r.clone(),

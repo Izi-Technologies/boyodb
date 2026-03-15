@@ -6,7 +6,8 @@
 //! - Domain inheritance and composition
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // DOMAIN DEFINITION
@@ -363,7 +364,7 @@ impl DomainManager {
     pub fn create_domain(&self, domain: Domain) -> Result<(), DomainError> {
         let qualified_name = domain.qualified_name();
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
 
         if domains.contains_key(&qualified_name) {
             return Err(DomainError::AlreadyExists(qualified_name));
@@ -376,7 +377,7 @@ impl DomainManager {
     /// Get a domain
     pub fn get_domain(&self, schema: &str, name: &str) -> Option<Domain> {
         let qualified_name = format!("{}.{}", schema, name);
-        let domains = self.domains.read().unwrap();
+        let domains = self.domains.read();
         domains.get(&qualified_name).cloned()
     }
 
@@ -384,7 +385,7 @@ impl DomainManager {
     pub fn drop_domain(&self, schema: &str, name: &str, cascade: bool) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
 
         if !domains.contains_key(&qualified_name) {
             return Err(DomainError::NotFound(qualified_name));
@@ -404,7 +405,7 @@ impl DomainManager {
     pub fn alter_set_default(&self, schema: &str, name: &str, default_expr: &str) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -417,7 +418,7 @@ impl DomainManager {
     pub fn alter_drop_default(&self, schema: &str, name: &str) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -430,7 +431,7 @@ impl DomainManager {
     pub fn alter_set_not_null(&self, schema: &str, name: &str) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -443,7 +444,7 @@ impl DomainManager {
     pub fn alter_drop_not_null(&self, schema: &str, name: &str) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -461,7 +462,7 @@ impl DomainManager {
     ) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -484,7 +485,7 @@ impl DomainManager {
     ) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
-        let mut domains = self.domains.write().unwrap();
+        let mut domains = self.domains.write();
         let domain = domains
             .get_mut(&qualified_name)
             .ok_or_else(|| DomainError::NotFound(qualified_name))?;
@@ -510,7 +511,7 @@ impl DomainManager {
 
     /// List all domains in a schema
     pub fn list_domains(&self, schema: &str) -> Vec<Domain> {
-        let domains = self.domains.read().unwrap();
+        let domains = self.domains.read();
         domains
             .values()
             .filter(|d| d.schema == schema)
@@ -520,7 +521,7 @@ impl DomainManager {
 
     /// List all domains
     pub fn list_all_domains(&self) -> Vec<Domain> {
-        let domains = self.domains.read().unwrap();
+        let domains = self.domains.read();
         domains.values().cloned().collect()
     }
 }

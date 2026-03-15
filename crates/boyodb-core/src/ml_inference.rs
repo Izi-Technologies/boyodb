@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// ML inference error types
@@ -337,7 +338,7 @@ impl ModelRegistry {
             )));
         }
 
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write();
         let versions = models.entry(model.name.clone()).or_insert_with(Vec::new);
 
         // Check for version conflict
@@ -358,7 +359,7 @@ impl ModelRegistry {
         versions.push(model);
 
         // Update stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_versions += 1;
         if versions.len() == 1 {
             stats.total_models += 1;
@@ -369,7 +370,7 @@ impl ModelRegistry {
 
     /// Get model by name and optional version
     pub fn get_model(&self, name: &str, version: Option<&str>) -> Result<MLModel, MLError> {
-        let models = self.models.read().unwrap();
+        let models = self.models.read();
         let versions = models
             .get(name)
             .ok_or_else(|| MLError::ModelNotFound(name.to_string()))?;
@@ -393,7 +394,7 @@ impl ModelRegistry {
 
     /// List all models
     pub fn list_models(&self) -> Vec<MLModel> {
-        let models = self.models.read().unwrap();
+        let models = self.models.read();
         models
             .values()
             .flat_map(|versions| versions.iter().filter(|m| m.is_active))
@@ -409,11 +410,11 @@ impl ModelRegistry {
         if self.config.cache_predictions {
             let cache_key = self.compute_cache_key(&request);
             if let Some(cached) = self.get_cached(&cache_key) {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.cache_hits += 1;
                 return Ok(cached);
             }
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.cache_misses += 1;
         }
 
@@ -449,7 +450,7 @@ impl ModelRegistry {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_inferences += 1;
             stats.total_latency_us += latency_us;
         }
@@ -550,7 +551,7 @@ impl ModelRegistry {
     }
 
     fn get_cached(&self, key: &str) -> Option<InferenceResult> {
-        let cache = self.prediction_cache.read().unwrap();
+        let cache = self.prediction_cache.read();
         if let Some(cached) = cache.get(key) {
             if cached.cached_at.elapsed() < Duration::from_secs(self.config.cache_ttl_secs) {
                 let mut result = cached.result.clone();
@@ -562,7 +563,7 @@ impl ModelRegistry {
     }
 
     fn cache_result(&self, key: &str, result: InferenceResult) {
-        let mut cache = self.prediction_cache.write().unwrap();
+        let mut cache = self.prediction_cache.write();
         cache.insert(
             key.to_string(),
             CachedPrediction {
@@ -580,7 +581,7 @@ impl ModelRegistry {
 
     /// Delete a model
     pub fn delete_model(&self, name: &str, version: Option<&str>) -> Result<(), MLError> {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write();
 
         if let Some(versions) = models.get_mut(name) {
             if let Some(v) = version {
@@ -599,7 +600,7 @@ impl ModelRegistry {
 
     /// Activate a specific version
     pub fn activate_version(&self, name: &str, version: &str) -> Result<(), MLError> {
-        let mut models = self.models.write().unwrap();
+        let mut models = self.models.write();
         let versions = models
             .get_mut(name)
             .ok_or_else(|| MLError::ModelNotFound(name.to_string()))?;
@@ -623,7 +624,7 @@ impl ModelRegistry {
 
     /// Get registry stats
     pub fn stats(&self) -> RegistryStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

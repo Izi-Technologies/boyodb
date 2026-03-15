@@ -7,7 +7,8 @@
 //! - Business glossary
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Catalog entry types
@@ -311,7 +312,7 @@ impl DataCatalog {
 
     /// Generate unique ID
     fn generate_id(&self) -> String {
-        let mut counter = self.entry_counter.write().unwrap();
+        let mut counter = self.entry_counter.write();
         *counter += 1;
         format!("entry_{}", *counter)
     }
@@ -336,7 +337,7 @@ impl DataCatalog {
 
         // Update tag index
         {
-            let mut tag_index = self.tag_index.write().unwrap();
+            let mut tag_index = self.tag_index.write();
             for tag in &entry.tags {
                 tag_index
                     .entry(tag.clone())
@@ -348,14 +349,14 @@ impl DataCatalog {
         // Update search index
         self.index_entry(&entry);
 
-        self.entries.write().unwrap().insert(id.clone(), entry);
+        self.entries.write().insert(id.clone(), entry);
 
         id
     }
 
     /// Index entry for search
     fn index_entry(&self, entry: &CatalogEntry) {
-        let mut search_index = self.search_index.write().unwrap();
+        let mut search_index = self.search_index.write();
 
         // Index name words
         for word in entry.name.to_lowercase().split_whitespace() {
@@ -394,14 +395,13 @@ impl DataCatalog {
 
     /// Get entry by ID
     pub fn get(&self, id: &str) -> Option<CatalogEntry> {
-        self.entries.read().unwrap().get(id).cloned()
+        self.entries.read().get(id).cloned()
     }
 
     /// Get entry by FQN
     pub fn get_by_fqn(&self, fqn: &str) -> Option<CatalogEntry> {
         self.entries
             .read()
-            .unwrap()
             .values()
             .find(|e| e.fqn == fqn)
             .cloned()
@@ -409,7 +409,7 @@ impl DataCatalog {
 
     /// Update entry
     pub fn update(&self, id: &str, updates: HashMap<String, String>) -> bool {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
 
         if let Some(entry) = entries.get_mut(id) {
             for (key, value) in updates {
@@ -435,10 +435,10 @@ impl DataCatalog {
 
     /// Add tags to entry
     pub fn add_tags(&self, id: &str, tags: Vec<String>) -> bool {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
 
         if let Some(entry) = entries.get_mut(id) {
-            let mut tag_index = self.tag_index.write().unwrap();
+            let mut tag_index = self.tag_index.write();
 
             for tag in tags {
                 if !entry.tags.contains(&tag) {
@@ -457,10 +457,10 @@ impl DataCatalog {
 
     /// Remove tags from entry
     pub fn remove_tags(&self, id: &str, tags: &[String]) -> bool {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
 
         if let Some(entry) = entries.get_mut(id) {
-            let mut tag_index = self.tag_index.write().unwrap();
+            let mut tag_index = self.tag_index.write();
 
             for tag in tags {
                 entry.tags.retain(|t| t != tag);
@@ -476,14 +476,13 @@ impl DataCatalog {
 
     /// Register columns for a table
     pub fn register_columns(&self, table_id: &str, columns: Vec<ColumnEntry>) {
-        self.columns.write().unwrap().insert(table_id.to_string(), columns);
+        self.columns.write().insert(table_id.to_string(), columns);
     }
 
     /// Get columns for a table
     pub fn get_columns(&self, table_id: &str) -> Vec<ColumnEntry> {
         self.columns
             .read()
-            .unwrap()
             .get(table_id)
             .cloned()
             .unwrap_or_default()
@@ -491,8 +490,8 @@ impl DataCatalog {
 
     /// Search the catalog
     pub fn search(&self, query: &SearchQuery) -> Vec<SearchResult> {
-        let entries = self.entries.read().unwrap();
-        let search_index = self.search_index.read().unwrap();
+        let entries = self.entries.read();
+        let search_index = self.search_index.read();
 
         // Find matching entry IDs
         let search_words: Vec<String> = query.text
@@ -588,7 +587,7 @@ impl DataCatalog {
 
     /// Add lineage relationship
     pub fn add_lineage(&self, source_id: &str, target_id: &str, edge_type: LineageEdgeType) {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
 
         let source_node = entries.get(source_id).map(|e| LineageNode {
             id: e.id.clone(),
@@ -618,7 +617,7 @@ impl DataCatalog {
 
         drop(entries);
 
-        let mut lineage = self.lineage.write().unwrap();
+        let mut lineage = self.lineage.write();
 
         if let Some(node) = source_node {
             lineage.add_node(node);
@@ -639,7 +638,7 @@ impl DataCatalog {
 
     /// Get lineage for an entry
     pub fn get_lineage(&self, id: &str, direction: LineageDirection, depth: usize) -> LineageGraph {
-        let lineage = self.lineage.read().unwrap();
+        let lineage = self.lineage.read();
         let mut result = LineageGraph::new();
         let mut visited = HashSet::new();
         let mut to_visit = vec![(id.to_string(), 0)];
@@ -691,18 +690,18 @@ impl DataCatalog {
     /// Add glossary term
     pub fn add_glossary_term(&self, term: GlossaryTerm) -> String {
         let id = term.id.clone();
-        self.glossary.write().unwrap().insert(id.clone(), term);
+        self.glossary.write().insert(id.clone(), term);
         id
     }
 
     /// Get glossary term
     pub fn get_glossary_term(&self, id: &str) -> Option<GlossaryTerm> {
-        self.glossary.read().unwrap().get(id).cloned()
+        self.glossary.read().get(id).cloned()
     }
 
     /// Search glossary
     pub fn search_glossary(&self, query: &str) -> Vec<GlossaryTerm> {
-        let glossary = self.glossary.read().unwrap();
+        let glossary = self.glossary.read();
         let lower_query = query.to_lowercase();
 
         glossary
@@ -718,7 +717,7 @@ impl DataCatalog {
 
     /// Link glossary term to catalog entry
     pub fn link_term_to_entry(&self, term_id: &str, entry_id: &str) -> bool {
-        let mut glossary = self.glossary.write().unwrap();
+        let mut glossary = self.glossary.write();
 
         if let Some(term) = glossary.get_mut(term_id) {
             if !term.associated_entries.contains(&entry_id.to_string()) {
@@ -732,8 +731,8 @@ impl DataCatalog {
 
     /// Get entries by tag
     pub fn get_by_tag(&self, tag: &str) -> Vec<CatalogEntry> {
-        let tag_index = self.tag_index.read().unwrap();
-        let entries = self.entries.read().unwrap();
+        let tag_index = self.tag_index.read();
+        let entries = self.entries.read();
 
         tag_index
             .get(tag)
@@ -747,7 +746,7 @@ impl DataCatalog {
 
     /// Get popular entries
     pub fn get_popular(&self, limit: usize) -> Vec<CatalogEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         let mut sorted: Vec<_> = entries.values().cloned().collect();
         sorted.sort_by(|a, b| b.popularity.partial_cmp(&a.popularity).unwrap());
         sorted.truncate(limit);
@@ -756,7 +755,7 @@ impl DataCatalog {
 
     /// Record access (updates popularity)
     pub fn record_access(&self, id: &str) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
 
         if let Some(entry) = entries.get_mut(id) {
             entry.last_accessed_at = Some(
@@ -771,8 +770,8 @@ impl DataCatalog {
 
     /// Get catalog statistics
     pub fn stats(&self) -> CatalogStats {
-        let entries = self.entries.read().unwrap();
-        let glossary = self.glossary.read().unwrap();
+        let entries = self.entries.read();
+        let glossary = self.glossary.read();
 
         let mut type_counts: HashMap<String, usize> = HashMap::new();
         for entry in entries.values() {
@@ -783,7 +782,7 @@ impl DataCatalog {
             total_entries: entries.len(),
             entry_types: type_counts,
             total_glossary_terms: glossary.len(),
-            total_tags: self.tag_index.read().unwrap().len(),
+            total_tags: self.tag_index.read().len(),
         }
     }
 }

@@ -4,7 +4,8 @@
 //! Captures INSERT, UPDATE, DELETE events and publishes them to sinks.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
@@ -226,17 +227,17 @@ impl MemorySink {
     }
 
     pub fn events(&self) -> Vec<CdcEvent> {
-        self.events.read().unwrap().iter().cloned().collect()
+        self.events.read().iter().cloned().collect()
     }
 
     pub fn drain(&self) -> Vec<CdcEvent> {
-        self.events.write().unwrap().drain(..).collect()
+        self.events.write().drain(..).collect()
     }
 }
 
 impl CdcSink for MemorySink {
     fn send(&self, event: &CdcEvent) -> Result<(), CdcError> {
-        let mut events = self.events.write().unwrap();
+        let mut events = self.events.write();
         if events.len() >= self.max_events {
             events.pop_front();
         }
@@ -293,32 +294,32 @@ impl CdcConnector {
 
     /// Register a sink
     pub fn add_sink(&self, sink: Arc<dyn CdcSink>) {
-        self.sinks.write().unwrap().push(sink);
+        self.sinks.write().push(sink);
     }
 
     /// Start the connector
     pub fn start(&self) {
-        *self.running.write().unwrap() = true;
+        *self.running.write() = true;
     }
 
     /// Stop the connector
     pub fn stop(&self) {
-        *self.running.write().unwrap() = false;
+        *self.running.write() = false;
     }
 
     /// Check if connector is running
     pub fn is_running(&self) -> bool {
-        *self.running.read().unwrap()
+        *self.running.read()
     }
 
     /// Get current LSN
     pub fn current_lsn(&self) -> u64 {
-        *self.lsn.read().unwrap()
+        *self.lsn.read()
     }
 
     /// Get statistics
     pub fn stats(&self) -> CdcStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Emit a change event
@@ -342,7 +343,7 @@ impl CdcConnector {
 
         // Increment LSN
         let lsn = {
-            let mut lsn = self.lsn.write().unwrap();
+            let mut lsn = self.lsn.write();
             *lsn += 1;
             *lsn
         };
@@ -386,7 +387,7 @@ impl CdcConnector {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.events_captured += 1;
             stats.last_event_ts_ms = ts_ms;
             match event_type {
@@ -399,14 +400,14 @@ impl CdcConnector {
         }
 
         // Send to sinks
-        let sinks = self.sinks.read().unwrap();
+        let sinks = self.sinks.read();
         for sink in sinks.iter() {
             match sink.send(&event) {
                 Ok(_) => {
-                    self.stats.write().unwrap().events_sent += 1;
+                    self.stats.write().events_sent += 1;
                 }
                 Err(_) => {
-                    self.stats.write().unwrap().events_failed += 1;
+                    self.stats.write().events_failed += 1;
                 }
             }
         }
@@ -446,7 +447,7 @@ impl CdcConnector {
 
     /// Flush all sinks
     pub fn flush(&self) -> Result<(), CdcError> {
-        let sinks = self.sinks.read().unwrap();
+        let sinks = self.sinks.read();
         for sink in sinks.iter() {
             sink.flush()?;
         }

@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 /// Sequence error types
@@ -254,7 +255,7 @@ impl SequenceManager {
 
         // Check if exists
         {
-            let definitions = self.definitions.read().unwrap();
+            let definitions = self.definitions.read();
             if definitions.contains_key(&full_name) {
                 if options.if_not_exists {
                     return Ok(());
@@ -330,8 +331,8 @@ impl SequenceManager {
         let state = Arc::new(SequenceState::new(initial_value));
 
         // Insert
-        let mut definitions = self.definitions.write().unwrap();
-        let mut states = self.states.write().unwrap();
+        let mut definitions = self.definitions.write();
+        let mut states = self.states.write();
 
         definitions.insert(full_name.clone(), definition);
         states.insert(full_name, state);
@@ -349,7 +350,7 @@ impl SequenceManager {
     ) -> Result<(), SequenceError> {
         let full_name = format!("{}.{}", schema, name);
 
-        let mut definitions = self.definitions.write().unwrap();
+        let mut definitions = self.definitions.write();
 
         if let Some(def) = definitions.get(&full_name) {
             // Check if owned by column
@@ -364,7 +365,7 @@ impl SequenceManager {
 
         definitions.remove(&full_name);
 
-        let mut states = self.states.write().unwrap();
+        let mut states = self.states.write();
         states.remove(&full_name);
 
         Ok(())
@@ -379,7 +380,7 @@ impl SequenceManager {
     ) -> Result<(), SequenceError> {
         let full_name = format!("{}.{}", schema, name);
 
-        let mut definitions = self.definitions.write().unwrap();
+        let mut definitions = self.definitions.write();
         let definition = definitions
             .get_mut(&full_name)
             .ok_or_else(|| SequenceError::NotFound(full_name.clone()))?;
@@ -426,7 +427,7 @@ impl SequenceManager {
             }
 
             // Update state
-            let states = self.states.read().unwrap();
+            let states = self.states.read();
             if let Some(state) = states.get(&full_name) {
                 let initial = if definition.increment_by > 0 {
                     restart_to - definition.increment_by
@@ -434,8 +435,8 @@ impl SequenceManager {
                     restart_to - definition.increment_by
                 };
                 state.current_value.store(initial, Ordering::SeqCst);
-                *state.is_set.write().unwrap() = false;
-                let mut cache = state.cache.write().unwrap();
+                *state.is_set.write() = false;
+                let mut cache = state.cache.write();
                 cache.values.clear();
                 cache.position = 0;
             }
@@ -460,23 +461,23 @@ impl SequenceManager {
     ) -> Result<i64, SequenceError> {
         let full_name = format!("{}.{}", schema, name);
 
-        let definitions = self.definitions.read().unwrap();
+        let definitions = self.definitions.read();
         let definition = definitions
             .get(&full_name)
             .ok_or_else(|| SequenceError::NotFound(full_name.clone()))?;
 
-        let states = self.states.read().unwrap();
+        let states = self.states.read();
         let state = states
             .get(&full_name)
             .ok_or_else(|| SequenceError::NotFound(full_name.clone()))?;
 
         // Try to get from cache first
         {
-            let mut cache = state.cache.write().unwrap();
+            let mut cache = state.cache.write();
             if cache.position < cache.values.len() {
                 let value = cache.values[cache.position];
                 cache.position += 1;
-                *state.is_set.write().unwrap() = true;
+                *state.is_set.write() = true;
                 state.current_value.store(value, Ordering::SeqCst);
                 session.set_current(&full_name, value);
                 return Ok(value);
@@ -539,11 +540,11 @@ impl SequenceManager {
 
         // Update state
         state.current_value.store(last_value, Ordering::SeqCst);
-        *state.is_set.write().unwrap() = true;
+        *state.is_set.write() = true;
 
         // Update cache
         {
-            let mut cache = state.cache.write().unwrap();
+            let mut cache = state.cache.write();
             cache.values = new_values;
             cache.position = 1; // We're returning the first one
         }
@@ -564,7 +565,7 @@ impl SequenceManager {
 
         // Check sequence exists
         {
-            let definitions = self.definitions.read().unwrap();
+            let definitions = self.definitions.read();
             if !definitions.contains_key(&full_name) {
                 return Err(SequenceError::NotFound(full_name.clone()));
             }
@@ -587,7 +588,7 @@ impl SequenceManager {
     ) -> Result<i64, SequenceError> {
         let full_name = format!("{}.{}", schema, name);
 
-        let definitions = self.definitions.read().unwrap();
+        let definitions = self.definitions.read();
         let definition = definitions
             .get(&full_name)
             .ok_or_else(|| SequenceError::NotFound(full_name.clone()))?;
@@ -600,7 +601,7 @@ impl SequenceManager {
             )));
         }
 
-        let states = self.states.read().unwrap();
+        let states = self.states.read();
         let state = states
             .get(&full_name)
             .ok_or_else(|| SequenceError::NotFound(full_name.clone()))?;
@@ -610,17 +611,17 @@ impl SequenceManager {
         // If is_called is false, next NEXTVAL will return value
         if is_called {
             state.current_value.store(value, Ordering::SeqCst);
-            *state.is_set.write().unwrap() = true;
+            *state.is_set.write() = true;
             session.set_current(&full_name, value);
         } else {
             let prev = value - definition.increment_by;
             state.current_value.store(prev, Ordering::SeqCst);
-            *state.is_set.write().unwrap() = false;
+            *state.is_set.write() = false;
         }
 
         // Clear cache
         {
-            let mut cache = state.cache.write().unwrap();
+            let mut cache = state.cache.write();
             cache.values.clear();
             cache.position = 0;
         }
@@ -643,14 +644,13 @@ impl SequenceManager {
     /// Get sequence definition
     pub fn get_sequence(&self, schema: &str, name: &str) -> Option<SequenceDefinition> {
         let full_name = format!("{}.{}", schema, name);
-        self.definitions.read().unwrap().get(&full_name).cloned()
+        self.definitions.read().get(&full_name).cloned()
     }
 
     /// List all sequences
     pub fn list_sequences(&self, schema: Option<&str>) -> Vec<SequenceDefinition> {
         self.definitions
             .read()
-            .unwrap()
             .values()
             .filter(|s| schema.map_or(true, |sc| s.schema == sc))
             .cloned()
@@ -660,14 +660,13 @@ impl SequenceManager {
     /// Check if sequence exists
     pub fn sequence_exists(&self, schema: &str, name: &str) -> bool {
         let full_name = format!("{}.{}", schema, name);
-        self.definitions.read().unwrap().contains_key(&full_name)
+        self.definitions.read().contains_key(&full_name)
     }
 
     /// Get sequences owned by a table/column
     pub fn get_sequences_owned_by(&self, table: &str) -> Vec<SequenceDefinition> {
         self.definitions
             .read()
-            .unwrap()
             .values()
             .filter(|s| {
                 s.owned_by
@@ -682,15 +681,15 @@ impl SequenceManager {
     pub fn get_sequence_state(&self, schema: &str, name: &str) -> Option<SequenceStateInfo> {
         let full_name = format!("{}.{}", schema, name);
 
-        let definitions = self.definitions.read().unwrap();
+        let definitions = self.definitions.read();
         let definition = definitions.get(&full_name)?;
 
-        let states = self.states.read().unwrap();
+        let states = self.states.read();
         let state = states.get(&full_name)?;
 
         let current = state.current_value.load(Ordering::SeqCst);
-        let is_set = *state.is_set.read().unwrap();
-        let cache = state.cache.read().unwrap();
+        let is_set = *state.is_set.read();
+        let cache = state.cache.read();
 
         Some(SequenceStateInfo {
             full_name,

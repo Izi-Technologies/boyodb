@@ -4,7 +4,8 @@
 //! Supports WASM modules compiled from Rust, Go, AssemblyScript, etc.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// WASM value type
 #[derive(Debug, Clone, PartialEq)]
@@ -255,8 +256,8 @@ impl WasmUdfRegistry {
 
     /// Register a WASM module
     pub fn register_module(&self, module: WasmModule) -> Result<(), WasmError> {
-        let mut modules = self.modules.write().unwrap();
-        let mut function_map = self.function_map.write().unwrap();
+        let mut modules = self.modules.write();
+        let mut function_map = self.function_map.write();
 
         // Check for function name conflicts
         for func in &module.functions {
@@ -276,8 +277,8 @@ impl WasmUdfRegistry {
 
     /// Unregister a WASM module
     pub fn unregister_module(&self, name: &str) -> Result<(), WasmError> {
-        let mut modules = self.modules.write().unwrap();
-        let mut function_map = self.function_map.write().unwrap();
+        let mut modules = self.modules.write();
+        let mut function_map = self.function_map.write();
 
         let module = modules.remove(name)
             .ok_or_else(|| WasmError::ModuleNotFound(name.into()))?;
@@ -291,13 +292,13 @@ impl WasmUdfRegistry {
 
     /// Get a module by name
     pub fn get_module(&self, name: &str) -> Option<Arc<WasmModule>> {
-        self.modules.read().unwrap().get(name).cloned()
+        self.modules.read().get(name).cloned()
     }
 
     /// Get function signature
     pub fn get_function(&self, name: &str) -> Option<WasmSignature> {
-        let function_map = self.function_map.read().unwrap();
-        let modules = self.modules.read().unwrap();
+        let function_map = self.function_map.read();
+        let modules = self.modules.read();
 
         let module_name = function_map.get(name)?;
         let module = modules.get(module_name)?;
@@ -307,12 +308,12 @@ impl WasmUdfRegistry {
 
     /// Check if function exists
     pub fn has_function(&self, name: &str) -> bool {
-        self.function_map.read().unwrap().contains_key(name)
+        self.function_map.read().contains_key(name)
     }
 
     /// List all functions
     pub fn list_functions(&self) -> Vec<WasmSignature> {
-        let modules = self.modules.read().unwrap();
+        let modules = self.modules.read();
         modules.values()
             .flat_map(|m| m.functions.iter().cloned())
             .collect()
@@ -320,7 +321,7 @@ impl WasmUdfRegistry {
 
     /// List all modules
     pub fn list_modules(&self) -> Vec<(String, String)> {
-        self.modules.read().unwrap()
+        self.modules.read()
             .values()
             .map(|m| (m.name.clone(), m.description.clone()))
             .collect()

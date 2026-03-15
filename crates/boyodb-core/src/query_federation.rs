@@ -9,7 +9,8 @@
 //! - Connection pooling
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Federated data source
@@ -609,20 +610,19 @@ impl FederationRegistry {
     pub fn register_source(&self, source: DataSource) -> Result<(), String> {
         self.engine
             .write()
-            .map_err(|e| e.to_string())?
             .register_source(source)
     }
 
     /// Execute federated query
     pub fn execute(&self, sql: &str) -> Result<FederatedResult, String> {
-        let mut engine = self.engine.write().map_err(|e| e.to_string())?;
+        let mut engine = self.engine.write();
         let query = engine.plan_query(sql)?;
         engine.execute(&query)
     }
 
     /// List sources
     pub fn list_sources(&self) -> Result<Vec<String>, String> {
-        let engine = self.engine.read().map_err(|e| e.to_string())?;
+        let engine = self.engine.read();
         Ok(engine.sources.keys().cloned().collect())
     }
 }

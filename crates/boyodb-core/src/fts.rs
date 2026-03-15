@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use crate::engine::EngineError;
 
@@ -802,13 +803,13 @@ impl FtsManager {
         let key = (database.to_string(), table.to_string(), column.to_string());
 
         {
-            let indexes = self.indexes.read().unwrap();
+            let indexes = self.indexes.read();
             if let Some(idx) = indexes.get(&key) {
                 return idx.clone();
             }
         }
 
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
         indexes
             .entry(key)
             .or_insert_with(|| Arc::new(RwLock::new(InvertedFtsIndex::new(config))))
@@ -818,7 +819,7 @@ impl FtsManager {
     /// Drop an FTS index
     pub fn drop_index(&self, database: &str, table: &str, column: &str) -> bool {
         let key = (database.to_string(), table.to_string(), column.to_string());
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
         indexes.remove(&key).is_some()
     }
 }

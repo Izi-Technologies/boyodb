@@ -4,7 +4,8 @@
 //! Supports CREATE EXTENSION syntax and extension management.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Extension metadata
 #[derive(Debug, Clone)]
@@ -219,7 +220,7 @@ impl ExtensionRegistry {
     }
 
     fn register_available(&mut self, metadata: ExtensionMetadata) {
-        self.available.write().unwrap().insert(metadata.name.clone(), metadata);
+        self.available.write().insert(metadata.name.clone(), metadata);
     }
 
     /// Create/install an extension
@@ -230,20 +231,20 @@ impl ExtensionRegistry {
         schema: Option<&str>,
         cascade: bool,
     ) -> Result<(), ExtensionError> {
-        let available = self.available.read().unwrap();
+        let available = self.available.read();
         let metadata = available.get(name)
             .ok_or_else(|| ExtensionError::NotFound(name.into()))?;
 
         // Check dependencies
         if cascade {
             for req in &metadata.requires {
-                if !self.extensions.read().unwrap().contains_key(req) {
+                if !self.extensions.read().contains_key(req) {
                     self.create_extension(req, None, None, true)?;
                 }
             }
         } else {
             for req in &metadata.requires {
-                if !self.extensions.read().unwrap().contains_key(req) {
+                if !self.extensions.read().contains_key(req) {
                     return Err(ExtensionError::MissingDependency(req.clone()));
                 }
             }
@@ -253,14 +254,14 @@ impl ExtensionRegistry {
         let schema = schema.unwrap_or(metadata.schema.as_deref().unwrap_or("public"));
 
         let extension = self.build_extension(name, version, schema)?;
-        self.extensions.write().unwrap().insert(name.into(), extension);
+        self.extensions.write().insert(name.into(), extension);
 
         Ok(())
     }
 
     /// Drop an extension
     pub fn drop_extension(&self, name: &str, cascade: bool) -> Result<(), ExtensionError> {
-        let mut extensions = self.extensions.write().unwrap();
+        let mut extensions = self.extensions.write();
         
         if !extensions.contains_key(name) {
             return Err(ExtensionError::NotInstalled(name.into()));
@@ -295,7 +296,7 @@ impl ExtensionRegistry {
         name: &str,
         action: AlterExtensionAction,
     ) -> Result<(), ExtensionError> {
-        let mut extensions = self.extensions.write().unwrap();
+        let mut extensions = self.extensions.write();
         let extension = extensions.get_mut(name)
             .ok_or_else(|| ExtensionError::NotInstalled(name.into()))?;
 
@@ -316,22 +317,22 @@ impl ExtensionRegistry {
 
     /// List installed extensions
     pub fn list_installed(&self) -> Vec<Extension> {
-        self.extensions.read().unwrap().values().cloned().collect()
+        self.extensions.read().values().cloned().collect()
     }
 
     /// List available extensions
     pub fn list_available(&self) -> Vec<ExtensionMetadata> {
-        self.available.read().unwrap().values().cloned().collect()
+        self.available.read().values().cloned().collect()
     }
 
     /// Get extension
     pub fn get(&self, name: &str) -> Option<Extension> {
-        self.extensions.read().unwrap().get(name).cloned()
+        self.extensions.read().get(name).cloned()
     }
 
     /// Check if extension is installed
     pub fn is_installed(&self, name: &str) -> bool {
-        self.extensions.read().unwrap().contains_key(name)
+        self.extensions.read().contains_key(name)
     }
 
     fn build_extension(&self, name: &str, version: &str, schema: &str) -> Result<Extension, ExtensionError> {

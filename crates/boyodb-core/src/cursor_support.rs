@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -552,7 +553,7 @@ impl CursorManager {
         options: CursorOptions,
         transaction_id: Option<u64>,
     ) -> Result<u64, CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
 
         // Check if cursor name already exists
         if cursors.contains_key(&options.name) {
@@ -574,7 +575,7 @@ impl CursorManager {
 
     /// Get a cursor by name
     pub fn get(&self, name: &str) -> Option<CursorStats> {
-        let cursors = self.cursors.read().unwrap();
+        let cursors = self.cursors.read();
         cursors.get(name).map(|c| c.stats())
     }
 
@@ -585,7 +586,7 @@ impl CursorManager {
         direction: FetchDirection,
         count: Option<u64>,
     ) -> Result<Vec<CursorRow>, CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let cursor = cursors
             .get_mut(name)
             .ok_or_else(|| CursorError::NotFound(name.to_string()))?;
@@ -600,7 +601,7 @@ impl CursorManager {
         direction: FetchDirection,
         count: Option<u64>,
     ) -> Result<u64, CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let cursor = cursors
             .get_mut(name)
             .ok_or_else(|| CursorError::NotFound(name.to_string()))?;
@@ -610,7 +611,7 @@ impl CursorManager {
 
     /// Close a cursor
     pub fn close(&self, name: &str) -> Result<(), CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         if let Some(mut cursor) = cursors.remove(name) {
             cursor.close();
             Ok(())
@@ -621,7 +622,7 @@ impl CursorManager {
 
     /// Close all cursors
     pub fn close_all(&self) {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         for (_, mut cursor) in cursors.drain() {
             cursor.close();
         }
@@ -629,7 +630,7 @@ impl CursorManager {
 
     /// Close cursors for a transaction
     pub fn close_for_transaction(&self, transaction_id: u64, committed: bool) {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let to_close: Vec<String> = cursors
             .iter()
             .filter(|(_, c)| {
@@ -648,7 +649,7 @@ impl CursorManager {
 
     /// Clean up timed-out cursors
     pub fn cleanup_expired(&self) -> usize {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let expired: Vec<String> = cursors
             .iter()
             .filter(|(_, c)| c.last_accessed.elapsed() > self.timeout)
@@ -666,19 +667,19 @@ impl CursorManager {
 
     /// List all cursors
     pub fn list(&self) -> Vec<CursorStats> {
-        let cursors = self.cursors.read().unwrap();
+        let cursors = self.cursors.read();
         cursors.values().map(|c| c.stats()).collect()
     }
 
     /// Get cursor count
     pub fn count(&self) -> usize {
-        let cursors = self.cursors.read().unwrap();
+        let cursors = self.cursors.read();
         cursors.len()
     }
 
     /// Load rows into a cursor
     pub fn load_rows(&self, name: &str, rows: Vec<CursorRow>) -> Result<(), CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let cursor = cursors
             .get_mut(name)
             .ok_or_else(|| CursorError::NotFound(name.to_string()))?;
@@ -689,7 +690,7 @@ impl CursorManager {
 
     /// Set column descriptions for a cursor
     pub fn set_columns(&self, name: &str, columns: Vec<CursorColumn>) -> Result<(), CursorError> {
-        let mut cursors = self.cursors.write().unwrap();
+        let mut cursors = self.cursors.write();
         let cursor = cursors
             .get_mut(name)
             .ok_or_else(|| CursorError::NotFound(name.to_string()))?;

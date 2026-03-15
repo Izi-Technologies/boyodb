@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Cross-database error types
@@ -352,23 +353,22 @@ impl DatabaseCatalog {
     pub fn register_database(&self, info: DatabaseInfo) {
         self.databases
             .write()
-            .unwrap()
             .insert(info.name.clone(), info);
     }
 
     /// Get database info
     pub fn get_database(&self, name: &str) -> Option<DatabaseInfo> {
-        self.databases.read().unwrap().get(name).cloned()
+        self.databases.read().get(name).cloned()
     }
 
     /// List all databases
     pub fn list_databases(&self) -> Vec<DatabaseInfo> {
-        self.databases.read().unwrap().values().cloned().collect()
+        self.databases.read().values().cloned().collect()
     }
 
     /// Create database link
     pub fn create_link(&self, link: DatabaseLink) -> Result<(), CrossDbError> {
-        let mut links = self.links.write().unwrap();
+        let mut links = self.links.write();
         if links.contains_key(&link.name) {
             return Err(CrossDbError::InvalidReference(format!(
                 "link '{}' already exists",
@@ -383,19 +383,18 @@ impl DatabaseCatalog {
     pub fn drop_link(&self, name: &str) -> Result<DatabaseLink, CrossDbError> {
         self.links
             .write()
-            .unwrap()
             .remove(name)
             .ok_or_else(|| CrossDbError::LinkNotFound(name.to_string()))
     }
 
     /// Get database link
     pub fn get_link(&self, name: &str) -> Option<DatabaseLink> {
-        self.links.read().unwrap().get(name).cloned()
+        self.links.read().get(name).cloned()
     }
 
     /// List all links
     pub fn list_links(&self) -> Vec<DatabaseLink> {
-        self.links.read().unwrap().values().cloned().collect()
+        self.links.read().values().cloned().collect()
     }
 
     /// Get or create remote connection
@@ -406,7 +405,7 @@ impl DatabaseCatalog {
 
         // Try to get from pool
         {
-            let mut conns = self.connections.write().unwrap();
+            let mut conns = self.connections.write();
             if let Some(pool) = conns.get_mut(link_name) {
                 if let Some(conn) = pool.iter_mut().find(|c| !c.in_use) {
                     conn.in_use = true;
@@ -423,7 +422,7 @@ impl DatabaseCatalog {
         let conn = self.create_connection(&link)?;
 
         // Add to pool
-        let mut conns = self.connections.write().unwrap();
+        let mut conns = self.connections.write();
         conns
             .entry(link_name.to_string())
             .or_insert_with(Vec::new)
@@ -447,7 +446,7 @@ impl DatabaseCatalog {
 
     /// Return connection to pool
     pub fn return_connection(&self, link_name: &str) {
-        let mut conns = self.connections.write().unwrap();
+        let mut conns = self.connections.write();
         if let Some(pool) = conns.get_mut(link_name) {
             if let Some(conn) = pool.iter_mut().find(|c| c.in_use) {
                 conn.in_use = false;
@@ -871,7 +870,7 @@ impl CrossDbManager {
     ) -> Result<CrossDbResult, CrossDbError> {
         let plan = self.planner.plan_cross_db_query(references, context)?;
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_queries += 1;
 
         if plan.is_local_only() {
@@ -888,7 +887,7 @@ impl CrossDbManager {
 
         let result = self.executor.execute_cross_db(&plan, context)?;
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_execution_time_ms += result.execution_time.as_millis() as u64;
         stats.total_rows_fetched += result.rows.len() as u64;
 
@@ -897,7 +896,7 @@ impl CrossDbManager {
 
     /// Get statistics
     pub fn stats(&self) -> CrossDbStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

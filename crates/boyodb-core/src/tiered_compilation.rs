@@ -4,7 +4,8 @@
 //! Starts with interpretation, then compiles hot paths progressively.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Compilation tier
@@ -229,8 +230,8 @@ impl TieredCompilationManager {
             return None;
         }
 
-        let mut cache = self.cache.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
+        let mut cache = self.cache.write();
+        let mut stats = self.stats.write();
 
         if let Some(code) = cache.get_mut(fingerprint) {
             code.last_used = Instant::now();
@@ -245,7 +246,7 @@ impl TieredCompilationManager {
 
     /// Record execution for tier promotion tracking
     pub fn record_execution(&self, fingerprint: &str, execution_time: Duration) {
-        let mut counters = self.counters.write().unwrap();
+        let mut counters = self.counters.write();
         let counter = counters.entry(fingerprint.to_string())
             .or_insert_with(ExecutionCounter::default);
 
@@ -263,7 +264,7 @@ impl TieredCompilationManager {
     /// Check if query should be promoted to a higher tier
     fn maybe_promote(&self, fingerprint: &str, count: u64) {
         let current_tier = {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read();
             cache.get(fingerprint).map(|c| c.tier)
         };
 
@@ -286,7 +287,7 @@ impl TieredCompilationManager {
 
         // Queue for compilation (would be done in production)
         // For now, just track the request
-        let mut pending = self.pending.write().unwrap();
+        let mut pending = self.pending.write();
         if !pending.iter().any(|p| p.fingerprint == fingerprint && p.target_tier >= target_tier) {
             pending.push(CompilationRequest {
                 fingerprint: fingerprint.to_string(),
@@ -349,7 +350,7 @@ impl TieredCompilationManager {
         self.add_to_cache(compiled.clone())?;
 
         // Update stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_compilations += 1;
         stats.total_compilation_time += compilation_time;
         match request.target_tier {
@@ -437,7 +438,7 @@ impl TieredCompilationManager {
 
     /// Add compiled code to cache
     fn add_to_cache(&self, code: CompiledCode) -> Result<(), CompilationError> {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
 
         // Check cache size
         let total_size: usize = cache.values().map(|c| c.code_size).sum();
@@ -459,7 +460,7 @@ impl TieredCompilationManager {
         entries.sort_by_key(|(_, last_used, _)| *last_used);
 
         let mut freed = 0usize;
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
 
         for (key, _, size) in entries {
             if freed >= needed {
@@ -473,7 +474,7 @@ impl TieredCompilationManager {
 
     /// Get current tier for a query
     pub fn get_tier(&self, fingerprint: &str) -> CompilationTier {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         cache.get(fingerprint)
             .map(|c| c.tier)
             .unwrap_or(CompilationTier::Interpreted)
@@ -481,13 +482,13 @@ impl TieredCompilationManager {
 
     /// Get pending compilations
     pub fn pending_count(&self) -> usize {
-        self.pending.read().unwrap().len()
+        self.pending.read().len()
     }
 
     /// Process pending compilations
     pub fn process_pending(&self) -> Vec<Result<CompiledCode, CompilationError>> {
         let requests: Vec<CompilationRequest> = {
-            let mut pending = self.pending.write().unwrap();
+            let mut pending = self.pending.write();
             pending.drain(..).collect()
         };
 
@@ -496,18 +497,18 @@ impl TieredCompilationManager {
 
     /// Get statistics
     pub fn stats(&self) -> CompilationStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Clear cache
     pub fn clear_cache(&self) {
-        self.cache.write().unwrap().clear();
-        self.counters.write().unwrap().clear();
+        self.cache.write().clear();
+        self.counters.write().clear();
     }
 
     /// Get cache info
     pub fn cache_info(&self) -> CacheInfo {
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         let total_size: usize = cache.values().map(|c| c.code_size).sum();
 
         CacheInfo {
@@ -642,7 +643,7 @@ mod tests {
         }
 
         // Should have baseline compilation pending
-        let pending = manager.pending.read().unwrap();
+        let pending = manager.pending.read();
         assert!(!pending.is_empty());
         assert!(pending.iter().any(|p| p.target_tier == CompilationTier::Baseline));
     }

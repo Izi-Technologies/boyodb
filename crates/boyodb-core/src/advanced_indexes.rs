@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -422,14 +422,14 @@ impl PartialIndex {
             return;
         }
 
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.entry(key).or_insert_with(Vec::new).push(row_id);
         self.entry_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Remove a row from the index
     pub fn remove(&self, key: &[IndexValue], row_id: u64) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         if let Some(row_ids) = entries.get_mut(key) {
             row_ids.retain(|&id| id != row_id);
             if row_ids.is_empty() {
@@ -441,7 +441,7 @@ impl PartialIndex {
 
     /// Lookup by key
     pub fn lookup(&self, key: &[IndexValue]) -> Vec<u64> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.get(key).cloned().unwrap_or_default()
     }
 
@@ -529,14 +529,14 @@ impl CoveringIndex {
             included_values,
         };
 
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.entry(key).or_insert_with(Vec::new).push(entry);
         self.entry_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Remove a row from the index
     pub fn remove(&self, key: &[IndexValue], row_id: u64) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         if let Some(entry_list) = entries.get_mut(key) {
             entry_list.retain(|e| e.row_id != row_id);
             if entry_list.is_empty() {
@@ -548,7 +548,7 @@ impl CoveringIndex {
 
     /// Lookup by key, returning entries with included values
     pub fn lookup(&self, key: &[IndexValue]) -> Vec<CoveringIndexEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.get(key).cloned().unwrap_or_default()
     }
 
@@ -669,7 +669,7 @@ impl BrinIndex {
         let range_start = range_id * self.def.pages_per_range as u64;
         let range_end = range_start + self.def.pages_per_range as u64 - 1;
 
-        let mut summaries = self.summaries.write().unwrap();
+        let mut summaries = self.summaries.write();
 
         let summary = summaries.entry(range_id).or_insert_with(|| BrinSummary {
             block_start: range_start,
@@ -695,7 +695,7 @@ impl BrinIndex {
 
     /// Scan for blocks that might contain values in range
     pub fn scan_range(&self, min: &IndexValue, max: &IndexValue) -> Vec<Range<u64>> {
-        let summaries = self.summaries.read().unwrap();
+        let summaries = self.summaries.read();
         let mut ranges = Vec::new();
 
         for (_, summary) in summaries.iter() {
@@ -710,7 +710,7 @@ impl BrinIndex {
 
     /// Scan for blocks that might contain a specific value
     pub fn scan_value(&self, value: &IndexValue) -> Vec<Range<u64>> {
-        let summaries = self.summaries.read().unwrap();
+        let summaries = self.summaries.read();
         let mut ranges = Vec::new();
 
         for (_, summary) in summaries.iter() {
@@ -748,12 +748,12 @@ impl BrinIndex {
 
     /// Get number of summaries
     pub fn summary_count(&self) -> usize {
-        self.summaries.read().unwrap().len()
+        self.summaries.read().len()
     }
 
     /// Summarize the index for EXPLAIN
     pub fn summarize(&self) -> BrinIndexSummary {
-        let summaries = self.summaries.read().unwrap();
+        let summaries = self.summaries.read();
         BrinIndexSummary {
             name: self.def.name.clone(),
             column: self.def.column.clone(),
@@ -885,7 +885,7 @@ impl ExpressionIndex {
     pub fn insert(&self, row_id: u64, row: &HashMap<String, IndexValue>) -> Result<(), IndexError> {
         let key = self.evaluator.evaluate(row)?;
 
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.entry(key).or_insert_with(Vec::new).push(row_id);
         self.entry_count.fetch_add(1, Ordering::Relaxed);
 
@@ -896,7 +896,7 @@ impl ExpressionIndex {
     pub fn remove(&self, row_id: u64, row: &HashMap<String, IndexValue>) -> Result<(), IndexError> {
         let key = self.evaluator.evaluate(row)?;
 
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         if let Some(row_ids) = entries.get_mut(&key) {
             row_ids.retain(|&id| id != row_id);
             if row_ids.is_empty() {
@@ -910,7 +910,7 @@ impl ExpressionIndex {
 
     /// Lookup by expression value
     pub fn lookup(&self, value: &IndexValue) -> Vec<u64> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.get(value).cloned().unwrap_or_default()
     }
 
@@ -957,7 +957,7 @@ impl AdvancedIndexManager {
     pub fn create_partial_index(&self, def: PartialIndexDef) -> Result<(), IndexError> {
         let name = def.name.clone();
         let index = PartialIndex::new(def);
-        self.partial_indexes.write().unwrap().insert(name, index);
+        self.partial_indexes.write().insert(name, index);
         Ok(())
     }
 
@@ -965,7 +965,7 @@ impl AdvancedIndexManager {
     pub fn create_covering_index(&self, def: CoveringIndexDef) -> Result<(), IndexError> {
         let name = def.name.clone();
         let index = CoveringIndex::new(def);
-        self.covering_indexes.write().unwrap().insert(name, index);
+        self.covering_indexes.write().insert(name, index);
         Ok(())
     }
 
@@ -973,7 +973,7 @@ impl AdvancedIndexManager {
     pub fn create_brin_index(&self, def: BrinIndexDef) -> Result<(), IndexError> {
         let name = def.name.clone();
         let index = BrinIndex::new(def);
-        self.brin_indexes.write().unwrap().insert(name, index);
+        self.brin_indexes.write().insert(name, index);
         Ok(())
     }
 
@@ -981,22 +981,22 @@ impl AdvancedIndexManager {
     pub fn create_expression_index(&self, def: ExpressionIndexDef) -> Result<(), IndexError> {
         let name = def.name.clone();
         let index = ExpressionIndex::new(def);
-        self.expression_indexes.write().unwrap().insert(name, index);
+        self.expression_indexes.write().insert(name, index);
         Ok(())
     }
 
     /// Drop an index
     pub fn drop_index(&self, name: &str) -> bool {
-        if self.partial_indexes.write().unwrap().remove(name).is_some() {
+        if self.partial_indexes.write().remove(name).is_some() {
             return true;
         }
-        if self.covering_indexes.write().unwrap().remove(name).is_some() {
+        if self.covering_indexes.write().remove(name).is_some() {
             return true;
         }
-        if self.brin_indexes.write().unwrap().remove(name).is_some() {
+        if self.brin_indexes.write().remove(name).is_some() {
             return true;
         }
-        if self.expression_indexes.write().unwrap().remove(name).is_some() {
+        if self.expression_indexes.write().remove(name).is_some() {
             return true;
         }
         false
@@ -1006,7 +1006,7 @@ impl AdvancedIndexManager {
     pub fn list_indexes(&self) -> Vec<IndexInfo> {
         let mut indexes = Vec::new();
 
-        for (name, idx) in self.partial_indexes.read().unwrap().iter() {
+        for (name, idx) in self.partial_indexes.read().iter() {
             indexes.push(IndexInfo {
                 name: name.clone(),
                 schema: idx.def.schema.clone(),
@@ -1019,7 +1019,7 @@ impl AdvancedIndexManager {
             });
         }
 
-        for (name, idx) in self.covering_indexes.read().unwrap().iter() {
+        for (name, idx) in self.covering_indexes.read().iter() {
             indexes.push(IndexInfo {
                 name: name.clone(),
                 schema: idx.def.schema.clone(),
@@ -1032,7 +1032,7 @@ impl AdvancedIndexManager {
             });
         }
 
-        for (name, idx) in self.brin_indexes.read().unwrap().iter() {
+        for (name, idx) in self.brin_indexes.read().iter() {
             indexes.push(IndexInfo {
                 name: name.clone(),
                 schema: idx.def.schema.clone(),
@@ -1045,7 +1045,7 @@ impl AdvancedIndexManager {
             });
         }
 
-        for (name, idx) in self.expression_indexes.read().unwrap().iter() {
+        for (name, idx) in self.expression_indexes.read().iter() {
             indexes.push(IndexInfo {
                 name: name.clone(),
                 schema: idx.def.schema.clone(),

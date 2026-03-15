@@ -36,7 +36,8 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // GPU Device Information
@@ -379,12 +380,12 @@ impl GpuExecutor {
 
     /// Get execution statistics
     pub fn stats(&self) -> GpuExecutionStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Reset execution statistics
     pub fn reset_stats(&self) {
-        *self.stats.write().unwrap() = GpuExecutionStats::default();
+        *self.stats.write() = GpuExecutionStats::default();
     }
 
     /// Decide whether to use GPU for an operation
@@ -551,7 +552,7 @@ impl GpuExecutor {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.cpu_fallback_operations += 1;
             stats.cpu_fallback_time_micros += start.elapsed().as_micros() as u64;
         }
@@ -617,7 +618,7 @@ impl GpuExecutor {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.cpu_fallback_operations += 1;
             stats.cpu_fallback_time_micros += start.elapsed().as_micros() as u64;
         }
@@ -1054,7 +1055,7 @@ impl MetalExecutor {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.gpu_operations += 1;
             stats.gpu_time_micros += start.elapsed().as_micros() as u64;
             stats.gpu_bytes_processed += data_bytes as u64;
@@ -1076,7 +1077,7 @@ impl MetalExecutor {
         }
 
         // Fall back to CPU
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.cpu_fallback_operations += 1;
 
         cpu_aggregate(batches, agg_type, column_idx)
@@ -1084,7 +1085,7 @@ impl MetalExecutor {
 
     /// Get execution statistics
     pub fn stats(&self) -> GpuExecutionStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 
@@ -1351,13 +1352,13 @@ impl GpuMemoryPool {
             allocated_at: std::time::Instant::now(),
         };
 
-        self.allocations.write().unwrap().insert(id, alloc.clone());
+        self.allocations.write().insert(id, alloc.clone());
         Ok(alloc)
     }
 
     /// Free GPU memory
     pub fn free(&self, id: u64) -> bool {
-        let mut allocations = self.allocations.write().unwrap();
+        let mut allocations = self.allocations.write();
         if let Some(alloc) = allocations.remove(&id) {
             self.allocated.fetch_sub(alloc.size_bytes, Ordering::SeqCst);
             true
@@ -1378,7 +1379,7 @@ impl GpuMemoryPool {
 
     /// Get stats
     pub fn stats(&self) -> GpuMemoryPoolStats {
-        let allocations = self.allocations.read().unwrap();
+        let allocations = self.allocations.read();
         GpuMemoryPoolStats {
             pool_size: self.pool_size,
             allocated: self.allocated(),

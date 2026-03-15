@@ -23,7 +23,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+use parking_lot::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::RwLock;
@@ -282,10 +283,8 @@ impl ShutdownManager {
                 break;
             }
 
-            let guard = self.shutdown_mutex.lock().unwrap();
-            let _ = self
-                .shutdown_cv
-                .wait_timeout(guard, Duration::from_millis(100));
+            let mut guard = self.shutdown_mutex.lock();
+            self.shutdown_cv.wait_for(&mut guard, Duration::from_millis(100));
         }
 
         // Phase 3: Wait for background tasks
@@ -301,10 +300,8 @@ impl ShutdownManager {
                 break;
             }
 
-            let guard = self.shutdown_mutex.lock().unwrap();
-            let _ = self
-                .shutdown_cv
-                .wait_timeout(guard, Duration::from_millis(100));
+            let mut guard = self.shutdown_mutex.lock();
+            self.shutdown_cv.wait_for(&mut guard, Duration::from_millis(100));
         }
 
         // Phase 4: Run shutdown hooks

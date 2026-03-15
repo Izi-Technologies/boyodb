@@ -28,7 +28,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
@@ -353,7 +354,7 @@ impl StatStatementsManager {
         let queryid = query_fingerprint(sql);
         let normalized = normalize_query(sql);
 
-        let mut statements = self.statements.write().unwrap();
+        let mut statements = self.statements.write();
 
         // Check if we need to evict
         if !statements.contains_key(&queryid) && statements.len() >= self.config.max_statements {
@@ -377,12 +378,12 @@ impl StatStatementsManager {
 
     /// Get all statement statistics
     pub fn get_statements(&self) -> Vec<StatementStats> {
-        self.statements.read().unwrap().values().cloned().collect()
+        self.statements.read().values().cloned().collect()
     }
 
     /// Get top N statements by total time
     pub fn get_top_by_time(&self, n: usize) -> Vec<StatementStats> {
-        let mut stats: Vec<_> = self.statements.read().unwrap().values().cloned().collect();
+        let mut stats: Vec<_> = self.statements.read().values().cloned().collect();
         stats.sort_by(|a, b| b.total_time.partial_cmp(&a.total_time).unwrap());
         stats.truncate(n);
         stats
@@ -390,7 +391,7 @@ impl StatStatementsManager {
 
     /// Get top N statements by calls
     pub fn get_top_by_calls(&self, n: usize) -> Vec<StatementStats> {
-        let mut stats: Vec<_> = self.statements.read().unwrap().values().cloned().collect();
+        let mut stats: Vec<_> = self.statements.read().values().cloned().collect();
         stats.sort_by(|a, b| b.calls.cmp(&a.calls));
         stats.truncate(n);
         stats
@@ -398,7 +399,7 @@ impl StatStatementsManager {
 
     /// Get top N statements by mean time
     pub fn get_top_by_mean_time(&self, n: usize) -> Vec<StatementStats> {
-        let mut stats: Vec<_> = self.statements.read().unwrap().values().cloned().collect();
+        let mut stats: Vec<_> = self.statements.read().values().cloned().collect();
         stats.sort_by(|a, b| b.mean_time.partial_cmp(&a.mean_time).unwrap());
         stats.truncate(n);
         stats
@@ -406,19 +407,19 @@ impl StatStatementsManager {
 
     /// Get statement by query ID
     pub fn get_statement(&self, queryid: QueryId) -> Option<StatementStats> {
-        self.statements.read().unwrap().get(&queryid).cloned()
+        self.statements.read().get(&queryid).cloned()
     }
 
     /// Reset all statistics (pg_stat_statements_reset)
     pub fn reset(&self) {
-        let mut statements = self.statements.write().unwrap();
+        let mut statements = self.statements.write();
         statements.clear();
-        *self.stats_reset.write().unwrap() = Some(SystemTime::now());
+        *self.stats_reset.write() = Some(SystemTime::now());
     }
 
     /// Reset statistics for a specific query
     pub fn reset_query(&self, queryid: QueryId) -> bool {
-        self.statements.write().unwrap().remove(&queryid).is_some()
+        self.statements.write().remove(&queryid).is_some()
     }
 
     /// Get deallocation count
@@ -428,12 +429,12 @@ impl StatStatementsManager {
 
     /// Get stats reset time
     pub fn stats_reset_time(&self) -> Option<SystemTime> {
-        *self.stats_reset.read().unwrap()
+        *self.stats_reset.read()
     }
 
     /// Get number of tracked statements
     pub fn statement_count(&self) -> usize {
-        self.statements.read().unwrap().len()
+        self.statements.read().len()
     }
 }
 
@@ -681,30 +682,29 @@ impl StatActivityManager {
     pub fn register_session(&self, database: &str, username: &str) -> u32 {
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed) as u32;
         let entry = ActivityEntry::new_client(pid, database, username);
-        self.sessions.write().unwrap().insert(pid, entry);
+        self.sessions.write().insert(pid, entry);
         pid
     }
 
     /// Unregister a session
     pub fn unregister_session(&self, pid: u32) {
-        self.sessions.write().unwrap().remove(&pid);
+        self.sessions.write().remove(&pid);
     }
 
     /// Get session
     pub fn get_session(&self, pid: u32) -> Option<ActivityEntry> {
-        self.sessions.read().unwrap().get(&pid).cloned()
+        self.sessions.read().get(&pid).cloned()
     }
 
     /// Get all sessions
     pub fn get_all_sessions(&self) -> Vec<ActivityEntry> {
-        self.sessions.read().unwrap().values().cloned().collect()
+        self.sessions.read().values().cloned().collect()
     }
 
     /// Get active sessions
     pub fn get_active_sessions(&self) -> Vec<ActivityEntry> {
         self.sessions
             .read()
-            .unwrap()
             .values()
             .filter(|e| e.state == ActivityState::Active)
             .cloned()
@@ -716,7 +716,7 @@ impl StatActivityManager {
     where
         F: FnOnce(&mut ActivityEntry),
     {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write();
         if let Some(entry) = sessions.get_mut(&pid) {
             f(entry);
             true
@@ -729,7 +729,6 @@ impl StatActivityManager {
     pub fn get_by_state(&self, state: ActivityState) -> Vec<ActivityEntry> {
         self.sessions
             .read()
-            .unwrap()
             .values()
             .filter(|e| e.state == state)
             .cloned()
@@ -740,7 +739,6 @@ impl StatActivityManager {
     pub fn get_long_running(&self, threshold_ms: u64) -> Vec<ActivityEntry> {
         self.sessions
             .read()
-            .unwrap()
             .values()
             .filter(|e| {
                 e.state == ActivityState::Active
@@ -752,7 +750,7 @@ impl StatActivityManager {
 
     /// Get count by state
     pub fn count_by_state(&self) -> HashMap<ActivityState, usize> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read();
         let mut counts = HashMap::new();
         for entry in sessions.values() {
             *counts.entry(entry.state).or_insert(0) += 1;
@@ -871,7 +869,7 @@ impl SlowQueryLog {
             plan_time_ms,
         };
 
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         entries.push(entry);
 
         // Trim if over max
@@ -884,13 +882,13 @@ impl SlowQueryLog {
 
     /// Get recent slow queries
     pub fn get_recent(&self, limit: usize) -> Vec<SlowQueryEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.iter().rev().take(limit).cloned().collect()
     }
 
     /// Get slow queries in time range
     pub fn get_in_range(&self, start: SystemTime, end: SystemTime) -> Vec<SlowQueryEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries
             .iter()
             .filter(|e| e.timestamp >= start && e.timestamp <= end)
@@ -905,7 +903,7 @@ impl SlowQueryLog {
 
     /// Clear log
     pub fn clear(&self) {
-        self.entries.write().unwrap().clear();
+        self.entries.write().clear();
     }
 
     /// Get config

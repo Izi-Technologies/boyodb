@@ -215,10 +215,7 @@ impl DistributedExecutor {
     // ========================================================================
 
     fn resolve_nodes(&self, db: &Db, plan: &LocalPlan) -> Result<Vec<SocketAddr>, EngineError> {
-        let cm_lock = db
-            .cluster_manager
-            .read()
-            .map_err(|_| EngineError::Internal("ClusterManager lock poisoned".into()))?;
+        let cm_lock = db.cluster_manager.read();
         let cm_weak = cm_lock.as_ref().ok_or_else(|| {
             EngineError::Internal("ClusterManager not initialized in distributed mode".into())
         })?;
@@ -234,7 +231,7 @@ impl DistributedExecutor {
         let mut broadcast = false;
 
         for shard_id in shard_ids {
-            if let Some(node_id) = db.shard_map.read().unwrap().get_node_id(shard_id) {
+            if let Some(node_id) = db.shard_map.read().get_node_id(shard_id) {
                 target_nodes.insert(node_id);
             } else {
                 broadcast = true;
@@ -281,20 +278,20 @@ impl DistributedExecutor {
     }
 
     fn prune_shards(&self, db: &Db, plan: &LocalPlan) -> Vec<u16> {
-        let empty_shards: Vec<u16> = (0..db.shard_map.read().unwrap().total_shards).collect();
+        let empty_shards: Vec<u16> = (0..db.shard_map.read().total_shards).collect();
         match &plan.kind {
             PlanKind::Simple { filter, .. } => {
                 let mut shards = Vec::new();
                 let mut constrained = false;
 
                 if let Some(tid) = filter.tenant_id_eq {
-                    shards.push(db.shard_map.read().unwrap().get_shard_id(tid));
+                    shards.push(db.shard_map.read().get_shard_id(tid));
                     constrained = true;
                 }
 
                 if let Some(tids) = &filter.tenant_id_in {
                     for tid in tids {
-                        shards.push(db.shard_map.read().unwrap().get_shard_id(*tid));
+                        shards.push(db.shard_map.read().get_shard_id(*tid));
                     }
                     constrained = true;
                 }

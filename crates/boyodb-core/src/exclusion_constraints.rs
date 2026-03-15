@@ -4,7 +4,8 @@
 //! Useful for scheduling, resource allocation, and temporal data.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::hash::{Hash, Hasher};
 
 /// Exclusion constraint definition
@@ -338,15 +339,15 @@ impl ExclusionConstraintManager {
     pub fn add_constraint(&self, constraint: ExclusionConstraint) -> Result<(), ExclusionError> {
         let name = constraint.name.clone();
 
-        let mut constraints = self.constraints.write().unwrap();
+        let mut constraints = self.constraints.write();
         if constraints.contains_key(&name) {
             return Err(ExclusionError::ConstraintExists(name));
         }
 
         constraints.insert(name.clone(), constraint);
-        self.indexes.write().unwrap().insert(name, Vec::new());
+        self.indexes.write().insert(name, Vec::new());
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_constraints += 1;
 
         Ok(())
@@ -354,15 +355,15 @@ impl ExclusionConstraintManager {
 
     /// Drop an exclusion constraint
     pub fn drop_constraint(&self, name: &str) -> Result<(), ExclusionError> {
-        let mut constraints = self.constraints.write().unwrap();
+        let mut constraints = self.constraints.write();
 
         if constraints.remove(name).is_none() {
             return Err(ExclusionError::ConstraintNotFound(name.into()));
         }
 
-        self.indexes.write().unwrap().remove(name);
+        self.indexes.write().remove(name);
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         if stats.total_constraints > 0 {
             stats.total_constraints -= 1;
         }
@@ -372,12 +373,12 @@ impl ExclusionConstraintManager {
 
     /// Get constraint
     pub fn get_constraint(&self, name: &str) -> Option<ExclusionConstraint> {
-        self.constraints.read().unwrap().get(name).cloned()
+        self.constraints.read().get(name).cloned()
     }
 
     /// Get constraints for a table
     pub fn get_table_constraints(&self, table: &str) -> Vec<ExclusionConstraint> {
-        self.constraints.read().unwrap()
+        self.constraints.read()
             .values()
             .filter(|c| c.table == table)
             .cloned()
@@ -393,7 +394,7 @@ impl ExclusionConstraintManager {
     ) -> Result<(), ExclusionViolation> {
         let constraints = self.get_table_constraints(table);
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.checks_performed += 1;
 
         for constraint in constraints {
@@ -403,7 +404,7 @@ impl ExclusionConstraintManager {
                 .collect();
 
             // Check against existing entries
-            let indexes = self.indexes.read().unwrap();
+            let indexes = self.indexes.read();
             if let Some(index_entries) = indexes.get(&constraint.name) {
                 stats.index_lookups += 1;
 
@@ -431,7 +432,7 @@ impl ExclusionConstraintManager {
         values: &HashMap<String, ConstraintValue>,
     ) {
         let constraints = self.get_table_constraints(table);
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
 
         for constraint in constraints {
             let row_values: Vec<ConstraintValue> = constraint.elements.iter()
@@ -450,7 +451,7 @@ impl ExclusionConstraintManager {
     /// Remove row from exclusion indexes
     pub fn unindex_row(&self, table: &str, row_id: &RowId) {
         let constraints = self.get_table_constraints(table);
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
 
         for constraint in constraints {
             if let Some(index) = indexes.get_mut(&constraint.name) {
@@ -509,7 +510,7 @@ impl ExclusionConstraintManager {
 
     /// Get statistics
     pub fn stats(&self) -> ExclusionStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

@@ -9,7 +9,8 @@
 //! - Breaking change detection
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Data contract definition
@@ -773,19 +774,18 @@ impl ContractStore {
     pub fn register(&self, contract: DataContract) -> Result<(), String> {
         self.registry
             .write()
-            .map_err(|e| e.to_string())?
             .register(contract)
     }
 
     /// Get latest contract
     pub fn get_latest(&self, id: &str) -> Result<Option<DataContract>, String> {
-        let registry = self.registry.read().map_err(|e| e.to_string())?;
+        let registry = self.registry.read();
         Ok(registry.get_latest(id).cloned())
     }
 
     /// Validate data
     pub fn validate(&self, contract_id: &str, version: &SemanticVersion, data: &HashMap<String, String>) -> Result<ValidationResult, String> {
-        let registry = self.registry.read().map_err(|e| e.to_string())?;
+        let registry = self.registry.read();
         Ok(registry.validate(contract_id, version, data))
     }
 }

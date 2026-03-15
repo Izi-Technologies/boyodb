@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::fs;
 
 // ============================================================================
@@ -177,7 +178,7 @@ impl Tablespace {
 
     /// Get current statistics
     pub fn stats(&self) -> TablespaceStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Update statistics
@@ -185,7 +186,7 @@ impl Tablespace {
     where
         F: FnOnce(&mut TablespaceStats),
     {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         f(&mut stats);
     }
 
@@ -195,7 +196,7 @@ impl Tablespace {
             return Ok(()); // Unlimited
         }
 
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read();
         if stats.bytes_used + additional_bytes > self.config.max_size {
             return Err(TablespaceError::QuotaExceeded {
                 tablespace: self.config.name.clone(),
@@ -219,7 +220,7 @@ impl Tablespace {
             return u64::MAX;
         }
 
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read();
         self.config.max_size.saturating_sub(stats.bytes_used)
     }
 
@@ -330,8 +331,8 @@ impl TablespaceManager {
             eprintln!("Warning: Failed to initialize tablespace {}: {:?}", name, e);
         }
 
-        let mut tablespaces = self.tablespaces.write().unwrap();
-        let mut name_index = self.name_index.write().unwrap();
+        let mut tablespaces = self.tablespaces.write();
+        let mut name_index = self.name_index.write();
 
         tablespaces.insert(oid, tablespace.clone());
         name_index.insert(name, oid);
@@ -356,7 +357,7 @@ impl TablespaceManager {
 
         // Check for duplicate name
         {
-            let name_index = self.name_index.read().unwrap();
+            let name_index = self.name_index.read();
             if name_index.contains_key(&config.name) {
                 return Err(TablespaceError::AlreadyExists(config.name.clone()));
             }
@@ -369,7 +370,7 @@ impl TablespaceManager {
 
         // Allocate OID
         let oid = {
-            let mut next_oid = self.next_oid.write().unwrap();
+            let mut next_oid = self.next_oid.write();
             let oid = *next_oid;
             *next_oid += 1;
             oid
@@ -386,7 +387,7 @@ impl TablespaceManager {
         }
 
         let oid = {
-            let name_index = self.name_index.read().unwrap();
+            let name_index = self.name_index.read();
             match name_index.get(name) {
                 Some(&oid) => oid,
                 None => {
@@ -400,7 +401,7 @@ impl TablespaceManager {
 
         // Check if tablespace is empty
         {
-            let tablespaces = self.tablespaces.read().unwrap();
+            let tablespaces = self.tablespaces.read();
             if let Some(ts) = tablespaces.get(&oid) {
                 let stats = ts.stats();
                 if stats.relation_count > 0 {
@@ -413,8 +414,8 @@ impl TablespaceManager {
         }
 
         // Remove from maps
-        let mut tablespaces = self.tablespaces.write().unwrap();
-        let mut name_index = self.name_index.write().unwrap();
+        let mut tablespaces = self.tablespaces.write();
+        let mut name_index = self.name_index.write();
 
         tablespaces.remove(&oid);
         name_index.remove(name);
@@ -424,15 +425,15 @@ impl TablespaceManager {
 
     /// Get a tablespace by name
     pub fn get_tablespace(&self, name: &str) -> Option<Arc<Tablespace>> {
-        let name_index = self.name_index.read().unwrap();
+        let name_index = self.name_index.read();
         let oid = name_index.get(name)?;
-        let tablespaces = self.tablespaces.read().unwrap();
+        let tablespaces = self.tablespaces.read();
         tablespaces.get(oid).cloned()
     }
 
     /// Get a tablespace by OID
     pub fn get_tablespace_by_oid(&self, oid: u32) -> Option<Arc<Tablespace>> {
-        let tablespaces = self.tablespaces.read().unwrap();
+        let tablespaces = self.tablespaces.read();
         tablespaces.get(&oid).cloned()
     }
 
@@ -450,7 +451,7 @@ impl TablespaceManager {
 
     /// List all tablespaces
     pub fn list_tablespaces(&self) -> Vec<Arc<Tablespace>> {
-        let tablespaces = self.tablespaces.read().unwrap();
+        let tablespaces = self.tablespaces.read();
         tablespaces.values().cloned().collect()
     }
 
@@ -479,7 +480,7 @@ impl TablespaceManager {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        *tablespace.modified_at.write().unwrap() = now;
+        *tablespace.modified_at.write() = now;
 
         Ok(())
     }
@@ -503,7 +504,7 @@ impl TablespaceManager {
 
     /// Get total size across all tablespaces
     pub fn total_size(&self) -> u64 {
-        let tablespaces = self.tablespaces.read().unwrap();
+        let tablespaces = self.tablespaces.read();
         tablespaces
             .values()
             .map(|ts| ts.stats().bytes_used)
@@ -515,7 +516,7 @@ impl TablespaceManager {
         &self,
         criteria: &TablespaceSelectionCriteria,
     ) -> Option<Arc<Tablespace>> {
-        let tablespaces = self.tablespaces.read().unwrap();
+        let tablespaces = self.tablespaces.read();
 
         tablespaces
             .values()

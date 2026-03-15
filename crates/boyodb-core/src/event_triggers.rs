@@ -7,7 +7,8 @@
 //! - sql_drop - When objects are dropped
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::Instant;
 
 // ============================================================================
@@ -470,7 +471,7 @@ impl EventTriggerManager {
 
     /// Create an event trigger
     pub fn create_trigger(&self, trigger: EventTrigger) -> Result<(), EventTriggerError> {
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
 
         if triggers.contains_key(&trigger.name) {
             return Err(EventTriggerError::AlreadyExists(trigger.name.clone()));
@@ -482,7 +483,7 @@ impl EventTriggerManager {
 
     /// Drop an event trigger
     pub fn drop_trigger(&self, name: &str) -> Result<(), EventTriggerError> {
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
 
         if triggers.remove(name).is_none() {
             return Err(EventTriggerError::NotFound(name.to_string()));
@@ -493,7 +494,7 @@ impl EventTriggerManager {
 
     /// Alter trigger enabled state
     pub fn alter_trigger(&self, name: &str, enabled: EventTriggerEnabled) -> Result<(), EventTriggerError> {
-        let mut triggers = self.triggers.write().unwrap();
+        let mut triggers = self.triggers.write();
 
         let trigger = triggers
             .get_mut(name)
@@ -508,7 +509,7 @@ impl EventTriggerManager {
     where
         F: Fn(&EventContext) -> Result<(), String> + Send + Sync + 'static,
     {
-        let mut handlers = self.handlers.write().unwrap();
+        let mut handlers = self.handlers.write();
         handlers.insert(function_name.to_string(), Arc::new(Box::new(handler)));
     }
 
@@ -519,8 +520,8 @@ impl EventTriggerManager {
         }
 
         let mut results = Vec::new();
-        let triggers = self.triggers.read().unwrap();
-        let handlers = self.handlers.read().unwrap();
+        let triggers = self.triggers.read();
+        let handlers = self.handlers.read();
 
         for trigger in triggers.values() {
             if !trigger.should_fire(context) {
@@ -561,19 +562,19 @@ impl EventTriggerManager {
 
     /// Get trigger by name
     pub fn get_trigger(&self, name: &str) -> Option<EventTrigger> {
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         triggers.get(name).cloned()
     }
 
     /// List all triggers
     pub fn list_triggers(&self) -> Vec<EventTrigger> {
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         triggers.values().cloned().collect()
     }
 
     /// List triggers for an event
     pub fn list_triggers_for_event(&self, event: EventType) -> Vec<EventTrigger> {
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         triggers
             .values()
             .filter(|t| t.event == event)
@@ -583,7 +584,7 @@ impl EventTriggerManager {
 
     /// Get statistics
     pub fn stats(&self) -> EventTriggerStats {
-        let triggers = self.triggers.read().unwrap();
+        let triggers = self.triggers.read();
         EventTriggerStats {
             total_triggers: triggers.len(),
             enabled_triggers: triggers.values().filter(|t| t.enabled != EventTriggerEnabled::Disabled).count(),

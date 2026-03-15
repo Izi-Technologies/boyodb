@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -156,22 +157,22 @@ impl LargeObject {
 
     /// Get the OID
     pub fn oid(&self) -> Oid {
-        self.metadata.read().unwrap().oid
+        self.metadata.read().oid
     }
 
     /// Get the total size
     pub fn size(&self) -> u64 {
-        self.metadata.read().unwrap().size
+        self.metadata.read().size
     }
 
     /// Get the object type
     pub fn object_type(&self) -> LargeObjectType {
-        self.metadata.read().unwrap().object_type
+        self.metadata.read().object_type
     }
 
     /// Write data to the large object at the specified offset
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize, LobError> {
-        let chunk_size = self.metadata.read().unwrap().chunk_size;
+        let chunk_size = self.metadata.read().chunk_size;
         let mut written = 0;
 
         while written < data.len() {
@@ -180,7 +181,7 @@ impl LargeObject {
             let chunk_offset = (current_offset % chunk_size as u64) as usize;
 
             // Get or create chunk
-            let mut chunks = self.chunks.write().unwrap();
+            let mut chunks = self.chunks.write();
             let chunk = chunks.entry(chunk_number).or_insert_with(|| {
                 Chunk::new(chunk_number, vec![0u8; chunk_size])
             });
@@ -203,7 +204,7 @@ impl LargeObject {
 
         // Update metadata
         {
-            let mut metadata = self.metadata.write().unwrap();
+            let mut metadata = self.metadata.write();
             let new_end = offset + data.len() as u64;
             if new_end > metadata.size {
                 metadata.size = new_end;
@@ -217,7 +218,7 @@ impl LargeObject {
 
     /// Read data from the large object at the specified offset
     pub fn read_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, LobError> {
-        let metadata = self.metadata.read().unwrap();
+        let metadata = self.metadata.read();
 
         if offset >= metadata.size {
             return Ok(Vec::new());
@@ -235,7 +236,7 @@ impl LargeObject {
             let chunk_number = (current_offset / chunk_size as u64) as u32;
             let chunk_offset = (current_offset % chunk_size as u64) as usize;
 
-            let chunks = self.chunks.read().unwrap();
+            let chunks = self.chunks.read();
             let chunk_data = if let Some(chunk) = chunks.get(&chunk_number) {
                 let available = chunk.data.len().saturating_sub(chunk_offset);
                 let to_read = std::cmp::min(available, remaining);
@@ -256,16 +257,16 @@ impl LargeObject {
 
     /// Truncate the large object to a specified length
     pub fn truncate(&self, length: u64) -> Result<(), LobError> {
-        let mut metadata = self.metadata.write().unwrap();
+        let mut metadata = self.metadata.write();
         let chunk_size = metadata.chunk_size;
 
         if length == 0 {
             // Clear all chunks
-            self.chunks.write().unwrap().clear();
+            self.chunks.write().clear();
         } else if length < metadata.size {
             // Remove chunks beyond the new length
             let last_chunk = (length / chunk_size as u64) as u32;
-            let mut chunks = self.chunks.write().unwrap();
+            let mut chunks = self.chunks.write();
             chunks.retain(|&num, _| num <= last_chunk);
 
             // Truncate the last chunk if needed
@@ -469,7 +470,7 @@ impl LargeObjectManager {
         let oid = self.next_oid.fetch_add(1, Ordering::SeqCst) as Oid;
         let lob = Arc::new(LargeObject::new(oid, object_type, owner));
 
-        self.objects.write().unwrap().insert(oid, lob);
+        self.objects.write().insert(oid, lob);
         Ok(oid)
     }
 
@@ -486,7 +487,7 @@ impl LargeObjectManager {
     /// Drop a large object
     pub fn drop(&self, oid: Oid) -> Result<(), LobError> {
         // Check if any handles are open
-        let handles = self.handles.read().unwrap();
+        let handles = self.handles.read();
         for handle in handles.values() {
             if handle.oid() == oid && !handle.is_closed() {
                 return Err(LobError::ObjectInUse(oid));
@@ -494,7 +495,7 @@ impl LargeObjectManager {
         }
         drop(handles);
 
-        let mut objects = self.objects.write().unwrap();
+        let mut objects = self.objects.write();
         if objects.remove(&oid).is_none() {
             return Err(LobError::NotFound(oid));
         }
@@ -503,12 +504,12 @@ impl LargeObjectManager {
 
     /// Get a large object by OID
     pub fn get(&self, oid: Oid) -> Option<Arc<LargeObject>> {
-        self.objects.read().unwrap().get(&oid).cloned()
+        self.objects.read().get(&oid).cloned()
     }
 
     /// Check if a large object exists
     pub fn exists(&self, oid: Oid) -> bool {
-        self.objects.read().unwrap().contains_key(&oid)
+        self.objects.read().contains_key(&oid)
     }
 
     /// Open a large object for access
@@ -518,13 +519,13 @@ impl LargeObjectManager {
         let descriptor = self.next_descriptor.fetch_add(1, Ordering::SeqCst) as i32;
         let handle = LargeObjectHandle::new(lob, mode);
 
-        self.handles.write().unwrap().insert(descriptor, handle);
+        self.handles.write().insert(descriptor, handle);
         Ok(descriptor)
     }
 
     /// Close a large object handle
     pub fn close(&self, descriptor: i32) -> Result<(), LobError> {
-        let mut handles = self.handles.write().unwrap();
+        let mut handles = self.handles.write();
         if let Some(mut handle) = handles.remove(&descriptor) {
             handle.close();
             Ok(())
@@ -535,7 +536,7 @@ impl LargeObjectManager {
 
     /// Read from an open large object
     pub fn read(&self, descriptor: i32, length: usize) -> Result<Vec<u8>, LobError> {
-        let mut handles = self.handles.write().unwrap();
+        let mut handles = self.handles.write();
         let handle = handles.get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
@@ -548,7 +549,7 @@ impl LargeObjectManager {
 
     /// Write to an open large object
     pub fn write(&self, descriptor: i32, data: &[u8]) -> Result<usize, LobError> {
-        let mut handles = self.handles.write().unwrap();
+        let mut handles = self.handles.write();
         let handle = handles.get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
@@ -558,7 +559,7 @@ impl LargeObjectManager {
 
     /// Seek in an open large object
     pub fn seek(&self, descriptor: i32, offset: i64, whence: i32) -> Result<u64, LobError> {
-        let mut handles = self.handles.write().unwrap();
+        let mut handles = self.handles.write();
         let handle = handles.get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
@@ -575,7 +576,7 @@ impl LargeObjectManager {
 
     /// Get the current position in an open large object
     pub fn tell(&self, descriptor: i32) -> Result<u64, LobError> {
-        let handles = self.handles.read().unwrap();
+        let handles = self.handles.read();
         let handle = handles.get(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
         Ok(handle.tell())
@@ -583,7 +584,7 @@ impl LargeObjectManager {
 
     /// Truncate an open large object
     pub fn truncate(&self, descriptor: i32, length: u64) -> Result<(), LobError> {
-        let handles = self.handles.read().unwrap();
+        let handles = self.handles.read();
         let handle = handles.get(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
@@ -596,15 +597,15 @@ impl LargeObjectManager {
 
     /// List all large objects
     pub fn list(&self) -> Vec<LargeObjectMetadata> {
-        self.objects.read().unwrap()
+        self.objects.read()
             .values()
-            .map(|lob| lob.metadata.read().unwrap().clone())
+            .map(|lob| lob.metadata.read().clone())
             .collect()
     }
 
     /// Get large object metadata
     pub fn get_metadata(&self, oid: Oid) -> Option<LargeObjectMetadata> {
-        self.get(oid).map(|lob| lob.metadata.read().unwrap().clone())
+        self.get(oid).map(|lob| lob.metadata.read().clone())
     }
 
     /// Update large object metadata
@@ -613,7 +614,7 @@ impl LargeObjectManager {
         F: FnOnce(&mut LargeObjectMetadata),
     {
         let lob = self.get(oid).ok_or(LobError::NotFound(oid))?;
-        let mut metadata = lob.metadata.write().unwrap();
+        let mut metadata = lob.metadata.write();
         f(&mut metadata);
         Ok(())
     }
@@ -662,7 +663,7 @@ impl LargeObjectManager {
         };
 
         let lob = Arc::new(LargeObject::new(oid, LargeObjectType::Blob, 0));
-        self.objects.write().unwrap().insert(oid, lob);
+        self.objects.write().insert(oid, lob);
         Ok(oid)
     }
 

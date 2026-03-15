@@ -10,7 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -1898,14 +1899,14 @@ impl ProcedureManager {
             proc.name.clone()
         };
 
-        let mut procs = self.procedures.write().unwrap();
+        let mut procs = self.procedures.write();
         procs.insert(key, proc);
         Ok(())
     }
 
     /// Get a procedure by name
     pub fn get(&self, schema: Option<&str>, name: &str) -> Option<ProcedureDefinition> {
-        let procs = self.procedures.read().unwrap();
+        let procs = self.procedures.read();
 
         if let Some(s) = schema {
             procs.get(&format!("{}.{}", s, name)).cloned()
@@ -1916,7 +1917,7 @@ impl ProcedureManager {
 
     /// Drop a procedure
     pub fn drop(&self, schema: Option<&str>, name: &str) -> bool {
-        let mut procs = self.procedures.write().unwrap();
+        let mut procs = self.procedures.write();
 
         let key = if let Some(s) = schema {
             format!("{}.{}", s, name)
@@ -1929,7 +1930,7 @@ impl ProcedureManager {
 
     /// List all procedures
     pub fn list(&self) -> Vec<String> {
-        let procs = self.procedures.read().unwrap();
+        let procs = self.procedures.read();
         procs.keys().cloned().collect()
     }
 }

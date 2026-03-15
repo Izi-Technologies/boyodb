@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Online learning algorithms
@@ -188,8 +188,8 @@ impl OnlineLinearModel {
 
     /// Predict for a single example
     pub fn predict(&self, features: &[f64]) -> f64 {
-        let weights = self.weights.read().unwrap();
-        let bias = *self.bias.read().unwrap();
+        let weights = self.weights.read();
+        let bias = *self.bias.read();
 
         let mut pred = bias;
         for (w, x) in weights.iter().zip(features.iter()) {
@@ -213,7 +213,7 @@ impl OnlineLinearModel {
         let loss = error * error * 0.5 * example.weight;
 
         // Get current learning rate
-        let state = self.optimizer_state.read().unwrap();
+        let state = self.optimizer_state.read();
         let step = state.step;
         drop(state);
 
@@ -228,7 +228,7 @@ impl OnlineLinearModel {
         let bias_grad = error * example.weight;
 
         // Add L2 regularization
-        let weights = self.weights.read().unwrap();
+        let weights = self.weights.read();
         for (g, w) in gradients.iter_mut().zip(weights.iter()) {
             *g += self.config.l2_reg * w;
         }
@@ -238,7 +238,7 @@ impl OnlineLinearModel {
         self.apply_update(&gradients, bias_grad, lr);
 
         // Update stats
-        *self.stats.total_loss.write().unwrap() += loss;
+        *self.stats.total_loss.write() += loss;
         self.stats.updates.fetch_add(1, Ordering::Relaxed);
 
         loss
@@ -255,9 +255,9 @@ impl OnlineLinearModel {
 
     /// Apply gradient update based on algorithm
     fn apply_update(&self, gradients: &[f64], bias_grad: f64, lr: f64) {
-        let mut weights = self.weights.write().unwrap();
-        let mut bias = self.bias.write().unwrap();
-        let mut state = self.optimizer_state.write().unwrap();
+        let mut weights = self.weights.write();
+        let mut bias = self.bias.write();
+        let mut state = self.optimizer_state.write();
 
         state.step += 1;
 
@@ -337,17 +337,17 @@ impl OnlineLinearModel {
 
     /// Get current weights
     pub fn get_weights(&self) -> Vec<f64> {
-        self.weights.read().unwrap().clone()
+        self.weights.read().clone()
     }
 
     /// Get bias
     pub fn get_bias(&self) -> f64 {
-        *self.bias.read().unwrap()
+        *self.bias.read()
     }
 
     /// Get statistics
     pub fn get_stats(&self) -> OnlineModelStats {
-        let total_loss = *self.stats.total_loss.read().unwrap();
+        let total_loss = *self.stats.total_loss.read();
         let updates = self.stats.updates.load(Ordering::Relaxed);
 
         OnlineModelStats {
@@ -355,7 +355,7 @@ impl OnlineLinearModel {
             updates,
             average_loss: if updates > 0 { total_loss / updates as f64 } else { 0.0 },
             current_lr: self.config.lr_schedule.get_lr(
-                self.optimizer_state.read().unwrap().step,
+                self.optimizer_state.read().step,
                 None,
             ),
         }
@@ -363,7 +363,7 @@ impl OnlineLinearModel {
 
     /// Reset optimizer state
     pub fn reset_optimizer(&self) {
-        let mut state = self.optimizer_state.write().unwrap();
+        let mut state = self.optimizer_state.write();
         *state = OptimizerState::new(self.config.num_features);
     }
 }
@@ -418,8 +418,8 @@ impl MultiArmedBandit {
 
     /// Select an arm to pull
     pub fn select_arm(&self) -> usize {
-        let counts = self.counts.read().unwrap();
-        let rewards = self.rewards.read().unwrap();
+        let counts = self.counts.read();
+        let rewards = self.rewards.read();
         let total = self.total_pulls.load(Ordering::Relaxed);
 
         match &self.algorithm {
@@ -528,8 +528,8 @@ impl MultiArmedBandit {
             return;
         }
 
-        self.counts.write().unwrap()[arm] += 1;
-        self.rewards.write().unwrap()[arm] += reward;
+        self.counts.write()[arm] += 1;
+        self.rewards.write()[arm] += reward;
         self.total_pulls.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -553,8 +553,8 @@ impl MultiArmedBandit {
 
     /// Get statistics for all arms
     pub fn get_stats(&self) -> Vec<ArmStats> {
-        let counts = self.counts.read().unwrap();
-        let rewards = self.rewards.read().unwrap();
+        let counts = self.counts.read();
+        let rewards = self.rewards.read();
 
         (0..self.num_arms)
             .map(|i| ArmStats {
@@ -618,8 +618,8 @@ impl ContextualBandit {
 
     /// Select arm given context
     pub fn select_arm(&self, context: &[f64]) -> usize {
-        let a_matrices = self.a_matrices.read().unwrap();
-        let b_vectors = self.b_vectors.read().unwrap();
+        let a_matrices = self.a_matrices.read();
+        let b_vectors = self.b_vectors.read();
 
         let mut best_arm = 0;
         let mut best_ucb = f64::NEG_INFINITY;
@@ -651,8 +651,8 @@ impl ContextualBandit {
             return;
         }
 
-        let mut a_matrices = self.a_matrices.write().unwrap();
-        let mut b_vectors = self.b_vectors.write().unwrap();
+        let mut a_matrices = self.a_matrices.write();
+        let mut b_vectors = self.b_vectors.write();
 
         // A = A + x * x^T
         for i in 0..self.num_features {
@@ -687,12 +687,11 @@ impl OnlineLearningRegistry {
     pub fn create_linear_model(&self, name: &str, config: OnlineConfig) {
         self.linear_models
             .write()
-            .unwrap()
             .insert(name.to_string(), OnlineLinearModel::new(config));
     }
 
-    pub fn get_linear_model(&self, name: &str) -> Option<std::sync::RwLockReadGuard<'_, HashMap<String, OnlineLinearModel>>> {
-        let models = self.linear_models.read().unwrap();
+    pub fn get_linear_model(&self, name: &str) -> Option<parking_lot::RwLockReadGuard<'_, HashMap<String, OnlineLinearModel>>> {
+        let models = self.linear_models.read();
         if models.contains_key(name) {
             Some(models)
         } else {
@@ -703,12 +702,11 @@ impl OnlineLearningRegistry {
     pub fn create_bandit(&self, name: &str, num_arms: usize, algorithm: BanditAlgorithm) {
         self.bandits
             .write()
-            .unwrap()
             .insert(name.to_string(), MultiArmedBandit::new(num_arms, algorithm));
     }
 
     pub fn list_models(&self) -> Vec<String> {
-        self.linear_models.read().unwrap().keys().cloned().collect()
+        self.linear_models.read().keys().cloned().collect()
     }
 }
 

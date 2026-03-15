@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Partitioning error types
@@ -362,20 +363,20 @@ impl PartitionManager {
 
     /// Get partition for a row based on key values
     pub fn route_row(&self, key_values: &[PartitionValue]) -> Result<String, PartitionError> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
 
         // Try cache first
         {
-            let cache = self.routing_cache.read().unwrap();
+            let cache = self.routing_cache.read();
             if cache.valid {
                 if let Some(partition) = self.lookup_cache(&cache, key_values, &config) {
-                    self.stats.write().unwrap().routing_cache_hits += 1;
+                    self.stats.write().routing_cache_hits += 1;
                     return Ok(partition);
                 }
             }
         }
 
-        self.stats.write().unwrap().routing_cache_misses += 1;
+        self.stats.write().routing_cache_misses += 1;
 
         match &*config {
             PartitionStrategy::Range(range_config) => {
@@ -566,8 +567,8 @@ impl PartitionManager {
 
     /// Apply partition pruning
     pub fn prune(&self, context: &PruningContext) -> PruningResult {
-        let config = self.config.read().unwrap();
-        let partitions = self.partitions.read().unwrap();
+        let config = self.config.read();
+        let partitions = self.partitions.read();
 
         let all_partitions: Vec<String> = partitions.keys().cloned().collect();
 
@@ -580,7 +581,7 @@ impl PartitionManager {
             };
         }
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.pruning_operations += 1;
 
         let result = match &*config {
@@ -910,7 +911,7 @@ impl PartitionManager {
 
     /// Add a new partition
     pub fn add_partition(&self, partition: PartitionMetadata) -> Result<(), PartitionError> {
-        let mut partitions = self.partitions.write().unwrap();
+        let mut partitions = self.partitions.write();
 
         if partitions.contains_key(&partition.name) {
             return Err(PartitionError::AlreadyExists(partition.name));
@@ -919,25 +920,25 @@ impl PartitionManager {
         partitions.insert(partition.name.clone(), partition);
 
         // Invalidate routing cache
-        self.routing_cache.write().unwrap().valid = false;
+        self.routing_cache.write().valid = false;
 
-        self.stats.write().unwrap().total_partitions = partitions.len();
+        self.stats.write().total_partitions = partitions.len();
 
         Ok(())
     }
 
     /// Drop a partition
     pub fn drop_partition(&self, name: &str) -> Result<PartitionMetadata, PartitionError> {
-        let mut partitions = self.partitions.write().unwrap();
+        let mut partitions = self.partitions.write();
 
         let partition = partitions
             .remove(name)
             .ok_or_else(|| PartitionError::NotFound(name.to_string()))?;
 
         // Invalidate routing cache
-        self.routing_cache.write().unwrap().valid = false;
+        self.routing_cache.write().valid = false;
 
-        self.stats.write().unwrap().total_partitions = partitions.len();
+        self.stats.write().total_partitions = partitions.len();
 
         Ok(partition)
     }
@@ -948,7 +949,7 @@ impl PartitionManager {
         name: &str,
         constraint: PartitionConstraint,
     ) -> Result<(), PartitionError> {
-        let mut partitions = self.partitions.write().unwrap();
+        let mut partitions = self.partitions.write();
 
         if let Some(partition) = partitions.get_mut(name) {
             partition.is_attached = true;
@@ -962,7 +963,7 @@ impl PartitionManager {
 
     /// Detach a partition (makes it a standalone table)
     pub fn detach_partition(&self, name: &str) -> Result<(), PartitionError> {
-        let mut partitions = self.partitions.write().unwrap();
+        let mut partitions = self.partitions.write();
 
         if let Some(partition) = partitions.get_mut(name) {
             partition.is_attached = false;
@@ -984,7 +985,7 @@ impl PartitionManager {
         split_point: Vec<PartitionValue>,
         new_partition_name: String,
     ) -> Result<(), PartitionError> {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write();
 
         match &mut *config {
             PartitionStrategy::Range(range_config) => {
@@ -1026,7 +1027,7 @@ impl PartitionManager {
         }
 
         // Invalidate cache
-        self.routing_cache.write().unwrap().valid = false;
+        self.routing_cache.write().valid = false;
 
         Ok(())
     }
@@ -1038,7 +1039,7 @@ impl PartitionManager {
         partition2: &str,
         merged_name: String,
     ) -> Result<(), PartitionError> {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write();
 
         match &mut *config {
             PartitionStrategy::Range(range_config) => {
@@ -1083,15 +1084,15 @@ impl PartitionManager {
             }
         }
 
-        self.routing_cache.write().unwrap().valid = false;
+        self.routing_cache.write().valid = false;
 
         Ok(())
     }
 
     /// Rebuild routing cache
     pub fn rebuild_cache(&self) {
-        let config = self.config.read().unwrap();
-        let mut cache = self.routing_cache.write().unwrap();
+        let config = self.config.read();
+        let mut cache = self.routing_cache.write();
 
         cache.range_boundaries.clear();
         cache.list_map.clear();
@@ -1126,22 +1127,22 @@ impl PartitionManager {
 
     /// Get partition statistics
     pub fn stats(&self) -> PartitionStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// List all partitions
     pub fn list_partitions(&self) -> Vec<PartitionMetadata> {
-        self.partitions.read().unwrap().values().cloned().collect()
+        self.partitions.read().values().cloned().collect()
     }
 
     /// Get partition by name
     pub fn get_partition(&self, name: &str) -> Option<PartitionMetadata> {
-        self.partitions.read().unwrap().get(name).cloned()
+        self.partitions.read().get(name).cloned()
     }
 
     /// Update partition statistics
     pub fn update_partition_stats(&self, name: &str, row_count: u64, size_bytes: u64) {
-        let mut partitions = self.partitions.write().unwrap();
+        let mut partitions = self.partitions.write();
         if let Some(partition) = partitions.get_mut(name) {
             partition.row_count = row_count;
             partition.size_bytes = size_bytes;
@@ -1149,7 +1150,7 @@ impl PartitionManager {
         }
 
         // Update totals
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_rows = partitions.values().map(|p| p.row_count).sum();
         stats.total_size_bytes = partitions.values().map(|p| p.size_bytes).sum();
     }
@@ -1215,12 +1216,12 @@ impl PartitionMaintenance {
 
     /// Register a partition manager
     pub fn register(&self, table: String, manager: Arc<PartitionManager>) {
-        self.managers.write().unwrap().insert(table, manager);
+        self.managers.write().insert(table, manager);
     }
 
     /// Run maintenance for all registered tables
     pub fn run_maintenance(&self) -> Vec<MaintenanceAction> {
-        let managers = self.managers.read().unwrap();
+        let managers = self.managers.read();
         let mut actions = Vec::new();
 
         for (table, manager) in managers.iter() {

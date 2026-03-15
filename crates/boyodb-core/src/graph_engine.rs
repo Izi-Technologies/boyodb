@@ -8,7 +8,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque, BinaryHeap};
 use std::cmp::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Node in the graph
 #[derive(Debug, Clone)]
@@ -258,10 +259,10 @@ impl GraphDatabase {
             properties,
         };
 
-        self.nodes.write().unwrap().insert(id.to_string(), node.clone());
+        self.nodes.write().insert(id.to_string(), node.clone());
 
         // Update label index
-        let mut label_index = self.label_index.write().unwrap();
+        let mut label_index = self.label_index.write();
         for label in &labels {
             label_index
                 .entry(label.clone())
@@ -270,8 +271,8 @@ impl GraphDatabase {
         }
 
         // Initialize adjacency lists
-        self.outgoing.write().unwrap().entry(id.to_string()).or_default();
-        self.incoming.write().unwrap().entry(id.to_string()).or_default();
+        self.outgoing.write().entry(id.to_string()).or_default();
+        self.incoming.write().entry(id.to_string()).or_default();
 
         node
     }
@@ -287,7 +288,7 @@ impl GraphDatabase {
         weight: f64,
     ) -> Option<Edge> {
         // Verify nodes exist
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         if !nodes.contains_key(source) || !nodes.contains_key(target) {
             return None;
         }
@@ -302,20 +303,20 @@ impl GraphDatabase {
             weight,
         };
 
-        self.edges.write().unwrap().insert(id.to_string(), edge.clone());
+        self.edges.write().insert(id.to_string(), edge.clone());
 
         // Update adjacency lists
-        self.outgoing.write().unwrap()
+        self.outgoing.write()
             .entry(source.to_string())
             .or_default()
             .push(id.to_string());
-        self.incoming.write().unwrap()
+        self.incoming.write()
             .entry(target.to_string())
             .or_default()
             .push(id.to_string());
 
         // Update edge type index
-        self.edge_type_index.write().unwrap()
+        self.edge_type_index.write()
             .entry(edge_type.to_string())
             .or_insert_with(HashSet::new)
             .insert(id.to_string());
@@ -325,19 +326,19 @@ impl GraphDatabase {
 
     /// Get node by ID
     pub fn get_node(&self, id: &str) -> Option<Node> {
-        self.nodes.read().unwrap().get(id).cloned()
+        self.nodes.read().get(id).cloned()
     }
 
     /// Get edge by ID
     pub fn get_edge(&self, id: &str) -> Option<Edge> {
-        self.edges.read().unwrap().get(id).cloned()
+        self.edges.read().get(id).cloned()
     }
 
     /// Get neighbors of a node
     pub fn neighbors(&self, node_id: &str, direction: Direction) -> Vec<String> {
-        let edges = self.edges.read().unwrap();
-        let outgoing = self.outgoing.read().unwrap();
-        let incoming = self.incoming.read().unwrap();
+        let edges = self.edges.read();
+        let outgoing = self.outgoing.read();
+        let incoming = self.incoming.read();
 
         let mut neighbors = HashSet::new();
 
@@ -443,8 +444,8 @@ impl GraphDatabase {
             distance: 0.0,
         });
 
-        let edges = self.edges.read().unwrap();
-        let outgoing = self.outgoing.read().unwrap();
+        let edges = self.edges.read();
+        let outgoing = self.outgoing.read();
 
         while let Some(DijkstraEntry { node_id, distance }) = heap.pop() {
             if node_id == end {
@@ -550,8 +551,8 @@ impl GraphDatabase {
         } else {
             // Collect edges to explore while holding locks, then release
             let edges_to_explore: Vec<(String, String)> = {
-                let edges = self.edges.read().unwrap();
-                let outgoing = self.outgoing.read().unwrap();
+                let edges = self.edges.read();
+                let outgoing = self.outgoing.read();
 
                 outgoing.get(current)
                     .map(|edge_ids| {
@@ -590,7 +591,7 @@ impl GraphDatabase {
 
     /// PageRank algorithm
     pub fn pagerank(&self, damping: f64, iterations: usize) -> HashMap<String, f64> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         let n = nodes.len() as f64;
 
         if n == 0.0 {
@@ -627,7 +628,7 @@ impl GraphDatabase {
 
     /// Community detection using label propagation
     pub fn detect_communities(&self, max_iterations: usize) -> HashMap<String, usize> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
 
         // Initialize: each node in its own community
         let mut labels: HashMap<String, usize> = nodes.keys()
@@ -672,8 +673,8 @@ impl GraphDatabase {
 
     /// Get graph statistics
     pub fn stats(&self) -> GraphStats {
-        let nodes = self.nodes.read().unwrap();
-        let edges = self.edges.read().unwrap();
+        let nodes = self.nodes.read();
+        let edges = self.edges.read();
 
         let mut label_counts: HashMap<String, usize> = HashMap::new();
         for node in nodes.values() {

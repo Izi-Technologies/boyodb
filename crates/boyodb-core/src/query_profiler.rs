@@ -4,7 +4,8 @@
 //! Provides deep insight into query execution for performance optimization.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Query profile
@@ -274,17 +275,17 @@ impl QueryProfiler {
 
     /// Enable profiling
     pub fn enable(&self) {
-        *self.enabled.write().unwrap() = true;
+        *self.enabled.write() = true;
     }
 
     /// Disable profiling
     pub fn disable(&self) {
-        *self.enabled.write().unwrap() = false;
+        *self.enabled.write() = false;
     }
 
     /// Check if enabled
     pub fn is_enabled(&self) -> bool {
-        *self.enabled.read().unwrap()
+        *self.enabled.read()
     }
 
     /// Start profiling a query
@@ -294,12 +295,12 @@ impl QueryProfiler {
         }
 
         let profile = QueryProfile::new(query_id.clone(), sql);
-        self.profiles.write().unwrap().insert(query_id, profile);
+        self.profiles.write().insert(query_id, profile);
     }
 
     /// Start a phase
     pub fn start_phase(&self, query_id: &str, phase_name: &str) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.phases.push(ProfilePhase {
                 name: phase_name.into(),
                 start: Instant::now(),
@@ -310,7 +311,7 @@ impl QueryProfiler {
 
     /// End current phase
     pub fn end_phase(&self, query_id: &str) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             if let Some(phase) = profile.phases.last_mut() {
                 phase.duration = phase.start.elapsed();
             }
@@ -319,14 +320,14 @@ impl QueryProfiler {
 
     /// Add operator profile
     pub fn add_operator(&self, query_id: &str, operator: OperatorProfile) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.operators.push(operator);
         }
     }
 
     /// Update memory stats
     pub fn update_memory(&self, query_id: &str, allocated: u64, peak: u64) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.memory.allocated_bytes = allocated;
             if peak > profile.memory.peak_bytes {
                 profile.memory.peak_bytes = peak;
@@ -336,7 +337,7 @@ impl QueryProfiler {
 
     /// Update I/O stats
     pub fn update_io(&self, query_id: &str, bytes_read: u64, segments: u64) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.io.bytes_read += bytes_read;
             profile.io.segments_scanned += segments;
         }
@@ -344,7 +345,7 @@ impl QueryProfiler {
 
     /// Update row stats
     pub fn update_rows(&self, query_id: &str, scanned: u64, filtered: u64, returned: u64) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.rows.scanned += scanned;
             profile.rows.filtered += filtered;
             profile.rows.returned += returned;
@@ -353,7 +354,7 @@ impl QueryProfiler {
 
     /// Record wait event
     pub fn record_wait(&self, query_id: &str, event_type: WaitEventType, duration: Duration, context: &str) {
-        if let Some(profile) = self.profiles.write().unwrap().get_mut(query_id) {
+        if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.wait_events.push(WaitEvent {
                 event_type,
                 duration,
@@ -365,14 +366,14 @@ impl QueryProfiler {
 
     /// Finish profiling a query
     pub fn finish(&self, query_id: &str) -> Option<QueryProfile> {
-        let mut profiles = self.profiles.write().unwrap();
+        let mut profiles = self.profiles.write();
         let mut profile = profiles.remove(query_id)?;
         profile.finish();
 
         let profile_clone = profile.clone();
 
         // Add to history
-        let mut history = self.history.write().unwrap();
+        let mut history = self.history.write();
         if history.len() >= self.history_limit {
             history.remove(0);
         }
@@ -383,18 +384,18 @@ impl QueryProfiler {
 
     /// Get active profile
     pub fn get_active(&self, query_id: &str) -> Option<QueryProfile> {
-        self.profiles.read().unwrap().get(query_id).cloned()
+        self.profiles.read().get(query_id).cloned()
     }
 
     /// Get recent profiles
     pub fn get_history(&self, limit: usize) -> Vec<QueryProfile> {
-        let history = self.history.read().unwrap();
+        let history = self.history.read();
         history.iter().rev().take(limit).cloned().collect()
     }
 
     /// Clear history
     pub fn clear_history(&self) {
-        self.history.write().unwrap().clear();
+        self.history.write().clear();
     }
 }
 

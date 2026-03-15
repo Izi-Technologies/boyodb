@@ -10,7 +10,8 @@
 //! - Partition pruning
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Delta Lake table
@@ -780,7 +781,6 @@ impl LakehouseRegistry {
     pub fn create_delta_table(&self, table: DeltaTable) -> Result<(), String> {
         self.store
             .write()
-            .map_err(|e| e.to_string())?
             .create_delta_table(table)
     }
 
@@ -788,13 +788,12 @@ impl LakehouseRegistry {
     pub fn create_iceberg_table(&self, table: IcebergTable) -> Result<(), String> {
         self.store
             .write()
-            .map_err(|e| e.to_string())?
             .create_iceberg_table(table)
     }
 
     /// List tables
     pub fn list_tables(&self) -> Result<(Vec<String>, Vec<String>), String> {
-        let store = self.store.read().map_err(|e| e.to_string())?;
+        let store = self.store.read();
         Ok((
             store.list_delta_tables().iter().map(|s| s.to_string()).collect(),
             store.list_iceberg_tables().iter().map(|s| s.to_string()).collect(),

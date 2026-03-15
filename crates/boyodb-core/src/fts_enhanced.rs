@@ -9,7 +9,8 @@
 // - GIN index support
 
 use std::collections::{HashMap, HashSet, BTreeMap};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // Basic Types
@@ -1180,7 +1181,7 @@ impl GinIndex {
 
     /// Insert a document
     pub fn insert(&self, doc_id: u64, ts: &TsVector) {
-        let mut postings = self.postings.write().unwrap();
+        let mut postings = self.postings.write();
 
         for lexeme in ts.lexemes() {
             postings.entry(lexeme.clone())
@@ -1188,12 +1189,12 @@ impl GinIndex {
                 .push(doc_id);
         }
 
-        *self.doc_count.write().unwrap() += 1;
+        *self.doc_count.write() += 1;
     }
 
     /// Delete a document
     pub fn delete(&self, doc_id: u64, ts: &TsVector) {
-        let mut postings = self.postings.write().unwrap();
+        let mut postings = self.postings.write();
 
         for lexeme in ts.lexemes() {
             if let Some(docs) = postings.get_mut(lexeme) {
@@ -1201,7 +1202,7 @@ impl GinIndex {
             }
         }
 
-        let mut count = self.doc_count.write().unwrap();
+        let mut count = self.doc_count.write();
         if *count > 0 {
             *count -= 1;
         }
@@ -1209,7 +1210,7 @@ impl GinIndex {
 
     /// Search for documents matching a query
     pub fn search(&self, query: &TsQuery) -> Vec<u64> {
-        let postings = self.postings.read().unwrap();
+        let postings = self.postings.read();
 
         match &query.root {
             None => Vec::new(),
@@ -1258,10 +1259,10 @@ impl GinIndex {
 
     /// Get index statistics
     pub fn stats(&self) -> GinIndexStats {
-        let postings = self.postings.read().unwrap();
+        let postings = self.postings.read();
         GinIndexStats {
             lexeme_count: postings.len(),
-            doc_count: *self.doc_count.read().unwrap(),
+            doc_count: *self.doc_count.read(),
             avg_postings: if postings.is_empty() {
                 0.0
             } else {

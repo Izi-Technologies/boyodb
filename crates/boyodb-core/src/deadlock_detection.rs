@@ -25,7 +25,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -554,24 +555,24 @@ impl DeadlockDetector {
             priority: 0,
             work_done: 0,
         };
-        self.transactions.write().unwrap().insert(txn_id, state);
+        self.transactions.write().insert(txn_id, state);
     }
 
     /// Unregister a transaction (releases all locks)
     pub fn unregister_transaction(&self, txn_id: TransactionId) {
         // Get and remove transaction state
-        let state = self.transactions.write().unwrap().remove(&txn_id);
+        let state = self.transactions.write().remove(&txn_id);
 
         if let Some(state) = state {
             // Release all held locks
-            let mut locks = self.locks.write().unwrap();
+            let mut locks = self.locks.write();
             for lock_id in state.held_locks {
                 locks.remove(&lock_id);
             }
         }
 
         // Remove from wait-for graph
-        self.graph.write().unwrap().remove_transaction(txn_id);
+        self.graph.write().remove_transaction(txn_id);
     }
 
     /// Request a lock
@@ -601,17 +602,17 @@ impl DeadlockDetector {
         };
 
         // Add lock entry
-        self.locks.write().unwrap().insert(lock_id, entry.clone());
+        self.locks.write().insert(lock_id, entry.clone());
 
         // Update transaction state
-        if let Some(state) = self.transactions.write().unwrap().get_mut(&txn_id) {
+        if let Some(state) = self.transactions.write().get_mut(&txn_id) {
             if entry.granted {
                 state.held_locks.push(lock_id);
             } else {
                 state.waiting_for = Some(lock_id);
 
                 // Add edges to wait-for graph
-                let mut graph = self.graph.write().unwrap();
+                let mut graph = self.graph.write();
                 for (blocking_txn, blocking_mode) in &conflicts {
                     graph.add_edge(WaitEdge {
                         waiter: txn_id,
@@ -647,7 +648,7 @@ impl DeadlockDetector {
         mode: LockMode,
         requesting_txn: TransactionId,
     ) -> Vec<(TransactionId, LockMode)> {
-        let locks = self.locks.read().unwrap();
+        let locks = self.locks.read();
         let mut conflicts = Vec::new();
 
         for entry in locks.values() {
@@ -665,14 +666,13 @@ impl DeadlockDetector {
 
     /// Release a lock
     pub fn release_lock(&self, lock_id: LockId) -> bool {
-        let entry = self.locks.write().unwrap().remove(&lock_id);
+        let entry = self.locks.write().remove(&lock_id);
 
         if let Some(entry) = entry {
             // Update transaction state
             if let Some(state) = self
                 .transactions
                 .write()
-                .unwrap()
                 .get_mut(&entry.transaction_id)
             {
                 state.held_locks.retain(|&id| id != lock_id);
@@ -689,9 +689,9 @@ impl DeadlockDetector {
 
     /// Process waiting locks after a release
     fn process_waiting_locks(&self, target: &LockTarget) {
-        let mut locks = self.locks.write().unwrap();
-        let mut transactions = self.transactions.write().unwrap();
-        let mut graph = self.graph.write().unwrap();
+        let mut locks = self.locks.write();
+        let mut transactions = self.transactions.write();
+        let mut graph = self.graph.write();
 
         // Find waiting locks for this target
         let waiting: Vec<_> = locks
@@ -740,10 +740,10 @@ impl DeadlockDetector {
             return Ok(None);
         }
 
-        let graph = self.graph.read().unwrap();
+        let graph = self.graph.read();
         let cycles = graph.detect_cycles();
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.detection_runs += 1;
 
         if let Some(cycle) = cycles.into_iter().next() {
@@ -759,7 +759,7 @@ impl DeadlockDetector {
 
     /// Select victim transaction from a deadlock cycle
     fn select_victim(&self, cycle: &[TransactionId]) -> TransactionId {
-        let transactions = self.transactions.read().unwrap();
+        let transactions = self.transactions.read();
 
         match self.config.victim_strategy {
             VictimStrategy::Youngest => {
@@ -800,22 +800,22 @@ impl DeadlockDetector {
 
     /// Update transaction work done
     pub fn update_work(&self, txn_id: TransactionId, work: u64) {
-        if let Some(state) = self.transactions.write().unwrap().get_mut(&txn_id) {
+        if let Some(state) = self.transactions.write().get_mut(&txn_id) {
             state.work_done += work;
         }
     }
 
     /// Set transaction priority
     pub fn set_priority(&self, txn_id: TransactionId, priority: i32) {
-        if let Some(state) = self.transactions.write().unwrap().get_mut(&txn_id) {
+        if let Some(state) = self.transactions.write().get_mut(&txn_id) {
             state.priority = priority;
         }
     }
 
     /// Get lock wait graph for visualization
     pub fn get_wait_graph(&self) -> WaitGraphInfo {
-        let graph = self.graph.read().unwrap();
-        let transactions = self.transactions.read().unwrap();
+        let graph = self.graph.read();
+        let transactions = self.transactions.read();
 
         let nodes: Vec<_> = transactions
             .values()
@@ -837,17 +837,17 @@ impl DeadlockDetector {
 
     /// Get statistics
     pub fn stats(&self) -> DeadlockStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get all locks (for pg_locks view)
     pub fn get_locks(&self) -> Vec<LockEntry> {
-        self.locks.read().unwrap().values().cloned().collect()
+        self.locks.read().values().cloned().collect()
     }
 
     /// Get blocking PIDs for a transaction
     pub fn get_blocking_pids(&self, txn_id: TransactionId) -> Vec<TransactionId> {
-        self.graph.read().unwrap().get_blockers(txn_id)
+        self.graph.read().get_blockers(txn_id)
     }
 }
 

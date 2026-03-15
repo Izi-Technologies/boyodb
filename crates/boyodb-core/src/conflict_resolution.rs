@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -377,12 +378,12 @@ impl ConflictResolver {
 
     /// Set configuration
     pub fn set_config(&self, config: ConflictConfig) {
-        *self.config.write().unwrap() = config;
+        *self.config.write() = config;
     }
 
     /// Get configuration
     pub fn config(&self) -> ConflictConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 
     /// Set custom resolver
@@ -390,7 +391,7 @@ impl ConflictResolver {
     where
         F: Fn(&Conflict) -> Option<ConflictResolution> + Send + Sync + 'static,
     {
-        *self.custom_resolver.write().unwrap() = Some(Arc::new(resolver));
+        *self.custom_resolver.write() = Some(Arc::new(resolver));
     }
 
     /// Detect conflict between local and remote changes
@@ -445,7 +446,7 @@ impl ConflictResolver {
 
     /// Resolve a conflict
     pub fn resolve(&self, mut conflict: Conflict) -> Result<ConflictResolution, ConflictError> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
 
         // Determine strategy
         let full_table_name = format!("{}.{}", conflict.schema, conflict.table);
@@ -459,7 +460,7 @@ impl ConflictResolver {
 
         // Try custom resolver first
         if strategy == ResolutionStrategy::Custom {
-            if let Some(resolver) = self.custom_resolver.read().unwrap().as_ref() {
+            if let Some(resolver) = self.custom_resolver.read().as_ref() {
                 if let Some(resolution) = resolver(&conflict) {
                     conflict.resolution = Some(resolution.clone());
                     conflict.resolved = true;
@@ -664,14 +665,14 @@ impl ConflictResolver {
     }
 
     fn store_conflict(&self, conflict: Conflict) {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
         if !config.log_conflicts {
             return;
         }
         let max_history = config.max_history;
         drop(config);
 
-        let mut history = self.history.write().unwrap();
+        let mut history = self.history.write();
         history.push(conflict);
 
         // Trim if necessary
@@ -683,12 +684,12 @@ impl ConflictResolver {
 
     /// Get conflict history
     pub fn history(&self) -> Vec<Conflict> {
-        self.history.read().unwrap().clone()
+        self.history.read().clone()
     }
 
     /// Clear history
     pub fn clear_history(&self) {
-        self.history.write().unwrap().clear();
+        self.history.write().clear();
     }
 
     /// Get statistics
@@ -700,7 +701,6 @@ impl ConflictResolver {
     pub fn pending_conflicts(&self) -> Vec<Conflict> {
         self.history
             .read()
-            .unwrap()
             .iter()
             .filter(|c| !c.resolved)
             .cloned()
@@ -786,7 +786,7 @@ impl ConflictLogger {
             logged_at: SystemTime::now(),
         };
 
-        let mut conflicts = self.conflicts.write().unwrap();
+        let mut conflicts = self.conflicts.write();
         conflicts.push(entry);
 
         if conflicts.len() > self.max_size {
@@ -797,18 +797,18 @@ impl ConflictLogger {
 
     /// Get recent conflicts
     pub fn recent(&self, limit: usize) -> Vec<LoggedConflict> {
-        let conflicts = self.conflicts.read().unwrap();
+        let conflicts = self.conflicts.read();
         conflicts.iter().rev().take(limit).cloned().collect()
     }
 
     /// Clear log
     pub fn clear(&self) {
-        self.conflicts.write().unwrap().clear();
+        self.conflicts.write().clear();
     }
 
     /// Get log size
     pub fn size(&self) -> usize {
-        self.conflicts.read().unwrap().len()
+        self.conflicts.read().len()
     }
 }
 

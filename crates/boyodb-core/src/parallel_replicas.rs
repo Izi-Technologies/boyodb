@@ -4,7 +4,8 @@
 //! Distributes query parts across multiple replicas for parallel processing.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Replica endpoint
@@ -174,17 +175,17 @@ impl ParallelReplicaCoordinator {
 
     /// Register a replica
     pub fn register_replica(&self, replica: ReplicaEndpoint) {
-        self.replicas.write().unwrap().insert(replica.id.clone(), replica);
+        self.replicas.write().insert(replica.id.clone(), replica);
     }
 
     /// Unregister a replica
     pub fn unregister_replica(&self, replica_id: &str) {
-        self.replicas.write().unwrap().remove(replica_id);
+        self.replicas.write().remove(replica_id);
     }
 
     /// Get healthy replicas
     pub fn healthy_replicas(&self) -> Vec<ReplicaEndpoint> {
-        self.replicas.read().unwrap()
+        self.replicas.read()
             .values()
             .filter(|r| r.healthy)
             .cloned()
@@ -193,14 +194,14 @@ impl ParallelReplicaCoordinator {
 
     /// Mark replica as unhealthy
     pub fn mark_unhealthy(&self, replica_id: &str) {
-        if let Some(replica) = self.replicas.write().unwrap().get_mut(replica_id) {
+        if let Some(replica) = self.replicas.write().get_mut(replica_id) {
             replica.healthy = false;
         }
     }
 
     /// Mark replica as healthy
     pub fn mark_healthy(&self, replica_id: &str) {
-        if let Some(replica) = self.replicas.write().unwrap().get_mut(replica_id) {
+        if let Some(replica) = self.replicas.write().get_mut(replica_id) {
             replica.healthy = true;
             replica.last_check = Some(Instant::now());
         }
@@ -208,7 +209,7 @@ impl ParallelReplicaCoordinator {
 
     /// Update replica load
     pub fn update_load(&self, replica_id: &str, load: f64) {
-        if let Some(replica) = self.replicas.write().unwrap().get_mut(replica_id) {
+        if let Some(replica) = self.replicas.write().get_mut(replica_id) {
             replica.load = load.clamp(0.0, 1.0);
         }
     }
@@ -301,7 +302,7 @@ impl ParallelReplicaCoordinator {
 
         match self.config.load_balance {
             LoadBalanceStrategy::RoundRobin => {
-                let mut counter = self.rr_counter.write().unwrap();
+                let mut counter = self.rr_counter.write();
                 let idx = *counter % healthy.len();
                 *counter = counter.wrapping_add(1);
                 Some(healthy[idx].clone())
@@ -363,7 +364,7 @@ impl ParallelReplicaCoordinator {
         }
 
         // Update stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.queries_executed += 1;
         stats.parts_executed += results.len() as u64;
         stats.rows_processed += total_rows;
@@ -380,7 +381,7 @@ impl ParallelReplicaCoordinator {
 
     /// Record part failure
     pub fn record_failure(&self, _part_id: u64, replica_id: &str) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.parts_failed += 1;
 
         // Check if we should mark replica unhealthy
@@ -393,7 +394,7 @@ impl ParallelReplicaCoordinator {
 
     /// Get statistics
     pub fn stats(&self) -> CoordinatorStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 

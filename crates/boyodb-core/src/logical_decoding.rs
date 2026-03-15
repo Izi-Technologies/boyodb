@@ -8,7 +8,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -613,29 +614,29 @@ impl ReplicationSlot {
 
     /// Acquire the slot for use
     pub fn acquire(&self, pid: u32) -> Result<(), DecodingError> {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
         if *state == SlotState::Active {
             return Err(DecodingError::SlotInUse(self.name.clone()));
         }
         *state = SlotState::Active;
-        *self.active_pid.write().unwrap() = Some(pid);
+        *self.active_pid.write() = Some(pid);
         Ok(())
     }
 
     /// Release the slot
     pub fn release(&self) {
-        *self.state.write().unwrap() = SlotState::Inactive;
-        *self.active_pid.write().unwrap() = None;
+        *self.state.write() = SlotState::Inactive;
+        *self.active_pid.write() = None;
     }
 
     /// Check if slot is active
     pub fn is_active(&self) -> bool {
-        *self.state.read().unwrap() == SlotState::Active
+        *self.state.read() == SlotState::Active
     }
 
     /// Get the current state
     pub fn state(&self) -> SlotState {
-        *self.state.read().unwrap()
+        *self.state.read()
     }
 
     /// Advance the confirmed flush LSN
@@ -684,7 +685,7 @@ impl SlotManager {
     pub fn create_physical_slot(&self, name: &str, temporary: bool) -> Result<Arc<ReplicationSlot>, DecodingError> {
         self.validate_slot_name(name)?;
 
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
         if slots.len() >= self.max_slots {
             return Err(DecodingError::TooManySlots(self.max_slots));
         }
@@ -710,7 +711,7 @@ impl SlotManager {
         self.validate_slot_name(name)?;
         self.validate_plugin(plugin)?;
 
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
         if slots.len() >= self.max_slots {
             return Err(DecodingError::TooManySlots(self.max_slots));
         }
@@ -727,7 +728,7 @@ impl SlotManager {
 
     /// Drop a replication slot
     pub fn drop_slot(&self, name: &str) -> Result<(), DecodingError> {
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
 
         let slot = slots.get(name)
             .ok_or_else(|| DecodingError::SlotNotFound(name.to_string()))?;
@@ -742,17 +743,17 @@ impl SlotManager {
 
     /// Get a slot by name
     pub fn get_slot(&self, name: &str) -> Option<Arc<ReplicationSlot>> {
-        self.slots.read().unwrap().get(name).cloned()
+        self.slots.read().get(name).cloned()
     }
 
     /// List all slots
     pub fn list_slots(&self) -> Vec<Arc<ReplicationSlot>> {
-        self.slots.read().unwrap().values().cloned().collect()
+        self.slots.read().values().cloned().collect()
     }
 
     /// Drop all temporary slots
     pub fn drop_temporary_slots(&self) {
-        let mut slots = self.slots.write().unwrap();
+        let mut slots = self.slots.write();
         slots.retain(|_, slot| !slot.temporary || slot.is_active());
     }
 
@@ -840,7 +841,7 @@ impl LogicalDecoder {
         self.slot.acquire(pid)?;
 
         {
-            let mut plugin = self.plugin.write().unwrap();
+            let mut plugin = self.plugin.write();
             plugin.startup(options)?;
             plugin.begin_streaming()?;
         }
@@ -856,7 +857,7 @@ impl LogicalDecoder {
         self.active.store(false, Ordering::SeqCst);
 
         {
-            let mut plugin = self.plugin.write().unwrap();
+            let mut plugin = self.plugin.write();
             plugin.end_streaming()?;
             plugin.shutdown()?;
         }
@@ -890,7 +891,7 @@ impl LogicalDecoder {
         }
 
         // Add to buffer
-        let mut buffer = self.buffer.write().unwrap();
+        let mut buffer = self.buffer.write();
         if buffer.len() >= self.config.max_buffer_size {
             return Err(DecodingError::BufferFull);
         }
@@ -901,10 +902,10 @@ impl LogicalDecoder {
 
     /// Get the next formatted change
     pub fn get_next_change(&self) -> Result<Option<Vec<u8>>, DecodingError> {
-        let change = self.buffer.write().unwrap().pop_front();
+        let change = self.buffer.write().pop_front();
         match change {
             Some(c) => {
-                let plugin = self.plugin.read().unwrap();
+                let plugin = self.plugin.read();
                 Ok(Some(plugin.format_change(&c)?))
             }
             None => Ok(None),
@@ -913,8 +914,8 @@ impl LogicalDecoder {
 
     /// Get all pending formatted changes
     pub fn get_all_changes(&self) -> Result<Vec<Vec<u8>>, DecodingError> {
-        let changes: Vec<_> = self.buffer.write().unwrap().drain(..).collect();
-        let plugin = self.plugin.read().unwrap();
+        let changes: Vec<_> = self.buffer.write().drain(..).collect();
+        let plugin = self.plugin.read();
         changes.into_iter()
             .map(|c| plugin.format_change(&c))
             .collect()
@@ -932,7 +933,7 @@ impl LogicalDecoder {
 
     /// Get buffer size
     pub fn buffer_size(&self) -> usize {
-        self.buffer.read().unwrap().len()
+        self.buffer.read().len()
     }
 }
 

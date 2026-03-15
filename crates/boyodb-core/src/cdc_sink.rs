@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -301,7 +302,7 @@ pub struct KafkaSink {
     events_sent: AtomicU64,
     events_failed: AtomicU64,
     bytes_sent: AtomicU64,
-    buffer: std::sync::Mutex<Vec<CdcEvent>>,
+    buffer: Mutex<Vec<CdcEvent>>,
 }
 
 impl KafkaSink {
@@ -312,7 +313,7 @@ impl KafkaSink {
             events_sent: AtomicU64::new(0),
             events_failed: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
-            buffer: std::sync::Mutex::new(Vec::new()),
+            buffer: Mutex::new(Vec::new()),
         }
     }
 
@@ -361,9 +362,7 @@ impl KafkaSink {
 
         // Buffer the event
         {
-            let mut buffer = self.buffer.lock().map_err(|_| {
-                CdcSinkError::SendFailed("failed to acquire buffer lock".into())
-            })?;
+            let mut buffer = self.buffer.lock();
 
             if buffer.len() >= self.config.producer.batch_size / 100 {
                 // Batch is full, would flush
@@ -405,9 +404,7 @@ impl KafkaSink {
     /// Flush buffered events
     pub fn flush(&self) -> Result<(), CdcSinkError> {
         let events = {
-            let mut buffer = self.buffer.lock().map_err(|_| {
-                CdcSinkError::SendFailed("failed to acquire buffer lock".into())
-            })?;
+            let mut buffer = self.buffer.lock();
             std::mem::take(&mut *buffer)
         };
 

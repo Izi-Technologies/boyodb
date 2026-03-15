@@ -8,7 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -124,8 +125,8 @@ impl VisibilityMap {
     pub fn get_visibility(&self, page_id: u32) -> PageVisibility {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        let all_visible = self.all_visible.read().unwrap();
-        let all_frozen = self.all_frozen.read().unwrap();
+        let all_visible = self.all_visible.read();
+        let all_frozen = self.all_frozen.read();
 
         let idx = page_id as usize;
 
@@ -157,7 +158,7 @@ impl VisibilityMap {
 
     /// Mark a page as all-visible
     pub fn set_all_visible(&self, page_id: u32) {
-        let mut all_visible = self.all_visible.write().unwrap();
+        let mut all_visible = self.all_visible.write();
         let idx = page_id as usize;
 
         if idx >= all_visible.len() {
@@ -175,7 +176,7 @@ impl VisibilityMap {
     pub fn set_all_frozen(&self, page_id: u32) {
         self.set_all_visible(page_id);
 
-        let mut all_frozen = self.all_frozen.write().unwrap();
+        let mut all_frozen = self.all_frozen.write();
         let idx = page_id as usize;
 
         if idx >= all_frozen.len() {
@@ -190,8 +191,8 @@ impl VisibilityMap {
 
     /// Clear visibility for a page (called on update/delete)
     pub fn clear_visibility(&self, page_id: u32) {
-        let mut all_visible = self.all_visible.write().unwrap();
-        let mut all_frozen = self.all_frozen.write().unwrap();
+        let mut all_visible = self.all_visible.write();
+        let mut all_frozen = self.all_frozen.write();
         let idx = page_id as usize;
 
         if idx < all_visible.len() && all_visible[idx] {
@@ -218,7 +219,7 @@ impl VisibilityMap {
 
     /// Get number of all-visible pages
     pub fn count_all_visible(&self) -> usize {
-        let all_visible = self.all_visible.read().unwrap();
+        let all_visible = self.all_visible.read();
         all_visible.iter().filter(|&&v| v).count()
     }
 
@@ -426,20 +427,20 @@ impl IndexOnlyScanManager {
     ) {
         let index = CoveringIndex::new(name, &self.table_name, key_columns, included_columns);
 
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
         indexes.insert(name.to_string(), index);
 
-        let mut data = self.index_data.write().unwrap();
+        let mut data = self.index_data.write();
         data.insert(name.to_string(), Vec::new());
     }
 
     /// Drop an index
     pub fn drop_index(&self, name: &str) -> bool {
-        let mut indexes = self.indexes.write().unwrap();
+        let mut indexes = self.indexes.write();
         let removed = indexes.remove(name).is_some();
 
         if removed {
-            let mut data = self.index_data.write().unwrap();
+            let mut data = self.index_data.write();
             data.remove(name);
         }
 
@@ -454,7 +455,7 @@ impl IndexOnlyScanManager {
         heap_offset: u16,
         values: Vec<IndexValue>,
     ) -> Result<(), IndexScanError> {
-        let data = self.index_data.read().unwrap();
+        let data = self.index_data.read();
         if !data.contains_key(index_name) {
             return Err(IndexScanError::IndexNotFound(index_name.to_string()));
         }
@@ -466,7 +467,7 @@ impl IndexOnlyScanManager {
             values,
         };
 
-        let mut data = self.index_data.write().unwrap();
+        let mut data = self.index_data.write();
         if let Some(entries) = data.get_mut(index_name) {
             entries.push(entry);
         }
@@ -476,7 +477,7 @@ impl IndexOnlyScanManager {
 
     /// Check if a query can be satisfied by index-only scan
     pub fn can_index_only_scan(&self, index_name: &str, columns: &[&str]) -> bool {
-        let indexes = self.indexes.read().unwrap();
+        let indexes = self.indexes.read();
         if let Some(index) = indexes.get(index_name) {
             index.covers(columns)
         } else {
@@ -486,7 +487,7 @@ impl IndexOnlyScanManager {
 
     /// Find the best index for the given columns
     pub fn find_covering_index(&self, columns: &[&str]) -> Option<String> {
-        let indexes = self.indexes.read().unwrap();
+        let indexes = self.indexes.read();
 
         for (name, index) in indexes.iter() {
             if index.covers(columns) {
@@ -505,7 +506,7 @@ impl IndexOnlyScanManager {
     ) -> Result<IndexOnlyScanResult, IndexScanError> {
         self.stats.index_scans.fetch_add(1, Ordering::Relaxed);
 
-        let data = self.index_data.read().unwrap();
+        let data = self.index_data.read();
         let entries = data
             .get(index_name)
             .ok_or_else(|| IndexScanError::IndexNotFound(index_name.to_string()))?;
@@ -578,13 +579,13 @@ impl IndexOnlyScanManager {
 
     /// List all indexes
     pub fn list_indexes(&self) -> Vec<String> {
-        let indexes = self.indexes.read().unwrap();
+        let indexes = self.indexes.read();
         indexes.keys().cloned().collect()
     }
 
     /// Get index info
     pub fn get_index(&self, name: &str) -> Option<CoveringIndex> {
-        let indexes = self.indexes.read().unwrap();
+        let indexes = self.indexes.read();
         indexes.get(name).cloned()
     }
 }

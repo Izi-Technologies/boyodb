@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Feature data types
@@ -237,7 +238,7 @@ impl OnlineStore {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         let mut result = HashMap::new();
 
         if let Some(entity_features) = cache.get(entity_key) {
@@ -272,7 +273,7 @@ impl OnlineStore {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         let entity_features = cache.entry(entity_key.to_string()).or_insert_with(HashMap::new);
 
         for (name, value) in features {
@@ -297,7 +298,7 @@ impl OnlineStore {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         for entity_features in cache.values_mut() {
             entity_features.retain(|_, (_, ts)| now - *ts < self.default_ttl_ms as i64);
         }
@@ -442,7 +443,7 @@ impl FeatureStore {
 
     /// Register a feature group
     pub fn register_group(&self, group: FeatureGroup) -> Result<(), FeatureStoreError> {
-        let mut groups = self.groups.write().unwrap();
+        let mut groups = self.groups.write();
         if groups.contains_key(&group.name) {
             return Err(FeatureStoreError::DuplicateGroup(group.name));
         }
@@ -452,17 +453,17 @@ impl FeatureStore {
 
     /// Get a feature group
     pub fn get_group(&self, name: &str) -> Option<FeatureGroup> {
-        self.groups.read().unwrap().get(name).cloned()
+        self.groups.read().get(name).cloned()
     }
 
     /// List all feature groups
     pub fn list_groups(&self) -> Vec<FeatureGroup> {
-        self.groups.read().unwrap().values().cloned().collect()
+        self.groups.read().values().cloned().collect()
     }
 
     /// Register a feature view
     pub fn register_view(&self, view: FeatureView) -> Result<(), FeatureStoreError> {
-        let mut views = self.views.write().unwrap();
+        let mut views = self.views.write();
         if views.contains_key(&view.name) {
             return Err(FeatureStoreError::DuplicateView(view.name));
         }
@@ -472,20 +473,20 @@ impl FeatureStore {
 
     /// Get a feature view
     pub fn get_view(&self, name: &str) -> Option<FeatureView> {
-        self.views.read().unwrap().get(name).cloned()
+        self.views.read().get(name).cloned()
     }
 
     /// Register a transformation pipeline
     pub fn register_pipeline(&self, pipeline: FeaturePipeline) -> Result<(), FeatureStoreError> {
         // Track lineage
         {
-            let mut lineage = self.lineage.write().unwrap();
+            let mut lineage = self.lineage.write();
             for output in &pipeline.outputs {
                 lineage.insert(output.clone(), pipeline.inputs.clone());
             }
         }
 
-        self.pipelines.write().unwrap().insert(pipeline.name.clone(), pipeline);
+        self.pipelines.write().insert(pipeline.name.clone(), pipeline);
         Ok(())
     }
 
@@ -649,7 +650,6 @@ impl FeatureStore {
     pub fn get_lineage(&self, feature_name: &str) -> Vec<String> {
         self.lineage
             .read()
-            .unwrap()
             .get(feature_name)
             .cloned()
             .unwrap_or_default()
@@ -657,9 +657,9 @@ impl FeatureStore {
 
     /// Get statistics
     pub fn get_stats(&self) -> FeatureStoreStats {
-        let groups = self.groups.read().unwrap();
-        let views = self.views.read().unwrap();
-        let pipelines = self.pipelines.read().unwrap();
+        let groups = self.groups.read();
+        let views = self.views.read();
+        let pipelines = self.pipelines.read();
 
         let total_features: usize = groups.values().map(|g| g.features.len()).sum();
         let (hits, misses, _) = self.online_store.stats();

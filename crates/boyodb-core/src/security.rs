@@ -6,7 +6,8 @@
 //! - Column Encryption for data protection at rest
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -182,36 +183,36 @@ impl RlsManager {
     /// Enable RLS on a table
     pub fn enable_rls(&self, database: &str, table: &str) {
         let key = format!("{}.{}", database, table);
-        self.enabled_tables.write().unwrap().insert(key);
+        self.enabled_tables.write().insert(key);
     }
 
     /// Disable RLS on a table
     pub fn disable_rls(&self, database: &str, table: &str) {
         let key = format!("{}.{}", database, table);
-        self.enabled_tables.write().unwrap().remove(&key);
+        self.enabled_tables.write().remove(&key);
     }
 
     /// Check if RLS is enabled on a table
     pub fn is_rls_enabled(&self, database: &str, table: &str) -> bool {
         let key = format!("{}.{}", database, table);
-        self.enabled_tables.read().unwrap().contains(&key)
+        self.enabled_tables.read().contains(&key)
     }
 
     /// Add a bypass role (superuser)
     pub fn add_bypass_role(&self, role: &str) {
-        self.bypass_roles.write().unwrap().insert(role.to_string());
+        self.bypass_roles.write().insert(role.to_string());
     }
 
     /// Remove a bypass role
     pub fn remove_bypass_role(&self, role: &str) {
-        self.bypass_roles.write().unwrap().remove(role);
+        self.bypass_roles.write().remove(role);
     }
 
     /// Create a policy
     pub fn create_policy(&self, policy: RlsPolicy) -> Result<(), RlsError> {
         let key = format!("{}.{}", policy.database, policy.table);
 
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write();
         let table_policies = policies.entry(key).or_default();
 
         // Check for duplicate name
@@ -232,7 +233,7 @@ impl RlsManager {
     ) -> Result<RlsPolicy, RlsError> {
         let key = format!("{}.{}", database, table);
 
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write();
         let table_policies = policies
             .get_mut(&key)
             .ok_or_else(|| RlsError::PolicyNotFound(name.to_string()))?;
@@ -250,7 +251,6 @@ impl RlsManager {
         let key = format!("{}.{}", database, table);
         self.policies
             .read()
-            .unwrap()
             .get(&key)
             .cloned()
             .unwrap_or_default()
@@ -267,7 +267,7 @@ impl RlsManager {
         let key = format!("{}.{}", database, table);
 
         // Check if RLS is enabled
-        if !self.enabled_tables.read().unwrap().contains(&key) {
+        if !self.enabled_tables.read().contains(&key) {
             return RlsResult {
                 allowed: true,
                 filter: None,
@@ -277,7 +277,7 @@ impl RlsManager {
         }
 
         // Check for bypass roles
-        let bypass_roles = self.bypass_roles.read().unwrap();
+        let bypass_roles = self.bypass_roles.read();
         for role in &context.roles {
             if bypass_roles.contains(role) {
                 return RlsResult {
@@ -290,7 +290,7 @@ impl RlsManager {
         }
 
         // Get applicable policies
-        let policies = self.policies.read().unwrap();
+        let policies = self.policies.read();
         let table_policies = match policies.get(&key) {
             Some(p) => p.clone(),
             None => {
@@ -732,7 +732,7 @@ impl AuditLogger {
 
     /// Log an audit entry
     pub fn log(&self, mut entry: AuditEntry) {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
 
         // Check if auditing is enabled
         if !config.enabled {
@@ -768,14 +768,14 @@ impl AuditLogger {
 
         // Update counts
         {
-            let mut counts = self.counts.write().unwrap();
+            let mut counts = self.counts.write();
             *counts.entry(entry.event_type).or_insert(0) += 1;
         }
 
         // Add to log
         {
-            let mut entries = self.entries.write().unwrap();
-            let config = self.config.read().unwrap();
+            let mut entries = self.entries.write();
+            let config = self.config.read();
 
             entries.push_back(entry);
 
@@ -788,7 +788,7 @@ impl AuditLogger {
 
     /// Query audit log
     pub fn query(&self, filter: &AuditFilter) -> Vec<AuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
 
         entries
             .iter()
@@ -852,28 +852,28 @@ impl AuditLogger {
 
     /// Get event counts
     pub fn get_counts(&self) -> HashMap<AuditEventType, u64> {
-        self.counts.read().unwrap().clone()
+        self.counts.read().clone()
     }
 
     /// Get total entry count
     pub fn entry_count(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().len()
     }
 
     /// Clear all entries
     pub fn clear(&self) {
-        self.entries.write().unwrap().clear();
-        self.counts.write().unwrap().clear();
+        self.entries.write().clear();
+        self.counts.write().clear();
     }
 
     /// Update configuration
     pub fn update_config(&self, config: AuditConfig) {
-        *self.config.write().unwrap() = config;
+        *self.config.write() = config;
     }
 
     /// Get current configuration
     pub fn get_config(&self) -> AuditConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 }
 
@@ -1154,7 +1154,7 @@ impl ColumnEncryptionManager {
 
     /// Set master key
     pub fn set_master_key(&self, key: Vec<u8>) {
-        *self.master_key.write().unwrap() = Some(key);
+        *self.master_key.write() = Some(key);
     }
 
     /// Create a new encryption key
@@ -1169,7 +1169,7 @@ impl ColumnEncryptionManager {
 
         let key = EncryptionKey::new(id, algorithm, key_material);
 
-        let mut keys = self.keys.write().unwrap();
+        let mut keys = self.keys.write();
         keys.entry(id.to_string()).or_default().push(key.clone());
 
         Ok(key)
@@ -1177,7 +1177,7 @@ impl ColumnEncryptionManager {
 
     /// Get active key by ID
     pub fn get_key(&self, id: &str) -> Option<EncryptionKey> {
-        let keys = self.keys.read().unwrap();
+        let keys = self.keys.read();
         keys.get(id)?
             .iter()
             .filter(|k| k.active && !k.is_expired())
@@ -1187,7 +1187,7 @@ impl ColumnEncryptionManager {
 
     /// Rotate a key (create new version)
     pub fn rotate_key(&self, id: &str) -> Result<EncryptionKey, EncryptionError> {
-        let mut keys = self.keys.write().unwrap();
+        let mut keys = self.keys.write();
         let key_versions = keys
             .get_mut(id)
             .ok_or_else(|| EncryptionError::KeyNotFound(id.to_string()))?;
@@ -1224,7 +1224,7 @@ impl ColumnEncryptionManager {
         }
 
         let key = format!("{}.{}.{}", policy.database, policy.table, policy.column);
-        self.policies.write().unwrap().insert(key, policy);
+        self.policies.write().insert(key, policy);
         Ok(())
     }
 
@@ -1236,13 +1236,13 @@ impl ColumnEncryptionManager {
         column: &str,
     ) -> Option<ColumnEncryptionPolicy> {
         let key = format!("{}.{}.{}", database, table, column);
-        self.policies.read().unwrap().get(&key).cloned()
+        self.policies.read().get(&key).cloned()
     }
 
     /// Drop policy for a column
     pub fn drop_policy(&self, database: &str, table: &str, column: &str) -> bool {
         let key = format!("{}.{}.{}", database, table, column);
-        self.policies.write().unwrap().remove(&key).is_some()
+        self.policies.write().remove(&key).is_some()
     }
 
     /// List all policies for a table
@@ -1250,7 +1250,6 @@ impl ColumnEncryptionManager {
         let prefix = format!("{}.{}.", database, table);
         self.policies
             .read()
-            .unwrap()
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, v)| v.clone())
@@ -1306,7 +1305,7 @@ impl ColumnEncryptionManager {
     /// Decrypt a value
     pub fn decrypt(&self, encrypted: &EncryptedValue) -> Result<Vec<u8>, EncryptionError> {
         // Find the key version used
-        let keys = self.keys.read().unwrap();
+        let keys = self.keys.read();
         let key_versions = keys
             .get(&encrypted.key_id)
             .ok_or_else(|| EncryptionError::KeyNotFound(encrypted.key_id.clone()))?;
@@ -1753,7 +1752,7 @@ mod tests {
         assert!(rotated.active);
 
         // Old key should be inactive
-        let keys = manager.keys.read().unwrap();
+        let keys = manager.keys.read();
         let key1_versions = keys.get("key1").unwrap();
         assert!(!key1_versions[0].active);
         assert!(key1_versions[1].active);

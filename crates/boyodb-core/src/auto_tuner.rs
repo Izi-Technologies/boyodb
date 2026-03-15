@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -372,7 +374,7 @@ impl AutoTuner {
     }
 
     fn register_default_parameters(&self) {
-        let mut params = self.parameters.write().unwrap();
+        let mut params = self.parameters.write();
 
         // Memory parameters
         params.insert("buffer_pool_size".to_string(), TunableParameter {
@@ -514,7 +516,7 @@ impl AutoTuner {
 
     /// Record a metrics sample
     pub fn record_metrics(&self, sample: MetricsSample) {
-        let mut history = self.metrics_history.write().unwrap();
+        let mut history = self.metrics_history.write();
         history.push_back(sample);
 
         // Keep only recent samples
@@ -526,7 +528,7 @@ impl AutoTuner {
 
     /// Record a query execution
     pub fn record_query(&self, fingerprint: &str, query_type: QueryType, execution_ms: f64, rows: u64) {
-        let mut patterns = self.query_patterns.write().unwrap();
+        let mut patterns = self.query_patterns.write();
 
         let pattern = patterns.entry(fingerprint.to_string()).or_insert_with(|| {
             QueryPattern {
@@ -551,8 +553,8 @@ impl AutoTuner {
 
     /// Analyze workload and compute profile
     pub fn analyze_workload(&self) -> WorkloadProfile {
-        let metrics = self.metrics_history.read().unwrap();
-        let patterns = self.query_patterns.read().unwrap();
+        let metrics = self.metrics_history.read();
+        let patterns = self.query_patterns.read();
 
         if metrics.is_empty() {
             return WorkloadProfile::default();
@@ -643,8 +645,8 @@ impl AutoTuner {
     /// Generate tuning recommendations
     pub fn generate_recommendations(&self) -> Vec<TuningRecommendation> {
         let profile = self.analyze_workload();
-        let metrics = self.metrics_history.read().unwrap();
-        let params = self.parameters.read().unwrap();
+        let metrics = self.metrics_history.read();
+        let params = self.parameters.read();
 
         let mut recommendations = Vec::new();
 
@@ -822,7 +824,7 @@ impl AutoTuner {
         if self.config.tune_queries {
             if let Some(param) = params.get("join_buffer_size") {
                 // Check if we have join-heavy workload
-                let has_joins = self.query_patterns.read().unwrap()
+                let has_joins = self.query_patterns.read()
                     .values()
                     .any(|p| p.has_join);
 
@@ -862,7 +864,7 @@ impl AutoTuner {
 
     /// Apply a recommendation
     pub fn apply_recommendation(&self, rec: &TuningRecommendation) -> Result<(), String> {
-        let mut params = self.parameters.write().unwrap();
+        let mut params = self.parameters.write();
 
         let param = params.get_mut(&rec.parameter).ok_or_else(|| {
             format!("parameter not found: {}", rec.parameter)
@@ -923,7 +925,7 @@ impl AutoTuner {
         };
 
         // Store in history
-        let mut history = self.tuning_history.write().unwrap();
+        let mut history = self.tuning_history.write();
         history.push_back(result.clone());
         while history.len() > 100 {
             history.pop_front();
@@ -934,17 +936,17 @@ impl AutoTuner {
 
     /// Get current parameter values
     pub fn get_parameters(&self) -> HashMap<String, TunableParameter> {
-        self.parameters.read().unwrap().clone()
+        self.parameters.read().clone()
     }
 
     /// Get parameter by name
     pub fn get_parameter(&self, name: &str) -> Option<TunableParameter> {
-        self.parameters.read().unwrap().get(name).cloned()
+        self.parameters.read().get(name).cloned()
     }
 
     /// Set parameter value
     pub fn set_parameter(&self, name: &str, value: ParameterValue) -> Result<(), String> {
-        let mut params = self.parameters.write().unwrap();
+        let mut params = self.parameters.write();
         let param = params.get_mut(name).ok_or_else(|| {
             format!("parameter not found: {}", name)
         })?;
@@ -962,8 +964,8 @@ impl AutoTuner {
 
     /// Get tuning statistics
     pub fn stats(&self) -> AutoTunerStats {
-        let history = self.tuning_history.read().unwrap();
-        let metrics = self.metrics_history.read().unwrap();
+        let history = self.tuning_history.read();
+        let metrics = self.metrics_history.read();
 
         AutoTunerStats {
             iterations: self.iterations.load(Ordering::Relaxed),
@@ -1007,7 +1009,7 @@ impl WorkloadClassifier {
 
     /// Record a workload profile
     pub fn record(&self, profile: WorkloadProfile) {
-        let mut profiles = self.profiles.write().unwrap();
+        let mut profiles = self.profiles.write();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1024,7 +1026,7 @@ impl WorkloadClassifier {
 
     /// Detect workload patterns
     pub fn detect_patterns(&self) -> Vec<WorkloadPattern> {
-        let profiles = self.profiles.read().unwrap();
+        let profiles = self.profiles.read();
 
         if profiles.len() < 24 {
             return Vec::new();

@@ -24,7 +24,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
@@ -324,12 +325,12 @@ impl PubSubManager {
 
     /// Register a new session
     pub fn register_session(&self, session_id: SessionId) {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write();
         sessions
             .entry(session_id)
             .or_insert_with(|| SessionPubSubState::new(session_id));
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.active_sessions = sessions.len();
     }
 
@@ -337,9 +338,9 @@ impl PubSubManager {
     pub fn unregister_session(&self, session_id: SessionId) {
         // Remove from sessions
         let listening_channels = {
-            let mut sessions = self.sessions.write().unwrap();
+            let mut sessions = self.sessions.write();
             if let Some(state) = sessions.remove(&session_id) {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.active_sessions = sessions.len();
                 state.listening_channels
             } else {
@@ -349,13 +350,13 @@ impl PubSubManager {
 
         // Remove from listen_all
         {
-            let mut listen_all = self.listen_all_sessions.write().unwrap();
+            let mut listen_all = self.listen_all_sessions.write();
             listen_all.remove(&session_id);
         }
 
         // Remove from channels
         {
-            let mut channels = self.channels.write().unwrap();
+            let mut channels = self.channels.write();
             for channel_name in listening_channels {
                 if let Some(channel) = channels.get_mut(&channel_name) {
                     channel.remove_listener(session_id);
@@ -389,7 +390,7 @@ impl PubSubManager {
 
         // Update session state
         {
-            let mut sessions = self.sessions.write().unwrap();
+            let mut sessions = self.sessions.write();
             let state = sessions
                 .get_mut(&session_id)
                 .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -398,23 +399,23 @@ impl PubSubManager {
 
         // Handle LISTEN *
         if channel == "*" {
-            let mut listen_all = self.listen_all_sessions.write().unwrap();
+            let mut listen_all = self.listen_all_sessions.write();
             listen_all.insert(session_id);
         } else {
             // Add to channel listeners
-            let mut channels = self.channels.write().unwrap();
+            let mut channels = self.channels.write();
             let channel_obj = channels
                 .entry(channel.to_string())
                 .or_insert_with(|| Channel::new(channel.to_string()));
             channel_obj.add_listener(session_id);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.active_channels = channels.len();
         }
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_listens += 1;
         }
 
@@ -427,7 +428,7 @@ impl PubSubManager {
 
         // Update session state
         {
-            let mut sessions = self.sessions.write().unwrap();
+            let mut sessions = self.sessions.write();
             let state = sessions
                 .get_mut(&session_id)
                 .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -436,17 +437,17 @@ impl PubSubManager {
 
         // Handle UNLISTEN *
         if channel == "*" {
-            let mut listen_all = self.listen_all_sessions.write().unwrap();
+            let mut listen_all = self.listen_all_sessions.write();
             listen_all.remove(&session_id);
 
             // Also remove from all channel listeners
-            let mut channels = self.channels.write().unwrap();
+            let mut channels = self.channels.write();
             for channel_obj in channels.values_mut() {
                 channel_obj.remove_listener(session_id);
             }
         } else {
             // Remove from channel listeners
-            let mut channels = self.channels.write().unwrap();
+            let mut channels = self.channels.write();
             if let Some(channel_obj) = channels.get_mut(channel) {
                 channel_obj.remove_listener(session_id);
             }
@@ -454,7 +455,7 @@ impl PubSubManager {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_unlistens += 1;
         }
 
@@ -493,8 +494,8 @@ impl PubSubManager {
 
         // Get all listeners: channel-specific + listen_all sessions
         let listeners: Vec<SessionId> = {
-            let channels = self.channels.read().unwrap();
-            let listen_all = self.listen_all_sessions.read().unwrap();
+            let channels = self.channels.read();
+            let listen_all = self.listen_all_sessions.read();
 
             let mut all_listeners: HashSet<SessionId> = listen_all.iter().copied().collect();
 
@@ -507,7 +508,7 @@ impl PubSubManager {
 
         // Deliver to all listeners
         {
-            let mut sessions = self.sessions.write().unwrap();
+            let mut sessions = self.sessions.write();
             for listener_id in listeners {
                 if let Some(state) = sessions.get_mut(&listener_id) {
                     match state.queue_notification(notification.clone()) {
@@ -520,7 +521,7 @@ impl PubSubManager {
 
         // Update channel stats
         {
-            let mut channels = self.channels.write().unwrap();
+            let mut channels = self.channels.write();
             if let Some(channel_obj) = channels.get_mut(channel) {
                 channel_obj.notification_count += 1;
                 channel_obj.last_notification = Some(SystemTime::now());
@@ -529,7 +530,7 @@ impl PubSubManager {
 
         // Update global stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_notifications += 1;
             stats.total_delivered += delivered;
             stats.total_dropped += dropped;
@@ -544,7 +545,7 @@ impl PubSubManager {
 
     /// Poll for pending notifications for a session
     pub fn poll(&self, session_id: SessionId) -> Result<Option<Notification>, PubSubError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write();
         let state = sessions
             .get_mut(&session_id)
             .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -553,7 +554,7 @@ impl PubSubManager {
 
     /// Drain all pending notifications for a session
     pub fn drain(&self, session_id: SessionId) -> Result<Vec<Notification>, PubSubError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.sessions.write();
         let state = sessions
             .get_mut(&session_id)
             .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -562,7 +563,7 @@ impl PubSubManager {
 
     /// Check if session has pending notifications
     pub fn has_pending(&self, session_id: SessionId) -> Result<bool, PubSubError> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read();
         let state = sessions
             .get(&session_id)
             .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -571,7 +572,7 @@ impl PubSubManager {
 
     /// Get pending notification count for a session
     pub fn pending_count(&self, session_id: SessionId) -> Result<usize, PubSubError> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read();
         let state = sessions
             .get(&session_id)
             .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -580,7 +581,7 @@ impl PubSubManager {
 
     /// Get channels a session is listening to
     pub fn listening_channels(&self, session_id: SessionId) -> Result<Vec<String>, PubSubError> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read();
         let state = sessions
             .get(&session_id)
             .ok_or(PubSubError::SessionNotFound(session_id))?;
@@ -589,7 +590,7 @@ impl PubSubManager {
 
     /// Get all active channels
     pub fn list_channels(&self) -> Vec<ChannelInfo> {
-        let channels = self.channels.read().unwrap();
+        let channels = self.channels.read();
         channels
             .values()
             .map(|c| ChannelInfo {
@@ -604,7 +605,7 @@ impl PubSubManager {
 
     /// Get pub/sub statistics
     pub fn stats(&self) -> PubSubStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// pg_notify function implementation
@@ -770,7 +771,7 @@ impl NotificationDispatcher {
 
     /// Register a callback for a session
     pub fn register_callback(&self, session_id: SessionId, callback: NotificationCallback) {
-        let mut callbacks = self.callbacks.write().unwrap();
+        let mut callbacks = self.callbacks.write();
         callbacks
             .entry(session_id)
             .or_insert_with(Vec::new)
@@ -779,7 +780,7 @@ impl NotificationDispatcher {
 
     /// Unregister all callbacks for a session
     pub fn unregister_session(&self, session_id: SessionId) {
-        let mut callbacks = self.callbacks.write().unwrap();
+        let mut callbacks = self.callbacks.write();
         callbacks.remove(&session_id);
     }
 
@@ -788,7 +789,7 @@ impl NotificationDispatcher {
         let notifications = self.manager.drain(session_id)?;
         let count = notifications.len();
 
-        let callbacks = self.callbacks.read().unwrap();
+        let callbacks = self.callbacks.read();
         if let Some(session_callbacks) = callbacks.get(&session_id) {
             for notification in &notifications {
                 for callback in session_callbacks {

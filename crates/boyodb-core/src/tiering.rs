@@ -4,7 +4,8 @@ use crate::storage::TieredStorage;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
@@ -187,7 +188,7 @@ impl TieringStats {
             .unwrap_or_default()
             .as_micros() as u64;
 
-        let mut log = self.access_log.write().unwrap();
+        let mut log = self.access_log.write();
         let entry = log.entry(segment_id.to_string()).or_insert((0, 0));
         entry.0 += 1;
         entry.1 = now;
@@ -200,7 +201,7 @@ impl TieringStats {
             .as_micros() as u64;
 
         let window_micros = window_millis * 1000;
-        let log = self.access_log.read().unwrap();
+        let log = self.access_log.read();
 
         if let Some((count, last_access)) = log.get(segment_id) {
             if now.saturating_sub(*last_access) < window_micros {
@@ -291,7 +292,7 @@ impl ColdDataCache {
             .unwrap_or_default()
             .as_micros() as u64;
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(segment_id) {
             entry.last_access = now;
             entry.access_count += 1;
@@ -313,7 +314,7 @@ impl ColdDataCache {
             .unwrap_or_default()
             .as_micros() as u64;
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
 
         // Evict until we have space
         while self.current_bytes.load(Ordering::Relaxed) + data_len > self.max_bytes {
@@ -349,7 +350,7 @@ impl ColdDataCache {
     }
 
     pub fn invalidate(&self, segment_id: &str) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         if let Some(removed) = cache.remove(segment_id) {
             self.current_bytes
                 .fetch_sub(removed.data.len() as u64, Ordering::Relaxed);
@@ -361,7 +362,7 @@ impl ColdDataCache {
     }
 
     pub fn entry_count(&self) -> usize {
-        self.cache.read().unwrap().len()
+        self.cache.read().len()
     }
 }
 
@@ -574,14 +575,14 @@ impl TieringManager {
 
     /// Add a lifecycle policy
     pub fn add_policy(&self, policy: LifecyclePolicy) {
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write();
         policies.push(policy);
         policies.sort_by(|a, b| b.priority.cmp(&a.priority));
     }
 
     /// Remove a policy by name
     pub fn remove_policy(&self, name: &str) -> bool {
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write();
         let len_before = policies.len();
         policies.retain(|p| p.name != name);
         policies.len() != len_before
@@ -589,7 +590,7 @@ impl TieringManager {
 
     /// List all policies
     pub fn list_policies(&self) -> Vec<LifecyclePolicy> {
-        self.policies.read().unwrap().clone()
+        self.policies.read().clone()
     }
 
     /// Get tiering statistics
@@ -648,7 +649,7 @@ impl TieringManager {
 
         // Collect segment info
         let segments: Vec<SegmentInfo> = {
-            let manifest = self.manifest.read().unwrap();
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -662,7 +663,7 @@ impl TieringManager {
         }
 
         // Evaluate policies for each segment
-        let policies = self.policies.read().unwrap();
+        let policies = self.policies.read();
         let mut transitions: Vec<(String, SegmentTier, S3StorageClass)> = Vec::new();
 
         for segment in &segments {
@@ -718,7 +719,7 @@ impl TieringManager {
 
         // 1. Identify candidates (holding READ lock)
         let candidates: Vec<String> = {
-            let manifest = self.manifest.read().unwrap();
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -760,7 +761,7 @@ impl TieringManager {
         // Double check state and get fresh metadata (race condition protection)
         // Also helps avoid holding lock during I/O
         let entry_clone = {
-            let manifest = self.manifest.read().unwrap();
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -788,7 +789,7 @@ impl TieringManager {
 
                 // Update Manifest and Delete Local File
                 {
-                    let mut manifest = self.manifest.write().unwrap();
+                    let mut manifest = self.manifest.write();
                     if let Some(entry) = manifest
                         .entries
                         .iter_mut()
@@ -814,7 +815,7 @@ impl TieringManager {
             }
             SegmentTier::Warm => {
                 // Hot -> Warm transition (just update manifest, data stays local)
-                let mut manifest = self.manifest.write().unwrap();
+                let mut manifest = self.manifest.write();
                 if let Some(entry) = manifest
                     .entries
                     .iter_mut()
@@ -840,7 +841,7 @@ impl TieringManager {
     /// Prefetch cold data back to hot tier
     pub fn prefetch_to_hot(&self, segment_id: &str) -> Result<(), EngineError> {
         let entry_clone = {
-            let manifest = self.manifest.read().unwrap();
+            let manifest = self.manifest.read();
             manifest
                 .entries
                 .iter()
@@ -861,7 +862,7 @@ impl TieringManager {
 
         // Update manifest
         {
-            let mut manifest = self.manifest.write().unwrap();
+            let mut manifest = self.manifest.write();
             if let Some(entry) = manifest
                 .entries
                 .iter_mut()
@@ -908,7 +909,7 @@ impl TieringManager {
 
     /// Get tier distribution summary
     pub fn get_tier_distribution(&self) -> TierDistribution {
-        let manifest = self.manifest.read().unwrap();
+        let manifest = self.manifest.read();
         let mut dist = TierDistribution::default();
 
         for entry in &manifest.entries {

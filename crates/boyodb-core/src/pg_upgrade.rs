@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Version information
@@ -174,11 +175,11 @@ pub struct UpgradeProgress {
     /// Tables processed
     pub tables_processed: AtomicU64,
     /// Current item being processed
-    pub current_item: std::sync::Mutex<String>,
+    pub current_item: Mutex<String>,
     /// Errors encountered
-    pub errors: std::sync::Mutex<Vec<UpgradeError>>,
+    pub errors: Mutex<Vec<UpgradeError>>,
     /// Warnings
-    pub warnings: std::sync::Mutex<Vec<String>>,
+    pub warnings: Mutex<Vec<String>>,
     /// Cancelled flag
     pub cancelled: AtomicBool,
 }
@@ -192,9 +193,9 @@ impl Default for UpgradeProgress {
             bytes_transferred: AtomicU64::new(0),
             total_tables: AtomicU64::new(0),
             tables_processed: AtomicU64::new(0),
-            current_item: std::sync::Mutex::new(String::new()),
-            errors: std::sync::Mutex::new(Vec::new()),
-            warnings: std::sync::Mutex::new(Vec::new()),
+            current_item: Mutex::new(String::new()),
+            errors: Mutex::new(Vec::new()),
+            warnings: Mutex::new(Vec::new()),
             cancelled: AtomicBool::new(false),
         }
     }
@@ -211,17 +212,17 @@ impl UpgradeProgress {
     }
 
     pub fn add_error(&self, error: UpgradeError) {
-        let mut errors = self.errors.lock().unwrap();
+        let mut errors = self.errors.lock();
         errors.push(error);
     }
 
     pub fn add_warning(&self, warning: String) {
-        let mut warnings = self.warnings.lock().unwrap();
+        let mut warnings = self.warnings.lock();
         warnings.push(warning);
     }
 
     pub fn set_current_item(&self, item: &str) {
-        let mut current = self.current_item.lock().unwrap();
+        let mut current = self.current_item.lock();
         *current = item.to_string();
     }
 
@@ -413,7 +414,7 @@ impl UpgradeManager {
                 bytes_transferred: 0,
                 tables_upgraded: 0,
                 databases_upgraded: 0,
-                warnings: self.progress.warnings.lock().unwrap().clone(),
+                warnings: self.progress.warnings.lock().clone(),
             });
         }
 
@@ -459,7 +460,7 @@ impl UpgradeManager {
             bytes_transferred: self.progress.bytes_transferred.load(Ordering::Relaxed),
             tables_upgraded: self.progress.tables_processed.load(Ordering::Relaxed) as usize,
             databases_upgraded: schema.map_or(0, |s| s.databases.len()),
-            warnings: self.progress.warnings.lock().unwrap().clone(),
+            warnings: self.progress.warnings.lock().clone(),
         })
     }
 
@@ -1050,10 +1051,10 @@ mod tests {
         progress.add_error(UpgradeError::Cancelled);
         progress.add_warning("test warning".to_string());
 
-        let errors = progress.errors.lock().unwrap();
+        let errors = progress.errors.lock();
         assert_eq!(errors.len(), 1);
 
-        let warnings = progress.warnings.lock().unwrap();
+        let warnings = progress.warnings.lock();
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0], "test warning");
     }
@@ -1362,7 +1363,7 @@ mod tests {
 
         progress.set_current_item("test item");
 
-        let current = progress.current_item.lock().unwrap();
+        let current = progress.current_item.lock();
         assert_eq!(*current, "test item");
     }
 

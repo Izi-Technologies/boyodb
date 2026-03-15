@@ -4,7 +4,8 @@
 //! Generalized Search Tree (GiST) indexes for complex data types.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::hash::Hash;
 
 // ============================================================================
@@ -74,11 +75,11 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
 
     /// Insert entry into GIN index
     pub fn insert(&self, keys: &[K], row_id: u64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.inserts += 1;
 
         if self.config.fast_update {
-            let mut pending = self.pending.write().unwrap();
+            let mut pending = self.pending.write();
             for key in keys {
                 pending.entry(key.clone())
                     .or_insert_with(HashSet::new)
@@ -93,7 +94,7 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
                 self.merge_pending();
             }
         } else {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write();
             for key in keys {
                 entries.entry(key.clone())
                     .or_insert_with(HashSet::new)
@@ -106,7 +107,7 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
 
     /// Delete entry from GIN index
     pub fn delete(&self, keys: &[K], row_id: u64) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         for key in keys {
             if let Some(set) = entries.get_mut(key) {
                 set.remove(&row_id);
@@ -117,7 +118,7 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
         }
 
         // Also check pending
-        let mut pending = self.pending.write().unwrap();
+        let mut pending = self.pending.write();
         for key in keys {
             if let Some(set) = pending.get_mut(key) {
                 set.remove(&row_id);
@@ -127,19 +128,19 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
 
     /// Look up a single key
     pub fn lookup(&self, key: &K) -> HashSet<u64> {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.lookups += 1;
         drop(stats);
 
         let mut result = HashSet::new();
 
         // Check main entries
-        if let Some(set) = self.entries.read().unwrap().get(key) {
+        if let Some(set) = self.entries.read().get(key) {
             result.extend(set);
         }
 
         // Check pending
-        if let Some(set) = self.pending.read().unwrap().get(key) {
+        if let Some(set) = self.pending.read().get(key) {
             result.extend(set);
         }
 
@@ -171,9 +172,9 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
 
     /// Merge pending entries into main index
     pub fn merge_pending(&self) {
-        let mut pending = self.pending.write().unwrap();
-        let mut entries = self.entries.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
+        let mut pending = self.pending.write();
+        let mut entries = self.entries.write();
+        let mut stats = self.stats.write();
 
         for (key, row_ids) in pending.drain() {
             let entry = entries.entry(key).or_insert_with(HashSet::new);
@@ -188,7 +189,7 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
 
     /// Get statistics
     pub fn stats(&self) -> GinStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get index name
@@ -469,11 +470,11 @@ impl<K: GistKey + 'static> GistIndex<K> {
 
     /// Insert entry into GiST index
     pub fn insert(&self, key: K, row_id: u64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.inserts += 1;
         drop(stats);
 
-        let root = *self.root.read().unwrap();
+        let root = *self.root.read();
 
         if root.is_none() {
             // Create root node
@@ -488,10 +489,10 @@ impl<K: GistKey + 'static> GistIndex<K> {
                 }],
                 parent: None,
             };
-            self.nodes.write().unwrap().insert(id, node);
-            *self.root.write().unwrap() = Some(id);
+            self.nodes.write().insert(id, node);
+            *self.root.write() = Some(id);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.total_nodes = 1;
             stats.total_entries = 1;
             stats.height = 1;
@@ -504,13 +505,13 @@ impl<K: GistKey + 'static> GistIndex<K> {
 
     fn insert_recursive(&self, node_id: u64, key: K, row_id: u64) {
         let is_leaf = {
-            let nodes = self.nodes.read().unwrap();
+            let nodes = self.nodes.read();
             nodes.get(&node_id).map(|n| n.is_leaf).unwrap_or(true)
         };
 
         if is_leaf {
             // Insert into leaf
-            let mut nodes = self.nodes.write().unwrap();
+            let mut nodes = self.nodes.write();
             if let Some(node) = nodes.get_mut(&node_id) {
                 node.entries.push(GistEntry {
                     key,
@@ -527,7 +528,7 @@ impl<K: GistKey + 'static> GistIndex<K> {
         } else {
             // Find best child
             let child_id = {
-                let nodes = self.nodes.read().unwrap();
+                let nodes = self.nodes.read();
                 let node = nodes.get(&node_id).unwrap();
 
                 let mut best_idx = 0;
@@ -549,13 +550,13 @@ impl<K: GistKey + 'static> GistIndex<K> {
     }
 
     fn split_node(&self, node_id: u64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.splits += 1;
         drop(stats);
 
         // Get entries to split
         let (entries, parent, is_leaf) = {
-            let nodes = self.nodes.read().unwrap();
+            let nodes = self.nodes.read();
             let node = nodes.get(&node_id).unwrap();
             (node.entries.clone(), node.parent, node.is_leaf)
         };
@@ -574,7 +575,7 @@ impl<K: GistKey + 'static> GistIndex<K> {
             .collect();
 
         // Update nodes
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes.write();
 
         nodes.insert(new_id, GistNode {
             id: new_id,
@@ -643,20 +644,20 @@ impl<K: GistKey + 'static> GistIndex<K> {
             }
 
             drop(nodes);
-            *self.root.write().unwrap() = Some(new_root_id);
+            *self.root.write() = Some(new_root_id);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.height += 1;
         }
     }
 
     /// Search GiST index
     pub fn search(&self, query: &K) -> Vec<u64> {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.lookups += 1;
         drop(stats);
 
-        let root = *self.root.read().unwrap();
+        let root = *self.root.read();
         if root.is_none() {
             return Vec::new();
         }
@@ -667,7 +668,7 @@ impl<K: GistKey + 'static> GistIndex<K> {
     }
 
     fn search_recursive(&self, node_id: u64, query: &K, results: &mut Vec<u64>) {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         let node = match nodes.get(&node_id) {
             Some(n) => n,
             None => return,
@@ -689,11 +690,11 @@ impl<K: GistKey + 'static> GistIndex<K> {
     }
 
     fn allocate_node(&self) -> u64 {
-        let mut next = self.next_id.write().unwrap();
+        let mut next = self.next_id.write();
         let id = *next;
         *next += 1;
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.total_nodes += 1;
 
         id
@@ -701,7 +702,7 @@ impl<K: GistKey + 'static> GistIndex<K> {
 
     /// Get statistics
     pub fn stats(&self) -> GistStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 
     /// Get index name
@@ -755,17 +756,17 @@ impl AdvancedIndexRegistry {
 
     /// Register an index
     pub fn register(&self, meta: AdvancedIndexMeta) {
-        self.indexes.write().unwrap().insert(meta.name.clone(), meta);
+        self.indexes.write().insert(meta.name.clone(), meta);
     }
 
     /// Get index metadata
     pub fn get(&self, name: &str) -> Option<AdvancedIndexMeta> {
-        self.indexes.read().unwrap().get(name).cloned()
+        self.indexes.read().get(name).cloned()
     }
 
     /// List indexes for table
     pub fn list_for_table(&self, table: &str) -> Vec<AdvancedIndexMeta> {
-        self.indexes.read().unwrap()
+        self.indexes.read()
             .values()
             .filter(|m| m.table == table)
             .cloned()
@@ -774,7 +775,7 @@ impl AdvancedIndexRegistry {
 
     /// Drop index
     pub fn drop(&self, name: &str) -> bool {
-        self.indexes.write().unwrap().remove(name).is_some()
+        self.indexes.write().remove(name).is_some()
     }
 }
 

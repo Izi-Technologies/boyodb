@@ -8,7 +8,8 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Embedding model types
@@ -299,7 +300,7 @@ impl EmbeddingCache {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let cache = self.cache.read().unwrap();
+        let cache = self.cache.read();
         if let Some((embedding, timestamp)) = cache.get(&key) {
             if now - timestamp < self.ttl_ms {
                 self.hits.fetch_add(1, Ordering::Relaxed);
@@ -318,7 +319,7 @@ impl EmbeddingCache {
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
 
         // Evict if over size
         if cache.len() >= self.max_size {
@@ -595,17 +596,16 @@ impl EmbeddingRegistry {
         let engine = Arc::new(EmbeddingsEngine::new(config));
         self.engines
             .write()
-            .unwrap()
             .insert(name.to_string(), Arc::clone(&engine));
         engine
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<EmbeddingsEngine>> {
-        self.engines.read().unwrap().get(name).cloned()
+        self.engines.read().get(name).cloned()
     }
 
     pub fn get_or_default(&self) -> Arc<EmbeddingsEngine> {
-        let engines = self.engines.read().unwrap();
+        let engines = self.engines.read();
         if let Some(engine) = engines.values().next() {
             Arc::clone(engine)
         } else {
@@ -615,7 +615,7 @@ impl EmbeddingRegistry {
     }
 
     pub fn list(&self) -> Vec<String> {
-        self.engines.read().unwrap().keys().cloned().collect()
+        self.engines.read().keys().cloned().collect()
     }
 }
 

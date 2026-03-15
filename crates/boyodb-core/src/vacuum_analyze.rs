@@ -8,7 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -433,7 +434,7 @@ impl VacuumExecutor {
 
     /// Get current progress
     pub fn progress(&self) -> VacuumProgress {
-        self.progress.read().unwrap().clone()
+        self.progress.read().clone()
     }
 
     /// Execute vacuum on a table
@@ -447,7 +448,7 @@ impl VacuumExecutor {
 
         // Initialize
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::Initializing;
             progress.heap_blks_total = stats.rel_pages;
         }
@@ -458,7 +459,7 @@ impl VacuumExecutor {
 
         // Scanning heap
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::ScanningHeap;
         }
 
@@ -471,7 +472,7 @@ impl VacuumExecutor {
                 return Err(VacuumError::Cancelled);
             }
 
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.heap_blks_scanned = i + 1;
             progress.num_dead_tuples = dead_tuples * (i + 1) / pages;
         }
@@ -481,7 +482,7 @@ impl VacuumExecutor {
 
         // Vacuum indexes if needed
         if dead_tuples > 0 && options.index_cleanup != IndexCleanup::Off {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::VacuumingIndexes;
             index_entries_removed = dead_tuples * 2; // Estimate
             index_passes = 1;
@@ -490,7 +491,7 @@ impl VacuumExecutor {
 
         // Vacuum heap
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::VacuumingHeap;
         }
 
@@ -499,7 +500,7 @@ impl VacuumExecutor {
                 return Err(VacuumError::Cancelled);
             }
 
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.heap_blks_vacuumed = i + 1;
         }
 
@@ -507,7 +508,7 @@ impl VacuumExecutor {
 
         // Truncate if requested
         if options.truncate && stats.n_dead_tup > 0 {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::TruncatingHeap;
             // Simulate truncation
             pages_removed = stats.n_dead_tup / 100; // Rough estimate
@@ -515,7 +516,7 @@ impl VacuumExecutor {
 
         // Final cleanup
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = VacuumPhase::FinalCleanup;
         }
 
@@ -630,7 +631,7 @@ impl AnalyzeExecutor {
 
     /// Get current progress
     pub fn progress(&self) -> AnalyzeProgress {
-        self.progress.read().unwrap().clone()
+        self.progress.read().clone()
     }
 
     /// Execute analyze on a table
@@ -645,7 +646,7 @@ impl AnalyzeExecutor {
 
         // Initialize
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = AnalyzePhase::Initializing;
             progress.sample_blks_total = options.sample_size as u64;
         }
@@ -656,7 +657,7 @@ impl AnalyzeExecutor {
 
         // Acquire sample
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = AnalyzePhase::AcquiringSample;
         }
 
@@ -673,14 +674,14 @@ impl AnalyzeExecutor {
                 return Err(VacuumError::Cancelled);
             }
 
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.sample_blks_scanned = i + 1;
             progress.rows_sampled = (i + 1) * rows_per_page;
         }
 
         // Compute statistics
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = AnalyzePhase::ComputingStats;
         }
 
@@ -697,7 +698,7 @@ impl AnalyzeExecutor {
             }
 
             {
-                let mut progress = self.progress.write().unwrap();
+                let mut progress = self.progress.write();
                 progress.current_column = Some(column.clone());
             }
 
@@ -718,7 +719,7 @@ impl AnalyzeExecutor {
 
         // Finalize
         {
-            let mut progress = self.progress.write().unwrap();
+            let mut progress = self.progress.write();
             progress.phase = AnalyzePhase::Finalizing;
             progress.current_column = None;
         }
@@ -877,13 +878,13 @@ impl AutovacuumDaemon {
 
     /// Add a vacuum candidate
     pub fn add_vacuum_candidate(&self, table: &str) {
-        let mut candidates = self.vacuum_candidates.write().unwrap();
+        let mut candidates = self.vacuum_candidates.write();
         candidates.insert(table.to_string());
     }
 
     /// Add an analyze candidate
     pub fn add_analyze_candidate(&self, table: &str) {
-        let mut candidates = self.analyze_candidates.write().unwrap();
+        let mut candidates = self.analyze_candidates.write();
         candidates.insert(table.to_string());
     }
 
@@ -912,15 +913,15 @@ impl AutovacuumDaemon {
     pub fn get_next_table(&self) -> Option<(String, AutovacuumOp)> {
         // Check vacuum candidates first
         {
-            let mut candidates = self.vacuum_candidates.write().unwrap();
+            let mut candidates = self.vacuum_candidates.write();
             if let Some(table) = candidates.iter().next().cloned() {
                 candidates.remove(&table);
 
                 // Check if also needs analyze
-                let analyze = self.analyze_candidates.read().unwrap();
+                let analyze = self.analyze_candidates.read();
                 if analyze.contains(&table) {
                     drop(analyze);
-                    let mut analyze = self.analyze_candidates.write().unwrap();
+                    let mut analyze = self.analyze_candidates.write();
                     analyze.remove(&table);
                     return Some((table, AutovacuumOp::VacuumAnalyze));
                 }
@@ -931,7 +932,7 @@ impl AutovacuumDaemon {
 
         // Check analyze candidates
         {
-            let mut candidates = self.analyze_candidates.write().unwrap();
+            let mut candidates = self.analyze_candidates.write();
             if let Some(table) = candidates.iter().next().cloned() {
                 candidates.remove(&table);
                 return Some((table, AutovacuumOp::Analyze));
@@ -943,7 +944,7 @@ impl AutovacuumDaemon {
 
     /// Assign work to a worker
     pub fn assign_work(&self, worker_id: usize, table: &str, op: AutovacuumOp) {
-        let mut workers = self.workers.write().unwrap();
+        let mut workers = self.workers.write();
         if let Some(worker) = workers.get_mut(worker_id) {
             worker.current_table = Some(table.to_string());
             worker.current_op = Some(op);
@@ -953,7 +954,7 @@ impl AutovacuumDaemon {
 
     /// Complete work for a worker
     pub fn complete_work(&self, worker_id: usize) {
-        let mut workers = self.workers.write().unwrap();
+        let mut workers = self.workers.write();
         if let Some(worker) = workers.get_mut(worker_id) {
             if let Some(op) = worker.current_op {
                 match op {
@@ -982,7 +983,7 @@ impl AutovacuumDaemon {
 
     /// Get worker status
     pub fn worker_status(&self) -> Vec<AutovacuumWorker> {
-        self.workers.read().unwrap().clone()
+        self.workers.read().clone()
     }
 
     /// Get statistics
@@ -991,12 +992,11 @@ impl AutovacuumDaemon {
             is_running: self.is_running(),
             total_vacuums: self.total_vacuums.load(Ordering::Relaxed),
             total_analyzes: self.total_analyzes.load(Ordering::Relaxed),
-            pending_vacuums: self.vacuum_candidates.read().unwrap().len(),
-            pending_analyzes: self.analyze_candidates.read().unwrap().len(),
+            pending_vacuums: self.vacuum_candidates.read().len(),
+            pending_analyzes: self.analyze_candidates.read().len(),
             active_workers: self
                 .workers
                 .read()
-                .unwrap()
                 .iter()
                 .filter(|w| w.current_table.is_some())
                 .count(),

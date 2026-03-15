@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 /// Generated column error types
 #[derive(Debug, Clone)]
@@ -449,7 +450,7 @@ impl GeneratedColumnsManager {
     ) -> Result<(), GeneratedColumnError> {
         let table_key = format!("{}.{}", schema, table);
 
-        let mut identity_cols = self.identity_columns.write().unwrap();
+        let mut identity_cols = self.identity_columns.write();
         let cols = identity_cols.entry(table_key).or_insert_with(Vec::new);
 
         // Check for duplicate
@@ -476,7 +477,7 @@ impl GeneratedColumnsManager {
         // Check for circular dependencies
         self.check_circular_dependency(schema, table, &column)?;
 
-        let mut gen_cols = self.generated_columns.write().unwrap();
+        let mut gen_cols = self.generated_columns.write();
         let cols = gen_cols.entry(table_key).or_insert_with(Vec::new);
 
         // Check for duplicate
@@ -518,7 +519,7 @@ impl GeneratedColumnsManager {
     ) -> Result<(), GeneratedColumnError> {
         let table_key = format!("{}.{}", schema, table);
 
-        let mut identity_cols = self.identity_columns.write().unwrap();
+        let mut identity_cols = self.identity_columns.write();
         if let Some(cols) = identity_cols.get_mut(&table_key) {
             let len_before = cols.len();
             cols.retain(|c| c.column_name != column_name);
@@ -541,7 +542,7 @@ impl GeneratedColumnsManager {
     ) -> Result<(), GeneratedColumnError> {
         let table_key = format!("{}.{}", schema, table);
 
-        let mut gen_cols = self.generated_columns.write().unwrap();
+        let mut gen_cols = self.generated_columns.write();
         if let Some(cols) = gen_cols.get_mut(&table_key) {
             let len_before = cols.len();
             cols.retain(|c| c.column_name != column_name);
@@ -560,7 +561,6 @@ impl GeneratedColumnsManager {
         let table_key = format!("{}.{}", schema, table);
         self.identity_columns
             .read()
-            .unwrap()
             .get(&table_key)
             .cloned()
             .unwrap_or_default()
@@ -571,7 +571,6 @@ impl GeneratedColumnsManager {
         let table_key = format!("{}.{}", schema, table);
         self.generated_columns
             .read()
-            .unwrap()
             .get(&table_key)
             .cloned()
             .unwrap_or_default()
@@ -582,7 +581,6 @@ impl GeneratedColumnsManager {
         let table_key = format!("{}.{}", schema, table);
         self.identity_columns
             .read()
-            .unwrap()
             .get(&table_key)
             .map_or(false, |cols| {
                 cols.iter().any(|c| c.column_name == column)
@@ -594,7 +592,6 @@ impl GeneratedColumnsManager {
         let table_key = format!("{}.{}", schema, table);
         self.generated_columns
             .read()
-            .unwrap()
             .get(&table_key)
             .map_or(false, |cols| {
                 cols.iter().any(|c| c.column_name == column)
@@ -611,7 +608,6 @@ impl GeneratedColumnsManager {
         let table_key = format!("{}.{}", schema, table);
         self.identity_columns
             .read()
-            .unwrap()
             .get(&table_key)
             .and_then(|cols| cols.iter().find(|c| c.column_name == column).cloned())
     }
