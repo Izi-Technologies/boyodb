@@ -6,8 +6,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex, RwLock};
 
 // ============================================================================
 // Error Types
@@ -405,35 +407,35 @@ impl SyncReplicationManager {
 
     /// Set synchronous commit level
     pub fn set_commit_level(&self, level: SynchronousCommit) {
-        *self.commit_level.write().unwrap() = level;
+        *self.commit_level.write() = level;
     }
 
     /// Get current commit level
     pub fn commit_level(&self) -> SynchronousCommit {
-        *self.commit_level.read().unwrap()
+        *self.commit_level.read()
     }
 
     /// Configure synchronous standbys
     pub fn set_standby_config(&self, config: SyncStandbyConfig) {
-        *self.standby_config.write().unwrap() = config;
+        *self.standby_config.write() = config;
         self.update_sync_states();
     }
 
     /// Get standby config
     pub fn standby_config(&self) -> SyncStandbyConfig {
-        self.standby_config.read().unwrap().clone()
+        self.standby_config.read().clone()
     }
 
     /// Register a replica
     pub fn register_replica(&self, name: &str, priority: u32) {
-        let mut replicas = self.replicas.write().unwrap();
+        let mut replicas = self.replicas.write();
         replicas.insert(name.to_string(), ReplicaInfo::new(name, priority));
         self.update_sync_states();
     }
 
     /// Unregister a replica
     pub fn unregister_replica(&self, name: &str) {
-        let mut replicas = self.replicas.write().unwrap();
+        let mut replicas = self.replicas.write();
         replicas.remove(name);
         self.update_sync_states();
     }
@@ -446,7 +448,7 @@ impl SyncReplicationManager {
         flush_lsn: u64,
         apply_lsn: u64,
     ) {
-        let mut replicas = self.replicas.write().unwrap();
+        let mut replicas = self.replicas.write();
         if let Some(replica) = replicas.get_mut(name) {
             replica.write_lsn = write_lsn;
             replica.flush_lsn = flush_lsn;
@@ -465,7 +467,7 @@ impl SyncReplicationManager {
 
     /// Update replica connection state
     pub fn update_replica_state(&self, name: &str, state: ReplicaConnectionState) {
-        let mut replicas = self.replicas.write().unwrap();
+        let mut replicas = self.replicas.write();
         if let Some(replica) = replicas.get_mut(name) {
             replica.connection_state = state;
         }
@@ -495,7 +497,7 @@ impl SyncReplicationManager {
             return Ok(Duration::ZERO);
         }
 
-        let config = self.standby_config.read().unwrap().clone();
+        let config = self.standby_config.read().clone();
         let required_acks = config.names.required_acks();
 
         // Check if we have enough replicas
@@ -512,7 +514,7 @@ impl SyncReplicationManager {
         let start_time = pending.start_time;
 
         {
-            let mut commits = self.pending_commits.lock().unwrap();
+            let mut commits = self.pending_commits.lock();
             commits.push_back(pending);
             self.stats.commits_waiting.fetch_add(1, Ordering::Relaxed);
         }
@@ -522,7 +524,7 @@ impl SyncReplicationManager {
 
         // Wait for completion
         let timeout = config.timeout;
-        let mut commits = self.pending_commits.lock().unwrap();
+        let mut commits = self.pending_commits.lock();
 
         loop {
             // Find our commit
@@ -552,8 +554,7 @@ impl SyncReplicationManager {
 
                     // Wait
                     let remaining = timeout.saturating_sub(start_time.elapsed());
-                    let result = self.commit_cv.wait_timeout(commits, remaining).unwrap();
-                    commits = result.0;
+                    self.commit_cv.wait_for(&mut commits, remaining);
                 }
                 None => {
                     // Already completed and removed
@@ -564,9 +565,9 @@ impl SyncReplicationManager {
     }
 
     fn check_pending_commits(&self) {
-        let replicas = self.replicas.read().unwrap();
-        let config = self.standby_config.read().unwrap();
-        let mut commits = self.pending_commits.lock().unwrap();
+        let replicas = self.replicas.read();
+        let config = self.standby_config.read();
+        let mut commits = self.pending_commits.lock();
 
         for commit in commits.iter_mut() {
             if commit.completed {
@@ -594,8 +595,8 @@ impl SyncReplicationManager {
     }
 
     fn update_sync_states(&self) {
-        let config = self.standby_config.read().unwrap();
-        let mut replicas = self.replicas.write().unwrap();
+        let config = self.standby_config.read();
+        let mut replicas = self.replicas.write();
         let mut sync_count = 0u64;
 
         // First pass: determine which replicas are sync eligible
@@ -665,7 +666,7 @@ impl SyncReplicationManager {
     }
 
     fn get_sync_replica_count(&self) -> usize {
-        let replicas = self.replicas.read().unwrap();
+        let replicas = self.replicas.read();
         replicas
             .values()
             .filter(|r| {
@@ -677,13 +678,13 @@ impl SyncReplicationManager {
 
     /// Get replica info
     pub fn get_replica(&self, name: &str) -> Option<ReplicaInfo> {
-        let replicas = self.replicas.read().unwrap();
+        let replicas = self.replicas.read();
         replicas.get(name).cloned()
     }
 
     /// List all replicas
     pub fn list_replicas(&self) -> Vec<ReplicaInfo> {
-        let replicas = self.replicas.read().unwrap();
+        let replicas = self.replicas.read();
         replicas.values().cloned().collect()
     }
 
@@ -711,7 +712,7 @@ impl SyncReplicationManager {
 
     /// Get pending commit count
     pub fn pending_commit_count(&self) -> usize {
-        self.pending_commits.lock().unwrap().len()
+        self.pending_commits.lock().len()
     }
 }
 

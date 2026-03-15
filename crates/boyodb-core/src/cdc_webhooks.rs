@@ -9,8 +9,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use parking_lot::{Mutex, RwLock};
 
 /// CDC change operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,7 +260,7 @@ impl WebhookRegistry {
 
         // Update table mappings
         {
-            let mut table_webhooks = self.table_webhooks.write().unwrap();
+            let mut table_webhooks = self.table_webhooks.write();
             if config.tables.is_empty() {
                 // Watch all tables - use special "*" key
                 table_webhooks
@@ -275,19 +277,19 @@ impl WebhookRegistry {
             }
         }
 
-        self.webhooks.write().unwrap().insert(id.clone(), config);
+        self.webhooks.write().insert(id.clone(), config);
         Ok(id)
     }
 
     /// Unregister a webhook
     pub fn unregister(&self, id: &str) -> Result<(), WebhookError> {
-        let config = self.webhooks.write().unwrap().remove(id);
+        let config = self.webhooks.write().remove(id);
         if config.is_none() {
             return Err(WebhookError::NotFound(id.to_string()));
         }
 
         // Clean up table mappings
-        let mut table_webhooks = self.table_webhooks.write().unwrap();
+        let mut table_webhooks = self.table_webhooks.write();
         for webhooks in table_webhooks.values_mut() {
             webhooks.retain(|wh_id| wh_id != id);
         }
@@ -297,17 +299,17 @@ impl WebhookRegistry {
 
     /// Get webhook by ID
     pub fn get(&self, id: &str) -> Option<WebhookConfig> {
-        self.webhooks.read().unwrap().get(id).cloned()
+        self.webhooks.read().get(id).cloned()
     }
 
     /// List all webhooks
     pub fn list(&self) -> Vec<WebhookConfig> {
-        self.webhooks.read().unwrap().values().cloned().collect()
+        self.webhooks.read().values().cloned().collect()
     }
 
     /// Enable/disable a webhook
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), WebhookError> {
-        let mut webhooks = self.webhooks.write().unwrap();
+        let mut webhooks = self.webhooks.write();
         if let Some(wh) = webhooks.get_mut(id) {
             wh.enabled = enabled;
             Ok(())
@@ -347,7 +349,7 @@ impl WebhookRegistry {
 
         // Update stats
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock();
             stats.total_events += 1;
         }
 
@@ -363,8 +365,8 @@ impl WebhookRegistry {
     /// Find webhooks that match a table and operation
     fn find_matching_webhooks(&self, table: &str, operation: ChangeOperation) -> Vec<String> {
         let mut result = Vec::new();
-        let table_webhooks = self.table_webhooks.read().unwrap();
-        let webhooks = self.webhooks.read().unwrap();
+        let table_webhooks = self.table_webhooks.read();
+        let webhooks = self.webhooks.read();
 
         // Check specific table webhooks
         if let Some(ids) = table_webhooks.get(table) {
@@ -398,7 +400,7 @@ impl WebhookRegistry {
 
     /// Queue an event for delivery
     fn queue_event(&self, webhook_id: String, event: ChangeEvent) {
-        let webhook = match self.webhooks.read().unwrap().get(&webhook_id) {
+        let webhook = match self.webhooks.read().get(&webhook_id) {
             Some(wh) => wh.clone(),
             None => return,
         };
@@ -412,8 +414,8 @@ impl WebhookRegistry {
 
     /// Add event to batch buffer
     fn add_to_batch(&self, webhook_id: String, event: ChangeEvent, config: &WebhookConfig) {
-        let mut buffers = self.batch_buffers.lock().unwrap();
-        let mut starts = self.batch_starts.lock().unwrap();
+        let mut buffers = self.batch_buffers.lock();
+        let mut starts = self.batch_starts.lock();
 
         let buffer = buffers.entry(webhook_id.clone()).or_insert_with(Vec::new);
 
@@ -435,9 +437,9 @@ impl WebhookRegistry {
 
     /// Flush batches that have timed out
     pub fn flush_batches(&self) {
-        let webhooks = self.webhooks.read().unwrap();
-        let mut buffers = self.batch_buffers.lock().unwrap();
-        let mut starts = self.batch_starts.lock().unwrap();
+        let webhooks = self.webhooks.read();
+        let mut buffers = self.batch_buffers.lock();
+        let mut starts = self.batch_starts.lock();
 
         let mut to_flush = Vec::new();
 
@@ -484,11 +486,11 @@ impl WebhookRegistry {
         };
 
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock();
             stats.pending_deliveries += 1;
         }
 
-        self.pending.lock().unwrap().push_back(delivery);
+        self.pending.lock().push_back(delivery);
     }
 
     /// Get next pending delivery that's ready
@@ -498,7 +500,7 @@ impl WebhookRegistry {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock();
 
         // Find first delivery that's ready
         for i in 0..pending.len() {
@@ -539,7 +541,7 @@ impl WebhookRegistry {
 
         delivery.attempts.push(attempt);
 
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         stats.total_deliveries += 1;
 
         if success {
@@ -547,7 +549,7 @@ impl WebhookRegistry {
             stats.successful_deliveries += 1;
             stats.pending_deliveries = stats.pending_deliveries.saturating_sub(1);
         } else {
-            let webhook = self.webhooks.read().unwrap().get(&delivery.webhook_id).cloned();
+            let webhook = self.webhooks.read().get(&delivery.webhook_id).cloned();
 
             if let Some(wh) = webhook {
                 if delivery.attempts.len() as u32 >= wh.max_retries {
@@ -567,7 +569,7 @@ impl WebhookRegistry {
 
                     // Re-queue for retry
                     drop(stats);
-                    self.pending.lock().unwrap().push_back(delivery);
+                    self.pending.lock().push_back(delivery);
                     return;
                 }
             } else {
@@ -612,7 +614,7 @@ impl WebhookRegistry {
 
     /// Get webhook statistics
     pub fn stats(&self) -> WebhookStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().clone()
     }
 
     /// Stop the registry

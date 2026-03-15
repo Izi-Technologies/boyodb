@@ -10,7 +10,8 @@ use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -66,7 +67,7 @@ struct GroupCommitState {
 /// by batching multiple writes into a single fsync call.
 pub struct GroupCommitBuffer {
     /// All mutable state under single lock to prevent race conditions
-    state: StdMutex<GroupCommitState>,
+    state: Mutex<GroupCommitState>,
     /// Condition variable for waiting writers
     flush_complete: Condvar,
     /// Last flushed sequence number (all writes <= this are durable)
@@ -81,7 +82,7 @@ impl GroupCommitBuffer {
     pub fn new(config: GroupCommitConfig) -> Self {
         let max_writes = config.max_writes;
         Self {
-            state: StdMutex::new(GroupCommitState {
+            state: Mutex::new(GroupCommitState {
                 pending: Vec::with_capacity(max_writes),
                 pending_bytes: 0,
                 last_flush_time: Instant::now(),
@@ -100,7 +101,7 @@ impl GroupCommitBuffer {
         let bytes_len = record_bytes.len() as u64;
 
         // Single lock acquisition for atomic state update
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.pending.push(PendingWrite { record_bytes, seq });
         state.pending_bytes += bytes_len;
 
@@ -114,7 +115,7 @@ impl GroupCommitBuffer {
             return true; // Always flush immediately if group commit disabled
         }
 
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         if state.pending.is_empty() {
             return false;
         }
@@ -140,7 +141,7 @@ impl GroupCommitBuffer {
     /// Take all pending writes for flushing
     /// Atomically clears the buffer and returns all pending writes
     pub(crate) fn take_pending(&self) -> Vec<PendingWrite> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let writes = std::mem::take(&mut state.pending);
         state.pending_bytes = 0;
         state.last_flush_time = Instant::now();
@@ -155,7 +156,7 @@ impl GroupCommitBuffer {
 
     /// Wait until a specific sequence number has been flushed
     pub fn wait_for_flush(&self, seq: u64, timeout: Duration) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let deadline = Instant::now() + timeout;
 
         while self.last_flushed_seq.load(Ordering::SeqCst) < seq {
@@ -163,9 +164,8 @@ impl GroupCommitBuffer {
             if remaining.is_zero() {
                 return false; // Timeout
             }
-            let (lock, timeout_result) = self.flush_complete.wait_timeout(state, remaining).unwrap();
-            state = lock;
-            if timeout_result.timed_out() {
+            let wait_result = self.flush_complete.wait_for(&mut state, remaining);
+            if wait_result.timed_out() {
                 return false;
             }
         }
@@ -174,12 +174,12 @@ impl GroupCommitBuffer {
 
     /// Get the number of pending writes
     pub fn pending_count(&self) -> usize {
-        self.state.lock().unwrap().pending.len()
+        self.state.lock().pending.len()
     }
 
     /// Get the pending bytes
     pub fn pending_bytes(&self) -> u64 {
-        self.state.lock().unwrap().pending_bytes
+        self.state.lock().pending_bytes
     }
 }
 

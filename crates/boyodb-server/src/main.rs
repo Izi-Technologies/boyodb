@@ -4593,6 +4593,37 @@ struct QueryBinaryMeta {
     segments_scanned: usize,
 }
 
+/// RAII guard to ensure temporary IPC files are cleaned up on all code paths.
+/// The file is automatically deleted when the guard is dropped, unless `disarm()` is called.
+struct TempFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        TempFileGuard { path: Some(path) }
+    }
+
+    /// Disarm the guard, returning the path without deleting the file.
+    /// Use this when ownership of the file is being transferred to the caller.
+    fn disarm(mut self) -> PathBuf {
+        self.path.take().expect("TempFileGuard already disarmed")
+    }
+
+    /// Get a reference to the path (for use while guard is still active).
+    fn path(&self) -> &Path {
+        self.path.as_ref().expect("TempFileGuard already disarmed")
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 struct ChunkedSender {
     tx: tokio::sync::mpsc::UnboundedSender<Result<Vec<u8>, ServerError>>,
     buf: Vec<u8>,
@@ -4768,6 +4799,8 @@ async fn process_query_binary(
     validate_select(&effective_sql, max_query_len)
         .map_err(|e| ServerError::BadRequest(format!("invalid sql: {e}")))?;
     let (tmp_path, tmp_file) = create_temp_ipc_file(&data_dir)?;
+    // Use RAII guard to ensure temp file cleanup on all error paths
+    let mut payload_guard = TempFileGuard::new(tmp_path);
     let query_request = QueryRequest {
         sql: effective_sql,
         timeout_millis,
@@ -4775,7 +4808,7 @@ async fn process_query_binary(
         transaction_id: None,
     };
     let db = db.clone();
-    let meta = match blocking(move || {
+    let meta = blocking(move || {
         let mut file = tmp_file;
         match db.query_ipc_to_writer(query_request.clone(), &mut file) {
             Ok(resp) => Ok(QueryBinaryMeta {
@@ -4798,23 +4831,17 @@ async fn process_query_binary(
             Err(e) => Err(ServerError::Db(e.to_string())),
         }
     })
-    .await
-    {
-        Ok(meta) => meta,
-        Err(err) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-    };
+    .await?;
 
-    let mut payload_path = tmp_path;
-    let mut payload_len = std::fs::metadata(&payload_path)
+    let mut payload_len = std::fs::metadata(payload_guard.path())
         .map_err(|e| ServerError::Io(format!("read payload metadata failed: {e}")))?
         .len();
     let mut compression_used: Option<&'static str> = None;
     if payload_len > 0 && matches!(accept_compression.as_deref(), Some("zstd")) {
         let (compressed_path, compressed_file) = create_temp_ipc_file(&data_dir)?;
-        let mut input = std::fs::File::open(&payload_path)
+        // Create guard for compressed file; original will be cleaned up by its guard
+        let compressed_guard = TempFileGuard::new(compressed_path);
+        let mut input = std::fs::File::open(payload_guard.path())
             .map_err(|e| ServerError::Io(format!("open payload failed: {e}")))?;
         let encoder = zstd::stream::Encoder::new(compressed_file, 3)
             .map_err(|e| ServerError::Encode(format!("compression init failed: {e}")))?;
@@ -4822,14 +4849,16 @@ async fn process_query_binary(
         std::io::copy(&mut input, &mut encoder)
             .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
         drop(encoder);
-        let _ = std::fs::remove_file(&payload_path);
-        payload_path = compressed_path;
-        payload_len = std::fs::metadata(&payload_path)
+        // Drop original guard (deletes original file), replace with compressed
+        drop(payload_guard);
+        payload_guard = compressed_guard;
+        payload_len = std::fs::metadata(payload_guard.path())
             .map_err(|e| ServerError::Io(format!("read payload metadata failed: {e}")))?
             .len();
         compression_used = Some("zstd");
     }
     if payload_len > max_frame_len as u64 {
+        // payload_guard will clean up the temp file automatically on return
         return Err(ServerError::BadRequest(format!(
             "response too large ({} > {})",
             payload_len, max_frame_len
@@ -4847,6 +4876,8 @@ async fn process_query_binary(
         compression: compression_used.map(|c| c.to_string()),
         ..Default::default()
     };
+    // Disarm the guard - caller takes ownership of the temp file
+    let payload_path = payload_guard.disarm();
     Ok((header, payload_path))
 }
 
@@ -5073,6 +5104,8 @@ async fn process_execute_prepared_binary(
         .map_err(|e| ServerError::BadRequest(format!("invalid sql: {e}")))?;
 
     let (tmp_path, tmp_file) = create_temp_ipc_file(&data_dir)?;
+    // Use RAII guard to ensure temp file cleanup on all error paths
+    let mut payload_guard = TempFileGuard::new(tmp_path);
     let query_request = QueryRequest {
         sql: prepared.sql.clone(),
         timeout_millis,
@@ -5080,7 +5113,7 @@ async fn process_execute_prepared_binary(
         transaction_id: None,
     };
     let db = db.clone();
-    let meta = match blocking(move || {
+    let meta = blocking(move || {
         let mut file = tmp_file;
         match db.query_ipc_to_writer(query_request.clone(), &mut file) {
             Ok(resp) => Ok(QueryBinaryMeta {
@@ -5103,23 +5136,17 @@ async fn process_execute_prepared_binary(
             Err(e) => Err(ServerError::Db(e.to_string())),
         }
     })
-    .await
-    {
-        Ok(meta) => meta,
-        Err(err) => {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-    };
+    .await?;
 
-    let mut payload_path = tmp_path;
-    let mut payload_len = std::fs::metadata(&payload_path)
+    let mut payload_len = std::fs::metadata(payload_guard.path())
         .map_err(|e| ServerError::Io(format!("read payload metadata failed: {e}")))?
         .len();
     let mut compression_used: Option<&'static str> = None;
     if payload_len > 0 && matches!(accept_compression.as_deref(), Some("zstd")) {
         let (compressed_path, compressed_file) = create_temp_ipc_file(&data_dir)?;
-        let mut input = std::fs::File::open(&payload_path)
+        // Create guard for compressed file; original will be cleaned up by its guard
+        let compressed_guard = TempFileGuard::new(compressed_path);
+        let mut input = std::fs::File::open(payload_guard.path())
             .map_err(|e| ServerError::Io(format!("open payload failed: {e}")))?;
         let encoder = zstd::stream::Encoder::new(compressed_file, 3)
             .map_err(|e| ServerError::Encode(format!("compression init failed: {e}")))?;
@@ -5127,14 +5154,16 @@ async fn process_execute_prepared_binary(
         std::io::copy(&mut input, &mut encoder)
             .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
         drop(encoder);
-        let _ = std::fs::remove_file(&payload_path);
-        payload_path = compressed_path;
-        payload_len = std::fs::metadata(&payload_path)
+        // Drop original guard (deletes original file), replace with compressed
+        drop(payload_guard);
+        payload_guard = compressed_guard;
+        payload_len = std::fs::metadata(payload_guard.path())
             .map_err(|e| ServerError::Io(format!("read payload metadata failed: {e}")))?
             .len();
         compression_used = Some("zstd");
     }
     if payload_len > max_frame_len as u64 {
+        // payload_guard will clean up the temp file automatically on return
         return Err(ServerError::BadRequest(format!(
             "response too large ({} > {})",
             payload_len, max_frame_len
@@ -5152,6 +5181,8 @@ async fn process_execute_prepared_binary(
         compression: compression_used.map(|c| c.to_string()),
         ..Default::default()
     };
+    // Disarm the guard - caller takes ownership of the temp file
+    let payload_path = payload_guard.disarm();
     Ok((header, payload_path))
 }
 

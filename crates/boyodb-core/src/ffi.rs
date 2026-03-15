@@ -2,6 +2,18 @@
 //!
 //! These functions are designed to be called from C code and intentionally
 //! dereference raw pointers. The safety guarantees are provided by the caller.
+//!
+//! # Thread Safety
+//!
+//! The underlying `Db` type uses interior mutability with internal synchronization
+//! (Mutex, RwLock, atomics) to ensure thread safety. All FFI functions use shared
+//! references (`&*handle`) rather than mutable references to avoid undefined behavior
+//! from mutable aliasing when the same handle is accessed from multiple threads.
+//!
+//! Callers must ensure:
+//! - The handle pointer remains valid for the duration of each call
+//! - `boyodb_close` is called only once and only after all other operations complete
+//! - The handle is not used after `boyodb_close` is called
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::engine::{Db, EngineConfig, EngineError, IngestBatch, QueryRequest};
@@ -141,7 +153,7 @@ pub extern "C" fn boyodb_close(handle: *mut BoyodbHandle) {
 
 #[no_mangle]
 pub extern "C" fn boyodb_ingest_ipc(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload: *const u8,
     len: usize,
     watermark_micros: u64,
@@ -151,7 +163,7 @@ pub extern "C" fn boyodb_ingest_ipc(
 
 #[no_mangle]
 pub extern "C" fn boyodb_ingest_ipc_v2(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload: *const u8,
     len: usize,
     watermark_micros: u64,
@@ -174,7 +186,7 @@ pub extern "C" fn boyodb_ingest_ipc_v2(
 
 #[no_mangle]
 pub extern "C" fn boyodb_ingest_ipc_v3(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload: *const u8,
     len: usize,
     watermark_micros: u64,
@@ -188,7 +200,7 @@ pub extern "C" fn boyodb_ingest_ipc_v3(
     if handle.is_null() || payload.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let data = unsafe { std::slice::from_raw_parts(payload, len) }.to_vec();
 
     let db_name = if has_database {
@@ -223,7 +235,7 @@ pub extern "C" fn boyodb_ingest_ipc_v3(
 
 #[no_mangle]
 pub extern "C" fn boyodb_query_ipc(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     request: *const BoyodbQueryRequest,
     out_buffer: *mut OwnedBuffer,
 ) -> BoyodbStatus {
@@ -243,7 +255,7 @@ pub extern "C" fn boyodb_query_ipc(
         collect_stats: false,
         transaction_id: None,
     };
-    match unsafe { &mut *handle }.db.query(query) {
+    match unsafe { &*handle }.db.query(query) {
         Ok(resp) => {
             let buf = OwnedBuffer::from_vec(resp.records_ipc);
             unsafe { *out_buffer = buf };
@@ -256,7 +268,7 @@ pub extern "C" fn boyodb_query_ipc(
 
 #[no_mangle]
 pub extern "C" fn boyodb_plan_bundle(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     request: *const BoyodbBundleRequest,
     out_buffer: *mut OwnedBuffer,
 ) -> BoyodbStatus {
@@ -284,7 +296,7 @@ pub extern "C" fn boyodb_plan_bundle(
         max_entries: None,
     };
 
-    match unsafe { &mut *handle }.db.plan_bundle(bundle_req) {
+    match unsafe { &*handle }.db.plan_bundle(bundle_req) {
         Ok(plan) => match serde_json::to_vec(&plan) {
             Ok(json) => {
                 let buf = OwnedBuffer::from_vec(json);
@@ -300,7 +312,7 @@ pub extern "C" fn boyodb_plan_bundle(
 
 #[no_mangle]
 pub extern "C" fn boyodb_export_bundle(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     request: *const BoyodbBundleRequest,
     out_buffer: *mut OwnedBuffer,
 ) -> BoyodbStatus {
@@ -328,7 +340,7 @@ pub extern "C" fn boyodb_export_bundle(
         max_entries: None,
     };
 
-    match unsafe { &mut *handle }.db.export_bundle(bundle_req) {
+    match unsafe { &*handle }.db.export_bundle(bundle_req) {
         Ok(payload) => match serde_json::to_vec(&payload) {
             Ok(json) => {
                 let buf = OwnedBuffer::from_vec(json);
@@ -344,14 +356,14 @@ pub extern "C" fn boyodb_export_bundle(
 
 #[no_mangle]
 pub extern "C" fn boyodb_apply_bundle(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload_json: *const u8,
     len: usize,
 ) -> BoyodbStatus {
     if handle.is_null() || payload_json.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let payload_slice = unsafe { std::slice::from_raw_parts(payload_json, len) };
     let payload: BundlePayload = match serde_json::from_slice(payload_slice) {
         Ok(p) => p,
@@ -365,14 +377,14 @@ pub extern "C" fn boyodb_apply_bundle(
 
 #[no_mangle]
 pub extern "C" fn boyodb_validate_bundle(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload_json: *const u8,
     len: usize,
 ) -> BoyodbStatus {
     if handle.is_null() || payload_json.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let payload_slice = unsafe { std::slice::from_raw_parts(payload_json, len) };
     let payload: BundlePayload = match serde_json::from_slice(payload_slice) {
         Ok(p) => p,
@@ -420,13 +432,13 @@ pub extern "C" fn boyodb_free_buffer(buffer: *mut OwnedBuffer) {
 
 #[no_mangle]
 pub extern "C" fn boyodb_create_database(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     name: *const c_char,
 ) -> BoyodbStatus {
     if handle.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let name = match cstr_to_str(name) {
         Ok(s) => s,
         Err(status) => return status,
@@ -436,7 +448,7 @@ pub extern "C" fn boyodb_create_database(
 
 #[no_mangle]
 pub extern "C" fn boyodb_create_table(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     database: *const c_char,
     table: *const c_char,
     schema_json: *const c_char,
@@ -444,7 +456,7 @@ pub extern "C" fn boyodb_create_table(
     if handle.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let database = match cstr_to_str(database) {
         Ok(s) => s,
         Err(status) => return status,
@@ -465,32 +477,32 @@ pub extern "C" fn boyodb_create_table(
 }
 
 #[no_mangle]
-pub extern "C" fn boyodb_healthcheck(handle: *mut BoyodbHandle) -> BoyodbStatus {
+pub extern "C" fn boyodb_healthcheck(handle: *const BoyodbHandle) -> BoyodbStatus {
     if handle.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     status_from_result(db.db.health_check())
 }
 
 #[no_mangle]
-pub extern "C" fn boyodb_checkpoint(handle: *mut BoyodbHandle) -> BoyodbStatus {
+pub extern "C" fn boyodb_checkpoint(handle: *const BoyodbHandle) -> BoyodbStatus {
     if handle.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     status_from_result(db.db.checkpoint())
 }
 
 #[no_mangle]
 pub extern "C" fn boyodb_list_databases(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     out_buffer: *mut OwnedBuffer,
 ) -> BoyodbStatus {
     if handle.is_null() || out_buffer.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     match db.db.list_databases() {
         Ok(dbs) => match serde_json::to_vec(&dbs) {
             Ok(buf) => {
@@ -506,7 +518,7 @@ pub extern "C" fn boyodb_list_databases(
 
 #[no_mangle]
 pub extern "C" fn boyodb_list_tables(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     database: *const c_char,
     has_database: bool,
     out_buffer: *mut OwnedBuffer,
@@ -514,7 +526,7 @@ pub extern "C" fn boyodb_list_tables(
     if handle.is_null() || out_buffer.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let database_name = if has_database {
         match cstr_to_str(database) {
             Ok(s) => Some(s),
@@ -539,13 +551,13 @@ pub extern "C" fn boyodb_list_tables(
 
 #[no_mangle]
 pub extern "C" fn boyodb_manifest(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     out_buffer: *mut OwnedBuffer,
 ) -> BoyodbStatus {
     if handle.is_null() || out_buffer.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     match db.db.export_manifest() {
         Ok(buf) => {
             unsafe { *out_buffer = OwnedBuffer::from_vec(buf) };
@@ -558,7 +570,7 @@ pub extern "C" fn boyodb_manifest(
 
 #[no_mangle]
 pub extern "C" fn boyodb_import_manifest(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     payload: *const u8,
     len: usize,
     overwrite: bool,
@@ -566,14 +578,14 @@ pub extern "C" fn boyodb_import_manifest(
     if handle.is_null() || payload.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let data = unsafe { std::slice::from_raw_parts(payload, len) };
     status_from_result(db.db.import_manifest(data, overwrite))
 }
 
 #[no_mangle]
 pub extern "C" fn boyodb_describe_table(
-    handle: *mut BoyodbHandle,
+    handle: *const BoyodbHandle,
     database: *const c_char,
     table: *const c_char,
     out_buffer: *mut OwnedBuffer,
@@ -581,7 +593,7 @@ pub extern "C" fn boyodb_describe_table(
     if handle.is_null() || database.is_null() || table.is_null() || out_buffer.is_null() {
         return BoyodbStatus::InvalidArgument;
     }
-    let db = unsafe { &mut *handle };
+    let db = unsafe { &*handle };
     let database = match cstr_to_str(database) {
         Ok(s) => s,
         Err(status) => return status,

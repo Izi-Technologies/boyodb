@@ -9,9 +9,11 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex, RwLock};
 
 // ============================================================================
 // PARALLEL EXECUTION CONFIGURATION
@@ -126,7 +128,7 @@ impl WorkQueue {
 
     /// Add work to the queue
     pub fn push(&self, unit: WorkUnit) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.push_back(unit);
         self.total_units.fetch_add(1, Ordering::SeqCst);
         self.condvar.notify_one();
@@ -134,7 +136,7 @@ impl WorkQueue {
 
     /// Add multiple work units
     pub fn push_all(&self, units: Vec<WorkUnit>) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         let count = units.len() as u64;
         for unit in units {
             queue.push_back(unit);
@@ -145,7 +147,7 @@ impl WorkQueue {
 
     /// Get next work unit (blocking)
     pub fn pop(&self) -> Option<WorkUnit> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         loop {
             if let Some(unit) = queue.pop_front() {
                 return Some(unit);
@@ -153,19 +155,19 @@ impl WorkQueue {
             if self.closed.load(Ordering::SeqCst) {
                 return None;
             }
-            queue = self.condvar.wait(queue).unwrap();
+            self.condvar.wait(&mut queue);
         }
     }
 
     /// Try to get next work unit (non-blocking)
     pub fn try_pop(&self) -> Option<WorkUnit> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.pop_front()
     }
 
     /// Steal work from end of queue (for work stealing)
     pub fn steal(&self) -> Option<WorkUnit> {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.pop_back()
     }
 
@@ -182,7 +184,7 @@ impl WorkQueue {
 
     /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
-        let queue = self.queue.lock().unwrap();
+        let queue = self.queue.lock();
         queue.is_empty()
     }
 
@@ -259,7 +261,7 @@ impl ParallelScanState {
     /// Attach a worker
     pub fn attach_worker(&self) -> usize {
         let id = self.workers_attached.fetch_add(1, Ordering::SeqCst);
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write();
         if *state == ScanState::NotStarted {
             *state = ScanState::Scanning;
         }
@@ -294,14 +296,14 @@ impl ParallelScanState {
         let attached = self.workers_attached.load(Ordering::SeqCst);
 
         if finished >= attached {
-            let mut state = self.state.write().unwrap();
+            let mut state = self.state.write();
             *state = ScanState::Complete;
         }
     }
 
     /// Get scan state
     pub fn state(&self) -> ScanState {
-        *self.state.read().unwrap()
+        *self.state.read()
     }
 
     /// Get progress
@@ -446,7 +448,7 @@ impl ParallelAggregateState {
 
     /// Submit partial result from a worker
     pub fn submit_partial(&self, partial: PartialAggValue) {
-        let mut partials = self.partials.write().unwrap();
+        let mut partials = self.partials.write();
         partials.push(partial);
         self.completed.fetch_add(1, Ordering::SeqCst);
     }
@@ -458,7 +460,7 @@ impl ParallelAggregateState {
 
     /// Combine all partial results
     pub fn combine(&self) -> Option<f64> {
-        let partials = self.partials.read().unwrap();
+        let partials = self.partials.read();
         if partials.is_empty() {
             return None;
         }
@@ -469,13 +471,13 @@ impl ParallelAggregateState {
         }
 
         let final_val = result.finalize();
-        *self.final_result.write().unwrap() = Some(final_val);
+        *self.final_result.write() = Some(final_val);
         Some(final_val)
     }
 
     /// Get the final result
     pub fn get_result(&self) -> Option<f64> {
-        *self.final_result.read().unwrap()
+        *self.final_result.read()
     }
 }
 
@@ -546,7 +548,7 @@ impl GatherNode {
     /// Push a result tuple from a worker
     pub fn push_result(&self, worker_id: usize, tuple: ResultTuple) {
         if worker_id < self.num_workers {
-            let mut queue = self.result_queues[worker_id].lock().unwrap();
+            let mut queue = self.result_queues[worker_id].lock();
             queue.push_back(tuple);
             self.tuples_received.fetch_add(1, Ordering::Relaxed);
             self.result_condvar.notify_one();
@@ -572,7 +574,7 @@ impl GatherNode {
     fn next_unordered(&self) -> Option<ResultTuple> {
         // Round-robin through workers
         for (i, queue) in self.result_queues.iter().enumerate() {
-            let mut q = queue.lock().unwrap();
+            let mut q = queue.lock();
             if let Some(tuple) = q.pop_front() {
                 return Some(tuple);
             }
@@ -587,7 +589,8 @@ impl GatherNode {
             None
         } else {
             // Wait for more results
-            let _lock = self.result_lock.lock().unwrap();
+            let mut lock = self.result_lock.lock();
+            self.result_condvar.wait(&mut lock);
             self.next_unordered()
         }
     }
@@ -598,7 +601,7 @@ impl GatherNode {
         let mut best_key: Option<Vec<u8>> = None;
 
         for (i, queue) in self.result_queues.iter().enumerate() {
-            let q = queue.lock().unwrap();
+            let q = queue.lock();
             if let Some(tuple) = q.front() {
                 let key = tuple.sort_key.clone();
                 if best_key.is_none() || key < best_key {
@@ -609,7 +612,7 @@ impl GatherNode {
         }
 
         if let Some(worker_id) = best_worker {
-            let mut q = self.result_queues[worker_id].lock().unwrap();
+            let mut q = self.result_queues[worker_id].lock();
             return q.pop_front();
         }
 
@@ -617,7 +620,8 @@ impl GatherNode {
             None
         } else {
             // Wait and retry
-            let _lock = self.result_lock.lock().unwrap();
+            let mut lock = self.result_lock.lock();
+            self.result_condvar.wait(&mut lock);
             self.next_ordered()
         }
     }
@@ -633,7 +637,7 @@ impl GatherNode {
     pub fn stats(&self) -> GatherStats {
         let queued: usize = self.result_queues
             .iter()
-            .map(|q| q.lock().unwrap().len())
+            .map(|q| q.lock().len())
             .sum();
 
         GatherStats {
@@ -701,19 +705,19 @@ impl ParallelWorker {
     /// Start the worker
     pub fn start(&self) {
         self.state.store(WorkerState::Running as usize, Ordering::SeqCst);
-        *self.start_time.write().unwrap() = Some(Instant::now());
+        *self.start_time.write() = Some(Instant::now());
     }
 
     /// Finish the worker
     pub fn finish(&self) {
         self.state.store(WorkerState::Finished as usize, Ordering::SeqCst);
-        *self.end_time.write().unwrap() = Some(Instant::now());
+        *self.end_time.write() = Some(Instant::now());
     }
 
     /// Mark worker as error
     pub fn error(&self) {
         self.state.store(WorkerState::Error as usize, Ordering::SeqCst);
-        *self.end_time.write().unwrap() = Some(Instant::now());
+        *self.end_time.write() = Some(Instant::now());
     }
 
     /// Record tuples processed
@@ -733,8 +737,8 @@ impl ParallelWorker {
 
     /// Get execution time
     pub fn execution_time(&self) -> Option<Duration> {
-        let start = *self.start_time.read().unwrap();
-        let end = *self.end_time.read().unwrap();
+        let start = *self.start_time.read();
+        let end = *self.end_time.read();
 
         match (start, end) {
             (Some(s), Some(e)) => Some(e.duration_since(s)),
@@ -847,7 +851,7 @@ impl ParallelExecutor {
             let worker = Arc::new(ParallelWorker::new(worker_id));
 
             {
-                let mut workers = self.workers.write().unwrap();
+                let mut workers = self.workers.write();
                 workers.push(Arc::clone(&worker));
             }
 
@@ -856,7 +860,7 @@ impl ParallelExecutor {
                 while let Some(unit) = queue.pop() {
                     let partial = scan_fn(unit);
                     worker.add_tuples(partial.len() as u64);
-                    let mut res = results.lock().unwrap();
+                    let mut res = results.lock();
                     res.extend(partial);
                     queue.complete();
                 }
@@ -874,14 +878,16 @@ impl ParallelExecutor {
         self.queries_executed.fetch_add(1, Ordering::Relaxed);
 
         Arc::try_unwrap(results)
-            .unwrap_or_else(|_| Mutex::new(Vec::new()))
+            .unwrap_or_else(|_| {
+                // If we can't unwrap (shouldn't happen after join), return empty
+                Mutex::new(Vec::new())
+            })
             .into_inner()
-            .unwrap()
     }
 
     /// Get executor statistics
     pub fn stats(&self) -> ParallelExecutorStats {
-        let workers = self.workers.read().unwrap();
+        let workers = self.workers.read();
         ParallelExecutorStats {
             queries_executed: self.queries_executed.load(Ordering::Relaxed),
             total_worker_time_ms: self.total_worker_time.load(Ordering::Relaxed),

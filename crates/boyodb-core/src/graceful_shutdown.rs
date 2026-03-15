@@ -23,8 +23,10 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+use parking_lot::RwLock;
 
 // ============================================================================
 // Types and Errors
@@ -178,7 +180,7 @@ impl ShutdownManager {
 
     /// Get current shutdown phase
     pub fn phase(&self) -> ShutdownPhase {
-        *self.phase.read().unwrap()
+        *self.phase.read()
     }
 
     /// Check if new connections should be accepted
@@ -207,7 +209,7 @@ impl ShutdownManager {
 
         // Update stats
         if self.is_shutdown_requested() {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.connections_drained += 1;
         }
     }
@@ -228,7 +230,7 @@ impl ShutdownManager {
         }
 
         if self.is_shutdown_requested() {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write();
             stats.tasks_completed += 1;
         }
     }
@@ -237,7 +239,6 @@ impl ShutdownManager {
     pub fn register_hook(&self, name: &str, hook: ShutdownHook) {
         self.hooks
             .write()
-            .unwrap()
             .push((name.to_string(), hook));
     }
 
@@ -262,13 +263,13 @@ impl ShutdownManager {
             return Err(OperationalError::ShutdownInProgress);
         }
 
-        *self.shutdown_start.write().unwrap() = Some(Instant::now());
-        *self.phase.write().unwrap() = ShutdownPhase::Initiated;
+        *self.shutdown_start.write() = Some(Instant::now());
+        *self.phase.write() = ShutdownPhase::Initiated;
 
         let start = Instant::now();
 
         // Phase 1: Stop accepting new connections (already done via flag)
-        *self.phase.write().unwrap() = ShutdownPhase::Draining;
+        *self.phase.write() = ShutdownPhase::Draining;
 
         // Phase 2: Drain existing connections
         let drain_deadline = Instant::now() + Duration::from_millis(self.drain_timeout_ms);
@@ -276,7 +277,7 @@ impl ShutdownManager {
             if Instant::now() >= drain_deadline {
                 // Timeout - force terminate remaining connections
                 let remaining = self.active_connections.load(Ordering::Relaxed) as usize;
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.connections_terminated = remaining as u64;
                 break;
             }
@@ -288,14 +289,14 @@ impl ShutdownManager {
         }
 
         // Phase 3: Wait for background tasks
-        *self.phase.write().unwrap() = ShutdownPhase::WaitingTasks;
+        *self.phase.write() = ShutdownPhase::WaitingTasks;
         let task_deadline = Instant::now()
             + Duration::from_millis(self.timeout_ms.saturating_sub(self.drain_timeout_ms));
 
         while self.active_tasks.load(Ordering::Relaxed) > 0 {
             if Instant::now() >= task_deadline {
                 let remaining = self.active_tasks.load(Ordering::Relaxed);
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write();
                 stats.tasks_cancelled = remaining;
                 break;
             }
@@ -307,16 +308,16 @@ impl ShutdownManager {
         }
 
         // Phase 4: Run shutdown hooks
-        *self.phase.write().unwrap() = ShutdownPhase::Cleanup;
-        let hooks = self.hooks.read().unwrap();
+        *self.phase.write() = ShutdownPhase::Cleanup;
+        let hooks = self.hooks.read();
         for (name, hook) in hooks.iter() {
             hook();
         }
 
         // Complete
-        *self.phase.write().unwrap() = ShutdownPhase::Complete;
+        *self.phase.write() = ShutdownPhase::Complete;
 
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write();
         stats.duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(stats.clone())
@@ -324,7 +325,7 @@ impl ShutdownManager {
 
     /// Get shutdown statistics
     pub fn stats(&self) -> ShutdownStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().clone()
     }
 }
 
@@ -450,23 +451,22 @@ impl ConfigManager {
     pub fn register_param(&self, param: ConfigParam) {
         self.params
             .write()
-            .unwrap()
             .insert(param.name.clone(), param);
     }
 
     /// Get a parameter value
     pub fn get(&self, name: &str) -> Option<ConfigValue> {
-        self.params.read().unwrap().get(name).map(|p| p.value.clone())
+        self.params.read().get(name).map(|p| p.value.clone())
     }
 
     /// Get a parameter
     pub fn get_param(&self, name: &str) -> Option<ConfigParam> {
-        self.params.read().unwrap().get(name).cloned()
+        self.params.read().get(name).cloned()
     }
 
     /// Set a parameter value
     pub fn set(&self, name: &str, value: ConfigValue) -> Result<(), OperationalError> {
-        let mut params = self.params.write().unwrap();
+        let mut params = self.params.write();
 
         let param = params
             .get_mut(name)
@@ -485,7 +485,6 @@ impl ConfigManager {
             // Queue for restart
             self.pending_changes
                 .write()
-                .unwrap()
                 .insert(name.to_string(), value);
             return Ok(());
         }
@@ -494,7 +493,7 @@ impl ConfigManager {
 
         // Notify callbacks
         drop(params);
-        let callbacks = self.callbacks.read().unwrap();
+        let callbacks = self.callbacks.read();
         for callback in callbacks.iter() {
             callback(name, &old_value, &value);
         }
@@ -504,7 +503,7 @@ impl ConfigManager {
 
     /// Register a change callback
     pub fn on_change(&self, callback: ConfigChangeCallback) {
-        self.callbacks.write().unwrap().push(callback);
+        self.callbacks.write().push(callback);
     }
 
     /// Reload configuration (pg_reload_conf)
@@ -513,40 +512,40 @@ impl ConfigManager {
 
         // In a real implementation, this would re-read the config file
         // For now, we'll just apply any pending changes that don't require restart
-        let pending = self.pending_changes.read().unwrap().clone();
+        let pending = self.pending_changes.read().clone();
 
         for (name, value) in pending {
-            if let Some(param) = self.params.read().unwrap().get(&name) {
+            if let Some(param) = self.params.read().get(&name) {
                 if !param.requires_restart {
-                    self.params.write().unwrap().get_mut(&name).unwrap().value = value;
+                    self.params.write().get_mut(&name).unwrap().value = value;
                     reloaded.push(name);
                 }
             }
         }
 
-        *self.last_reload.write().unwrap() = Some(SystemTime::now());
+        *self.last_reload.write() = Some(SystemTime::now());
 
         Ok(reloaded)
     }
 
     /// Get all parameters
     pub fn get_all(&self) -> Vec<ConfigParam> {
-        self.params.read().unwrap().values().cloned().collect()
+        self.params.read().values().cloned().collect()
     }
 
     /// Get pending changes
     pub fn get_pending_changes(&self) -> HashMap<String, ConfigValue> {
-        self.pending_changes.read().unwrap().clone()
+        self.pending_changes.read().clone()
     }
 
     /// Check if restart is pending
     pub fn restart_pending(&self) -> bool {
-        !self.pending_changes.read().unwrap().is_empty()
+        !self.pending_changes.read().is_empty()
     }
 
     /// Get last reload time
     pub fn last_reload_time(&self) -> Option<SystemTime> {
-        *self.last_reload.read().unwrap()
+        *self.last_reload.read()
     }
 }
 
@@ -797,19 +796,19 @@ impl JobScheduler {
             error_count: 0,
         };
 
-        self.jobs.write().unwrap().insert(job_id, job);
+        self.jobs.write().insert(job_id, job);
 
         Ok(job_id)
     }
 
     /// Unschedule a job
     pub fn unschedule(&self, job_id: u64) -> bool {
-        self.jobs.write().unwrap().remove(&job_id).is_some()
+        self.jobs.write().remove(&job_id).is_some()
     }
 
     /// Enable a job
     pub fn enable(&self, job_id: u64) -> bool {
-        if let Some(job) = self.jobs.write().unwrap().get_mut(&job_id) {
+        if let Some(job) = self.jobs.write().get_mut(&job_id) {
             job.enabled = true;
             true
         } else {
@@ -819,7 +818,7 @@ impl JobScheduler {
 
     /// Disable a job
     pub fn disable(&self, job_id: u64) -> bool {
-        if let Some(job) = self.jobs.write().unwrap().get_mut(&job_id) {
+        if let Some(job) = self.jobs.write().get_mut(&job_id) {
             job.enabled = false;
             true
         } else {
@@ -829,17 +828,17 @@ impl JobScheduler {
 
     /// Get all jobs
     pub fn get_jobs(&self) -> Vec<ScheduledJob> {
-        self.jobs.read().unwrap().values().cloned().collect()
+        self.jobs.read().values().cloned().collect()
     }
 
     /// Get a specific job
     pub fn get_job(&self, job_id: u64) -> Option<ScheduledJob> {
-        self.jobs.read().unwrap().get(&job_id).cloned()
+        self.jobs.read().get(&job_id).cloned()
     }
 
     /// Record job execution
     pub fn record_execution(&self, job_id: u64, status: JobStatus) {
-        if let Some(job) = self.jobs.write().unwrap().get_mut(&job_id) {
+        if let Some(job) = self.jobs.write().get_mut(&job_id) {
             job.last_run = Some(SystemTime::now());
             job.last_status = Some(status);
             job.run_count += 1;

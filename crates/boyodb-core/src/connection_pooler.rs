@@ -7,8 +7,10 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::{Mutex, RwLock};
 
 // ============================================================================
 // Password Authentication Utilities
@@ -849,18 +851,18 @@ impl ConnectionPooler {
 
     /// Set config file path for RELOAD command
     pub fn set_config_file(&self, path: &str) {
-        let mut config_path = self.config_file_path.write().unwrap();
+        let mut config_path = self.config_file_path.write();
         *config_path = Some(path.to_string());
     }
 
     /// Get the current configuration (clone)
     pub fn get_config(&self) -> PoolerConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 
     /// Check if a database is paused
     pub fn is_database_paused(&self, database: &str) -> bool {
-        let paused = self.paused_databases.read().unwrap();
+        let paused = self.paused_databases.read();
         matches!(
             paused.get(database),
             Some(DatabasePauseState::Paused) | Some(DatabasePauseState::Killing)
@@ -869,14 +871,14 @@ impl ConnectionPooler {
 
     /// Get database pause state
     pub fn get_database_state(&self, database: &str) -> DatabasePauseState {
-        let paused = self.paused_databases.read().unwrap();
+        let paused = self.paused_databases.read();
         paused.get(database).copied().unwrap_or(DatabasePauseState::Active)
     }
 
     /// Add user credentials
     pub fn add_user(&self, database: &str, credentials: UserCredentials) {
         let key = format!("{}:{}", database, credentials.username);
-        let mut creds = self.user_credentials.write().unwrap();
+        let mut creds = self.user_credentials.write();
         creds.insert(key, credentials);
     }
 
@@ -895,14 +897,14 @@ impl ConnectionPooler {
     /// Get authentication salt for a client (generates if not exists)
     pub fn get_auth_salt(&self, client_id: u64) -> [u8; 4] {
         {
-            let salts = self.auth_salts.read().unwrap();
+            let salts = self.auth_salts.read();
             if let Some(salt) = salts.get(&client_id) {
                 return *salt;
             }
         }
 
         let salt = self.generate_salt();
-        let mut salts = self.auth_salts.write().unwrap();
+        let mut salts = self.auth_salts.write();
         salts.insert(client_id, salt);
         salt
     }
@@ -913,21 +915,21 @@ impl ConnectionPooler {
             return Err(PoolerError::ConfigError("database name required".into()));
         }
 
-        let mut databases = self.databases.write().unwrap();
+        let mut databases = self.databases.write();
         databases.insert(config.name.clone(), config);
         Ok(())
     }
 
     /// Remove a database configuration
     pub fn remove_database(&self, name: &str) -> Result<(), PoolerError> {
-        let mut databases = self.databases.write().unwrap();
+        let mut databases = self.databases.write();
         databases.remove(name).ok_or_else(|| PoolerError::UnknownDatabase(name.to_string()))?;
         Ok(())
     }
 
     /// Get database configuration
     pub fn get_database(&self, name: &str) -> Option<DatabaseConfig> {
-        let databases = self.databases.read().unwrap();
+        let databases = self.databases.read();
         databases.get(name).cloned()
     }
 
@@ -948,7 +950,7 @@ impl ConnectionPooler {
         }
 
         // Atomically increment and check client count to prevent race condition
-        let max_client_conn = self.config.read().unwrap().max_client_conn;
+        let max_client_conn = self.config.read().max_client_conn;
         let prev_count = self.stats.current_clients.fetch_add(1, Ordering::SeqCst);
         if prev_count >= max_client_conn {
             // Exceeded limit, rollback the increment
@@ -958,7 +960,7 @@ impl ConnectionPooler {
 
         // Verify database exists
         {
-            let databases = self.databases.read().unwrap();
+            let databases = self.databases.read();
             if !databases.contains_key(database) {
                 // Rollback client count on error
                 self.stats.current_clients.fetch_sub(1, Ordering::SeqCst);
@@ -975,7 +977,7 @@ impl ConnectionPooler {
         );
 
         {
-            let mut clients = self.clients.write().unwrap();
+            let mut clients = self.clients.write();
             clients.insert(client_id, Mutex::new(client));
         }
 
@@ -991,17 +993,17 @@ impl ConnectionPooler {
         password: Option<&str>,
     ) -> Result<(), PoolerError> {
         let (database, user) = {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             let client_lock = clients.get(&client_id).ok_or(PoolerError::AuthenticationFailed(
                 "client not found".to_string(),
             ))?;
-            let client = client_lock.lock().unwrap();
+            let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
 
         // Look up credentials
         let key = format!("{}:{}", database, user);
-        let creds = self.user_credentials.read().unwrap();
+        let creds = self.user_credentials.read();
 
         // Check if credentials are configured
         if let Some(user_creds) = creds.get(&key) {
@@ -1045,14 +1047,14 @@ impl ConnectionPooler {
         drop(creds);
 
         // Mark client as authenticated
-        let clients = self.clients.read().unwrap();
+        let clients = self.clients.read();
         if let Some(client_lock) = clients.get(&client_id) {
-            let mut client = client_lock.lock().unwrap();
+            let mut client = client_lock.lock();
             client.state = ClientState::Idle;
         }
 
         // Clean up auth salt
-        let mut salts = self.auth_salts.write().unwrap();
+        let mut salts = self.auth_salts.write();
         salts.remove(&client_id);
 
         Ok(())
@@ -1065,17 +1067,17 @@ impl ConnectionPooler {
         md5_response: &str,
     ) -> Result<(), PoolerError> {
         let (database, user) = {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             let client_lock = clients.get(&client_id).ok_or(PoolerError::AuthenticationFailed(
                 "client not found".to_string(),
             ))?;
-            let client = client_lock.lock().unwrap();
+            let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
 
         // Get the salt used for this client
         let salt = {
-            let salts = self.auth_salts.read().unwrap();
+            let salts = self.auth_salts.read();
             *salts.get(&client_id).ok_or_else(|| {
                 PoolerError::AuthenticationFailed("no auth salt found".to_string())
             })?
@@ -1083,7 +1085,7 @@ impl ConnectionPooler {
 
         // Look up credentials
         let key = format!("{}:{}", database, user);
-        let creds = self.user_credentials.read().unwrap();
+        let creds = self.user_credentials.read();
 
         if let Some(user_creds) = creds.get(&key) {
             if !user_creds.verify_md5(md5_response, &salt) {
@@ -1102,14 +1104,14 @@ impl ConnectionPooler {
         drop(creds);
 
         // Mark client as authenticated
-        let clients = self.clients.read().unwrap();
+        let clients = self.clients.read();
         if let Some(client_lock) = clients.get(&client_id) {
-            let mut client = client_lock.lock().unwrap();
+            let mut client = client_lock.lock();
             client.state = ClientState::Idle;
         }
 
         // Clean up auth salt
-        let mut salts = self.auth_salts.write().unwrap();
+        let mut salts = self.auth_salts.write();
         salts.remove(&client_id);
 
         Ok(())
@@ -1118,9 +1120,9 @@ impl ConnectionPooler {
     /// Request a server connection for a client
     pub fn get_server_connection(&self, client_id: u64) -> Result<u64, PoolerError> {
         let (database, user) = {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             let client_lock = clients.get(&client_id).ok_or(PoolerError::ConnectionTimeout)?;
-            let client = client_lock.lock().unwrap();
+            let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
 
@@ -1131,9 +1133,9 @@ impl ConnectionPooler {
 
         // Try to get from pool
         {
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if let Some(pool_lock) = pools.get(&pool_key) {
-                let mut pool = pool_lock.lock().unwrap();
+                let mut pool = pool_lock.lock();
                 if let Some(server_id) = pool.get_connection() {
                     // Assign server to client
                     self.assign_server_to_client(server_id, client_id)?;
@@ -1147,9 +1149,9 @@ impl ConnectionPooler {
 
         // Check if we can create more connections
         {
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if let Some(pool_lock) = pools.get(&pool_key) {
-                let pool = pool_lock.lock().unwrap();
+                let pool = pool_lock.lock();
                 let total = pool.idle_count() + pool.active_count();
                 if total >= config.max_db_connections {
                     // Need to wait
@@ -1163,9 +1165,9 @@ impl ConnectionPooler {
 
         // Add to pool's active list
         {
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if let Some(pool_lock) = pools.get(&pool_key) {
-                let mut pool = pool_lock.lock().unwrap();
+                let mut pool = pool_lock.lock();
                 pool.active_servers.push(server_id);
                 pool.stats.pool_misses += 1;
             }
@@ -1182,7 +1184,7 @@ impl ConnectionPooler {
         let pool_key = format!("{}:{}", database, user);
 
         {
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if pools.contains_key(&pool_key) {
                 return Ok(());
             }
@@ -1193,7 +1195,7 @@ impl ConnectionPooler {
 
         let pool = ConnectionPool::new(database.to_string(), user.to_string(), config);
 
-        let mut pools = self.pools.write().unwrap();
+        let mut pools = self.pools.write();
         pools.insert(pool_key, Mutex::new(pool));
 
         Ok(())
@@ -1249,7 +1251,7 @@ impl ConnectionPooler {
         }
 
         {
-            let mut servers = self.servers.write().unwrap();
+            let mut servers = self.servers.write();
             servers.insert(server_id, Mutex::new(server));
         }
 
@@ -1431,9 +1433,9 @@ impl ConnectionPooler {
     fn assign_server_to_client(&self, server_id: u64, client_id: u64) -> Result<(), PoolerError> {
         // Update server
         {
-            let servers = self.servers.read().unwrap();
+            let servers = self.servers.read();
             if let Some(server_lock) = servers.get(&server_id) {
-                let mut server = server_lock.lock().unwrap();
+                let mut server = server_lock.lock();
                 server.client_id = Some(client_id);
                 server.state = ServerState::Active;
                 server.last_activity = Instant::now();
@@ -1442,9 +1444,9 @@ impl ConnectionPooler {
 
         // Update client
         {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             if let Some(client_lock) = clients.get(&client_id) {
-                let mut client = client_lock.lock().unwrap();
+                let mut client = client_lock.lock();
                 client.server_id = Some(server_id);
                 client.state = ClientState::Active;
                 client.last_activity = Instant::now();
@@ -1461,9 +1463,9 @@ impl ConnectionPooler {
         transaction_complete: bool,
     ) -> Result<(), PoolerError> {
         let (database, user, server_id) = {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             let client_lock = clients.get(&client_id).ok_or(PoolerError::ConnectionTimeout)?;
-            let mut client = client_lock.lock().unwrap();
+            let mut client = client_lock.lock();
 
             let server_id = client.server_id.take();
             client.state = ClientState::Idle;
@@ -1487,9 +1489,9 @@ impl ConnectionPooler {
         if should_return {
             // Update server state
             {
-                let servers = self.servers.read().unwrap();
+                let servers = self.servers.read();
                 if let Some(server_lock) = servers.get(&server_id) {
-                    let mut server = server_lock.lock().unwrap();
+                    let mut server = server_lock.lock();
                     server.client_id = None;
                     server.state = ServerState::Idle;
                     server.last_activity = Instant::now();
@@ -1498,9 +1500,9 @@ impl ConnectionPooler {
 
             // Return to pool
             let pool_key = format!("{}:{}", database, user);
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if let Some(pool_lock) = pools.get(&pool_key) {
-                let mut pool = pool_lock.lock().unwrap();
+                let mut pool = pool_lock.lock();
                 pool.return_connection(server_id);
             }
         }
@@ -1512,9 +1514,9 @@ impl ConnectionPooler {
     pub fn record_query(&self, client_id: u64, query: &str, bytes_sent: u64, bytes_received: u64) {
         // Update client stats
         {
-            let clients = self.clients.read().unwrap();
+            let clients = self.clients.read();
             if let Some(client_lock) = clients.get(&client_id) {
-                let mut client = client_lock.lock().unwrap();
+                let mut client = client_lock.lock();
                 client.query_count += 1;
                 client.bytes_sent += bytes_sent;
                 client.bytes_received += bytes_received;
@@ -1522,9 +1524,9 @@ impl ConnectionPooler {
 
                 // Update server if assigned
                 if let Some(server_id) = client.server_id {
-                    let servers = self.servers.read().unwrap();
+                    let servers = self.servers.read();
                     if let Some(server_lock) = servers.get(&server_id) {
-                        let mut server = server_lock.lock().unwrap();
+                        let mut server = server_lock.lock();
                         server.query_count += 1;
                         server.bytes_sent += bytes_sent;
                         server.bytes_received += bytes_received;
@@ -1547,13 +1549,13 @@ impl ConnectionPooler {
 
         // Remove client
         {
-            let mut clients = self.clients.write().unwrap();
+            let mut clients = self.clients.write();
             clients.remove(&client_id);
         }
 
         // Clean up auth salt to prevent memory leak
         {
-            let mut salts = self.auth_salts.write().unwrap();
+            let mut salts = self.auth_salts.write();
             salts.remove(&client_id);
         }
 
@@ -1566,18 +1568,18 @@ impl ConnectionPooler {
     pub fn close_server_connection(&self, server_id: u64) -> Result<(), PoolerError> {
         // Get server info
         let (database, user) = {
-            let servers = self.servers.read().unwrap();
+            let servers = self.servers.read();
             let server_lock = servers.get(&server_id).ok_or(PoolerError::ConnectionTimeout)?;
-            let server = server_lock.lock().unwrap();
+            let server = server_lock.lock();
             (server.database.clone(), server.user.clone())
         };
 
         // Remove from pool
         let pool_key = format!("{}:{}", database, user);
         {
-            let pools = self.pools.read().unwrap();
+            let pools = self.pools.read();
             if let Some(pool_lock) = pools.get(&pool_key) {
-                let mut pool = pool_lock.lock().unwrap();
+                let mut pool = pool_lock.lock();
                 // Remove from idle or active
                 pool.idle_servers.retain(|&id| id != server_id);
                 pool.active_servers.retain(|&id| id != server_id);
@@ -1586,7 +1588,7 @@ impl ConnectionPooler {
 
         // Remove server
         {
-            let mut servers = self.servers.write().unwrap();
+            let mut servers = self.servers.write();
             servers.remove(&server_id);
         }
 
@@ -1603,18 +1605,18 @@ impl ConnectionPooler {
     /// Get pool statistics for a database/user pair
     pub fn get_pool_stats(&self, database: &str, user: &str) -> Option<PoolStats> {
         let pool_key = format!("{}:{}", database, user);
-        let pools = self.pools.read().unwrap();
+        let pools = self.pools.read();
         pools.get(&pool_key).map(|p| {
-            let pool = p.lock().unwrap();
+            let pool = p.lock();
             pool.stats.clone()
         })
     }
 
     /// List all pools
     pub fn list_pools(&self) -> Vec<PoolSummary> {
-        let pools = self.pools.read().unwrap();
+        let pools = self.pools.read();
         pools.iter().map(|(key, pool_lock)| {
-            let pool = pool_lock.lock().unwrap();
+            let pool = pool_lock.lock();
             PoolSummary {
                 database: pool.database.clone(),
                 user: pool.user.clone(),
@@ -1628,9 +1630,9 @@ impl ConnectionPooler {
 
     /// List all clients
     pub fn list_clients(&self) -> Vec<ClientSummary> {
-        let clients = self.clients.read().unwrap();
+        let clients = self.clients.read();
         clients.values().map(|lock| {
-            let client = lock.lock().unwrap();
+            let client = lock.lock();
             ClientSummary {
                 id: client.id,
                 database: client.database.clone(),
@@ -1645,9 +1647,9 @@ impl ConnectionPooler {
 
     /// List all servers
     pub fn list_servers(&self) -> Vec<ServerSummary> {
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         servers.values().map(|lock| {
-            let server = lock.lock().unwrap();
+            let server = lock.lock();
             ServerSummary {
                 id: server.id,
                 database: server.database.clone(),
@@ -1681,14 +1683,14 @@ impl ConnectionPooler {
     pub fn pause_database(&self, database: &str) -> Result<(), PoolerError> {
         // Verify database exists
         {
-            let databases = self.databases.read().unwrap();
+            let databases = self.databases.read();
             if !databases.contains_key(database) {
                 return Err(PoolerError::UnknownDatabase(database.to_string()));
             }
         }
 
         // Set pause state
-        let mut paused = self.paused_databases.write().unwrap();
+        let mut paused = self.paused_databases.write();
         paused.insert(database.to_string(), DatabasePauseState::Paused);
 
         Ok(())
@@ -1698,14 +1700,14 @@ impl ConnectionPooler {
     pub fn resume_database(&self, database: &str) -> Result<(), PoolerError> {
         // Verify database exists
         {
-            let databases = self.databases.read().unwrap();
+            let databases = self.databases.read();
             if !databases.contains_key(database) {
                 return Err(PoolerError::UnknownDatabase(database.to_string()));
             }
         }
 
         // Remove pause state
-        let mut paused = self.paused_databases.write().unwrap();
+        let mut paused = self.paused_databases.write();
         paused.remove(database);
 
         Ok(())
@@ -1716,7 +1718,7 @@ impl ConnectionPooler {
     pub fn wait_database(&self, database: &str) -> Result<usize, PoolerError> {
         // Verify database is paused
         {
-            let paused = self.paused_databases.read().unwrap();
+            let paused = self.paused_databases.read();
             if !matches!(paused.get(database), Some(DatabasePauseState::Paused)) {
                 return Err(PoolerError::ConfigError(
                     "database must be paused before waiting".to_string(),
@@ -1725,11 +1727,11 @@ impl ConnectionPooler {
         }
 
         // Count active connections for this database
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read();
         let active_count = servers
             .values()
             .filter_map(|lock| {
-                let server = lock.lock().unwrap();
+                let server = lock.lock();
                 if server.database == database && server.client_id.is_some() {
                     Some(())
                 } else {
@@ -1757,10 +1759,10 @@ impl ConnectionPooler {
 
         // Find and close all server connections for this database
         let server_ids: Vec<u64> = {
-            let servers = self.servers.read().unwrap();
+            let servers = self.servers.read();
             servers.iter()
                 .filter_map(|(&id, lock)| {
-                    let server = lock.lock().unwrap();
+                    let server = lock.lock();
                     if server.database == database {
                         Some(id)
                     } else {
@@ -1792,7 +1794,7 @@ impl ConnectionPooler {
     /// Changes to listen_addr/port require a restart.
     pub fn reload_config(&self) -> Result<(), PoolerError> {
         let config_path = {
-            let path = self.config_file_path.read().unwrap();
+            let path = self.config_file_path.read();
             path.clone()
         };
 
@@ -1811,7 +1813,7 @@ impl ConnectionPooler {
 
         // Apply changes to runtime config
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write();
             // Only update runtime-changeable parameters
             config.default_pool_size = new_config.default_pool_size;
             config.max_client_conn = new_config.max_client_conn;
@@ -2043,12 +2045,12 @@ impl AdminCommands {
                 "SERVERS" => Ok(AdminResult::Servers(pooler.list_servers())),
                 "CONFIG" => Ok(AdminResult::Config(pooler.get_config())),
                 "DATABASES" => {
-                    let dbs = pooler.databases.read().unwrap();
+                    let dbs = pooler.databases.read();
                     let names: Vec<String> = dbs.keys().cloned().collect();
                     Ok(AdminResult::Databases(names))
                 }
                 "PAUSED" => {
-                    let paused = pooler.paused_databases.read().unwrap();
+                    let paused = pooler.paused_databases.read();
                     let paused_dbs: Vec<String> = paused
                         .iter()
                         .filter(|(_, state)| matches!(state, DatabasePauseState::Paused))
@@ -2110,7 +2112,7 @@ impl AdminCommands {
         let param = parts[0].trim().to_lowercase();
         let value = parts[1].trim().trim_matches(|c| c == '\'' || c == '"');
 
-        let mut config = pooler.config.write().unwrap();
+        let mut config = pooler.config.write();
         match param.as_str() {
             "default_pool_size" => {
                 config.default_pool_size = value.parse().map_err(|_| {

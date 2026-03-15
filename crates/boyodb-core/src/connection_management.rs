@@ -24,8 +24,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
+
+use parking_lot::Mutex;
 
 // ============================================================================
 // Types and Errors
@@ -508,12 +510,12 @@ impl ConnectionPool {
 
     /// Get current pool size
     pub fn size(&self) -> usize {
-        self.available.lock().unwrap().len() + self.in_use.load(Ordering::Relaxed)
+        self.available.lock().len() + self.in_use.load(Ordering::Relaxed)
     }
 
     /// Get available connections
     pub fn available_count(&self) -> usize {
-        self.available.lock().unwrap().len()
+        self.available.lock().len()
     }
 
     /// Get in-use connections
@@ -523,7 +525,7 @@ impl ConnectionPool {
 
     /// Checkout a connection from the pool
     pub fn checkout(&self) -> Result<PooledConnection, ConnectionError> {
-        let mut available = self.available.lock().unwrap();
+        let mut available = self.available.lock();
 
         // Try to get an existing connection
         if let Some(mut conn) = available.pop_front() {
@@ -571,7 +573,7 @@ impl ConnectionPool {
             return;
         }
 
-        let mut available = self.available.lock().unwrap();
+        let mut available = self.available.lock();
 
         // Check pool size
         if available.len() < self.config.max_size {
@@ -581,7 +583,7 @@ impl ConnectionPool {
 
     /// Clean up idle connections
     pub fn cleanup(&self) -> usize {
-        let mut available = self.available.lock().unwrap();
+        let mut available = self.available.lock();
         let min_size = self.config.min_size;
         let idle_timeout = self.config.idle_timeout_ms;
 
@@ -604,7 +606,7 @@ impl ConnectionPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> PoolStats {
-        let available = self.available.lock().unwrap();
+        let available = self.available.lock();
         PoolStats {
             name: self.config.name.clone(),
             mode: self.config.mode,

@@ -24,7 +24,7 @@ use pgwire::messages::{startup::Authentication, PgWireBackendMessage};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 #[derive(Clone)]
 pub struct BoyodbPgAuthHandler {
@@ -155,7 +155,7 @@ impl BoyodbPgHandler {
 
     /// Handle BEGIN/START TRANSACTION command
     fn handle_begin(&self, query: &str) -> Result<(), String> {
-        let mut state = self.txn_state.lock().unwrap();
+        let mut state = self.txn_state.lock();
 
         if state.txn_id.is_some() {
             return Err("already in a transaction".to_string());
@@ -196,7 +196,7 @@ impl BoyodbPgHandler {
 
     /// Handle COMMIT command
     fn handle_commit(&self) -> Result<(), String> {
-        let mut state = self.txn_state.lock().unwrap();
+        let mut state = self.txn_state.lock();
 
         let txn_id = state
             .txn_id
@@ -217,7 +217,7 @@ impl BoyodbPgHandler {
 
     /// Handle ROLLBACK command
     fn handle_rollback(&self, savepoint: Option<&str>) -> Result<(), String> {
-        let mut state = self.txn_state.lock().unwrap();
+        let mut state = self.txn_state.lock();
 
         let txn_id = match state.txn_id {
             Some(id) => id,
@@ -250,7 +250,7 @@ impl BoyodbPgHandler {
 
     /// Handle SAVEPOINT command
     fn handle_savepoint(&self, name: &str) -> Result<(), String> {
-        let state = self.txn_state.lock().unwrap();
+        let state = self.txn_state.lock();
 
         let txn_id = state
             .txn_id
@@ -267,7 +267,7 @@ impl BoyodbPgHandler {
 
     /// Handle RELEASE SAVEPOINT command
     fn handle_release_savepoint(&self, name: &str) -> Result<(), String> {
-        let state = self.txn_state.lock().unwrap();
+        let state = self.txn_state.lock();
 
         let txn_id = state
             .txn_id
@@ -284,7 +284,7 @@ impl BoyodbPgHandler {
 
     /// Get current transaction ID (if any)
     fn current_txn_id(&self) -> Option<boyodb_core::transaction::TransactionId> {
-        self.txn_state.lock().unwrap().txn_id
+        self.txn_state.lock().txn_id
     }
 
     /// Check if a query is a transaction control command and handle it
@@ -414,7 +414,7 @@ impl ExtendedQueryHandler for BoyodbPgHandler {
         }
 
         // Get current transaction ID if in a transaction
-        let transaction_id = self.txn_state.lock().unwrap().txn_id;
+        let transaction_id = self.txn_state.lock().txn_id;
         let req = QueryRequest {
             sql: query.clone(),
             timeout_millis: 10000,
@@ -605,7 +605,7 @@ impl SimpleQueryHandler for BoyodbPgHandler {
         }
 
         // Get current transaction ID if in a transaction
-        let transaction_id = self.txn_state.lock().unwrap().txn_id;
+        let transaction_id = self.txn_state.lock().txn_id;
         let req = QueryRequest {
             sql: query.to_string(),
             timeout_millis: 10000,

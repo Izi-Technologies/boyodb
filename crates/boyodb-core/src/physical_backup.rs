@@ -11,8 +11,10 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+use parking_lot::RwLock;
 
 // ============================================================================
 // Backup Configuration
@@ -195,18 +197,18 @@ impl BackupState {
     }
 
     pub fn set_phase(&self, phase: BackupPhase) {
-        self.progress.write().unwrap().phase = phase;
+        self.progress.write().phase = phase;
     }
 
     pub fn add_error(&self, error: String) {
-        self.errors.write().unwrap().push(error);
+        self.errors.write().push(error);
     }
 
     pub fn update_progress(&self, bytes: u64, files: u64) {
         self.bytes_transferred.fetch_add(bytes, Ordering::SeqCst);
         self.files_transferred.fetch_add(files, Ordering::SeqCst);
 
-        let mut progress = self.progress.write().unwrap();
+        let mut progress = self.progress.write();
         progress.bytes_done = self.bytes_transferred.load(Ordering::SeqCst);
         progress.files_done = self.files_transferred.load(Ordering::SeqCst);
     }
@@ -381,7 +383,7 @@ impl BackupExecutor {
 
         // Initialize progress
         {
-            let mut progress = self.state.progress.write().unwrap();
+            let mut progress = self.state.progress.write();
             progress.start_time = Some(
                 SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
@@ -405,7 +407,7 @@ impl BackupExecutor {
         self.state.set_phase(BackupPhase::WaitingForCheckpoint);
         let total_size = self.calculate_backup_size()?;
         {
-            let mut progress = self.state.progress.write().unwrap();
+            let mut progress = self.state.progress.write();
             progress.total_bytes = total_size;
         }
 
@@ -887,10 +889,10 @@ impl RestoreExecutor {
 
     /// Execute restore from backup
     pub fn execute_restore(&self, config: &RestoreConfig) -> Result<RestoreResult, BackupError> {
-        *self.phase.write().unwrap() = RestorePhase::Initializing;
+        *self.phase.write() = RestorePhase::Initializing;
 
         // Validate backup
-        *self.phase.write().unwrap() = RestorePhase::ValidatingBackup;
+        *self.phase.write() = RestorePhase::ValidatingBackup;
         let manifest = self.validate_backup(&config.source)?;
 
         // Prepare target
@@ -904,20 +906,20 @@ impl RestoreExecutor {
         })?;
 
         // Restore files
-        *self.phase.write().unwrap() = RestorePhase::RestoringFiles;
+        *self.phase.write() = RestorePhase::RestoringFiles;
         self.restore_files(&config.source, &config.target)?;
 
         // Restore WAL if present
-        *self.phase.write().unwrap() = RestorePhase::RestoringWal;
+        *self.phase.write() = RestorePhase::RestoringWal;
         self.restore_wal(&config.source, &config.target)?;
 
         // Create recovery signal if PITR
         if config.recovery_target_time.is_some() || config.recovery_target_lsn.is_some() {
-            *self.phase.write().unwrap() = RestorePhase::CreatingRecoveryConf;
+            *self.phase.write() = RestorePhase::CreatingRecoveryConf;
             self.create_recovery_conf(&config.target, config)?;
         }
 
-        *self.phase.write().unwrap() = RestorePhase::Complete;
+        *self.phase.write() = RestorePhase::Complete;
 
         Ok(RestoreResult {
             files_restored: manifest.files.len() as u64,
@@ -1116,7 +1118,7 @@ mod tests {
         assert!(state.is_cancelled());
 
         state.set_phase(BackupPhase::BackingUpFiles);
-        assert_eq!(state.progress.read().unwrap().phase, BackupPhase::BackingUpFiles);
+        assert_eq!(state.progress.read().phase, BackupPhase::BackingUpFiles);
 
         state.update_progress(100, 1);
         assert_eq!(state.bytes_transferred.load(Ordering::SeqCst), 100);
@@ -1212,7 +1214,7 @@ mod tests {
     #[test]
     fn test_restore_executor_creation() {
         let executor = RestoreExecutor::new();
-        assert_eq!(*executor.phase.read().unwrap(), RestorePhase::Initializing);
+        assert_eq!(*executor.phase.read(), RestorePhase::Initializing);
     }
 
     #[test]
@@ -1263,7 +1265,7 @@ mod tests {
 
         for phase in phases {
             state.set_phase(phase);
-            assert_eq!(state.progress.read().unwrap().phase, phase);
+            assert_eq!(state.progress.read().phase, phase);
         }
     }
 
