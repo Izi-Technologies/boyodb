@@ -2,6 +2,8 @@
 
 Welcome to the BoyoDB documentation. This directory contains comprehensive guides for installing, configuring, and using BoyoDB.
 
+**Current Version: 0.9.6**
+
 ## Documentation Index
 
 ### Getting Started
@@ -19,17 +21,49 @@ Welcome to the BoyoDB documentation. This directory contains comprehensive guide
 - **[SECURITY.md](SECURITY.md)** - Authentication, authorization, and TLS
 - **[STORAGE_PHASES.md](STORAGE_PHASES.md)** - Storage tiers and data lifecycle
 
-### Enterprise Features
-- **Query Result Caching** - Distributed cache with Redis protocol (see README)
-- **Multi-Region DR** - Cross-region replication and failover (see README)
-- **Auto-Scaling** - Metrics-based scaling policies (see README)
-- **Data Retention** - GDPR/CCPA compliance and legal holds (see README)
-- **Query Replay** - Traffic capture and shadow testing (see README)
-- **CDC to Data Lakes** - Delta Lake/Iceberg CDC streaming (see README)
-
 ### Development
 - **[API.md](API.md)** - Protocol and API documentation
 - **[ROADMAP.md](ROADMAP.md)** - Feature roadmap and planned improvements
+
+## Feature Highlights
+
+### Enterprise Operations (v0.9.6)
+- **Query Result Caching** - Distributed cache with Redis-compatible protocol
+- **Multi-Region DR** - Cross-region replication with automatic failover
+- **Query Cost API** - Pre-flight cost estimates for query planning
+- **Tenant Isolation** - Namespace encryption, per-tenant backup/restore
+- **CDC to Data Lakes** - Direct CDC to Delta Lake/Iceberg
+- **Query Replay** - Traffic capture and replay for testing
+- **Auto-Scaling** - Metrics-based scaling with predictive policies
+- **Data Retention** - GDPR/CCPA compliant purging and legal holds
+
+### Analytics & ML
+- **Vector Search** - HNSW approximate nearest neighbor with multiple distance metrics
+- **Machine Learning** - Feature store, model registry, SHAP/LIME explainability
+- **Time Series Engine** - Aggregation, gap filling, downsampling, forecasting
+- **Graph Database** - Node/edge storage, path queries, PageRank, community detection
+- **Data Quality** - Validation rules, profiling, anomaly detection
+
+### ClickHouse Parity
+- **Approximate Functions** - HyperLogLog, T-Digest, Count-Min Sketch
+- **MergeTree Variants** - Replacing, Collapsing, Aggregating, Summing
+- **External Tables** - Query S3, HTTP, HDFS, Delta Lake, Iceberg
+- **Async Inserts** - Buffered batch ingestion
+- **Query Profiler** - Flame graphs, per-operator timing
+- **Parallel Replicas** - Distributed query execution
+
+### PostgreSQL Parity
+- **Exclusion Constraints** - Prevent overlapping ranges
+- **GIN/GiST Indexes** - Full-text search, spatial indexing
+- **CDC (Debezium-compatible)** - Change data capture
+- **WebAssembly UDFs** - Sandboxed user-defined functions
+- **Connection Pooler** - PgBouncer-compatible pooling
+
+### Performance
+- **GPU Acceleration** - CUDA (Linux/Windows) and Metal (macOS)
+- **JIT Compilation** - Cranelift-based native code generation
+- **Vectorized Execution** - SIMD-optimized query processing
+- **Group Commit** - Batched WAL writes for high throughput
 
 ## Quick Links
 
@@ -62,6 +96,29 @@ boyodb-server /data/node2 0.0.0.0:8767 \
     --cluster --cluster-id prod --gossip-addr 0.0.0.0:8768 \
     --seed-nodes "node1:8766"
 ```
+
+### Start a Read Replica
+```bash
+# Primary
+boyodb-server /data/primary 0.0.0.0:8765 \
+    --s3-bucket my-bucket --s3-region us-east-1
+
+# Replica
+boyodb-server /data/replica 0.0.0.0:8766 \
+    --replica --replica-sync-interval-ms 1000 \
+    --s3-bucket my-bucket --s3-region us-east-1
+```
+
+## Client Drivers
+
+| Driver | Repository |
+|--------|------------|
+| Rust | `drivers/rust/boyodb` |
+| Go | `drivers/go/boyodb` |
+| Python | `drivers/python/boyodb` |
+| Node.js | `bindings/node` |
+| C# | `drivers/csharp/BoyoDB` |
+| PHP | `drivers/php/boyodb` |
 
 ## Support
 

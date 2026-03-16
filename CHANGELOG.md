@@ -689,6 +689,7 @@ New engine configuration options:
 - Tiered storage (hot/warm/cold)
 - Compression (Zstd, LZ4, Snappy)
 
+[0.9.6]: https://github.com/Izi-Technologies/boyodb/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/Izi-Technologies/boyodb/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.7...v0.9.4
 [0.2.7]: https://github.com/Izi-Technologies/boyodb/compare/v0.2.6...v0.2.7
