@@ -601,7 +601,8 @@ impl BatchReader {
     /// Execute all reads and return results
     pub fn execute(self) -> io::Result<Vec<(u64, Vec<u8>)>> {
         let mut results = Vec::with_capacity(self.requests.len());
-        let mut request_ids = Vec::with_capacity(self.requests.len());
+        #[cfg(unix)]
+        let mut request_ids: Vec<(u64, u64)> = Vec::with_capacity(self.requests.len());
 
         // Submit all reads
         for (path, offset, len, user_data) in &self.requests {
