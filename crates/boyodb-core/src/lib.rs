@@ -760,3 +760,85 @@ pub use integrations::{
     PrestoConnectorConfig, PrestoConnectorGenerator, PrestoPluginInfo, SparkConnector,
     SparkConnectorConfig, SparkField, SparkPartition, SparkSchema, SparkWriteMode, TypeMapping,
 };
+
+// --- Enterprise Operations Features (Phase 41) ---
+pub mod query_cache;
+pub mod multi_region_dr;
+pub mod query_cost_api;
+pub mod tenant_isolation;
+pub mod cdc_lake;
+pub mod query_replay;
+pub mod auto_scaling;
+pub mod data_retention;
+
+// Query Result Caching
+pub use query_cache::{
+    CacheConfig, CacheEntry, CacheInvalidator, CacheKey, CacheStatsSnapshot, CacheValue,
+    CachedResult as QueryCachedResult, InvalidationEvent, QueryResultCache, RedisCacheCommand,
+    RedisCacheServer, RedisResponse,
+};
+
+// Multi-Region Disaster Recovery
+pub use multi_region_dr::{
+    DisasterRecoveryConfig, DnsRecord, DnsRecordType, DnsRoutingManager, DRError, DRMetrics,
+    FailoverEvent as DRFailoverEvent, FailoverReason, FailoverState, MultiRegionDRManager,
+    RegionConfig as DRRegionConfig, RegionHealth, RegionId, RegionStatus, ReplicationBatch,
+    ReplicationEvent, ReplicationStatus as DRReplicationStatus, RoutingPolicy,
+};
+
+// Query Cost Estimation API
+pub use query_cost_api::{
+    ColumnStatistics as CostColumnStatistics, CostEstimationService, CostModelConfig,
+    CostWarning, FilterPredicate as CostFilterPredicate, Histogram as CostHistogram,
+    HistogramBucket as CostHistogramBucket, IndexStatistics as CostIndexStatistics,
+    OperationCost, OperationType, PlanOperation, QueryComplexity as CostQueryComplexity,
+    QueryCostEstimate, QueryCostEstimator, QueryPlan as CostQueryPlan, QuickEstimate,
+    ResourcePredictions, TableStatistics as CostTableStatistics, WarningSeverity,
+};
+
+// Tenant Isolation
+pub use tenant_isolation::{
+    BackupError as TenantBackupError, BackupStatus, BackupStorageLocation,
+    BackupType as TenantBackupType, DataEncryptionKey, DataResidency, EncryptedData,
+    EncryptionAlgorithm as TenantEncryptionAlgorithm, EncryptionError, KeyManagement,
+    NamespaceEncryptionManager, QuotaCheckOperation, RestoreRequest, RestoreState,
+    RestoreStatus, TenantBackup, TenantBackupConfig, TenantBackupManager, TenantConfig,
+    TenantEncryption, TenantError, TenantId, TenantManager, TenantQuotas, TenantStatus,
+    TenantUsage as TenantResourceUsage,
+};
+
+// CDC to Data Lakes
+pub use cdc_lake::{
+    BatchConfig, CdcColumn as LakeCdcColumn, CdcDataType as LakeCdcDataType,
+    CdcEvent as LakeCdcEvent, CdcLakeSinkManager, CdcOperation,
+    CdcSchema as LakeCdcSchema, CdcValue as LakeCdcValue, CompactionConfig, DeltaLakeWriter,
+    IcebergWriter, LakeError, LakeFormat, LakeSink, LakeSinkConfig, LakeStorage,
+    LakeWriterStatsSnapshot, WriteMode as LakeWriteMode, WriteResult as LakeWriteResult,
+};
+
+// Query Replay/Shadowing
+pub use query_replay::{
+    CaptureConfig, CapturedQuery, CaptureFilters, CaptureStatsSnapshot, CaptureStorage,
+    ParamValue, PerformanceComparison, QueryCaptureService, QueryParam, QueryReplayResult,
+    QueryReplayService, ReplayConfig, ReplayMode, ReplayProgress, ReplayReport, ReplayStatus,
+    ReplayStatsSnapshot, ResultComparison, RowDiff, ShadowStatsSnapshot, ShadowTarget,
+    ShadowTrafficService,
+};
+
+// Auto-Scaling
+pub use auto_scaling::{
+    AutoScalingConfig, AutoScalingManager, AutoScalingStatus, CapacityForecast,
+    ComparisonOperator as ScalingComparisonOperator, MetricAggregation,
+    MetricDataPoint as ScalingMetricDataPoint, MetricsCollector, PolicyType, PredictiveScaler,
+    ScalingAction, ScalingDecision, ScalingError, ScalingEvent, ScalingEventType, ScalingMetric,
+    ScalingPolicy,
+};
+
+// Data Retention & Compliance
+pub use data_retention::{
+    AnonymizationStrategy, ComplianceReport, ComplianceRequirement, DataCategory,
+    DataRetentionManager, DataSubjectRequest, DataSubjectRequestType, ExportFormat,
+    LegalHold, LegalHoldScope, LegalHoldStatus, PurgeAction, PurgeEvent, PurgeSchedule,
+    RequestNote, RequestResult, RequestStatus, RetentionError, RetentionPeriod, RetentionPolicy,
+    RetentionScope, RetentionStatsSnapshot, TableRef as RetentionTableRef,
+};
