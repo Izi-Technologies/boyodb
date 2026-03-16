@@ -445,6 +445,8 @@ pub struct QueryReplayService {
     current_job: RwLock<Option<ReplayJob>>,
     /// Statistics
     stats: ReplayStats,
+    /// Maximum results to keep (prevents unbounded growth)
+    max_results: usize,
 }
 
 #[derive(Default)]
@@ -480,6 +482,7 @@ impl QueryReplayService {
             results: RwLock::new(Vec::new()),
             current_job: RwLock::new(None),
             stats: ReplayStats::default(),
+            max_results: 10000, // Keep last 10k results
         }
     }
 
@@ -599,7 +602,14 @@ impl QueryReplayService {
             job.completed_queries.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.results.write().push(result);
+        let mut results = self.results.write();
+        results.push(result);
+
+        // Enforce max results limit (remove oldest results)
+        if results.len() > self.max_results {
+            let excess = results.len() - self.max_results;
+            results.drain(0..excess);
+        }
     }
 
     /// Get replay progress

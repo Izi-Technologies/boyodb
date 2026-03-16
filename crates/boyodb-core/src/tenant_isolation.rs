@@ -371,6 +371,24 @@ impl NamespaceEncryptionManager {
     pub fn clear_cache(&self) {
         self.key_cache.write().clear();
     }
+
+    /// Prune expired entries from the key cache
+    pub fn prune_cache(&self) {
+        let mut cache = self.key_cache.write();
+        cache.retain(|_, cached| cached.cached_at.elapsed() < self.cache_ttl);
+    }
+
+    /// Remove all keys for a tenant (call when deleting tenant)
+    pub fn remove_tenant_keys(&self, tenant_id: &str) {
+        self.tenant_configs.write().remove(tenant_id);
+
+        let mut data_keys = self.data_keys.write();
+        data_keys.retain(|(tid, _), _| tid != tenant_id);
+
+        // Clear related cache entries
+        let mut cache = self.key_cache.write();
+        cache.retain(|key_id, _| !key_id.starts_with(&format!("{}:", tenant_id)));
+    }
 }
 
 impl Default for NamespaceEncryptionManager {
@@ -605,6 +623,8 @@ pub struct TenantBackupManager {
     backup_counter: AtomicU64,
     /// Encryption manager
     encryption_manager: Arc<NamespaceEncryptionManager>,
+    /// Maximum backups to keep per tenant (prevents unbounded growth)
+    max_backups_per_tenant: usize,
 }
 
 impl TenantBackupManager {
@@ -615,6 +635,48 @@ impl TenantBackupManager {
             restores: RwLock::new(HashMap::new()),
             backup_counter: AtomicU64::new(0),
             encryption_manager,
+            max_backups_per_tenant: 100,
+        }
+    }
+
+    /// Cleanup completed restores older than the given age in seconds
+    pub fn cleanup_old_restores(&self, max_age_secs: u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut restores = self.restores.write();
+        restores.retain(|_, r| {
+            // Keep pending/in-progress restores, or completed ones within max_age
+            r.status == RestoreState::Pending
+                || r.status == RestoreState::InProgress
+                || r.completed_at.map(|t| now - t < max_age_secs).unwrap_or(true)
+        });
+    }
+
+    /// Enforce backup limits per tenant (keeps most recent backups)
+    fn enforce_backup_limits(&self, tenant_id: &str) {
+        let mut backups = self.backups.write();
+
+        // Get all backups for this tenant sorted by creation time
+        let mut tenant_backups: Vec<_> = backups
+            .iter()
+            .filter(|(_, b)| b.tenant_id == tenant_id && b.status == BackupStatus::Completed)
+            .map(|(id, b)| (id.clone(), b.started_at))
+            .collect();
+
+        if tenant_backups.len() <= self.max_backups_per_tenant {
+            return;
+        }
+
+        // Sort by time (oldest first)
+        tenant_backups.sort_by_key(|(_, ts)| *ts);
+
+        // Remove oldest backups exceeding limit
+        let to_remove = tenant_backups.len() - self.max_backups_per_tenant;
+        for (id, _) in tenant_backups.into_iter().take(to_remove) {
+            backups.remove(&id);
         }
     }
 
@@ -677,20 +739,26 @@ impl TenantBackupManager {
         size_bytes: u64,
         checksum: &str,
     ) -> Result<(), BackupError> {
-        let mut backups = self.backups.write();
-        let backup = backups
-            .get_mut(backup_id)
-            .ok_or_else(|| BackupError::BackupNotFound(backup_id.to_string()))?;
+        let tenant_id = {
+            let mut backups = self.backups.write();
+            let backup = backups
+                .get_mut(backup_id)
+                .ok_or_else(|| BackupError::BackupNotFound(backup_id.to_string()))?;
 
-        backup.status = BackupStatus::Completed;
-        backup.completed_at = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
-        backup.size_bytes = size_bytes;
-        backup.checksum = checksum.to_string();
+            backup.status = BackupStatus::Completed;
+            backup.completed_at = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            );
+            backup.size_bytes = size_bytes;
+            backup.checksum = checksum.to_string();
+            backup.tenant_id.clone()
+        };
+
+        // Enforce per-tenant backup limits
+        self.enforce_backup_limits(&tenant_id);
 
         Ok(())
     }

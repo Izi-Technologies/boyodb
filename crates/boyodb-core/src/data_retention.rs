@@ -341,6 +341,10 @@ pub struct DataRetentionManager {
     purge_history: RwLock<Vec<PurgeEvent>>,
     /// Statistics
     stats: RetentionStats,
+    /// Maximum purge events to keep in history
+    max_purge_history: usize,
+    /// Maximum completed requests to keep
+    max_completed_requests: usize,
 }
 
 #[derive(Default)]
@@ -360,6 +364,8 @@ impl DataRetentionManager {
             category_mappings: RwLock::new(HashMap::new()),
             purge_history: RwLock::new(Vec::new()),
             stats: RetentionStats::default(),
+            max_purge_history: 1000,
+            max_completed_requests: 1000,
         }
     }
 
@@ -730,9 +736,78 @@ impl DataRetentionManager {
             duration_ms: 100,
         };
 
-        self.purge_history.write().push(event.clone());
+        {
+            let mut history = self.purge_history.write();
+            history.push(event.clone());
+            // Enforce history limit
+            if history.len() > self.max_purge_history {
+                let excess = history.len() - self.max_purge_history;
+                history.drain(0..excess);
+            }
+        }
 
         Ok(event)
+    }
+
+    /// Cleanup old completed requests
+    pub fn cleanup_completed_requests(&self, max_age_secs: u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut requests = self.requests.write();
+
+        // Remove completed/rejected/expired requests older than max_age
+        requests.retain(|_, r| {
+            if r.status == RequestStatus::Pending || r.status == RequestStatus::InProgress {
+                return true; // Keep active requests
+            }
+            // Keep completed requests within max_age
+            r.completed_at
+                .map(|t| now - t < max_age_secs)
+                .unwrap_or(true)
+        });
+
+        // Also enforce absolute limit on completed requests
+        if requests.len() > self.max_completed_requests {
+            // Get completed requests sorted by completion time
+            let mut completed: Vec<_> = requests
+                .iter()
+                .filter(|(_, r)| r.status == RequestStatus::Completed)
+                .map(|(id, r)| (id.clone(), r.completed_at.unwrap_or(0)))
+                .collect();
+
+            completed.sort_by_key(|(_, ts)| *ts);
+
+            let active_count = requests.len() - completed.len();
+            let max_completed = self.max_completed_requests.saturating_sub(active_count);
+
+            if completed.len() > max_completed {
+                let to_remove = completed.len() - max_completed;
+                for (id, _) in completed.into_iter().take(to_remove) {
+                    requests.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// Cleanup released legal holds older than max_age
+    pub fn cleanup_released_holds(&self, max_age_secs: u64) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        self.legal_holds.write().retain(|_, h| {
+            if h.status == LegalHoldStatus::Active {
+                return true; // Keep active holds
+            }
+            // Remove released holds older than max_age
+            h.released_at
+                .map(|t| now - t < max_age_secs)
+                .unwrap_or(true)
+        });
     }
 
     /// Get purge history

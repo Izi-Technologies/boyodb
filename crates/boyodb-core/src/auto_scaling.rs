@@ -543,6 +543,8 @@ pub struct AutoScalingManager {
     history: RwLock<Vec<ScalingEvent>>,
     /// Running state
     running: AtomicBool,
+    /// Maximum scaling events to keep in history
+    max_history_size: usize,
 }
 
 impl AutoScalingManager {
@@ -558,6 +560,7 @@ impl AutoScalingManager {
             last_scaling_time: RwLock::new(None),
             history: RwLock::new(Vec::new()),
             running: AtomicBool::new(false),
+            max_history_size: 1000, // Keep last 1000 scaling events
         }
     }
 
@@ -800,8 +803,15 @@ impl AutoScalingManager {
             error: None,
         };
 
-        // Record history
-        self.history.write().push(event.clone());
+        // Record history with bounded size
+        {
+            let mut history = self.history.write();
+            history.push(event.clone());
+            if history.len() > self.max_history_size {
+                let excess = history.len() - self.max_history_size;
+                history.drain(0..excess);
+            }
+        }
 
         Ok(event)
     }
@@ -836,8 +846,25 @@ impl AutoScalingManager {
             error: None,
         };
 
-        self.history.write().push(event.clone());
+        {
+            let mut history = self.history.write();
+            history.push(event.clone());
+            if history.len() > self.max_history_size {
+                let excess = history.len() - self.max_history_size;
+                history.drain(0..excess);
+            }
+        }
         Ok(event)
+    }
+
+    /// Cleanup stale policy states for removed policies
+    pub fn cleanup_policy_states(&self) {
+        let config = self.config.read();
+        let policy_names: std::collections::HashSet<_> =
+            config.policies.iter().map(|p| p.name.clone()).collect();
+        drop(config);
+
+        self.policy_states.write().retain(|name, _| policy_names.contains(name));
     }
 
     /// Get current node count

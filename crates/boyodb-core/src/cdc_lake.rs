@@ -692,6 +692,8 @@ pub struct CdcLakeSinkManager {
     sinks: RwLock<HashMap<String, Arc<dyn LakeSink + Send + Sync>>>,
     /// Schema registry
     schemas: RwLock<HashMap<String, Vec<CdcSchema>>>,
+    /// Maximum schema versions to keep per table
+    max_schema_versions: usize,
 }
 
 /// Lake sink trait
@@ -734,6 +736,7 @@ impl CdcLakeSinkManager {
         Self {
             sinks: RwLock::new(HashMap::new()),
             schemas: RwLock::new(HashMap::new()),
+            max_schema_versions: 100, // Keep last 100 schema versions per table
         }
     }
 
@@ -787,11 +790,18 @@ impl CdcLakeSinkManager {
 
     /// Register schema for a table
     pub fn register_schema(&self, table_key: &str, schema: CdcSchema) {
-        self.schemas
-            .write()
+        let mut schemas = self.schemas.write();
+        let versions = schemas
             .entry(table_key.to_string())
-            .or_insert_with(Vec::new)
-            .push(schema);
+            .or_insert_with(Vec::new);
+
+        versions.push(schema);
+
+        // Keep only the most recent schema versions
+        if versions.len() > self.max_schema_versions {
+            let excess = versions.len() - self.max_schema_versions;
+            versions.drain(0..excess);
+        }
     }
 
     /// Get schema history for a table

@@ -503,6 +503,27 @@ impl QueryResultCache {
                 self.stats.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
+
+        // Cleanup stale table dependencies (tables with no active cache entries)
+        self.cleanup_stale_dependencies();
+    }
+
+    /// Remove table dependency entries for tables that no longer have any cached queries
+    fn cleanup_stale_dependencies(&self) {
+        // Collect all tables referenced by current cache entries
+        let mut active_tables: HashSet<String> = HashSet::new();
+        for shard in &self.shards {
+            let shard = shard.read();
+            for entry in shard.entries.values() {
+                for table in &entry.result.referenced_tables {
+                    active_tables.insert(table.clone());
+                }
+            }
+        }
+
+        // Remove dependency entries for tables not in active set
+        let mut deps = self.table_dependencies.write();
+        deps.retain(|table, _| active_tables.contains(table));
     }
 }
 

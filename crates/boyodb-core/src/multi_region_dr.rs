@@ -372,6 +372,8 @@ pub struct MultiRegionDRManager {
     running: AtomicBool,
     /// Replication streams per region
     replication_cursors: RwLock<HashMap<RegionId, u64>>,
+    /// Maximum failover events to keep in history
+    max_failover_history: usize,
 }
 
 impl MultiRegionDRManager {
@@ -392,6 +394,7 @@ impl MultiRegionDRManager {
             current_lsn: AtomicU64::new(0),
             running: AtomicBool::new(false),
             replication_cursors: RwLock::new(HashMap::new()),
+            max_failover_history: 100, // Keep last 100 failover events
         }
     }
 
@@ -626,8 +629,15 @@ impl MultiRegionDRManager {
             data_loss_estimate_ms: data_loss_ms,
         };
 
-        // Record event
-        self.failover_history.write().push(event.clone());
+        // Record event with bounded history
+        {
+            let mut history = self.failover_history.write();
+            history.push(event.clone());
+            if history.len() > self.max_failover_history {
+                let excess = history.len() - self.max_failover_history;
+                history.drain(0..excess);
+            }
+        }
 
         // Complete failover
         *self.failover_state.write() = FailoverState::Completed;
