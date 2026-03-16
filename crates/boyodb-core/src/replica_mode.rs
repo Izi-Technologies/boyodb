@@ -40,10 +40,10 @@
 //!     --primary http://primary:8765
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -62,7 +62,10 @@ pub enum ReplicaError {
     /// Manifest parse error
     ManifestError(String),
     /// Lag too high
-    LagTooHigh { current_lag_ms: u64, max_lag_ms: u64 },
+    LagTooHigh {
+        current_lag_ms: u64,
+        max_lag_ms: u64,
+    },
     /// Configuration error
     ConfigError(String),
     /// Internal error

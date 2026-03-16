@@ -197,9 +197,7 @@ impl SqlExtensionRegistry {
         self.register(SqlExtension::new(
             "PROFILE",
             ExtensionCategory::DataQuality,
-            vec![
-                Param::new("table", ParamType::Table),
-            ],
+            vec![Param::new("table", ParamType::Table)],
             ParamType::Table,
             "Generate data quality profile",
         ));
@@ -207,9 +205,7 @@ impl SqlExtensionRegistry {
         self.register(SqlExtension::new(
             "QUALITY_SCORE",
             ExtensionCategory::DataQuality,
-            vec![
-                Param::new("table", ParamType::Table),
-            ],
+            vec![Param::new("table", ParamType::Table)],
             ParamType::Float,
             "Calculate overall data quality score",
         ));
@@ -241,9 +237,7 @@ impl SqlExtensionRegistry {
         self.register(SqlExtension::new(
             "VERIFY_CHAIN",
             ExtensionCategory::Audit,
-            vec![
-                Param::new("ledger", ParamType::String),
-            ],
+            vec![Param::new("ledger", ParamType::String)],
             ParamType::Boolean,
             "Verify blockchain integrity",
         ));
@@ -263,9 +257,7 @@ impl SqlExtensionRegistry {
         self.register(SqlExtension::new(
             "WORKFLOW_STATUS",
             ExtensionCategory::Workflow,
-            vec![
-                Param::new("run_id", ParamType::String),
-            ],
+            vec![Param::new("run_id", ParamType::String)],
             ParamType::Table,
             "Get workflow run status",
         ));

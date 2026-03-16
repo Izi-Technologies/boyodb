@@ -26,12 +26,12 @@
 //!                     └─────────────┘
 //! ```
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Configuration
@@ -324,21 +324,20 @@ impl SchemaRegistryClient {
 
     async fn fetch_schema_http(&self, url: &str) -> Result<String, KafkaSinkError> {
         // Parse URL to get host and path
-        let url_parsed = url.strip_prefix("http://")
+        let url_parsed = url
+            .strip_prefix("http://")
             .or_else(|| url.strip_prefix("https://"))
             .unwrap_or(url);
 
-        let (host, path) = url_parsed.split_once('/')
+        let (host, path) = url_parsed
+            .split_once('/')
             .ok_or_else(|| KafkaSinkError::SchemaRegistry("invalid URL".into()))?;
 
         // Connect and fetch
-        let stream = tokio::time::timeout(
-            self.timeout,
-            tokio::net::TcpStream::connect(host),
-        )
-        .await
-        .map_err(|_| KafkaSinkError::SchemaRegistry("connection timeout".into()))?
-        .map_err(|e| KafkaSinkError::SchemaRegistry(format!("connection failed: {}", e)))?;
+        let stream = tokio::time::timeout(self.timeout, tokio::net::TcpStream::connect(host))
+            .await
+            .map_err(|_| KafkaSinkError::SchemaRegistry("connection timeout".into()))?
+            .map_err(|e| KafkaSinkError::SchemaRegistry(format!("connection failed: {}", e)))?;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = stream;
@@ -348,17 +347,22 @@ impl SchemaRegistryClient {
             path, host
         );
 
-        stream.write_all(request.as_bytes()).await
+        stream
+            .write_all(request.as_bytes())
+            .await
             .map_err(|e| KafkaSinkError::SchemaRegistry(format!("write failed: {}", e)))?;
 
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).await
+        stream
+            .read_to_end(&mut response)
+            .await
             .map_err(|e| KafkaSinkError::SchemaRegistry(format!("read failed: {}", e)))?;
 
         let response_str = String::from_utf8_lossy(&response);
 
         // Parse HTTP response
-        let body_start = response_str.find("\r\n\r\n")
+        let body_start = response_str
+            .find("\r\n\r\n")
             .ok_or_else(|| KafkaSinkError::SchemaRegistry("invalid HTTP response".into()))?;
         let body = &response_str[body_start + 4..];
 
@@ -418,19 +422,23 @@ impl MessageParser {
         })
     }
 
-    fn parse_json(&self, data: &[u8]) -> Result<HashMap<String, serde_json::Value>, KafkaSinkError> {
+    fn parse_json(
+        &self,
+        data: &[u8],
+    ) -> Result<HashMap<String, serde_json::Value>, KafkaSinkError> {
         let value: serde_json::Value = serde_json::from_slice(data)
             .map_err(|e| KafkaSinkError::Parse(format!("JSON parse error: {}", e)))?;
 
         match value {
-            serde_json::Value::Object(map) => {
-                Ok(map.into_iter().collect())
-            }
+            serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
             _ => Err(KafkaSinkError::Parse("JSON root must be an object".into())),
         }
     }
 
-    async fn parse_avro(&self, data: &[u8]) -> Result<HashMap<String, serde_json::Value>, KafkaSinkError> {
+    async fn parse_avro(
+        &self,
+        data: &[u8],
+    ) -> Result<HashMap<String, serde_json::Value>, KafkaSinkError> {
         // Avro wire format: [magic byte][schema ID (4 bytes)][data]
         if data.len() < 5 {
             return Err(KafkaSinkError::Parse("Avro data too short".into()));
@@ -446,7 +454,11 @@ impl MessageParser {
         // Get schema from registry
         let _schema = match &self.schema_registry {
             Some(registry) => registry.get_schema(schema_id).await?,
-            None => return Err(KafkaSinkError::Parse("Schema registry not configured".into())),
+            None => {
+                return Err(KafkaSinkError::Parse(
+                    "Schema registry not configured".into(),
+                ))
+            }
         };
 
         // Note: Full Avro deserialization would require the apache-avro crate
@@ -619,8 +631,12 @@ impl KafkaSinkConnector {
 
     /// Process a Kafka record
     pub async fn process_record(&self, record: KafkaRecord) -> Result<(), KafkaSinkError> {
-        self.metrics.messages_consumed.fetch_add(1, Ordering::Relaxed);
-        self.metrics.bytes_consumed.fetch_add(record.value.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .messages_consumed
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .bytes_consumed
+            .fetch_add(record.value.len() as u64, Ordering::Relaxed);
 
         // Parse the record
         let parsed = match self.parser.parse(&record).await {
@@ -685,14 +701,20 @@ impl KafkaSinkConnector {
             "Flushing batch to BoyoDB"
         );
 
-        self.metrics.messages_ingested.fetch_add(record_count, Ordering::Relaxed);
-        self.metrics.batches_committed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .messages_ingested
+            .fetch_add(record_count, Ordering::Relaxed);
+        self.metrics
+            .batches_committed
+            .fetch_add(1, Ordering::Relaxed);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        self.metrics.last_commit_millis.store(now, Ordering::Relaxed);
+        self.metrics
+            .last_commit_millis
+            .store(now, Ordering::Relaxed);
 
         // Update last flush time
         *self.last_flush.write() = std::time::Instant::now();
@@ -727,26 +749,28 @@ impl KafkaSinkConnector {
 
         for col_name in &column_names {
             // Determine type from first non-null value
-            let first_value = records.iter()
-                .find_map(|r| r.columns.get(col_name));
+            let first_value = records.iter().find_map(|r| r.columns.get(col_name));
 
             match first_value {
                 Some(serde_json::Value::Number(n)) if n.is_i64() => {
-                    let values: Vec<Option<i64>> = records.iter()
+                    let values: Vec<Option<i64>> = records
+                        .iter()
                         .map(|r| r.columns.get(col_name).and_then(|v| v.as_i64()))
                         .collect();
                     columns.push(Arc::new(Int64Array::from(values)));
                     fields.push(Field::new(col_name, arrow_schema::DataType::Int64, true));
                 }
                 Some(serde_json::Value::Number(_)) => {
-                    let values: Vec<Option<f64>> = records.iter()
+                    let values: Vec<Option<f64>> = records
+                        .iter()
                         .map(|r| r.columns.get(col_name).and_then(|v| v.as_f64()))
                         .collect();
                     columns.push(Arc::new(Float64Array::from(values)));
                     fields.push(Field::new(col_name, arrow_schema::DataType::Float64, true));
                 }
                 Some(serde_json::Value::Bool(_)) => {
-                    let values: Vec<Option<bool>> = records.iter()
+                    let values: Vec<Option<bool>> = records
+                        .iter()
                         .map(|r| r.columns.get(col_name).and_then(|v| v.as_bool()))
                         .collect();
                     columns.push(Arc::new(BooleanArray::from(values)));
@@ -754,13 +778,12 @@ impl KafkaSinkConnector {
                 }
                 _ => {
                     // Default to string
-                    let values: Vec<Option<String>> = records.iter()
+                    let values: Vec<Option<String>> = records
+                        .iter()
                         .map(|r| {
-                            r.columns.get(col_name).map(|v| {
-                                match v {
-                                    serde_json::Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                }
+                            r.columns.get(col_name).map(|v| match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
                             })
                         })
                         .collect();
@@ -771,17 +794,22 @@ impl KafkaSinkConnector {
         }
 
         let schema = Arc::new(Schema::new(fields));
-        let batch = RecordBatch::try_new(schema, columns)
-            .map_err(|e| KafkaSinkError::Conversion(format!("RecordBatch creation failed: {}", e)))?;
+        let batch = RecordBatch::try_new(schema, columns).map_err(|e| {
+            KafkaSinkError::Conversion(format!("RecordBatch creation failed: {}", e))
+        })?;
 
         // Serialize to IPC
         let mut buf = Vec::new();
         {
             let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut buf, &batch.schema())
-                .map_err(|e| KafkaSinkError::Conversion(format!("IPC writer creation failed: {}", e)))?;
-            writer.write(&batch)
+                .map_err(|e| {
+                    KafkaSinkError::Conversion(format!("IPC writer creation failed: {}", e))
+                })?;
+            writer
+                .write(&batch)
                 .map_err(|e| KafkaSinkError::Conversion(format!("IPC write failed: {}", e)))?;
-            writer.finish()
+            writer
+                .finish()
                 .map_err(|e| KafkaSinkError::Conversion(format!("IPC finish failed: {}", e)))?;
         }
 
@@ -864,7 +892,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(parser.parse(&record)).unwrap();
 
-        assert_eq!(result.columns.get("name").unwrap(), &serde_json::json!("test"));
+        assert_eq!(
+            result.columns.get("name").unwrap(),
+            &serde_json::json!("test")
+        );
         assert_eq!(result.columns.get("value").unwrap(), &serde_json::json!(42));
     }
 
@@ -885,9 +916,18 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(parser.parse(&record)).unwrap();
 
-        assert_eq!(result.columns.get("col_0").unwrap(), &serde_json::json!("hello"));
-        assert_eq!(result.columns.get("col_1").unwrap(), &serde_json::json!("world"));
-        assert_eq!(result.columns.get("col_2").unwrap(), &serde_json::json!(123));
+        assert_eq!(
+            result.columns.get("col_0").unwrap(),
+            &serde_json::json!("hello")
+        );
+        assert_eq!(
+            result.columns.get("col_1").unwrap(),
+            &serde_json::json!("world")
+        );
+        assert_eq!(
+            result.columns.get("col_2").unwrap(),
+            &serde_json::json!(123)
+        );
     }
 
     #[test]

@@ -6,11 +6,11 @@
 // - Database/table placement control
 // - Storage quota management
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
-use std::fs;
 
 // ============================================================================
 // Types and Configuration
@@ -231,7 +231,8 @@ impl Tablespace {
 
     /// Get path for a specific relation in this tablespace
     pub fn relation_path(&self, database_oid: u32, relation_oid: u32) -> PathBuf {
-        self.database_path(database_oid).join(format!("{}", relation_oid))
+        self.database_path(database_oid)
+            .join(format!("{}", relation_oid))
     }
 
     /// Initialize the tablespace directory structure
@@ -246,10 +247,7 @@ impl Tablespace {
         } else {
             // Create the directory
             fs::create_dir_all(&self.config.location).map_err(|e| {
-                TablespaceError::IoError(format!(
-                    "Failed to create tablespace directory: {}",
-                    e
-                ))
+                TablespaceError::IoError(format!("Failed to create tablespace directory: {}", e))
             })?;
         }
 
@@ -505,10 +503,7 @@ impl TablespaceManager {
     /// Get total size across all tablespaces
     pub fn total_size(&self) -> u64 {
         let tablespaces = self.tablespaces.read();
-        tablespaces
-            .values()
-            .map(|ts| ts.stats().bytes_used)
-            .sum()
+        tablespaces.values().map(|ts| ts.stats().bytes_used).sum()
     }
 
     /// Find optimal tablespace for new relation based on criteria
@@ -597,7 +592,10 @@ impl std::fmt::Display for TablespaceError {
             Self::InvalidLocation(msg) => write!(f, "Invalid tablespace location: {}", msg),
             Self::AlreadyExists(name) => write!(f, "Tablespace '{}' already exists", name),
             Self::NotFound(name) => write!(f, "Tablespace '{}' not found", name),
-            Self::NotEmpty { tablespace, relation_count } => {
+            Self::NotEmpty {
+                tablespace,
+                relation_count,
+            } => {
                 write!(
                     f,
                     "Tablespace '{}' is not empty ({} relations)",

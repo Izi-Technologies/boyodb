@@ -1,11 +1,11 @@
 use crate::engine::{persist_manifest, EngineError};
 use crate::replication::{Manifest, ManifestEntry, SegmentTier};
 use crate::storage::TieredStorage;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 

@@ -240,7 +240,12 @@ impl MetricsCollector {
         let metrics = self.metrics.read();
         metrics
             .get(&metric)
-            .map(|h| h.iter().filter(|p| p.timestamp >= cutoff).cloned().collect())
+            .map(|h| {
+                h.iter()
+                    .filter(|p| p.timestamp >= cutoff)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -358,7 +363,11 @@ impl PredictiveScaler {
             .as_secs()
             - 7 * 24 * 3600;
 
-        while history.front().map(|p| p.timestamp < cutoff).unwrap_or(false) {
+        while history
+            .front()
+            .map(|p| p.timestamp < cutoff)
+            .unwrap_or(false)
+        {
             history.pop_front();
         }
     }
@@ -585,10 +594,8 @@ impl AutoScalingManager {
 
         // Also feed predictive scaler
         if metric == ScalingMetric::CpuUtilization {
-            self.predictive.record_capacity(
-                self.current_nodes.load(Ordering::Relaxed) as u32,
-                value,
-            );
+            self.predictive
+                .record_capacity(self.current_nodes.load(Ordering::Relaxed) as u32, value);
         }
     }
 
@@ -648,9 +655,11 @@ impl AutoScalingManager {
         let config = self.config.read();
 
         // Get metric value
-        let metric_value = self
-            .metrics
-            .aggregate(policy.metric, config.evaluation_period_secs, MetricAggregation::Average)?;
+        let metric_value = self.metrics.aggregate(
+            policy.metric,
+            config.evaluation_period_secs,
+            MetricAggregation::Average,
+        )?;
 
         // Check threshold
         let breached = policy.operator.evaluate(metric_value, policy.threshold);
@@ -715,7 +724,11 @@ impl AutoScalingManager {
         }
 
         // Check if we need to scale for upcoming demand
-        let max_recommended = forecasts.iter().map(|f| f.recommended_nodes).max().unwrap_or(current_nodes);
+        let max_recommended = forecasts
+            .iter()
+            .map(|f| f.recommended_nodes)
+            .max()
+            .unwrap_or(current_nodes);
 
         if max_recommended > current_nodes && max_recommended <= config.max_nodes {
             return Some(ScalingDecision {
@@ -724,7 +737,9 @@ impl AutoScalingManager {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs(),
-                action: ScalingAction::SetNodeCount { count: max_recommended },
+                action: ScalingAction::SetNodeCount {
+                    count: max_recommended,
+                },
                 triggered_by: "predictive-scaling".to_string(),
                 current_nodes,
                 target_nodes: max_recommended,
@@ -777,7 +792,8 @@ impl AutoScalingManager {
         drop(config);
 
         // Execute scaling (simplified - in production would call cloud API)
-        self.current_nodes.store(decision.target_nodes as u64, Ordering::Relaxed);
+        self.current_nodes
+            .store(decision.target_nodes as u64, Ordering::Relaxed);
 
         // Update last scaling time
         *self.last_scaling_time.write() = Some(Instant::now());
@@ -829,7 +845,8 @@ impl AutoScalingManager {
         drop(config);
 
         let previous = self.current_nodes.load(Ordering::Relaxed) as u32;
-        self.current_nodes.store(node_count as u64, Ordering::Relaxed);
+        self.current_nodes
+            .store(node_count as u64, Ordering::Relaxed);
 
         let event = ScalingEvent {
             event_id: generate_event_id(),
@@ -864,7 +881,9 @@ impl AutoScalingManager {
             config.policies.iter().map(|p| p.name.clone()).collect();
         drop(config);
 
-        self.policy_states.write().retain(|name, _| policy_names.contains(name));
+        self.policy_states
+            .write()
+            .retain(|name, _| policy_names.contains(name));
     }
 
     /// Get current node count
@@ -1019,7 +1038,11 @@ mod tests {
             collector.record(ScalingMetric::CpuUtilization, 50.0 + i as f64, None);
         }
 
-        let avg = collector.aggregate(ScalingMetric::CpuUtilization, 3600, MetricAggregation::Average);
+        let avg = collector.aggregate(
+            ScalingMetric::CpuUtilization,
+            3600,
+            MetricAggregation::Average,
+        );
         assert!(avg.is_some());
         assert!((avg.unwrap() - 54.5).abs() < 0.1);
     }

@@ -9,8 +9,8 @@
 //!
 //! Syntax: /*+ HINT_NAME(params) */
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Query hint types
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,7 +338,10 @@ impl HintParser {
                 Some(QueryHint::Timeout { millis })
             }
             "MAX_ROWS" | "ROWNUM" => {
-                let rows = parts.first().and_then(|s| s.parse().ok()).unwrap_or(1000000);
+                let rows = parts
+                    .first()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1000000);
                 Some(QueryHint::MaxRows { rows })
             }
 
@@ -415,7 +418,8 @@ impl HintParser {
     fn apply_hint(hint: &QueryHint, hints: &mut QueryHints) {
         match hint {
             QueryHint::UseIndex { table, index } => {
-                hints.index_hints
+                hints
+                    .index_hints
                     .entry(table.clone())
                     .or_default()
                     .push(IndexHint {
@@ -424,7 +428,8 @@ impl HintParser {
                     });
             }
             QueryHint::ForceIndex { table, index } => {
-                hints.index_hints
+                hints
+                    .index_hints
                     .entry(table.clone())
                     .or_default()
                     .push(IndexHint {
@@ -433,7 +438,8 @@ impl HintParser {
                     });
             }
             QueryHint::IgnoreIndex { table, index } => {
-                hints.index_hints
+                hints
+                    .index_hints
                     .entry(table.clone())
                     .or_default()
                     .push(IndexHint {
@@ -442,7 +448,8 @@ impl HintParser {
                     });
             }
             QueryHint::NoIndex { table } => {
-                hints.index_hints
+                hints
+                    .index_hints
                     .entry(table.clone())
                     .or_default()
                     .push(IndexHint {
@@ -602,7 +609,8 @@ mod tests {
 
     #[test]
     fn test_multiple_hints() {
-        let sql = "SELECT /*+ USE_INDEX(users, idx_name) PARALLEL(4) MAX_ROWS(1000) */ * FROM users";
+        let sql =
+            "SELECT /*+ USE_INDEX(users, idx_name) PARALLEL(4) MAX_ROWS(1000) */ * FROM users";
         let hints = HintParser::parse(sql);
 
         assert_eq!(hints.hints.len(), 3);

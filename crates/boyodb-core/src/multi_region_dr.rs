@@ -64,8 +64,8 @@ pub struct DisasterRecoveryConfig {
 impl Default for DisasterRecoveryConfig {
     fn default() -> Self {
         Self {
-            rpo_seconds: 60,           // 1 minute max data loss
-            rto_seconds: 300,          // 5 minutes max downtime
+            rpo_seconds: 60,  // 1 minute max data loss
+            rto_seconds: 300, // 5 minutes max downtime
             auto_failover: true,
             min_healthy_replicas: 1,
             health_check_interval_secs: 10,
@@ -152,10 +152,7 @@ pub enum ReplicationEvent {
         timestamp: u64,
     },
     /// Heartbeat
-    Heartbeat {
-        lsn: u64,
-        timestamp: u64,
-    },
+    Heartbeat { lsn: u64, timestamp: u64 },
 }
 
 /// Replication batch for efficient transfer
@@ -250,7 +247,10 @@ pub enum RoutingPolicy {
     /// Geolocation-based routing
     Geolocation { mappings: HashMap<String, RegionId> },
     /// Failover routing (primary with backup)
-    Failover { primary: RegionId, secondary: RegionId },
+    Failover {
+        primary: RegionId,
+        secondary: RegionId,
+    },
 }
 
 /// DNS routing manager
@@ -307,9 +307,7 @@ impl DnsRoutingManager {
         let record_set = records.get(hostname)?;
 
         match &*self.current_policy.read() {
-            RoutingPolicy::Primary => {
-                record_set.first().map(|r| r.value.clone())
-            }
+            RoutingPolicy::Primary => record_set.first().map(|r| r.value.clone()),
             RoutingPolicy::Latency => {
                 // Return record matching client region if available
                 if let Some(region) = client_region {
@@ -342,13 +340,14 @@ impl DnsRoutingManager {
                 }
                 record_set.first().map(|r| r.value.clone())
             }
-            RoutingPolicy::Failover { primary, secondary: _ } => {
-                record_set
-                    .iter()
-                    .find(|r| r.value.contains(primary))
-                    .or_else(|| record_set.first())
-                    .map(|r| r.value.clone())
-            }
+            RoutingPolicy::Failover {
+                primary,
+                secondary: _,
+            } => record_set
+                .iter()
+                .find(|r| r.value.contains(primary))
+                .or_else(|| record_set.first())
+                .map(|r| r.value.clone()),
         }
     }
 }
@@ -480,7 +479,9 @@ impl MultiRegionDRManager {
             .unwrap()
             .as_millis() as u64;
 
-        self.replication_cursors.write().insert(region_id.to_string(), lsn);
+        self.replication_cursors
+            .write()
+            .insert(region_id.to_string(), lsn);
 
         let mut status = self.region_status.write();
         if let Some(region_status) = status.get_mut(region_id) {
@@ -740,7 +741,11 @@ impl MultiRegionDRManager {
             .filter(|s| s.health == RegionHealth::Healthy)
             .count();
 
-        let max_lag = status.values().map(|s| s.replication_lag_ms).max().unwrap_or(0);
+        let max_lag = status
+            .values()
+            .map(|s| s.replication_lag_ms)
+            .max()
+            .unwrap_or(0);
 
         let avg_lag = if !status.is_empty() {
             status.values().map(|s| s.replication_lag_ms).sum::<u64>() / status.len() as u64
@@ -817,9 +822,9 @@ fn uuid_v4() -> String {
     format!(
         "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
         (h1 >> 32) as u32,
-        (h1 >> 16) as u16 & 0xffff,
-        h1 as u16 & 0x0fff,
-        (h2 >> 48) as u16 & 0x3fff | 0x8000,
+        (h1 >> 16) as u16,
+        (h1 & 0x0fff) as u16,
+        ((h2 >> 48) as u16 & 0x3fff) | 0x8000,
         h2 & 0xffffffffffff
     )
 }

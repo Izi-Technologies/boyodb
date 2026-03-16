@@ -285,7 +285,9 @@ pub enum DataSubjectRequestType {
     /// Right to access (GDPR Art. 15)
     Access,
     /// Right to rectification (GDPR Art. 16)
-    Rectification { corrections: HashMap<String, String> },
+    Rectification {
+        corrections: HashMap<String, String>,
+    },
     /// Right to erasure (GDPR Art. 17)
     Erasure,
     /// Right to restrict processing (GDPR Art. 18)
@@ -458,18 +460,25 @@ impl DataRetentionManager {
             match &hold.scope {
                 LegalHoldScope::Database(db) if db == database => return true,
                 LegalHoldScope::Tables(tables) => {
-                    if tables.iter().any(|t| t.database == database && t.table == table) {
+                    if tables
+                        .iter()
+                        .any(|t| t.database == database && t.table == table)
+                    {
                         return true;
                     }
                 }
-                LegalHoldScope::Condition { database: db, table: t, .. }
-                    if db == database && t == table =>
-                {
+                LegalHoldScope::Condition {
+                    database: db,
+                    table: t,
+                    ..
+                } if db == database && t == table => {
                     return true;
                 }
-                LegalHoldScope::DateRange { database: db, table: t, .. }
-                    if db == database && t == table =>
-                {
+                LegalHoldScope::DateRange {
+                    database: db,
+                    table: t,
+                    ..
+                } if db == database && t == table => {
                     return true;
                 }
                 _ => {}
@@ -538,19 +547,17 @@ impl DataRetentionManager {
             .ok_or_else(|| RetentionError::RequestNotFound(request_id.to_string()))?;
 
         if request.status != RequestStatus::Pending && request.status != RequestStatus::InProgress {
-            return Err(RetentionError::RequestNotProcessable(request_id.to_string()));
+            return Err(RetentionError::RequestNotProcessable(
+                request_id.to_string(),
+            ));
         }
 
         request.status = RequestStatus::InProgress;
 
         // Process based on request type
         let result = match &request.request_type {
-            DataSubjectRequestType::Access => {
-                self.process_access_request(&request.subject_id)
-            }
-            DataSubjectRequestType::Erasure => {
-                self.process_erasure_request(&request.subject_id)
-            }
+            DataSubjectRequestType::Access => self.process_access_request(&request.subject_id),
+            DataSubjectRequestType::Erasure => self.process_erasure_request(&request.subject_id),
             DataSubjectRequestType::Portability { format } => {
                 self.process_portability_request(&request.subject_id, format.clone())
             }
@@ -573,7 +580,9 @@ impl DataRetentionManager {
                 .as_secs(),
         );
 
-        self.stats.requests_processed.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .requests_processed
+            .fetch_add(1, Ordering::Relaxed);
 
         result
     }
@@ -595,7 +604,9 @@ impl DataRetentionManager {
         let categories = self.find_subject_data(subject_id);
         let rows_deleted = categories.len() as u64 * 10; // Simplified
 
-        self.stats.rows_purged.fetch_add(rows_deleted, Ordering::Relaxed);
+        self.stats
+            .rows_purged
+            .fetch_add(rows_deleted, Ordering::Relaxed);
 
         Ok(RequestResult::ErasureComplete {
             subject_id: subject_id.to_string(),
@@ -617,7 +628,8 @@ impl DataRetentionManager {
             expires_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs() + 86400 * 7, // 7 days
+                .as_secs()
+                + 86400 * 7, // 7 days
         })
     }
 
@@ -632,7 +644,10 @@ impl DataRetentionManager {
         })
     }
 
-    fn process_restriction_request(&self, subject_id: &str) -> Result<RequestResult, RetentionError> {
+    fn process_restriction_request(
+        &self,
+        subject_id: &str,
+    ) -> Result<RequestResult, RetentionError> {
         Ok(RequestResult::RestrictionApplied {
             subject_id: subject_id.to_string(),
             restricted_until: None, // Indefinite
@@ -688,8 +703,12 @@ impl DataRetentionManager {
         // Check legal holds
         match &policy.scope {
             RetentionScope::Table { database, table }
-            | RetentionScope::Columns { database, table, .. }
-            | RetentionScope::Conditional { database, table, .. } => {
+            | RetentionScope::Columns {
+                database, table, ..
+            }
+            | RetentionScope::Conditional {
+                database, table, ..
+            } => {
                 if self.is_under_hold(database, table) {
                     return Err(RetentionError::DataUnderLegalHold);
                 }
@@ -702,13 +721,19 @@ impl DataRetentionManager {
 
         match &policy.action {
             PurgeAction::Delete | PurgeAction::SoftDelete { .. } => {
-                self.stats.rows_purged.fetch_add(rows_affected, Ordering::Relaxed);
+                self.stats
+                    .rows_purged
+                    .fetch_add(rows_affected, Ordering::Relaxed);
             }
             PurgeAction::Anonymize { .. } | PurgeAction::Pseudonymize { .. } => {
-                self.stats.rows_anonymized.fetch_add(rows_affected, Ordering::Relaxed);
+                self.stats
+                    .rows_anonymized
+                    .fetch_add(rows_affected, Ordering::Relaxed);
             }
             PurgeAction::Archive { .. } => {
-                self.stats.rows_archived.fetch_add(rows_affected, Ordering::Relaxed);
+                self.stats
+                    .rows_archived
+                    .fetch_add(rows_affected, Ordering::Relaxed);
             }
         }
 
@@ -823,8 +848,18 @@ impl DataRetentionManager {
             rows_archived: self.stats.rows_archived.load(Ordering::Relaxed),
             requests_processed: self.stats.requests_processed.load(Ordering::Relaxed),
             active_policies: self.policies.read().values().filter(|p| p.enabled).count(),
-            active_holds: self.legal_holds.read().values().filter(|h| h.status == LegalHoldStatus::Active).count(),
-            pending_requests: self.requests.read().values().filter(|r| r.status == RequestStatus::Pending).count(),
+            active_holds: self
+                .legal_holds
+                .read()
+                .values()
+                .filter(|h| h.status == LegalHoldStatus::Active)
+                .count(),
+            pending_requests: self
+                .requests
+                .read()
+                .values()
+                .filter(|r| r.status == RequestStatus::Pending)
+                .count(),
         }
     }
 
@@ -961,7 +996,9 @@ impl std::fmt::Display for RetentionError {
             RetentionError::HoldNotFound(id) => write!(f, "Legal hold not found: {}", id),
             RetentionError::HoldExists(id) => write!(f, "Legal hold already exists: {}", id),
             RetentionError::RequestNotFound(id) => write!(f, "Request not found: {}", id),
-            RetentionError::RequestNotProcessable(id) => write!(f, "Request not processable: {}", id),
+            RetentionError::RequestNotProcessable(id) => {
+                write!(f, "Request not processable: {}", id)
+            }
             RetentionError::DataUnderLegalHold => write!(f, "Data is under legal hold"),
             RetentionError::ValidationError(msg) => write!(f, "Validation error: {}", msg),
         }

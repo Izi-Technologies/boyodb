@@ -8,9 +8,9 @@
 //! - Alert broadcasting
 //! - Query result streaming
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Dashboard configuration
@@ -659,7 +659,12 @@ impl StreamingHub {
     }
 
     /// Subscribe to updates
-    pub fn subscribe(&self, client_id: &str, sub_type: SubscriptionType, filter: &str) -> Result<String, String> {
+    pub fn subscribe(
+        &self,
+        client_id: &str,
+        sub_type: SubscriptionType,
+        filter: &str,
+    ) -> Result<String, String> {
         let mut subs = self.subscriptions.write();
         Ok(subs.subscribe(client_id, sub_type, filter))
     }

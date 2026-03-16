@@ -421,7 +421,8 @@ impl QueryCostEstimator {
                 } else {
                     0
                 };
-                let cost = comparisons as f64 * self.config.cpu_cost_per_sort_compare * *columns as f64;
+                let cost =
+                    comparisons as f64 * self.config.cpu_cost_per_sort_compare * *columns as f64;
                 let memory = *rows * self.config.avg_row_size_bytes as u64;
 
                 OperationCost {
@@ -447,7 +448,10 @@ impl QueryCostEstimator {
                     memory_bytes: memory,
                 }
             }
-            PlanOperation::HashJoin { left_rows, right_rows } => {
+            PlanOperation::HashJoin {
+                left_rows,
+                right_rows,
+            } => {
                 let build_cost = *right_rows as f64 * self.config.cpu_cost_per_hash;
                 let probe_cost = *left_rows as f64 * self.config.cpu_cost_per_hash;
                 let cost = build_cost + probe_cost;
@@ -463,16 +467,14 @@ impl QueryCostEstimator {
                     memory_bytes: memory,
                 }
             }
-            PlanOperation::Limit { limit } => {
-                OperationCost {
-                    operation_type: OperationType::Limit,
-                    description: format!("Limit to {} rows", limit),
-                    cost: 1.0,
-                    rows_in: *limit,
-                    rows_out: *limit,
-                    memory_bytes: 0,
-                }
-            }
+            PlanOperation::Limit { limit } => OperationCost {
+                operation_type: OperationType::Limit,
+                description: format!("Limit to {} rows", limit),
+                cost: 1.0,
+                rows_in: *limit,
+                rows_out: *limit,
+                memory_bytes: 0,
+            },
             PlanOperation::Exchange { rows } => {
                 let network_bytes = *rows * self.config.avg_row_size_bytes as u64;
                 let cost = network_bytes as f64 * self.config.network_cost_per_byte;
@@ -496,18 +498,18 @@ impl QueryCostEstimator {
     ) -> f64 {
         // Simple selectivity estimation
         match filter {
-            FilterPredicate::Equals { .. } => 0.01,  // 1%
-            FilterPredicate::Range { .. } => 0.1,    // 10%
+            FilterPredicate::Equals { .. } => 0.01, // 1%
+            FilterPredicate::Range { .. } => 0.1,   // 10%
             FilterPredicate::In { values } => (values.len() as f64 * 0.01).min(0.5),
-            FilterPredicate::Like { .. } => 0.1,     // 10%
+            FilterPredicate::Like { .. } => 0.1, // 10%
             FilterPredicate::IsNull => 0.01,
-            FilterPredicate::And(predicates) => {
-                predicates.iter()
-                    .map(|p| self.estimate_selectivity(p, _table_stats))
-                    .product()
-            }
+            FilterPredicate::And(predicates) => predicates
+                .iter()
+                .map(|p| self.estimate_selectivity(p, _table_stats))
+                .product(),
             FilterPredicate::Or(predicates) => {
-                let sel: f64 = predicates.iter()
+                let sel: f64 = predicates
+                    .iter()
                     .map(|p| self.estimate_selectivity(p, _table_stats))
                     .sum();
                 sel.min(1.0)
@@ -527,10 +529,7 @@ impl QueryCostEstimator {
                 warnings.push(CostWarning {
                     severity: WarningSeverity::Warning,
                     code: "FULL_TABLE_SCAN".to_string(),
-                    message: format!(
-                        "Full table scan on {} rows: {}",
-                        op.rows_in, op.description
-                    ),
+                    message: format!("Full table scan on {} rows: {}", op.rows_in, op.description),
                     suggestion: Some("Consider adding an index".to_string()),
                 });
             }
@@ -702,10 +701,22 @@ pub enum PlanOperation {
 /// Filter predicate for selectivity estimation
 #[derive(Debug, Clone)]
 pub enum FilterPredicate {
-    Equals { column: String, value: String },
-    Range { column: String, low: Option<String>, high: Option<String> },
-    In { values: Vec<String> },
-    Like { column: String, pattern: String },
+    Equals {
+        column: String,
+        value: String,
+    },
+    Range {
+        column: String,
+        low: Option<String>,
+        high: Option<String>,
+    },
+    In {
+        values: Vec<String>,
+    },
+    Like {
+        column: String,
+        pattern: String,
+    },
     IsNull,
     And(Vec<FilterPredicate>),
     Or(Vec<FilterPredicate>),
@@ -766,7 +777,12 @@ impl CostEstimationService {
     }
 
     /// Quick estimate without full plan analysis
-    pub fn quick_estimate(&self, tables: &[&str], has_join: bool, has_aggregate: bool) -> QuickEstimate {
+    pub fn quick_estimate(
+        &self,
+        tables: &[&str],
+        has_join: bool,
+        has_aggregate: bool,
+    ) -> QuickEstimate {
         let stats = self.estimator.table_stats.read();
 
         let total_rows: u64 = tables

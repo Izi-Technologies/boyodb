@@ -8,12 +8,12 @@
 //! - Idle connection cleanup
 //! - Connection lifetime limits
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::{Mutex, RwLock};
-use tokio::sync::{Semaphore, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Configuration for the connection pool
 #[derive(Clone, Debug)]
@@ -46,7 +46,7 @@ impl Default for PoolConfig {
             min_connections: 2,
             max_connections: 20,
             acquire_timeout_ms: 30_000,
-            idle_timeout_ms: 300_000, // 5 minutes
+            idle_timeout_ms: 300_000,  // 5 minutes
             max_lifetime_ms: 3600_000, // 1 hour
             warmup_connections: 2,
             health_check_interval_ms: 30_000,
@@ -330,7 +330,10 @@ where
 
     /// Warm up the pool by creating initial connections
     pub fn warmup(&self) {
-        let count = self.config.warmup_connections.min(self.config.max_connections);
+        let count = self
+            .config
+            .warmup_connections
+            .min(self.config.max_connections);
         let mut connections = self.connections.lock();
 
         for _ in 0..count {
@@ -373,7 +376,8 @@ where
 
         let wait_time = start.elapsed();
         if wait_time > Duration::from_millis(1) {
-            self.total_wait_time_us.fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
+            self.total_wait_time_us
+                .fetch_add(wait_time.as_micros() as u64, Ordering::Relaxed);
             self.wait_count.fetch_add(1, Ordering::Relaxed);
             let mut stats = self.stats.write();
             stats.acquisitions_waited += 1;
@@ -428,7 +432,8 @@ where
             // Update average wait time
             let wait_count = self.wait_count.load(Ordering::Relaxed);
             if wait_count > 0 {
-                stats.avg_wait_time_us = self.total_wait_time_us.load(Ordering::Relaxed) / wait_count;
+                stats.avg_wait_time_us =
+                    self.total_wait_time_us.load(Ordering::Relaxed) / wait_count;
             }
         }
 

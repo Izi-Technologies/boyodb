@@ -8,9 +8,9 @@
 //! - Result merging and aggregation
 //! - Connection pooling
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Federated data source
@@ -151,15 +151,9 @@ pub enum PlanStep {
         pushdown_filters: Vec<String>,
     },
     /// Local filter
-    Filter {
-        input: usize,
-        predicate: String,
-    },
+    Filter { input: usize, predicate: String },
     /// Local projection
-    Project {
-        input: usize,
-        columns: Vec<String>,
-    },
+    Project { input: usize, columns: Vec<String> },
     /// Join results from multiple sources
     Join {
         left: usize,
@@ -168,10 +162,7 @@ pub enum PlanStep {
         condition: String,
     },
     /// Union results
-    Union {
-        inputs: Vec<usize>,
-        all: bool,
-    },
+    Union { inputs: Vec<usize>, all: bool },
     /// Aggregate results
     Aggregate {
         input: usize,
@@ -408,7 +399,9 @@ impl FederationEngine {
         let mut cost = 0.0;
 
         for (i, part) in parts.iter().enumerate() {
-            let source = self.sources.get(&part.source)
+            let source = self
+                .sources
+                .get(&part.source)
                 .ok_or_else(|| format!("Source '{}' not found", part.source))?;
 
             // Determine pushdown filters based on capabilities
@@ -452,7 +445,9 @@ impl FederationEngine {
         if let Some(where_pos) = sql_upper.find("WHERE") {
             let after_where = &sql[where_pos + 5..];
             // Simple extraction - in production use proper parser
-            if let Some(end) = after_where.to_uppercase().find("GROUP BY")
+            if let Some(end) = after_where
+                .to_uppercase()
+                .find("GROUP BY")
                 .or_else(|| after_where.to_uppercase().find("ORDER BY"))
                 .or_else(|| after_where.to_uppercase().find("LIMIT"))
             {
@@ -482,15 +477,26 @@ impl FederationEngine {
         for (i, step) in steps.iter().enumerate() {
             let step_desc = match step {
                 PlanStep::Scan { source, .. } => format!("[{}] Scan {}", i, source),
-                PlanStep::Filter { input, predicate } => format!("[{}] Filter({}) {}", i, input, predicate),
-                PlanStep::Project { input, columns } => format!("[{}] Project({}) {:?}", i, input, columns),
-                PlanStep::Join { left, right, join_type, .. } => {
+                PlanStep::Filter { input, predicate } => {
+                    format!("[{}] Filter({}) {}", i, input, predicate)
+                }
+                PlanStep::Project { input, columns } => {
+                    format!("[{}] Project({}) {:?}", i, input, columns)
+                }
+                PlanStep::Join {
+                    left,
+                    right,
+                    join_type,
+                    ..
+                } => {
                     format!("[{}] {:?}Join({}, {})", i, join_type, left, right)
                 }
                 PlanStep::Union { inputs, .. } => format!("[{}] Union({:?})", i, inputs),
                 PlanStep::Aggregate { input, .. } => format!("[{}] Aggregate({})", i, input),
                 PlanStep::Sort { input, .. } => format!("[{}] Sort({})", i, input),
-                PlanStep::Limit { input, limit, .. } => format!("[{}] Limit({}, {})", i, input, limit),
+                PlanStep::Limit { input, limit, .. } => {
+                    format!("[{}] Limit({}, {})", i, input, limit)
+                }
             };
 
             if !diagram.is_empty() {
@@ -533,7 +539,9 @@ impl FederationEngine {
                 part.source.clone(),
                 source_start.elapsed().as_millis() as u64,
             );
-            stats.source_rows.insert(part.source.clone(), row_count as u64);
+            stats
+                .source_rows
+                .insert(part.source.clone(), row_count as u64);
         }
 
         stats.total_time_ms = start.elapsed().as_millis() as u64;
@@ -553,21 +561,25 @@ impl FederationEngine {
     }
 
     /// Execute query on specific source (simulated)
-    fn execute_on_source(&self, source: &str, _sql: &str) -> Result<(Vec<String>, Vec<Vec<FederatedValue>>), String> {
+    fn execute_on_source(
+        &self,
+        source: &str,
+        _sql: &str,
+    ) -> Result<(Vec<String>, Vec<Vec<FederatedValue>>), String> {
         // In production, this would connect to the actual source
-        let _source_config = self.sources.get(source)
+        let _source_config = self
+            .sources
+            .get(source)
             .ok_or_else(|| format!("Source '{}' not found", source))?;
 
         // Simulated result
         Ok((
             vec!["id".to_string(), "name".to_string(), "value".to_string()],
-            vec![
-                vec![
-                    FederatedValue::Int(1),
-                    FederatedValue::String("example".to_string()),
-                    FederatedValue::Float(42.0),
-                ],
-            ],
+            vec![vec![
+                FederatedValue::Int(1),
+                FederatedValue::String("example".to_string()),
+                FederatedValue::Float(42.0),
+            ]],
         ))
     }
 
@@ -608,9 +620,7 @@ impl FederationRegistry {
 
     /// Register source
     pub fn register_source(&self, source: DataSource) -> Result<(), String> {
-        self.engine
-            .write()
-            .register_source(source)
+        self.engine.write().register_source(source)
     }
 
     /// Execute federated query
@@ -673,15 +683,19 @@ mod tests {
     fn test_plan_query() {
         let mut engine = FederationEngine::new();
 
-        engine.register_source(DataSource {
-            name: "source1".to_string(),
-            source_type: DataSourceType::BoyoDB,
-            config: SourceConfig::default(),
-            capabilities: SourceCapabilities::default(),
-            active: true,
-        }).unwrap();
+        engine
+            .register_source(DataSource {
+                name: "source1".to_string(),
+                source_type: DataSourceType::BoyoDB,
+                config: SourceConfig::default(),
+                capabilities: SourceCapabilities::default(),
+                active: true,
+            })
+            .unwrap();
 
-        let query = engine.plan_query("SELECT * FROM source1.users WHERE id > 10").unwrap();
+        let query = engine
+            .plan_query("SELECT * FROM source1.users WHERE id > 10")
+            .unwrap();
         assert!(query.plan.is_some());
         assert!(!query.parts.is_empty());
     }
@@ -690,32 +704,37 @@ mod tests {
     fn test_execute_query() {
         let mut engine = FederationEngine::new();
 
-        engine.register_source(DataSource {
-            name: "test".to_string(),
-            source_type: DataSourceType::BoyoDB,
-            config: SourceConfig::default(),
-            capabilities: SourceCapabilities::default(),
-            active: true,
-        }).unwrap();
+        engine
+            .register_source(DataSource {
+                name: "test".to_string(),
+                source_type: DataSourceType::BoyoDB,
+                config: SourceConfig::default(),
+                capabilities: SourceCapabilities::default(),
+                active: true,
+            })
+            .unwrap();
 
         let query = engine.plan_query("SELECT * FROM test.users").unwrap();
         let result = engine.execute(&query).unwrap();
 
         assert!(!result.columns.is_empty());
-        assert!(result.stats.total_time_ms >= 0);
+        // total_time_ms is u64, just verify execution completed
+        let _ = result.stats.total_time_ms;
     }
 
     #[test]
     fn test_federation_registry() {
         let registry = FederationRegistry::new();
 
-        registry.register_source(DataSource {
-            name: "db1".to_string(),
-            source_type: DataSourceType::PostgreSQL,
-            config: SourceConfig::default(),
-            capabilities: SourceCapabilities::default(),
-            active: true,
-        }).unwrap();
+        registry
+            .register_source(DataSource {
+                name: "db1".to_string(),
+                source_type: DataSourceType::PostgreSQL,
+                config: SourceConfig::default(),
+                capabilities: SourceCapabilities::default(),
+                active: true,
+            })
+            .unwrap();
 
         let sources = registry.list_sources().unwrap();
         assert!(sources.contains(&"db1".to_string()));

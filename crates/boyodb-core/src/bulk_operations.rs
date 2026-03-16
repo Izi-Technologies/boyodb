@@ -6,12 +6,12 @@
 //! - Streaming backup support
 //! - Point-in-time recovery helpers
 
-use std::collections::HashMap;
-use std::io::{Read, Write, BufWriter};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::io::{BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -238,7 +238,11 @@ impl Default for RestoreOptions {
             no_owner: false,
             no_privileges: false,
             database: None,
-            sections: vec![BackupSection::PreData, BackupSection::Data, BackupSection::PostData],
+            sections: vec![
+                BackupSection::PreData,
+                BackupSection::Data,
+                BackupSection::PostData,
+            ],
             single_transaction: false,
             verbose: false,
         }
@@ -528,12 +532,14 @@ impl BackupCatalog {
             let id = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             offset += 4;
 
-            let type_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+            let type_len =
+                u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
             let object_type = String::from_utf8_lossy(&data[offset..offset + type_len]).to_string();
             offset += type_len;
 
-            let name_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
             offset += 2;
             let name = String::from_utf8_lossy(&data[offset..offset + name_len]).to_string();
             offset += name_len;
@@ -1149,8 +1155,7 @@ mod tests {
 
     #[test]
     fn test_toc_entry_dependencies() {
-        let entry = TocEntry::new(2, "INDEX", "idx_users_id")
-            .depends_on(1);
+        let entry = TocEntry::new(2, "INDEX", "idx_users_id").depends_on(1);
 
         assert_eq!(entry.dependencies, vec![1]);
     }
@@ -1170,9 +1175,7 @@ mod tests {
     #[test]
     fn test_backup_catalog_entries_by_section() {
         let mut catalog = BackupCatalog::new("testdb");
-        catalog.add_entry(
-            TocEntry::new(0, "TABLE", "users").with_section(BackupSection::PreData),
-        );
+        catalog.add_entry(TocEntry::new(0, "TABLE", "users").with_section(BackupSection::PreData));
         catalog.add_entry(
             TocEntry::new(0, "INDEX", "idx_users").with_section(BackupSection::PostData),
         );

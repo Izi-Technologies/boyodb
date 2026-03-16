@@ -50,7 +50,11 @@ impl<T: Clone + Ord> Range<T> {
     /// Create a new range
     pub fn new(lower: RangeBound<T>, upper: RangeBound<T>) -> Self {
         let is_empty = Self::check_empty(&lower, &upper);
-        Self { lower, upper, is_empty }
+        Self {
+            lower,
+            upper,
+            is_empty,
+        }
     }
 
     /// Create an empty range
@@ -303,16 +307,32 @@ impl<T: Clone + Ord> Range<T> {
         match (a, b) {
             (RangeBound::Unbounded, _) | (_, RangeBound::Unbounded) => RangeBound::Unbounded,
             (RangeBound::Inclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Inclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 < v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 < v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
         }
     }
@@ -321,16 +341,32 @@ impl<T: Clone + Ord> Range<T> {
         match (a, b) {
             (RangeBound::Unbounded, other) | (other, RangeBound::Unbounded) => other.clone(),
             (RangeBound::Inclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Inclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 > v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 > v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
         }
     }
@@ -339,16 +375,32 @@ impl<T: Clone + Ord> Range<T> {
         match (a, b) {
             (RangeBound::Unbounded, _) | (_, RangeBound::Unbounded) => RangeBound::Unbounded,
             (RangeBound::Inclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Inclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 > v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 > v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 >= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 >= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
         }
     }
@@ -357,16 +409,32 @@ impl<T: Clone + Ord> Range<T> {
         match (a, b) {
             (RangeBound::Unbounded, other) | (other, RangeBound::Unbounded) => other.clone(),
             (RangeBound::Inclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Inclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 < v2 { RangeBound::Inclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 < v2 {
+                    RangeBound::Inclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Inclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Inclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Inclusive(v2.clone())
+                }
             }
             (RangeBound::Exclusive(v1), RangeBound::Exclusive(v2)) => {
-                if v1 <= v2 { RangeBound::Exclusive(v1.clone()) } else { RangeBound::Exclusive(v2.clone()) }
+                if v1 <= v2 {
+                    RangeBound::Exclusive(v1.clone())
+                } else {
+                    RangeBound::Exclusive(v2.clone())
+                }
             }
         }
     }
@@ -428,9 +496,11 @@ pub type TsTzRange = Range<i64>;
 pub type DateRange = Range<i32>;
 
 /// Parse range from string
-pub fn parse_range<T: std::str::FromStr + Clone + Ord>(s: &str) -> Result<Range<T>, RangeParseError> {
+pub fn parse_range<T: std::str::FromStr + Clone + Ord>(
+    s: &str,
+) -> Result<Range<T>, RangeParseError> {
     let s = s.trim();
-    
+
     if s == "empty" {
         return Ok(Range::empty());
     }
@@ -451,9 +521,9 @@ pub fn parse_range<T: std::str::FromStr + Clone + Ord>(s: &str) -> Result<Range<
         _ => return Err(RangeParseError::InvalidFormat),
     };
 
-    let inner = &s[1..s.len()-1];
+    let inner = &s[1..s.len() - 1];
     let parts: Vec<&str> = inner.split(',').collect();
-    
+
     if parts.len() != 2 {
         return Err(RangeParseError::InvalidFormat);
     }
@@ -461,7 +531,9 @@ pub fn parse_range<T: std::str::FromStr + Clone + Ord>(s: &str) -> Result<Range<
     let lower = if parts[0].trim().is_empty() {
         RangeBound::Unbounded
     } else {
-        let val = parts[0].trim().parse::<T>()
+        let val = parts[0]
+            .trim()
+            .parse::<T>()
             .map_err(|_| RangeParseError::InvalidValue)?;
         if lower_inclusive {
             RangeBound::Inclusive(val)
@@ -473,7 +545,9 @@ pub fn parse_range<T: std::str::FromStr + Clone + Ord>(s: &str) -> Result<Range<
     let upper = if parts[1].trim().is_empty() {
         RangeBound::Unbounded
     } else {
-        let val = parts[1].trim().parse::<T>()
+        let val = parts[1]
+            .trim()
+            .parse::<T>()
             .map_err(|_| RangeParseError::InvalidValue)?;
         if upper_inclusive {
             RangeBound::Inclusive(val)
@@ -554,7 +628,7 @@ mod tests {
     fn test_range_union() {
         let r1 = Range::inclusive(1i32, 5);
         let r2 = Range::inclusive(3i32, 8);
-        
+
         let union = r1.union(&r2).unwrap();
         assert!(union.contains(&1));
         assert!(union.contains(&8));
@@ -564,7 +638,7 @@ mod tests {
     fn test_range_intersection() {
         let r1 = Range::inclusive(1i32, 5);
         let r2 = Range::inclusive(3i32, 8);
-        
+
         let intersection = r1.intersection(&r2);
         assert!(!intersection.contains(&2));
         assert!(intersection.contains(&3));
@@ -576,11 +650,11 @@ mod tests {
     fn test_parse_range() {
         let range: Int4Range = parse_range("[1,10]").unwrap();
         assert!(range.contains(&5));
-        
+
         let range: Int4Range = parse_range("(1,10)").unwrap();
         assert!(!range.contains(&1));
         assert!(!range.contains(&10));
-        
+
         let range: Int4Range = parse_range("[,10)").unwrap();
         assert!(range.contains(&-100));
         assert!(!range.contains(&10));
@@ -590,10 +664,10 @@ mod tests {
     fn test_range_display() {
         let range = Range::inclusive(1i32, 10);
         assert_eq!(format!("{}", range), "[1,10]");
-        
+
         let range = Range::half_open(1i32, 10);
         assert_eq!(format!("{}", range), "[1,10)");
-        
+
         let range: Int4Range = Range::empty();
         assert_eq!(format!("{}", range), "empty");
     }

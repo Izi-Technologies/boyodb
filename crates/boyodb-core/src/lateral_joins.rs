@@ -330,7 +330,14 @@ impl TableSource {
 
     /// Check if this is a lateral source
     pub fn is_lateral(&self) -> bool {
-        matches!(self, Self::Lateral(_) | Self::Function { is_lateral: true, .. })
+        matches!(
+            self,
+            Self::Lateral(_)
+                | Self::Function {
+                    is_lateral: true,
+                    ..
+                }
+        )
     }
 }
 
@@ -490,10 +497,7 @@ pub struct LateralQueryRewriter;
 
 impl LateralQueryRewriter {
     /// Create execution plan for a lateral join
-    pub fn create_plan(
-        outer_alias: &str,
-        lateral_join: &LateralJoin,
-    ) -> LateralExecutionPlan {
+    pub fn create_plan(outer_alias: &str, lateral_join: &LateralJoin) -> LateralExecutionPlan {
         LateralExecutionPlan {
             outer_source: outer_alias.to_string(),
             lateral_subquery: lateral_join.subquery.subquery_sql.clone(),
@@ -504,10 +508,7 @@ impl LateralQueryRewriter {
     }
 
     /// Substitute parameters in lateral subquery for a specific outer row
-    pub fn substitute_params(
-        subquery: &str,
-        bindings: &[(ColumnRef, String)],
-    ) -> String {
+    pub fn substitute_params(subquery: &str, bindings: &[(ColumnRef, String)]) -> String {
         let mut result = subquery.to_string();
         for (col_ref, value) in bindings {
             let pattern = col_ref.to_sql();
@@ -566,12 +567,7 @@ impl SetReturningFunction {
                 if self.return_columns.len() == 1 {
                     format!("{} AS {}", func_call, a)
                 } else {
-                    format!(
-                        "{} AS {}({})",
-                        func_call,
-                        a,
-                        self.return_columns.join(", ")
-                    )
+                    format!("{} AS {}({})", func_call, a, self.return_columns.join(", "))
                 }
             }
             None => func_call,
@@ -723,9 +719,9 @@ impl LateralJoinBuilder {
         Ok(match self.join_type {
             LateralJoinType::Cross => LateralJoin::cross(subquery),
             LateralJoinType::Inner => {
-                let on_cond = self
-                    .on_condition
-                    .ok_or_else(|| LateralJoinError::ParseError("INNER JOIN requires ON condition".into()))?;
+                let on_cond = self.on_condition.ok_or_else(|| {
+                    LateralJoinError::ParseError("INNER JOIN requires ON condition".into())
+                })?;
                 LateralJoin::inner(subquery, on_cond)
             }
             LateralJoinType::Left => LateralJoin::left(subquery, self.on_condition),
@@ -907,7 +903,9 @@ mod tests {
     #[test]
     fn test_contains_lateral() {
         assert!(contains_lateral("SELECT * FROM t, LATERAL (SELECT 1)"));
-        assert!(contains_lateral("SELECT * FROM t LEFT JOIN LATERAL (SELECT 1) x ON true"));
+        assert!(contains_lateral(
+            "SELECT * FROM t LEFT JOIN LATERAL (SELECT 1) x ON true"
+        ));
         assert!(!contains_lateral("SELECT * FROM t"));
     }
 

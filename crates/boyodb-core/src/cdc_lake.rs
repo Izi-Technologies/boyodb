@@ -61,7 +61,11 @@ pub enum CdcValue {
     Float64(f64),
     String(String),
     Bytes(Vec<u8>),
-    Decimal { value: String, precision: u32, scale: u32 },
+    Decimal {
+        value: String,
+        precision: u32,
+        scale: u32,
+    },
     Date(i32),
     Timestamp(i64),
     TimestampTz(i64, String),
@@ -96,7 +100,10 @@ pub enum CdcDataType {
     Int64,
     Float32,
     Float64,
-    Decimal { precision: u32, scale: u32 },
+    Decimal {
+        precision: u32,
+        scale: u32,
+    },
     String,
     Binary,
     Date,
@@ -105,7 +112,10 @@ pub enum CdcDataType {
     Uuid,
     Json,
     Array(Box<CdcDataType>),
-    Map { key: Box<CdcDataType>, value: Box<CdcDataType> },
+    Map {
+        key: Box<CdcDataType>,
+        value: Box<CdcDataType>,
+    },
     Struct(Vec<CdcColumn>),
 }
 
@@ -323,8 +333,12 @@ impl DeltaLakeWriter {
         }
 
         self.version.fetch_add(1, Ordering::Relaxed);
-        self.stats.records_written.fetch_add(records_written as u64, Ordering::Relaxed);
-        self.stats.bytes_written.fetch_add(bytes_written as u64, Ordering::Relaxed);
+        self.stats
+            .records_written
+            .fetch_add(records_written as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_written
+            .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
         Ok(WriteResult {
             records_written,
@@ -359,8 +373,12 @@ impl DeltaLakeWriter {
         Ok(())
     }
 
-    fn partition_events(&self, events: &[CdcEvent]) -> HashMap<String, (HashMap<String, String>, Vec<CdcEvent>)> {
-        let mut partitioned: HashMap<String, (HashMap<String, String>, Vec<CdcEvent>)> = HashMap::new();
+    fn partition_events(
+        &self,
+        events: &[CdcEvent],
+    ) -> HashMap<String, (HashMap<String, String>, Vec<CdcEvent>)> {
+        let mut partitioned: HashMap<String, (HashMap<String, String>, Vec<CdcEvent>)> =
+            HashMap::new();
 
         for event in events {
             let partition_values: HashMap<String, String> = self
@@ -369,7 +387,9 @@ impl DeltaLakeWriter {
                 .iter()
                 .filter_map(|col| {
                     event.after.as_ref().and_then(|after| {
-                        after.get(col).map(|v| (col.clone(), cdc_value_to_string(v)))
+                        after
+                            .get(col)
+                            .map(|v| (col.clone(), cdc_value_to_string(v)))
                     })
                 })
                 .collect();
@@ -433,7 +453,8 @@ impl DeltaLakeWriter {
         };
 
         // Serialize and write (simplified)
-        let _json = serde_json::to_string(&commit).map_err(|e| LakeError::SerializationError(e.to_string()))?;
+        let _json = serde_json::to_string(&commit)
+            .map_err(|e| LakeError::SerializationError(e.to_string()))?;
 
         Ok(())
     }
@@ -579,7 +600,10 @@ impl IcebergWriter {
         // Write data files
         let data_files = self.write_data_files(&events)?;
         let files_created = data_files.len();
-        let bytes_written: usize = data_files.iter().map(|f| f.file_size_in_bytes as usize).sum();
+        let bytes_written: usize = data_files
+            .iter()
+            .map(|f| f.file_size_in_bytes as usize)
+            .sum();
 
         // Create new snapshot
         let new_snapshot_id = self.snapshot_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -600,8 +624,12 @@ impl IcebergWriter {
         // Write manifest (simplified)
         self.write_manifest(&snapshot, &data_files)?;
 
-        self.stats.records_written.fetch_add(records_written as u64, Ordering::Relaxed);
-        self.stats.bytes_written.fetch_add(bytes_written as u64, Ordering::Relaxed);
+        self.stats
+            .records_written
+            .fetch_add(records_written as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_written
+            .fetch_add(bytes_written as u64, Ordering::Relaxed);
 
         Ok(WriteResult {
             records_written,
@@ -965,7 +993,10 @@ mod tests {
             before: None,
             after: Some(HashMap::from([
                 ("id".to_string(), CdcValue::Int64(1)),
-                ("date".to_string(), CdcValue::String("2025-01-01".to_string())),
+                (
+                    "date".to_string(),
+                    CdcValue::String("2025-01-01".to_string()),
+                ),
             ])),
             schema_version: 1,
             schema: None,

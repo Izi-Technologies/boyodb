@@ -6,9 +6,9 @@
 //! - Rule-based query rewriting
 //! - Conditional rules with WHERE clauses
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // RULE TYPES
@@ -546,9 +546,14 @@ impl ViewRuleHelper {
             values.join(", ")
         );
 
-        Rule::new(&format!("_{}_insert", view), schema, view, RuleEvent::Insert)
-            .instead()
-            .do_command(&command)
+        Rule::new(
+            &format!("_{}_insert", view),
+            schema,
+            view,
+            RuleEvent::Insert,
+        )
+        .instead()
+        .do_command(&command)
     }
 
     /// Create INSTEAD UPDATE rule for updatable view
@@ -572,26 +577,31 @@ impl ViewRuleHelper {
             key_column
         );
 
-        Rule::new(&format!("_{}_update", view), schema, view, RuleEvent::Update)
-            .instead()
-            .do_command(&command)
+        Rule::new(
+            &format!("_{}_update", view),
+            schema,
+            view,
+            RuleEvent::Update,
+        )
+        .instead()
+        .do_command(&command)
     }
 
     /// Create INSTEAD DELETE rule for updatable view
-    pub fn delete_rule(
-        schema: &str,
-        view: &str,
-        base_table: &str,
-        key_column: &str,
-    ) -> Rule {
+    pub fn delete_rule(schema: &str, view: &str, base_table: &str, key_column: &str) -> Rule {
         let command = format!(
             "DELETE FROM {} WHERE {} = OLD.{}",
             base_table, key_column, key_column
         );
 
-        Rule::new(&format!("_{}_delete", view), schema, view, RuleEvent::Delete)
-            .instead()
-            .do_command(&command)
+        Rule::new(
+            &format!("_{}_delete", view),
+            schema,
+            view,
+            RuleEvent::Delete,
+        )
+        .instead()
+        .do_command(&command)
     }
 }
 
@@ -657,8 +667,7 @@ mod tests {
 
     #[test]
     fn test_rule_instead_nothing() {
-        let rule = Rule::new("deny_delete", "public", "protected", RuleEvent::Delete)
-            .do_nothing();
+        let rule = Rule::new("deny_delete", "public", "protected", RuleEvent::Delete).do_nothing();
 
         assert_eq!(rule.rule_type, RuleType::Instead);
         assert!(rule.commands.is_empty());
@@ -812,6 +821,9 @@ mod tests {
         ctx.set_old("status", Some("active".to_string()));
 
         assert_eq!(ctx.new_values.get("id"), Some(&Some("123".to_string())));
-        assert_eq!(ctx.old_values.get("status"), Some(&Some("active".to_string())));
+        assert_eq!(
+            ctx.old_values.get("status"),
+            Some(&Some("active".to_string()))
+        );
     }
 }

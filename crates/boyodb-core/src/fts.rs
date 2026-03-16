@@ -8,10 +8,10 @@
 //! - Highlighting and snippets
 //! - N-gram based fulltext indexes for substring search (LIKE '%pattern%')
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::engine::EngineError;
 
@@ -215,7 +215,13 @@ impl TextAnalyzer {
         }
     }
 
-    fn tokenize_ngram(&self, text: &str, min_gram: usize, max_gram: usize, tokens: &mut Vec<FtsToken>) {
+    fn tokenize_ngram(
+        &self,
+        text: &str,
+        min_gram: usize,
+        max_gram: usize,
+        tokens: &mut Vec<FtsToken>,
+    ) {
         let chars: Vec<char> = text.chars().collect();
         let mut position = 0;
 
@@ -233,7 +239,13 @@ impl TextAnalyzer {
         }
     }
 
-    fn tokenize_edge_ngram(&self, text: &str, min_gram: usize, max_gram: usize, tokens: &mut Vec<FtsToken>) {
+    fn tokenize_edge_ngram(
+        &self,
+        text: &str,
+        min_gram: usize,
+        max_gram: usize,
+        tokens: &mut Vec<FtsToken>,
+    ) {
         // First tokenize normally, then generate edge ngrams for each token
         let mut base_tokens = Vec::new();
         self.tokenize_standard(text, &mut base_tokens);
@@ -317,10 +329,7 @@ impl InvertedFtsIndex {
                 positions,
             };
 
-            self.index
-                .entry(term)
-                .or_default()
-                .push(posting);
+            self.index.entry(term).or_default().push(posting);
         }
 
         // Update document stats
@@ -379,7 +388,11 @@ impl InvertedFtsIndex {
             .map(|(doc_id, score)| SearchResult { doc_id, score })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -443,7 +456,11 @@ impl InvertedFtsIndex {
             }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -461,7 +478,11 @@ impl InvertedFtsIndex {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -506,12 +527,11 @@ impl InvertedFtsIndex {
                     .copied()
                     .collect()
             }
-            BooleanQuery::Phrase(phrase) => {
-                self.search_phrase(phrase, usize::MAX)
-                    .into_iter()
-                    .map(|r| r.doc_id)
-                    .collect()
-            }
+            BooleanQuery::Phrase(phrase) => self
+                .search_phrase(phrase, usize::MAX)
+                .into_iter()
+                .map(|r| r.doc_id)
+                .collect(),
         }
     }
 
@@ -682,7 +702,7 @@ impl BooleanQuery {
 
         // Check for phrase (quoted)
         if query.starts_with('"') && query.ends_with('"') && query.len() > 2 {
-            return Ok(BooleanQuery::Phrase(query[1..query.len()-1].to_string()));
+            return Ok(BooleanQuery::Phrase(query[1..query.len() - 1].to_string()));
         }
 
         // Check for AND
@@ -765,14 +785,12 @@ fn stem_word(word: &str, _language: &str) -> String {
 /// Default English stop words
 fn default_stop_words() -> HashSet<String> {
     [
-        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
-        "has", "he", "in", "is", "it", "its", "of", "on", "that", "the",
-        "to", "was", "were", "will", "with", "the", "this", "but", "they",
-        "have", "had", "what", "when", "where", "who", "which", "why", "how",
-        "all", "each", "every", "both", "few", "more", "most", "other",
-        "some", "such", "no", "nor", "not", "only", "own", "same", "so",
-        "than", "too", "very", "just", "can", "could", "may", "might",
-        "must", "shall", "should", "would", "now", "or", "if", "then",
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is",
+        "it", "its", "of", "on", "that", "the", "to", "was", "were", "will", "with", "the", "this",
+        "but", "they", "have", "had", "what", "when", "where", "who", "which", "why", "how", "all",
+        "each", "every", "both", "few", "more", "most", "other", "some", "such", "no", "nor",
+        "not", "only", "own", "same", "so", "than", "too", "very", "just", "can", "could", "may",
+        "might", "must", "shall", "should", "would", "now", "or", "if", "then",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -1115,17 +1133,17 @@ pub fn serialize_fulltext_index(
     let mut buffer = Vec::with_capacity(64 + data.len());
 
     // Write header
-    buffer.extend_from_slice(FULLTEXT_INDEX_MAGIC);              // 8 bytes
+    buffer.extend_from_slice(FULLTEXT_INDEX_MAGIC); // 8 bytes
     buffer.extend_from_slice(&FULLTEXT_INDEX_VERSION.to_le_bytes()); // 4 bytes
-    buffer.push(config.ngram_min);                               // 1 byte
-    buffer.push(config.ngram_max);                               // 1 byte
-    buffer.push(if config.case_sensitive { 1 } else { 0 });      // 1 byte
-    buffer.push(0);                                              // 1 byte reserved
-    buffer.extend_from_slice(&term_count.to_le_bytes());         // 8 bytes
+    buffer.push(config.ngram_min); // 1 byte
+    buffer.push(config.ngram_max); // 1 byte
+    buffer.push(if config.case_sensitive { 1 } else { 0 }); // 1 byte
+    buffer.push(0); // 1 byte reserved
+    buffer.extend_from_slice(&term_count.to_le_bytes()); // 8 bytes
     buffer.extend_from_slice(&(doc_count as u64).to_le_bytes()); // 8 bytes
-    buffer.extend_from_slice(&data_offset.to_le_bytes());        // 8 bytes
-    buffer.extend_from_slice(&data_length.to_le_bytes());        // 8 bytes
-    buffer.extend_from_slice(&[0u8; 16]);                        // 16 bytes reserved
+    buffer.extend_from_slice(&data_offset.to_le_bytes()); // 8 bytes
+    buffer.extend_from_slice(&data_length.to_le_bytes()); // 8 bytes
+    buffer.extend_from_slice(&[0u8; 16]); // 16 bytes reserved
 
     // Write data
     buffer.extend_from_slice(&data);
@@ -1173,8 +1191,9 @@ pub fn load_fulltext_index(data: &[u8]) -> Result<FulltextIndex, EngineError> {
     }
 
     let terms: BTreeMap<String, Vec<u32>> =
-        bincode::deserialize(&data[data_offset..data_offset + data_length])
-            .map_err(|e| EngineError::Internal(format!("failed to deserialize fulltext index: {e}")))?;
+        bincode::deserialize(&data[data_offset..data_offset + data_length]).map_err(|e| {
+            EngineError::Internal(format!("failed to deserialize fulltext index: {e}"))
+        })?;
 
     Ok(FulltextIndex {
         terms,
@@ -1444,7 +1463,10 @@ mod tests {
         // Valid patterns
         assert_eq!(extract_like_substring("%712%"), Some("712".to_string()));
         assert_eq!(extract_like_substring("%abc%"), Some("abc".to_string()));
-        assert_eq!(extract_like_substring("%Hello World%"), Some("Hello World".to_string()));
+        assert_eq!(
+            extract_like_substring("%Hello World%"),
+            Some("Hello World".to_string())
+        );
 
         // Invalid patterns
         assert_eq!(extract_like_substring("prefix%"), None);
@@ -1452,6 +1474,6 @@ mod tests {
         assert_eq!(extract_like_substring("no_wildcards"), None);
         assert_eq!(extract_like_substring("%a%b%"), None); // Internal wildcard
         assert_eq!(extract_like_substring("%a_b%"), None); // Internal single-char wildcard
-        assert_eq!(extract_like_substring("%%"), None);    // Empty inner
+        assert_eq!(extract_like_substring("%%"), None); // Empty inner
     }
 }

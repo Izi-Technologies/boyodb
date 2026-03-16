@@ -6,9 +6,9 @@
 //! - Downsampling and retention policies
 //! - Forecasting and trend analysis
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Time series data point
 #[derive(Debug, Clone)]
@@ -106,9 +106,9 @@ pub enum TimeAggregation {
     StdDev,
     Variance,
     Percentile(f64),
-    Rate,        // Change per second
-    Increase,    // Total increase (for counters)
-    Delta,       // Difference from previous
+    Rate,     // Change per second
+    Increase, // Total increase (for counters)
+    Delta,    // Difference from previous
 }
 
 /// Gap filling strategies
@@ -248,7 +248,8 @@ impl TimeSeriesFunctions {
             TimeAggregation::Last => values[values.len() - 1],
             TimeAggregation::StdDev => {
                 let mean = values.iter().sum::<f64>() / values.len() as f64;
-                let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+                let variance =
+                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
                 variance.sqrt()
             }
             TimeAggregation::Variance => {
@@ -286,7 +287,11 @@ impl TimeSeriesFunctions {
     }
 
     /// Fill gaps in time series
-    pub fn gap_fill(series: &TimeSeries, bucket: TimeBucket, strategy: GapFillStrategy) -> TimeSeries {
+    pub fn gap_fill(
+        series: &TimeSeries,
+        bucket: TimeBucket,
+        strategy: GapFillStrategy,
+    ) -> TimeSeries {
         if series.points.len() < 2 {
             return series.clone();
         }
@@ -400,7 +405,11 @@ impl TimeSeriesFunctions {
         let mut result = TimeSeries::new(&format!("ma{}({})", window_size, series.name));
 
         for i in 0..series.points.len() {
-            let start = if i >= window_size { i - window_size + 1 } else { 0 };
+            let start = if i >= window_size {
+                i - window_size + 1
+            } else {
+                0
+            };
             let window: Vec<f64> = series.points[start..=i].iter().map(|p| p.value).collect();
             let avg = window.iter().sum::<f64>() / window.len() as f64;
             result.add_point(series.points[i].timestamp, avg);
@@ -436,7 +445,8 @@ impl TimeSeriesFunctions {
 
         let values: Vec<f64> = series.points.iter().map(|p| p.value).collect();
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt();
+        let std =
+            (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64).sqrt();
 
         if std == 0.0 {
             return vec![];
@@ -476,7 +486,11 @@ impl TimeSeriesFunctions {
             denominator += (x - x_mean).powi(2);
         }
 
-        let slope = if denominator != 0.0 { numerator / denominator } else { 0.0 };
+        let slope = if denominator != 0.0 {
+            numerator / denominator
+        } else {
+            0.0
+        };
         let intercept = y_mean - slope * x_mean;
 
         // Get time interval
@@ -543,8 +557,14 @@ impl TimeSeriesStore {
     /// Write a data point
     pub fn write(&self, metric: &str, timestamp: i64, value: f64, tags: HashMap<String, String>) {
         let mut series = self.series.write();
-        let ts = series.entry(metric.to_string()).or_insert_with(|| TimeSeries::new(metric));
-        ts.points.push(DataPoint { timestamp, value, tags });
+        let ts = series
+            .entry(metric.to_string())
+            .or_insert_with(|| TimeSeries::new(metric));
+        ts.points.push(DataPoint {
+            timestamp,
+            value,
+            tags,
+        });
     }
 
     /// Query time series
@@ -607,7 +627,9 @@ impl TimeSeriesStore {
 
     /// Set retention policy
     pub fn set_retention_policy(&self, metric: &str, policy: DownsamplePolicy) {
-        self.retention_policies.write().insert(metric.to_string(), policy);
+        self.retention_policies
+            .write()
+            .insert(metric.to_string(), policy);
     }
 
     /// Apply retention policies
@@ -645,7 +667,8 @@ mod tests {
     #[test]
     fn test_aggregation() {
         let series = create_test_series();
-        let result = TimeSeriesFunctions::aggregate(&series, TimeBucket::Seconds(10), TimeAggregation::Avg);
+        let result =
+            TimeSeriesFunctions::aggregate(&series, TimeBucket::Seconds(10), TimeAggregation::Avg);
         assert!(result.points.len() < series.points.len());
     }
 
@@ -655,7 +678,8 @@ mod tests {
         series.add_point(0, 10.0);
         series.add_point(3000, 40.0);
 
-        let filled = TimeSeriesFunctions::gap_fill(&series, TimeBucket::Seconds(1), GapFillStrategy::Linear);
+        let filled =
+            TimeSeriesFunctions::gap_fill(&series, TimeBucket::Seconds(1), GapFillStrategy::Linear);
         assert!(filled.points.len() > series.points.len());
     }
 

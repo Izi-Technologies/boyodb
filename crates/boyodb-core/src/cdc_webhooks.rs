@@ -372,7 +372,8 @@ impl WebhookRegistry {
         if let Some(ids) = table_webhooks.get(table) {
             for id in ids {
                 if let Some(wh) = webhooks.get(id) {
-                    if wh.enabled && (wh.operations.is_empty() || wh.operations.contains(&operation))
+                    if wh.enabled
+                        && (wh.operations.is_empty() || wh.operations.contains(&operation))
                     {
                         result.push(id.clone());
                     }
@@ -427,7 +428,7 @@ impl WebhookRegistry {
 
         // Check if batch is full
         if buffer.len() >= config.batch_max_size {
-            let events: Vec<ChangeEvent> = buffer.drain(..).collect();
+            let events: Vec<ChangeEvent> = std::mem::take(buffer);
             starts.remove(&webhook_id);
             drop(buffers);
             drop(starts);
@@ -449,7 +450,7 @@ impl WebhookRegistry {
                 if elapsed >= wh.batch_timeout_ms {
                     if let Some(buffer) = buffers.get_mut(webhook_id) {
                         if !buffer.is_empty() {
-                            to_flush.push((webhook_id.clone(), buffer.drain(..).collect()));
+                            to_flush.push((webhook_id.clone(), std::mem::take(buffer)));
                         }
                     }
                 }
@@ -672,7 +673,13 @@ impl ChangeTracker {
     }
 
     /// Track an INSERT
-    pub fn track_insert(&self, table: &str, primary_key: &str, new_values: &str, tx_id: Option<u64>) {
+    pub fn track_insert(
+        &self,
+        table: &str,
+        primary_key: &str,
+        new_values: &str,
+        tx_id: Option<u64>,
+    ) {
         self.registry.record_change(
             &self.database,
             table,
@@ -705,7 +712,13 @@ impl ChangeTracker {
     }
 
     /// Track a DELETE
-    pub fn track_delete(&self, table: &str, primary_key: &str, old_values: &str, tx_id: Option<u64>) {
+    pub fn track_delete(
+        &self,
+        table: &str,
+        primary_key: &str,
+        old_values: &str,
+        tx_id: Option<u64>,
+    ) {
         self.registry.record_change(
             &self.database,
             table,
@@ -749,14 +762,8 @@ impl WebhookDeliveryWorker {
                     );
                 }
                 Err(e) => {
-                    self.registry.record_attempt(
-                        delivery,
-                        false,
-                        0,
-                        None,
-                        Some(e.to_string()),
-                        0,
-                    );
+                    self.registry
+                        .record_attempt(delivery, false, 0, None, Some(e.to_string()), 0);
                 }
             }
         }
@@ -820,7 +827,9 @@ impl WebhookBuilder {
 
     /// Add a header
     pub fn header(mut self, key: &str, value: &str) -> Self {
-        self.config.headers.insert(key.to_string(), value.to_string());
+        self.config
+            .headers
+            .insert(key.to_string(), value.to_string());
         self
     }
 
@@ -979,13 +988,37 @@ mod tests {
         registry.register(config).unwrap();
 
         // Add 2 events - not enough to trigger batch
-        registry.record_change("db", "tbl", ChangeOperation::Insert, "{}", None, Some("{}"), None);
-        registry.record_change("db", "tbl", ChangeOperation::Insert, "{}", None, Some("{}"), None);
+        registry.record_change(
+            "db",
+            "tbl",
+            ChangeOperation::Insert,
+            "{}",
+            None,
+            Some("{}"),
+            None,
+        );
+        registry.record_change(
+            "db",
+            "tbl",
+            ChangeOperation::Insert,
+            "{}",
+            None,
+            Some("{}"),
+            None,
+        );
 
         assert!(registry.next_pending().is_none());
 
         // Add 1 more to reach batch size
-        registry.record_change("db", "tbl", ChangeOperation::Insert, "{}", None, Some("{}"), None);
+        registry.record_change(
+            "db",
+            "tbl",
+            ChangeOperation::Insert,
+            "{}",
+            None,
+            Some("{}"),
+            None,
+        );
 
         let delivery = registry.next_pending().unwrap();
         assert_eq!(delivery.events.len(), 3);

@@ -7,10 +7,10 @@
 // - Custom collation definitions
 // - Built-in collations (C, POSIX, en_US, etc.)
 
+use parking_lot::RwLock;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Collation Types
@@ -149,10 +149,7 @@ impl Collation {
         // Normalize based on accent sensitivity
         let (a_final, b_final) = match self.config.accent_sensitivity {
             AccentSensitivity::Sensitive => (a_norm, b_norm),
-            AccentSensitivity::Insensitive => (
-                remove_accents(&a_norm),
-                remove_accents(&b_norm),
-            ),
+            AccentSensitivity::Insensitive => (remove_accents(&a_norm), remove_accents(&b_norm)),
         };
 
         // Handle different locales
@@ -211,10 +208,10 @@ impl Collation {
             "de_DE" | "de_AT" => {
                 // German: ä after a, ö after o, ü after u, ß after ss
                 match lower {
-                    'ä' => 101,  // After 'a'
-                    'ö' => 115,  // After 'o'
-                    'ü' => 121,  // After 'u'
-                    'ß' => 200,  // After 's'
+                    'ä' => 101, // After 'a'
+                    'ö' => 115, // After 'o'
+                    'ü' => 121, // After 'u'
+                    'ß' => 200, // After 's'
                     _ => base,
                 }
             }
@@ -230,7 +227,7 @@ impl Collation {
             "es_ES" => {
                 // Spanish: ñ after n
                 match lower {
-                    'ñ' => 114,  // After 'n'
+                    'ñ' => 114, // After 'n'
                     _ => base,
                 }
             }
@@ -255,7 +252,11 @@ impl Collation {
 
     /// Get case weight for a character
     fn case_weight(&self, c: char) -> u32 {
-        if c.is_uppercase() { 1 } else { 0 }
+        if c.is_uppercase() {
+            1
+        } else {
+            0
+        }
     }
 
     /// Compare using libc (fallback to builtin)
@@ -348,7 +349,9 @@ fn like_match_recursive(text: &[char], pattern: &[char], ti: usize, pi: usize) -
 fn remove_accents(s: &str) -> String {
     s.chars()
         .map(|c| match c {
-            'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' | 'Á' | 'À' | 'Â' | 'Ã' | 'Ä' | 'Å' => 'a',
+            'á' | 'à' | 'â' | 'ã' | 'ä' | 'å' | 'Á' | 'À' | 'Â' | 'Ã' | 'Ä' | 'Å' => {
+                'a'
+            }
             'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
             'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
             'ó' | 'ò' | 'ô' | 'õ' | 'ö' | 'Ó' | 'Ò' | 'Ô' | 'Õ' | 'Ö' => 'o',
@@ -392,89 +395,122 @@ impl CollationManager {
     fn initialize_builtins(&self) {
         let builtins = vec![
             // Default collation
-            (100, CollationConfig {
-                name: "default".to_string(),
-                locale: "en_US".to_string(),
-                ..Default::default()
-            }),
+            (
+                100,
+                CollationConfig {
+                    name: "default".to_string(),
+                    locale: "en_US".to_string(),
+                    ..Default::default()
+                },
+            ),
             // C collation (binary)
-            (950, CollationConfig {
-                name: "C".to_string(),
-                locale: "C".to_string(),
-                provider: CollationProvider::Builtin,
-                deterministic: true,
-                ..Default::default()
-            }),
+            (
+                950,
+                CollationConfig {
+                    name: "C".to_string(),
+                    locale: "C".to_string(),
+                    provider: CollationProvider::Builtin,
+                    deterministic: true,
+                    ..Default::default()
+                },
+            ),
             // POSIX collation (same as C)
-            (951, CollationConfig {
-                name: "POSIX".to_string(),
-                locale: "POSIX".to_string(),
-                provider: CollationProvider::Builtin,
-                deterministic: true,
-                ..Default::default()
-            }),
+            (
+                951,
+                CollationConfig {
+                    name: "POSIX".to_string(),
+                    locale: "POSIX".to_string(),
+                    provider: CollationProvider::Builtin,
+                    deterministic: true,
+                    ..Default::default()
+                },
+            ),
             // Unicode (UCS_BASIC)
-            (952, CollationConfig {
-                name: "ucs_basic".to_string(),
-                locale: "C".to_string(),
-                provider: CollationProvider::Builtin,
-                deterministic: true,
-                ..Default::default()
-            }),
+            (
+                952,
+                CollationConfig {
+                    name: "ucs_basic".to_string(),
+                    locale: "C".to_string(),
+                    provider: CollationProvider::Builtin,
+                    deterministic: true,
+                    ..Default::default()
+                },
+            ),
             // English (US)
-            (1000, CollationConfig {
-                name: "en_US".to_string(),
-                locale: "en_US".to_string(),
-                provider: CollationProvider::Builtin,
-                ..Default::default()
-            }),
+            (
+                1000,
+                CollationConfig {
+                    name: "en_US".to_string(),
+                    locale: "en_US".to_string(),
+                    provider: CollationProvider::Builtin,
+                    ..Default::default()
+                },
+            ),
             // German
-            (1001, CollationConfig {
-                name: "de_DE".to_string(),
-                locale: "de_DE".to_string(),
-                provider: CollationProvider::Builtin,
-                ..Default::default()
-            }),
+            (
+                1001,
+                CollationConfig {
+                    name: "de_DE".to_string(),
+                    locale: "de_DE".to_string(),
+                    provider: CollationProvider::Builtin,
+                    ..Default::default()
+                },
+            ),
             // French
-            (1002, CollationConfig {
-                name: "fr_FR".to_string(),
-                locale: "fr_FR".to_string(),
-                provider: CollationProvider::Builtin,
-                ..Default::default()
-            }),
+            (
+                1002,
+                CollationConfig {
+                    name: "fr_FR".to_string(),
+                    locale: "fr_FR".to_string(),
+                    provider: CollationProvider::Builtin,
+                    ..Default::default()
+                },
+            ),
             // Spanish
-            (1003, CollationConfig {
-                name: "es_ES".to_string(),
-                locale: "es_ES".to_string(),
-                provider: CollationProvider::Builtin,
-                ..Default::default()
-            }),
+            (
+                1003,
+                CollationConfig {
+                    name: "es_ES".to_string(),
+                    locale: "es_ES".to_string(),
+                    provider: CollationProvider::Builtin,
+                    ..Default::default()
+                },
+            ),
             // Swedish
-            (1004, CollationConfig {
-                name: "sv_SE".to_string(),
-                locale: "sv_SE".to_string(),
-                provider: CollationProvider::Builtin,
-                ..Default::default()
-            }),
+            (
+                1004,
+                CollationConfig {
+                    name: "sv_SE".to_string(),
+                    locale: "sv_SE".to_string(),
+                    provider: CollationProvider::Builtin,
+                    ..Default::default()
+                },
+            ),
             // Case-insensitive
-            (2000, CollationConfig {
-                name: "en_US_ci".to_string(),
-                locale: "en_US".to_string(),
-                case_sensitivity: CaseSensitivity::Insensitive,
-                provider: CollationProvider::Builtin,
-                deterministic: false,
-                ..Default::default()
-            }),
+            (
+                2000,
+                CollationConfig {
+                    name: "en_US_ci".to_string(),
+                    locale: "en_US".to_string(),
+                    case_sensitivity: CaseSensitivity::Insensitive,
+                    provider: CollationProvider::Builtin,
+                    deterministic: false,
+                    ..Default::default()
+                },
+            ),
             // Case and accent insensitive
-            (2001, CollationConfig {
-                name: "en_US_ci_ai".to_string(),
-                locale: "en_US".to_string(),
-                case_sensitivity: CaseSensitivity::Insensitive,
-                accent_sensitivity: AccentSensitivity::Insensitive,
-                provider: CollationProvider::Builtin,
-                deterministic: false,
-                ..Default::default()
-            }),
+            (
+                2001,
+                CollationConfig {
+                    name: "en_US_ci_ai".to_string(),
+                    locale: "en_US".to_string(),
+                    case_sensitivity: CaseSensitivity::Insensitive,
+                    accent_sensitivity: AccentSensitivity::Insensitive,
+                    provider: CollationProvider::Builtin,
+                    deterministic: false,
+                    ..Default::default()
+                },
+            ),
         ];
 
         for (oid, config) in builtins {
@@ -486,7 +522,10 @@ impl CollationManager {
     }
 
     /// Create a new collation
-    pub fn create_collation(&self, config: CollationConfig) -> Result<Arc<Collation>, CollationError> {
+    pub fn create_collation(
+        &self,
+        config: CollationConfig,
+    ) -> Result<Arc<Collation>, CollationError> {
         // Validate name
         if config.name.is_empty() {
             return Err(CollationError::InvalidName("empty name".to_string()));
@@ -520,7 +559,8 @@ impl CollationManager {
     pub fn drop_collation(&self, name: &str) -> Result<(), CollationError> {
         let oid = {
             let name_index = self.name_index.read();
-            *name_index.get(name)
+            *name_index
+                .get(name)
                 .ok_or_else(|| CollationError::NotFound(name.to_string()))?
         };
 
@@ -555,8 +595,7 @@ impl CollationManager {
 
     /// Get the C collation
     pub fn c_collation(&self) -> Arc<Collation> {
-        self.get_collation("C")
-            .expect("C collation must exist")
+        self.get_collation("C").expect("C collation must exist")
     }
 
     /// List all collations
@@ -566,7 +605,8 @@ impl CollationManager {
 
     /// Find collations matching a locale pattern
     pub fn find_by_locale(&self, locale_pattern: &str) -> Vec<Arc<Collation>> {
-        self.collations.read()
+        self.collations
+            .read()
             .values()
             .filter(|c| c.config.locale.starts_with(locale_pattern))
             .cloned()
@@ -596,21 +636,29 @@ pub fn collate_sort(strings: &mut [String], collation: &Collation) {
 
 /// Find minimum with collation
 pub fn collate_min<'a>(strings: &'a [&'a str], collation: &Collation) -> Option<&'a str> {
-    strings.iter()
+    strings
+        .iter()
         .min_by(|a, b| collation.compare(a, b))
         .copied()
 }
 
 /// Find maximum with collation
 pub fn collate_max<'a>(strings: &'a [&'a str], collation: &Collation) -> Option<&'a str> {
-    strings.iter()
+    strings
+        .iter()
         .max_by(|a, b| collation.compare(a, b))
         .copied()
 }
 
 /// Binary search with collation
-pub fn collate_binary_search(sorted: &[&str], target: &str, collation: &Collation) -> Option<usize> {
-    sorted.binary_search_by(|s| collation.compare(s, target)).ok()
+pub fn collate_binary_search(
+    sorted: &[&str],
+    target: &str,
+    collation: &Collation,
+) -> Option<usize> {
+    sorted
+        .binary_search_by(|s| collation.compare(s, target))
+        .ok()
 }
 
 // ============================================================================
@@ -635,7 +683,9 @@ impl std::fmt::Display for CollationError {
             Self::NotFound(name) => write!(f, "Collation '{}' not found", name),
             Self::CannotDropBuiltin(name) => write!(f, "Cannot drop built-in collation '{}'", name),
             Self::InvalidLocale(locale) => write!(f, "Invalid locale: {}", locale),
-            Self::ProviderNotAvailable(provider) => write!(f, "Collation provider not available: {:?}", provider),
+            Self::ProviderNotAvailable(provider) => {
+                write!(f, "Collation provider not available: {:?}", provider)
+            }
         }
     }
 }
@@ -886,15 +936,15 @@ mod tests {
         let tertiary = Collation::new(2, config_tertiary);
 
         // Primary ignores case and accents
-        let key_a = primary.sort_key("a");
-        let key_A = primary.sort_key("A");
+        let key_lower = primary.sort_key("a");
+        let key_upper = primary.sort_key("A");
         // Both should have same primary weight
-        assert_eq!(key_a[0] >> 16, key_A[0] >> 16);
+        assert_eq!(key_lower[0] >> 16, key_upper[0] >> 16);
 
         // Tertiary distinguishes case
-        let key_a_t = tertiary.sort_key("a");
-        let key_A_t = tertiary.sort_key("A");
-        assert_ne!(key_a_t[0], key_A_t[0]);
+        let key_lower_t = tertiary.sort_key("a");
+        let key_upper_t = tertiary.sort_key("A");
+        assert_ne!(key_lower_t[0], key_upper_t[0]);
     }
 
     #[test]
@@ -949,8 +999,14 @@ mod tests {
 
         let sorted = vec!["apple", "banana", "cherry", "date"];
 
-        assert_eq!(collate_binary_search(&sorted, "banana", &collation), Some(1));
-        assert_eq!(collate_binary_search(&sorted, "cherry", &collation), Some(2));
+        assert_eq!(
+            collate_binary_search(&sorted, "banana", &collation),
+            Some(1)
+        );
+        assert_eq!(
+            collate_binary_search(&sorted, "cherry", &collation),
+            Some(2)
+        );
         assert_eq!(collate_binary_search(&sorted, "grape", &collation), None);
     }
 }

@@ -544,10 +544,7 @@ impl GraphQLExecutor {
     }
 
     /// Generate schema from database tables
-    pub fn generate_schema_from_tables(
-        &mut self,
-        tables: Vec<TableSchema>,
-    ) -> Result<(), String> {
+    pub fn generate_schema_from_tables(&mut self, tables: Vec<TableSchema>) -> Result<(), String> {
         let schema = Arc::make_mut(&mut self.schema);
 
         for table in tables {

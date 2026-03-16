@@ -3,10 +3,10 @@
 //! PostgreSQL-compatible Generalized Inverted Index (GIN) and
 //! Generalized Search Tree (GiST) indexes for complex data types.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
+use std::sync::Arc;
 
 // ============================================================================
 // GIN (Generalized Inverted Index)
@@ -81,7 +81,8 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
         if self.config.fast_update {
             let mut pending = self.pending.write();
             for key in keys {
-                pending.entry(key.clone())
+                pending
+                    .entry(key.clone())
                     .or_insert_with(HashSet::new)
                     .insert(row_id);
                 stats.pending_entries += 1;
@@ -96,7 +97,8 @@ impl<K: Eq + Hash + Clone> GinIndex<K> {
         } else {
             let mut entries = self.entries.write();
             for key in keys {
-                entries.entry(key.clone())
+                entries
+                    .entry(key.clone())
                     .or_insert_with(HashSet::new)
                     .insert(row_id);
                 stats.total_entries += 1;
@@ -253,11 +255,21 @@ pub struct BoxKey {
 
 impl BoxKey {
     pub fn new(xmin: f64, ymin: f64, xmax: f64, ymax: f64) -> Self {
-        Self { xmin, ymin, xmax, ymax }
+        Self {
+            xmin,
+            ymin,
+            xmax,
+            ymax,
+        }
     }
 
     pub fn point(x: f64, y: f64) -> Self {
-        Self { xmin: x, ymin: y, xmax: x, ymax: y }
+        Self {
+            xmin: x,
+            ymin: y,
+            xmax: x,
+            ymax: y,
+        }
     }
 
     pub fn area(&self) -> f64 {
@@ -265,13 +277,17 @@ impl BoxKey {
     }
 
     pub fn intersects(&self, other: &Self) -> bool {
-        self.xmin <= other.xmax && self.xmax >= other.xmin &&
-        self.ymin <= other.ymax && self.ymax >= other.ymin
+        self.xmin <= other.xmax
+            && self.xmax >= other.xmin
+            && self.ymin <= other.ymax
+            && self.ymax >= other.ymin
     }
 
     pub fn contains(&self, other: &Self) -> bool {
-        self.xmin <= other.xmin && self.xmax >= other.xmax &&
-        self.ymin <= other.ymin && self.ymax >= other.ymax
+        self.xmin <= other.xmin
+            && self.xmax >= other.xmax
+            && self.ymin <= other.ymin
+            && self.ymax >= other.ymax
     }
 }
 
@@ -566,23 +582,24 @@ impl<K: GistKey + 'static> GistIndex<K> {
 
         // Create new node for right half
         let new_id = self.allocate_node();
-        let right_entries: Vec<GistEntry<K>> = right_indices.iter()
-            .map(|&i| entries[i].clone())
-            .collect();
+        let right_entries: Vec<GistEntry<K>> =
+            right_indices.iter().map(|&i| entries[i].clone()).collect();
 
-        let left_entries: Vec<GistEntry<K>> = left_indices.iter()
-            .map(|&i| entries[i].clone())
-            .collect();
+        let left_entries: Vec<GistEntry<K>> =
+            left_indices.iter().map(|&i| entries[i].clone()).collect();
 
         // Update nodes
         let mut nodes = self.nodes.write();
 
-        nodes.insert(new_id, GistNode {
-            id: new_id,
-            is_leaf,
-            entries: right_entries,
-            parent,
-        });
+        nodes.insert(
+            new_id,
+            GistNode {
+                id: new_id,
+                is_leaf,
+                entries: right_entries,
+                parent,
+            },
+        );
 
         if let Some(node) = nodes.get_mut(&node_id) {
             node.entries = left_entries;
@@ -593,11 +610,19 @@ impl<K: GistKey + 'static> GistIndex<K> {
             // Add new child to parent
             let left_key = {
                 let node = nodes.get(&node_id).unwrap();
-                node.entries.iter().map(|e| e.key.clone()).reduce(|a, b| a.union(&b)).unwrap()
+                node.entries
+                    .iter()
+                    .map(|e| e.key.clone())
+                    .reduce(|a, b| a.union(&b))
+                    .unwrap()
             };
             let right_key = {
                 let node = nodes.get(&new_id).unwrap();
-                node.entries.iter().map(|e| e.key.clone()).reduce(|a, b| a.union(&b)).unwrap()
+                node.entries
+                    .iter()
+                    .map(|e| e.key.clone())
+                    .reduce(|a, b| a.union(&b))
+                    .unwrap()
             };
 
             if let Some(parent) = nodes.get_mut(&parent_id) {
@@ -618,22 +643,41 @@ impl<K: GistKey + 'static> GistIndex<K> {
 
             let left_key = {
                 let node = nodes.get(&node_id).unwrap();
-                node.entries.iter().map(|e| e.key.clone()).reduce(|a, b| a.union(&b)).unwrap()
+                node.entries
+                    .iter()
+                    .map(|e| e.key.clone())
+                    .reduce(|a, b| a.union(&b))
+                    .unwrap()
             };
             let right_key = {
                 let node = nodes.get(&new_id).unwrap();
-                node.entries.iter().map(|e| e.key.clone()).reduce(|a, b| a.union(&b)).unwrap()
+                node.entries
+                    .iter()
+                    .map(|e| e.key.clone())
+                    .reduce(|a, b| a.union(&b))
+                    .unwrap()
             };
 
-            nodes.insert(new_root_id, GistNode {
-                id: new_root_id,
-                is_leaf: false,
-                entries: vec![
-                    GistEntry { key: left_key, child: Some(node_id), row_id: None },
-                    GistEntry { key: right_key, child: Some(new_id), row_id: None },
-                ],
-                parent: None,
-            });
+            nodes.insert(
+                new_root_id,
+                GistNode {
+                    id: new_root_id,
+                    is_leaf: false,
+                    entries: vec![
+                        GistEntry {
+                            key: left_key,
+                            child: Some(node_id),
+                            row_id: None,
+                        },
+                        GistEntry {
+                            key: right_key,
+                            child: Some(new_id),
+                            row_id: None,
+                        },
+                    ],
+                    parent: None,
+                },
+            );
 
             // Update children's parent
             if let Some(node) = nodes.get_mut(&node_id) {
@@ -766,7 +810,8 @@ impl AdvancedIndexRegistry {
 
     /// List indexes for table
     pub fn list_for_table(&self, table: &str) -> Vec<AdvancedIndexMeta> {
-        self.indexes.read()
+        self.indexes
+            .read()
             .values()
             .filter(|m| m.table == table)
             .cloned()

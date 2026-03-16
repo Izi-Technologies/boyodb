@@ -7,10 +7,10 @@
 //! - Range types
 //! - Array types
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::SystemTime;
 
 /// User type error
@@ -450,9 +450,7 @@ impl UserTypeManager {
 
                 Ok(())
             }
-            _ => Err(UserTypeError::InvalidDefinition(
-                "not an enum type".into(),
-            )),
+            _ => Err(UserTypeError::InvalidDefinition("not an enum type".into())),
         }
     }
 
@@ -632,7 +630,11 @@ impl UserTypeManager {
     }
 
     /// Validate a value against a type
-    pub fn validate_value(&self, value: &FieldValue, field_type: &FieldType) -> Result<(), UserTypeError> {
+    pub fn validate_value(
+        &self,
+        value: &FieldValue,
+        field_type: &FieldType,
+    ) -> Result<(), UserTypeError> {
         match (value, field_type) {
             (FieldValue::Null, FieldType::Nullable(_)) => Ok(()),
             (FieldValue::Null, _) => Err(UserTypeError::ConstraintViolation(
@@ -745,7 +747,8 @@ impl UserTypeManager {
 
         // Check for array syntax
         if type_name_upper.ends_with("[]") {
-            let element_type = self.parse_type(&type_name_trimmed[..type_name_trimmed.len() - 2])?;
+            let element_type =
+                self.parse_type(&type_name_trimmed[..type_name_trimmed.len() - 2])?;
             return Ok(FieldType::Array(Box::new(element_type)));
         }
 
@@ -975,12 +978,7 @@ mod tests {
 
         // Add new value
         manager
-            .alter_enum_add_value(
-                &TypeId::simple("status"),
-                "completed",
-                None,
-                Some("active"),
-            )
+            .alter_enum_add_value(&TypeId::simple("status"), "completed", None, Some("active"))
             .unwrap();
 
         let updated_type = manager.get_type(&TypeId::simple("status")).unwrap();
@@ -1034,10 +1032,7 @@ mod tests {
         let person_type = manager.get_type(&TypeId::simple("person")).unwrap();
         if let TypeKind::Composite(comp) = &person_type.type_kind {
             assert_eq!(comp.fields.len(), 2);
-            assert!(matches!(
-                &comp.fields[1].data_type,
-                FieldType::UserType(_)
-            ));
+            assert!(matches!(&comp.fields[1].data_type, FieldType::UserType(_)));
         }
     }
 

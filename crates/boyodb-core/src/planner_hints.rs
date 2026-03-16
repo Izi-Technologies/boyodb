@@ -489,26 +489,36 @@ fn parse_single_hint(hint: &str) -> Option<QueryHint> {
     // NO_* hints
     if hint_upper.starts_with("NO_") {
         match &hint_upper[3..] {
-            "SEQSCAN" => return Some(QueryHint::ScanMethod(ScanMethodHint {
-                table: String::new(),
-                method: ScanMethod::NoSeqScan,
-            })),
-            "INDEXSCAN" => return Some(QueryHint::ScanMethod(ScanMethodHint {
-                table: String::new(),
-                method: ScanMethod::NoIndexScan,
-            })),
-            "NESTLOOP" => return Some(QueryHint::JoinMethod(JoinMethodHint {
-                tables: Vec::new(),
-                method: JoinMethod::NoNestLoop,
-            })),
-            "HASHJOIN" => return Some(QueryHint::JoinMethod(JoinMethodHint {
-                tables: Vec::new(),
-                method: JoinMethod::NoHashJoin,
-            })),
-            "MERGEJOIN" => return Some(QueryHint::JoinMethod(JoinMethodHint {
-                tables: Vec::new(),
-                method: JoinMethod::NoMergeJoin,
-            })),
+            "SEQSCAN" => {
+                return Some(QueryHint::ScanMethod(ScanMethodHint {
+                    table: String::new(),
+                    method: ScanMethod::NoSeqScan,
+                }))
+            }
+            "INDEXSCAN" => {
+                return Some(QueryHint::ScanMethod(ScanMethodHint {
+                    table: String::new(),
+                    method: ScanMethod::NoIndexScan,
+                }))
+            }
+            "NESTLOOP" => {
+                return Some(QueryHint::JoinMethod(JoinMethodHint {
+                    tables: Vec::new(),
+                    method: JoinMethod::NoNestLoop,
+                }))
+            }
+            "HASHJOIN" => {
+                return Some(QueryHint::JoinMethod(JoinMethodHint {
+                    tables: Vec::new(),
+                    method: JoinMethod::NoHashJoin,
+                }))
+            }
+            "MERGEJOIN" => {
+                return Some(QueryHint::JoinMethod(JoinMethodHint {
+                    tables: Vec::new(),
+                    method: JoinMethod::NoMergeJoin,
+                }))
+            }
             _ => {}
         }
     }
@@ -572,21 +582,24 @@ fn parse_structured_hint(line: &str) -> Option<QueryHint> {
                     }));
                 }
                 "NESTLOOP" => {
-                    let tables: Vec<String> = args.split(',').map(|s| s.trim().to_string()).collect();
+                    let tables: Vec<String> =
+                        args.split(',').map(|s| s.trim().to_string()).collect();
                     return Some(QueryHint::JoinMethod(JoinMethodHint {
                         tables,
                         method: JoinMethod::NestLoop,
                     }));
                 }
                 "HASHJOIN" => {
-                    let tables: Vec<String> = args.split(',').map(|s| s.trim().to_string()).collect();
+                    let tables: Vec<String> =
+                        args.split(',').map(|s| s.trim().to_string()).collect();
                     return Some(QueryHint::JoinMethod(JoinMethodHint {
                         tables,
                         method: JoinMethod::HashJoin,
                     }));
                 }
                 "MERGEJOIN" => {
-                    let tables: Vec<String> = args.split(',').map(|s| s.trim().to_string()).collect();
+                    let tables: Vec<String> =
+                        args.split(',').map(|s| s.trim().to_string()).collect();
                     return Some(QueryHint::JoinMethod(JoinMethodHint {
                         tables,
                         method: JoinMethod::MergeJoin,
@@ -606,7 +619,8 @@ fn parse_structured_hint(line: &str) -> Option<QueryHint> {
                     }
                 }
                 "LEADING" => {
-                    let tables: Vec<String> = args.split(',').map(|s| s.trim().to_string()).collect();
+                    let tables: Vec<String> =
+                        args.split(',').map(|s| s.trim().to_string()).collect();
                     return Some(QueryHint::Leading(tables));
                 }
                 "ROWS" => {
@@ -649,7 +663,11 @@ pub fn extract_hints(sql: &str) -> Option<(HintCollection, usize)> {
                 if let Some(end) = after_keyword.find("*/") {
                     let hint_comment = &after_keyword[..end + 2];
                     let hints = parse_hints(hint_comment);
-                    let hint_end = pos + keyword.len() + (after_keyword.len() - after_keyword.trim_start().len()) + end + 2;
+                    let hint_end = pos
+                        + keyword.len()
+                        + (after_keyword.len() - after_keyword.trim_start().len())
+                        + end
+                        + 2;
                     return Some((hints, hint_end));
                 }
             }
@@ -757,7 +775,8 @@ mod tests {
 
     #[test]
     fn test_join_order_hint() {
-        let hint = JoinOrderHint::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]).fixed();
+        let hint =
+            JoinOrderHint::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]).fixed();
         assert!(hint.fixed);
         assert_eq!(hint.tables.len(), 3);
     }
@@ -792,8 +811,14 @@ mod tests {
 
         collection.add(QueryHint::OptimizerGoal(OptimizerGoal::FirstRows));
 
-        assert_eq!(collection.get_scan_method("users"), Some(ScanMethod::IndexScan));
-        assert_eq!(collection.get_optimizer_goal(), Some(OptimizerGoal::FirstRows));
+        assert_eq!(
+            collection.get_scan_method("users"),
+            Some(ScanMethod::IndexScan)
+        );
+        assert_eq!(
+            collection.get_optimizer_goal(),
+            Some(OptimizerGoal::FirstRows)
+        );
     }
 
     #[test]
@@ -814,7 +839,10 @@ mod tests {
         let collection = parse_hints(comment);
 
         // Last one wins
-        assert_eq!(collection.get_optimizer_goal(), Some(OptimizerGoal::AllRows));
+        assert_eq!(
+            collection.get_optimizer_goal(),
+            Some(OptimizerGoal::AllRows)
+        );
     }
 
     #[test]
@@ -842,7 +870,10 @@ mod tests {
         let collection = parse_hints(comment);
 
         let leading = collection.get_leading().unwrap();
-        assert_eq!(leading, &vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            leading,
+            &vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 
     #[test]

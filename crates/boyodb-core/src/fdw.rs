@@ -3,11 +3,11 @@
 //! Provides pluggable connectors for querying external databases
 //! including MySQL, PostgreSQL, MongoDB, Redis, and custom sources.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// FDW Error types
@@ -243,7 +243,11 @@ impl FdwSort {
         let mut s = self.column.clone();
         s.push_str(if self.descending { " DESC" } else { " ASC" });
         if let Some(nulls_first) = self.nulls_first {
-            s.push_str(if nulls_first { " NULLS FIRST" } else { " NULLS LAST" });
+            s.push_str(if nulls_first {
+                " NULLS FIRST"
+            } else {
+                " NULLS LAST"
+            });
         }
         s
     }
@@ -797,7 +801,8 @@ impl FdwRegistry {
         let mut conn = self.get_connection(&table.server_name, local_user)?;
 
         // Build query with pushdown
-        let query = self.build_pushdown_query(&table, &predicates, &columns, limit, &conn)?;
+        let query =
+            self.build_pushdown_query(&table, &predicates, &columns, limit, conn.as_ref())?;
 
         let cursor = conn.execute_query(&query)?;
 
@@ -819,7 +824,7 @@ impl FdwRegistry {
         predicates: &[FdwPredicate],
         columns: &[String],
         limit: Option<usize>,
-        conn: &Box<dyn FdwConnection>,
+        conn: &dyn FdwConnection,
     ) -> Result<String, FdwError> {
         let capabilities = conn.capabilities();
 
@@ -860,7 +865,7 @@ impl FdwRegistry {
         &self,
         table: &ForeignTable,
         plan: &FdwPushdownPlan,
-        conn: &Box<dyn FdwConnection>,
+        conn: &dyn FdwConnection,
     ) -> Result<String, FdwError> {
         let capabilities = conn.capabilities();
 
@@ -973,7 +978,7 @@ impl FdwRegistry {
         let mut conn = self.get_connection(&table.server_name, local_user)?;
 
         // Build query with full pushdown
-        let query = self.build_pushdown_query_full(&table, &plan, &conn)?;
+        let query = self.build_pushdown_query_full(&table, &plan, conn.as_ref())?;
 
         let cursor = conn.execute_query(&query)?;
 
@@ -999,9 +1004,7 @@ impl FdwRegistry {
 
     fn predicate_to_sql(&self, predicate: &FdwPredicate) -> Result<String, FdwError> {
         match predicate {
-            FdwPredicate::Equals(col, val) => {
-                Ok(format!("{} = {}", col, self.value_to_sql(val)?))
-            }
+            FdwPredicate::Equals(col, val) => Ok(format!("{} = {}", col, self.value_to_sql(val)?)),
             FdwPredicate::NotEquals(col, val) => {
                 Ok(format!("{} <> {}", col, self.value_to_sql(val)?))
             }
@@ -1043,9 +1046,7 @@ impl FdwRegistry {
                 self.predicate_to_sql(left)?,
                 self.predicate_to_sql(right)?
             )),
-            FdwPredicate::Not(inner) => {
-                Ok(format!("NOT ({})", self.predicate_to_sql(inner)?))
-            }
+            FdwPredicate::Not(inner) => Ok(format!("NOT ({})", self.predicate_to_sql(inner)?)),
         }
     }
 
@@ -1127,7 +1128,9 @@ impl FdwHandler for PostgresFdwHandler {
             .cloned()
             .unwrap_or_default();
 
-        Ok(Box::new(PostgresConnection::new(host, port, dbname, user, password)?))
+        Ok(Box::new(PostgresConnection::new(
+            host, port, dbname, user, password,
+        )?))
     }
 
     fn validate_server_options(&self, options: &HashMap<String, String>) -> Result<(), FdwError> {
@@ -1200,7 +1203,9 @@ impl PostgresConnection {
                     .block_on(async {
                         tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await
                     })
-                    .map_err(|e| FdwError::ConnectionFailed(format!("PostgreSQL connection failed: {}", e)))?;
+                    .map_err(|e| {
+                        FdwError::ConnectionFailed(format!("PostgreSQL connection failed: {}", e))
+                    })?;
 
                 // Spawn the connection task
                 let rt_clone = rt.clone();
@@ -1376,8 +1381,23 @@ impl FdwConnection for PostgresConnection {
             aggregate: true,
             group_by: true,
             join: true,
-            functions: vec!["count".into(), "sum".into(), "avg".into(), "min".into(), "max".into()],
-            operators: vec!["=".into(), "<>".into(), "<".into(), ">".into(), "<=".into(), ">=".into(), "LIKE".into(), "IN".into()],
+            functions: vec![
+                "count".into(),
+                "sum".into(),
+                "avg".into(),
+                "min".into(),
+                "max".into(),
+            ],
+            operators: vec![
+                "=".into(),
+                "<>".into(),
+                "<".into(),
+                ">".into(),
+                "<=".into(),
+                ">=".into(),
+                "LIKE".into(),
+                "IN".into(),
+            ],
         }
     }
 
@@ -2361,11 +2381,8 @@ mod tests {
         let sql = registry.predicate_to_sql(&pred).unwrap();
         assert_eq!(sql, "name = 'test'");
 
-        let pred = FdwPredicate::Between(
-            "age".to_string(),
-            FdwValue::Int64(18),
-            FdwValue::Int64(65),
-        );
+        let pred =
+            FdwPredicate::Between("age".to_string(), FdwValue::Int64(18), FdwValue::Int64(65));
         let sql = registry.predicate_to_sql(&pred).unwrap();
         assert_eq!(sql, "age BETWEEN 18 AND 65");
 

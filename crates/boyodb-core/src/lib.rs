@@ -1,30 +1,31 @@
 pub mod auth;
+pub mod auto_tuner;
 pub mod bloom_utils;
+pub mod cdc_sink;
 pub mod cluster;
+pub mod column_masking;
 pub mod connection_pool;
 pub mod engine;
+pub mod ffi;
 pub mod fts;
 pub mod geospatial;
 pub mod hnsw;
 pub mod http_api;
 pub mod incremental_backup;
 pub mod incremental_mv;
+pub mod index_advisor;
 pub mod io_uring;
 pub mod jit;
-pub mod ffi;
-pub mod query_hints;
-pub mod index_advisor;
-pub mod column_masking;
-pub mod lakehouse;
-pub mod vector_quantization;
-pub mod cdc_sink;
 pub mod kafka_sink;
-pub mod auto_tuner;
+pub mod lakehouse;
+pub mod query_hints;
+pub mod replica_sync;
 pub mod replication;
 pub mod replication_worker;
-pub mod replica_sync;
+pub mod vector_quantization;
 pub use replication::{BundlePayload, BundleSegment};
 pub mod analytics;
+pub mod audit_log;
 pub mod compression;
 pub mod data_formats;
 pub mod delta_encoding;
@@ -44,19 +45,18 @@ pub mod operations;
 pub mod optimizer;
 pub mod planner_distributed;
 pub mod projections;
+pub mod rbac_v2;
 pub mod realtime;
 pub mod resource_governance;
 pub mod security;
-pub mod rbac_v2;
-pub mod audit_log;
 pub mod sql;
 pub mod storage;
 pub mod streaming;
 pub mod telemetry;
 pub mod tiering;
 pub mod time_travel;
-pub mod ttl;
 pub mod tooling;
+pub mod ttl;
 pub mod types;
 pub mod vector;
 pub mod vectorized;
@@ -68,69 +68,69 @@ pub mod btree;
 pub mod constraint_validator;
 pub mod lock_manager;
 pub mod mvcc;
+pub mod optimizer_integration;
 pub mod pitr;
 pub mod transaction;
 pub mod undo_log;
 pub mod wal_archive;
-pub mod optimizer_integration;
 
 // --- Enterprise Features (Phase 20) ---
-pub mod procedures;
-pub mod triggers;
-pub mod two_phase_commit;
 pub mod enterprise_auth;
 pub mod plan_cache;
+pub mod procedures;
 pub mod stats_functions;
+pub mod triggers;
+pub mod two_phase_commit;
 
 // --- Production Stability Features (Phase 21) ---
-pub mod partitioning;
+pub mod cross_db;
+pub mod extensions;
 pub mod fdw;
 pub mod logical_replication;
 pub mod online_ddl;
-pub mod cross_db;
+pub mod partitioning;
 pub mod user_types;
-pub mod extensions;
 
 // --- SQL Compatibility Features (Phase 22) ---
-pub mod sequences;
-pub mod generated_columns;
-pub mod pubsub;
 pub mod advisory_locks;
+pub mod generated_columns;
 pub mod lateral_joins;
+pub mod pubsub;
+pub mod sequences;
 
 // --- Production Hardening Features (Phase 23) ---
-pub mod replica_mode;
 pub mod connection_management;
-pub mod query_safety;
-pub mod pg_stat;
 pub mod data_integrity;
+pub mod pg_stat;
+pub mod query_safety;
+pub mod replica_mode;
 
 // --- Operational Features (Phase 24) ---
-pub mod graceful_shutdown;
 pub mod advanced_indexes;
-pub mod query_enhancements;
+pub mod bulk_operations;
 pub mod deadlock_detection;
+pub mod graceful_shutdown;
 pub mod monitoring_endpoints;
 pub mod protocol_security;
-pub mod bulk_operations;
+pub mod query_enhancements;
 
 // --- Query Execution & Maintenance (Phase 25) ---
 pub mod cursor_support;
 pub mod parallel_query;
-pub mod vacuum_analyze;
 pub mod planner_hints;
+pub mod vacuum_analyze;
 
 // --- Advanced SQL Features (Phase 26) ---
-pub mod table_inheritance;
 pub mod domain_types;
 pub mod event_triggers;
 pub mod rules_system;
+pub mod table_inheritance;
 
 // --- Storage & Replication (Phase 27) ---
-pub mod tablespaces;
-pub mod physical_backup;
-pub mod logical_decoding;
 pub mod large_objects;
+pub mod logical_decoding;
+pub mod physical_backup;
+pub mod tablespaces;
 
 // --- Internationalization & Search (Phase 28) ---
 pub mod collation;
@@ -138,41 +138,41 @@ pub mod fts_enhanced;
 pub mod icu_support;
 
 // --- Advanced Data Types (Phase 29) ---
-pub mod range_types;
-pub mod network_types;
 pub mod geometric_types;
+pub mod network_types;
+pub mod range_types;
 pub mod xml_support;
 
 // --- Performance Optimizations (Phase 30) ---
 pub mod hot_updates;
 pub mod index_only_scans;
-pub mod parallel_index;
 pub mod memory_context;
+pub mod parallel_index;
 
 // --- Replication Enhancements (Phase 31) ---
+pub mod conflict_resolution;
 pub mod subscription;
 pub mod sync_replication;
-pub mod conflict_resolution;
 
 // --- Operational Excellence (Phase 32) ---
+pub mod connection_pooler;
 pub mod pg_dump;
 pub mod pg_upgrade;
-pub mod connection_pooler;
 pub mod query_explain;
 
 // --- Competitive Features (Phase 33) ---
+pub mod cdc_webhooks;
 pub mod graphql_api;
 pub mod ml_inference;
 pub mod otel_integration;
-pub mod cdc_webhooks;
 
 // --- Advanced ML Features (Phase 34) ---
-pub mod feature_store;
-pub mod model_monitoring;
-pub mod embeddings_engine;
-pub mod online_learning;
 pub mod automl;
+pub mod embeddings_engine;
+pub mod feature_store;
 pub mod ml_explainability;
+pub mod model_monitoring;
+pub mod online_learning;
 
 pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
@@ -186,21 +186,22 @@ pub use engine::{
     QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
     TableDescription, UdfRegistry, UserDefinedFunction, VacuumResult,
 };
-pub use replication::{
-    BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,
-};
 pub use replica_sync::{
     spawn_replica_sync_worker, ReplicaSyncConfig, ReplicaSyncMetrics, ReplicaSyncMetricsSnapshot,
     ReplicaSyncWorker,
+};
+pub use replication::{
+    BundlePlan, BundleRequest, DatabaseMeta, Manifest, ManifestEntry, SegmentTier, TableMeta,
 };
 pub use sql::{
     parse_ctes, parse_expr, parse_select_items_extended, parse_sql, AuthCommand, CteDefinition,
     DdlCommand, DeduplicationConfig, DeduplicationMode, DeleteCommand, GrantTargetType, GroupBy,
     GroupByColumn, InsertCommand, JoinClause, JoinCondition, JoinTable, JoinType, LiteralValue,
-    MergeCommand, MergeWhenMatched, MergeWhenNotMatched, OnConflict, OnConflictAction, OrderByClause,
-    ParsedQuery, PreparedStatementCommand, PubSubCommand, QueryFilter as SqlQueryFilter, ScalarFunction,
-    SelectColumn, SelectExpr, SqlStatement, SqlValue, UpdateCommand, UserOptions, WindowFrame,
-    WindowFrameBound, WindowFrameUnit, WindowFunction, WindowSpec,
+    MergeCommand, MergeWhenMatched, MergeWhenNotMatched, OnConflict, OnConflictAction,
+    OrderByClause, ParsedQuery, PreparedStatementCommand, PubSubCommand,
+    QueryFilter as SqlQueryFilter, ScalarFunction, SelectColumn, SelectExpr, SqlStatement,
+    SqlValue, UpdateCommand, UserOptions, WindowFrame, WindowFrameBound, WindowFrameUnit,
+    WindowFunction, WindowSpec,
 };
 pub use types::{BoyodbStatus, OwnedBuffer};
 
@@ -318,14 +319,43 @@ pub use data_formats::{
 
 // High Availability re-exports (Phase 15)
 pub use high_availability::{
-    AppendEntriesRequest, AppendEntriesResponse, ClusterHaStatus, ElectionState as HaElectionState,
-    FailoverEvent, FailoverEventType, FailoverManager, HaConfig, HaError, HaManager,
-    HealthCheckResult, HealthMonitor, LeaderElection, LoadBalanceStrategy, LogEntry, LogEntryType,
-    PendingWrite, QuorumWriter, ReadPreference, ReplicaInfo, ReplicaRole, ReplicaSelector,
-    ReplicaState, VoteRequest, VoteResponse, WriteAck, WriteConsistency,
+    AppendEntriesRequest,
+    AppendEntriesResponse,
+    ClusterHaStatus,
     // Multi-Region Replication
-    ConflictResolution, MultiRegionManager, MultiRegionStats, RegionConfig, RegionReplicationMode,
-    RegionReplicationStatus, RegionState, RegionWriteConcern, ReplicationConflict,
+    ConflictResolution,
+    ElectionState as HaElectionState,
+    FailoverEvent,
+    FailoverEventType,
+    FailoverManager,
+    HaConfig,
+    HaError,
+    HaManager,
+    HealthCheckResult,
+    HealthMonitor,
+    LeaderElection,
+    LoadBalanceStrategy,
+    LogEntry,
+    LogEntryType,
+    MultiRegionManager,
+    MultiRegionStats,
+    PendingWrite,
+    QuorumWriter,
+    ReadPreference,
+    RegionConfig,
+    RegionReplicationMode,
+    RegionReplicationStatus,
+    RegionState,
+    RegionWriteConcern,
+    ReplicaInfo,
+    ReplicaRole,
+    ReplicaSelector,
+    ReplicaState,
+    ReplicationConflict,
+    VoteRequest,
+    VoteResponse,
+    WriteAck,
+    WriteConsistency,
 };
 
 // Resource Governance re-exports (Phase 16)
@@ -353,14 +383,28 @@ pub use tooling::{
 
 // GPU Acceleration re-exports (Phase 19)
 pub use gpu::{
-    AggregateResult, AggregationType, FilterOp, FilterPredicate, GpuConfig, GpuDecision,
-    GpuDeviceInfo, GpuError, GpuExecutionStats, GpuExecutor, GpuOperation, GpuStatus,
-    // Metal support (macOS)
-    MetalDeviceInfo, MetalExecutor,
-    // GPU Vector Operations
-    GpuVectorOps, VectorOp,
+    AggregateResult,
+    AggregationType,
+    FilterOp,
+    FilterPredicate,
+    GpuConfig,
+    GpuDecision,
+    GpuDeviceInfo,
+    GpuError,
+    GpuExecutionStats,
+    GpuExecutor,
     // GPU Memory Pool
-    GpuMemoryAllocation, GpuMemoryPool, GpuMemoryPoolStats,
+    GpuMemoryAllocation,
+    GpuMemoryPool,
+    GpuMemoryPoolStats,
+    GpuOperation,
+    GpuStatus,
+    // GPU Vector Operations
+    GpuVectorOps,
+    // Metal support (macOS)
+    MetalDeviceInfo,
+    MetalExecutor,
+    VectorOp,
 };
 
 // --- Financial-Grade ACID Transaction Support re-exports ---
@@ -405,28 +449,54 @@ pub use sql::{ForeignKeyAction, SqlIsolationLevel, TableConstraint, TransactionC
 
 // Optimizer and Index Advisor
 pub use optimizer::{
-    // Index Advisor
-    ColumnAccessPattern, ExistingIndex, FilterType, IndexAdvisor, IndexAdvisorConfig,
-    IndexAdvisorStats, IndexRecommendation, RecommendedIndexType, TableAccessPattern,
-    // Query Store
-    QueryFingerprint, QueryPlanSnapshot, QueryStore, QueryStoreConfig, QueryStoreSummary,
-    StoredQuery,
-    // Complexity Scoring
-    ComplexityBasedAdmission, QueryComplexity, QueryResourceCost,
-    // Cost Model Tuning
-    CostBasedOptimizer, CostCalibrationStats, CostModelTuner, QueryCost, StatValue,
     // Adaptive Query Execution
-    AdaptiveCheckpoint, AdaptiveDecision, AdaptiveExecutionConfig, AdaptiveExecutionSummary,
-    AdaptiveExecutor, JoinStrategy, RuntimeStats,
-    // Per-Tenant Resource Quotas
-    TenantQuota, TenantQuotaError, TenantQueryToken, TenantResourceManager, TenantUsage,
+    AdaptiveCheckpoint,
+    AdaptiveDecision,
+    AdaptiveExecutionConfig,
+    AdaptiveExecutionSummary,
+    AdaptiveExecutor,
+    // Index Advisor
+    ColumnAccessPattern,
+    ColumnStatistics as OptimizerColumnStats,
+    // Complexity Scoring
+    ComplexityBasedAdmission,
+    // Cost Model Tuning
+    CostBasedOptimizer,
+    CostCalibrationStats,
     // Aliased to avoid conflicts
     CostModelParams as OptimizerCostParams,
-    ColumnStatistics as OptimizerColumnStats,
+    CostModelTuner,
+    ExistingIndex,
+    FilterType,
     Histogram as OptimizerHistogram,
     HistogramBucket as OptimizerHistogramBucket,
+    IndexAdvisor,
+    IndexAdvisorConfig,
+    IndexAdvisorStats,
+    IndexRecommendation,
+    JoinStrategy,
+    QueryComplexity,
+    QueryCost,
     QueryExecutionStats as StoredQueryStats,
+    // Query Store
+    QueryFingerprint,
+    QueryPlanSnapshot,
+    QueryResourceCost,
+    QueryStore,
+    QueryStoreConfig,
+    QueryStoreSummary,
+    RecommendedIndexType,
+    RuntimeStats,
+    StatValue,
+    StoredQuery,
+    TableAccessPattern,
     TableStats as OptimizerTableStats,
+    TenantQueryToken,
+    // Per-Tenant Resource Quotas
+    TenantQuota,
+    TenantQuotaError,
+    TenantResourceManager,
+    TenantUsage,
 };
 
 // --- Competitive Features re-exports (Phase 33) ---
@@ -440,9 +510,9 @@ pub use graphql_api::{
 
 // ML Inference
 pub use ml_inference::{
-    FeatureSpec, FeatureType, InferenceRequest, InferenceResult, MLConfig, MLError, MLModel,
-    ModelFormat, ModelRegistry, ModelType, OutputType, Prediction, PredictionExplanation,
-    Preprocessing, RegistryStats, sql_predict,
+    sql_predict, FeatureSpec, FeatureType, InferenceRequest, InferenceResult, MLConfig, MLError,
+    MLModel, ModelFormat, ModelRegistry, ModelType, OutputType, Prediction, PredictionExplanation,
+    Preprocessing, RegistryStats,
 };
 
 // OpenTelemetry Integration
@@ -464,14 +534,14 @@ pub use cdc_webhooks::{
 // Feature Store
 pub use feature_store::{
     EntityRow, FeatureDataType, FeatureDefinition, FeatureGroup, FeaturePipeline, FeatureSource,
-    FeatureStore, FeatureStoreError, FeatureStoreStats, FeatureValue, FeatureView, FeatureVector,
+    FeatureStore, FeatureStoreError, FeatureStoreStats, FeatureValue, FeatureVector, FeatureView,
     MissingStrategy, OnlineStore, PipelineStep, PointInTimeRequest, Transformation,
 };
 
 // Model Monitoring
 pub use model_monitoring::{
-    Alert, AlertChannel, AlertConfig, AlertSeverity, ComparisonOp, DriftResult, DriftSeverity,
-    DriftTest, DistributionStats, ModelMonitor, MonitoredMetric, MonitoringRegistry,
+    Alert, AlertChannel, AlertConfig, AlertSeverity, ComparisonOp, DistributionStats, DriftResult,
+    DriftSeverity, DriftTest, ModelMonitor, MonitoredMetric, MonitoringRegistry,
     PerformanceMetrics, PredictionLog, ReferenceDistribution,
 };
 
@@ -503,12 +573,12 @@ pub use ml_explainability::{
 };
 
 // --- Data Platform Features (Phase 35) ---
-pub mod time_series_engine;
-pub mod graph_engine;
-pub mod data_quality;
-pub mod nl_to_sql;
-pub mod data_catalog;
 pub mod blockchain_ledger;
+pub mod data_catalog;
+pub mod data_quality;
+pub mod graph_engine;
+pub mod nl_to_sql;
+pub mod time_series_engine;
 pub mod workflow_engine;
 
 // Time Series Engine
@@ -520,8 +590,8 @@ pub use time_series_engine::{
 
 // Graph Engine
 pub use graph_engine::{
-    Direction, Edge, EdgePattern, GraphDatabase, GraphQuery, GraphStats, Node, NodePattern,
-    Path, PropertyValue, QueryCondition, QueryResult as GraphQueryResult, ResultValue,
+    Direction, Edge, EdgePattern, GraphDatabase, GraphQuery, GraphStats, Node, NodePattern, Path,
+    PropertyValue, QueryCondition, QueryResult as GraphQueryResult, ResultValue,
 };
 
 // Data Quality
@@ -533,9 +603,9 @@ pub use data_quality::{
 
 // Natural Language to SQL
 pub use nl_to_sql::{
-    AggregationType as NlAggregationType, ColumnSchema, ComparisonOp as NlComparisonOp,
-    Condition, Entity, EntityType, GeneratedSQL, NLToSQL, ParsedQuery as NlParsedQuery,
-    QueryIntent, TableSchema as NlTableSchema,
+    AggregationType as NlAggregationType, ColumnSchema, ComparisonOp as NlComparisonOp, Condition,
+    Entity, EntityType, GeneratedSQL, NLToSQL, ParsedQuery as NlParsedQuery, QueryIntent,
+    TableSchema as NlTableSchema,
 };
 
 // Data Catalog
@@ -561,12 +631,12 @@ pub use workflow_engine::{
 };
 
 // --- Advanced Analytics Features (Phase 36) ---
-pub mod vector_search;
-pub mod query_federation;
-pub mod realtime_dashboard;
 pub mod data_contracts;
 pub mod lakehouse_formats;
+pub mod query_federation;
+pub mod realtime_dashboard;
 pub mod sql_extensions;
+pub mod vector_search;
 
 // Vector Search
 pub use vector_search::{
@@ -576,19 +646,18 @@ pub use vector_search::{
 
 // Query Federation
 pub use query_federation::{
-    AggregateExpr, DataSource, DataSourceType, ExecutionStats as FederationExecutionStats,
-    FederatedPlan, FederatedQuery, FederatedResult, FederatedValue, FederationEngine,
-    FederationRegistry, JoinType as FederatedJoinType, PlanStep, QueryPart, SourceCapabilities,
-    SourceConfig, SourceStats, TableStats as FederationTableStats,
-    ColumnStats as FederationColumnStats,
+    AggregateExpr, ColumnStats as FederationColumnStats, DataSource, DataSourceType,
+    ExecutionStats as FederationExecutionStats, FederatedPlan, FederatedQuery, FederatedResult,
+    FederatedValue, FederationEngine, FederationRegistry, JoinType as FederatedJoinType, PlanStep,
+    QueryPart, SourceCapabilities, SourceConfig, SourceStats, TableStats as FederationTableStats,
 };
 
 // Real-time Dashboard
 pub use realtime_dashboard::{
     Alert as DashboardAlert, AlertSeverity as DashboardAlertSeverity, Dashboard, DashboardManager,
-    LogEntry as DashboardLogEntry, MetricPoint, MetricSeries, MetricsRegistry, StreamingHub,
-    Subscription, SubscriptionManager, SubscriptionType, Threshold, Widget, WidgetLayout,
-    WidgetOptions, WidgetType, WsMessage, MessageType, MessagePayload,
+    LogEntry as DashboardLogEntry, MessagePayload, MessageType, MetricPoint, MetricSeries,
+    MetricsRegistry, StreamingHub, Subscription, SubscriptionManager, SubscriptionType, Threshold,
+    Widget, WidgetLayout, WidgetOptions, WidgetType, WsMessage,
 };
 
 // Data Contracts
@@ -597,8 +666,8 @@ pub use data_contracts::{
     ContractStore, DataContract, DataType as ContractDataType,
     FieldDefinition as ContractFieldDefinition, IndexDefinition as ContractIndexDefinition,
     SchemaChange as ContractSchemaChange, SchemaDefinition, SemanticVersion,
-    ValidationRule as ContractValidationRule, ValidationRuleType,
-    ValidationResult as ContractValidationResult, VersionBump,
+    ValidationResult as ContractValidationResult, ValidationRule as ContractValidationRule,
+    ValidationRuleType, VersionBump,
 };
 
 // Lakehouse Formats
@@ -613,8 +682,8 @@ pub use lakehouse_formats::{
 
 // SQL Extensions
 pub use sql_extensions::{
-    ExtensionCategory, FunctionCall, Param, ParamType, QueryRewriter, RewriteResult,
-    SqlExtension, SqlExtensionRegistry, SqlValue as ExtSqlValue,
+    ExtensionCategory, FunctionCall, Param, ParamType, QueryRewriter, RewriteResult, SqlExtension,
+    SqlExtensionRegistry, SqlValue as ExtSqlValue,
 };
 
 // --- Performance & Testing (Phase 37) ---
@@ -628,11 +697,11 @@ pub use benchmarks::{
 
 // --- Gap Analysis Features (Phase 38: ClickHouse & PostgreSQL Parity) ---
 pub mod approximate;
-pub mod cdc;
-pub mod wasm_udf;
-pub mod query_profiler;
 pub mod async_insert;
+pub mod cdc;
 pub mod external_tables;
+pub mod query_profiler;
+pub mod wasm_udf;
 
 // Approximate Functions (HyperLogLog, T-Digest, Count-Min Sketch)
 pub use approximate::{
@@ -667,17 +736,17 @@ pub use async_insert::{
 // External Tables (S3, URL, HDFS, File)
 pub use external_tables::{
     ColumnDef as ExternalColumnDef, ExternalScanOptions, ExternalScanner, ExternalTableConfig,
-    ExternalTableError as ExternalTableErrorV2, ExternalTableRegistry, ExternalTableType as ExternalTableTypeV2,
-    FileFormat as ExtFileFormat, S3Options, ScanBatch,
+    ExternalTableError as ExternalTableErrorV2, ExternalTableRegistry,
+    ExternalTableType as ExternalTableTypeV2, FileFormat as ExtFileFormat, S3Options, ScanBatch,
 };
 
 // --- Gap Analysis Features (Phase 39: Advanced Features) ---
-pub mod parallel_replicas;
-pub mod zero_copy_replication;
+pub mod ai_query_optimizer;
 pub mod exclusion_constraints;
 pub mod gin_gist_indexes;
-pub mod ai_query_optimizer;
+pub mod parallel_replicas;
 pub mod tiered_compilation;
+pub mod zero_copy_replication;
 
 // Parallel Replicas (ClickHouse-style)
 pub use parallel_replicas::{
@@ -688,15 +757,15 @@ pub use parallel_replicas::{
 
 // Zero-Copy Replication
 pub use zero_copy_replication::{
-    GcResult, LockType, SegmentHandle, SegmentRef, StorageTier as ZeroCopyStorageTier,
-    SyncResult, ZeroCopyConfig, ZeroCopyError, ZeroCopyManager, ZeroCopyMetadata, ZeroCopyStats,
+    GcResult, LockType, SegmentHandle, SegmentRef, StorageTier as ZeroCopyStorageTier, SyncResult,
+    ZeroCopyConfig, ZeroCopyError, ZeroCopyManager, ZeroCopyMetadata, ZeroCopyStats,
 };
 
 // Exclusion Constraints (PostgreSQL-compatible)
 pub use exclusion_constraints::{
-    ColumnType as ExclusionColumnType, ConstraintValue, ExclusionConstraint, ExclusionConstraintManager,
-    ExclusionElement, ExclusionError, ExclusionOperator, ExclusionStats, ExclusionViolation,
-    IndexMethod, RangeValue, RowId,
+    ColumnType as ExclusionColumnType, ConstraintValue, ExclusionConstraint,
+    ExclusionConstraintManager, ExclusionElement, ExclusionError, ExclusionOperator,
+    ExclusionStats, ExclusionViolation, IndexMethod, RangeValue, RowId,
 };
 
 // GIN/GiST Indexes
@@ -709,7 +778,8 @@ pub use gin_gist_indexes::{
 pub use ai_query_optimizer::{
     AiQueryOptimizer, CardinalityModel, ColumnStats as AiColumnStats, CostModel, ExecutionHistory,
     HistogramBucket as AiHistogramBucket, OptimizationResult, OptimizerStats as AiOptimizerStats,
-    PlanAlternative, PlanScoringWeights, Predicate, PredicateOp, QueryFeatures, TableStats as AiTableStats,
+    PlanAlternative, PlanScoringWeights, Predicate, PredicateOp, QueryFeatures,
+    TableStats as AiTableStats,
 };
 
 // Tiered Compilation
@@ -720,16 +790,16 @@ pub use tiered_compilation::{
 };
 
 // --- Operational & Data Platform Features (Phase 40) ---
-pub mod schema_migrations;
-pub mod deployment;
 pub mod data_lineage;
+pub mod deployment;
 pub mod integrations;
+pub mod schema_migrations;
 
 // Schema Migrations (aliased to avoid conflict with tooling module)
 pub use schema_migrations::{
-    Migration as SchemaMigration, MigrationConfig, MigrationError, MigrationId,
+    ChecksumMismatch, Migration as SchemaMigration, MigrationConfig, MigrationError, MigrationId,
     MigrationManager as SchemaMigrationManager, MigrationRecord, MigrationStatus,
-    MigrationStatusReport, MigrationVersion, ChecksumMismatch,
+    MigrationStatusReport, MigrationVersion,
 };
 
 // Deployment (Blue-Green, Connection Draining, Resource Pools)
@@ -754,22 +824,23 @@ pub use data_lineage::{
 
 // Data Platform Integrations (Spark, Flink, dbt, Airflow, Presto/Trino)
 pub use integrations::{
-    AirflowOperatorConfig, AirflowOperatorGenerator, ConnectionConfig as IntegrationConnectionConfig,
-    DbtAdapterConfig, DbtColumn, DbtMaterialization, DbtModel, DbtProfileGenerator,
-    FlinkConnectorConfig, FlinkDdlGenerator, FlinkLookupCache, IntegrationManager,
-    PrestoConnectorConfig, PrestoConnectorGenerator, PrestoPluginInfo, SparkConnector,
-    SparkConnectorConfig, SparkField, SparkPartition, SparkSchema, SparkWriteMode, TypeMapping,
+    AirflowOperatorConfig, AirflowOperatorGenerator,
+    ConnectionConfig as IntegrationConnectionConfig, DbtAdapterConfig, DbtColumn,
+    DbtMaterialization, DbtModel, DbtProfileGenerator, FlinkConnectorConfig, FlinkDdlGenerator,
+    FlinkLookupCache, IntegrationManager, PrestoConnectorConfig, PrestoConnectorGenerator,
+    PrestoPluginInfo, SparkConnector, SparkConnectorConfig, SparkField, SparkPartition,
+    SparkSchema, SparkWriteMode, TypeMapping,
 };
 
 // --- Enterprise Operations Features (Phase 41) ---
-pub mod query_cache;
-pub mod multi_region_dr;
-pub mod query_cost_api;
-pub mod tenant_isolation;
-pub mod cdc_lake;
-pub mod query_replay;
 pub mod auto_scaling;
+pub mod cdc_lake;
 pub mod data_retention;
+pub mod multi_region_dr;
+pub mod query_cache;
+pub mod query_cost_api;
+pub mod query_replay;
+pub mod tenant_isolation;
 
 // Query Result Caching
 pub use query_cache::{
@@ -780,7 +851,7 @@ pub use query_cache::{
 
 // Multi-Region Disaster Recovery
 pub use multi_region_dr::{
-    DisasterRecoveryConfig, DnsRecord, DnsRecordType, DnsRoutingManager, DRError, DRMetrics,
+    DRError, DRMetrics, DisasterRecoveryConfig, DnsRecord, DnsRecordType, DnsRoutingManager,
     FailoverEvent as DRFailoverEvent, FailoverReason, FailoverState, MultiRegionDRManager,
     RegionConfig as DRRegionConfig, RegionHealth, RegionId, RegionStatus, ReplicationBatch,
     ReplicationEvent, ReplicationStatus as DRReplicationStatus, RoutingPolicy,
@@ -788,12 +859,12 @@ pub use multi_region_dr::{
 
 // Query Cost Estimation API
 pub use query_cost_api::{
-    ColumnStatistics as CostColumnStatistics, CostEstimationService, CostModelConfig,
-    CostWarning, FilterPredicate as CostFilterPredicate, Histogram as CostHistogram,
-    HistogramBucket as CostHistogramBucket, IndexStatistics as CostIndexStatistics,
-    OperationCost, OperationType, PlanOperation, QueryComplexity as CostQueryComplexity,
-    QueryCostEstimate, QueryCostEstimator, QueryPlan as CostQueryPlan, QuickEstimate,
-    ResourcePredictions, TableStatistics as CostTableStatistics, WarningSeverity,
+    ColumnStatistics as CostColumnStatistics, CostEstimationService, CostModelConfig, CostWarning,
+    FilterPredicate as CostFilterPredicate, Histogram as CostHistogram,
+    HistogramBucket as CostHistogramBucket, IndexStatistics as CostIndexStatistics, OperationCost,
+    OperationType, PlanOperation, QueryComplexity as CostQueryComplexity, QueryCostEstimate,
+    QueryCostEstimator, QueryPlan as CostQueryPlan, QuickEstimate, ResourcePredictions,
+    TableStatistics as CostTableStatistics, WarningSeverity,
 };
 
 // Tenant Isolation
@@ -801,28 +872,27 @@ pub use tenant_isolation::{
     BackupError as TenantBackupError, BackupStatus, BackupStorageLocation,
     BackupType as TenantBackupType, DataEncryptionKey, DataResidency, EncryptedData,
     EncryptionAlgorithm as TenantEncryptionAlgorithm, EncryptionError, KeyManagement,
-    NamespaceEncryptionManager, QuotaCheckOperation, RestoreRequest, RestoreState,
-    RestoreStatus, TenantBackup, TenantBackupConfig, TenantBackupManager, TenantConfig,
-    TenantEncryption, TenantError, TenantId, TenantManager, TenantQuotas, TenantStatus,
+    NamespaceEncryptionManager, QuotaCheckOperation, RestoreRequest, RestoreState, RestoreStatus,
+    TenantBackup, TenantBackupConfig, TenantBackupManager, TenantConfig, TenantEncryption,
+    TenantError, TenantId, TenantManager, TenantQuotas, TenantStatus,
     TenantUsage as TenantResourceUsage,
 };
 
 // CDC to Data Lakes
 pub use cdc_lake::{
     BatchConfig, CdcColumn as LakeCdcColumn, CdcDataType as LakeCdcDataType,
-    CdcEvent as LakeCdcEvent, CdcLakeSinkManager, CdcOperation,
-    CdcSchema as LakeCdcSchema, CdcValue as LakeCdcValue, CompactionConfig, DeltaLakeWriter,
-    IcebergWriter, LakeError, LakeFormat, LakeSink, LakeSinkConfig, LakeStorage,
-    LakeWriterStatsSnapshot, WriteMode as LakeWriteMode, WriteResult as LakeWriteResult,
+    CdcEvent as LakeCdcEvent, CdcLakeSinkManager, CdcOperation, CdcSchema as LakeCdcSchema,
+    CdcValue as LakeCdcValue, CompactionConfig, DeltaLakeWriter, IcebergWriter, LakeError,
+    LakeFormat, LakeSink, LakeSinkConfig, LakeStorage, LakeWriterStatsSnapshot,
+    WriteMode as LakeWriteMode, WriteResult as LakeWriteResult,
 };
 
 // Query Replay/Shadowing
 pub use query_replay::{
-    CaptureConfig, CapturedQuery, CaptureFilters, CaptureStatsSnapshot, CaptureStorage,
-    ParamValue, PerformanceComparison, QueryCaptureService, QueryParam, QueryReplayResult,
-    QueryReplayService, ReplayConfig, ReplayMode, ReplayProgress, ReplayReport, ReplayStatus,
-    ReplayStatsSnapshot, ResultComparison, RowDiff, ShadowStatsSnapshot, ShadowTarget,
-    ShadowTrafficService,
+    CaptureConfig, CaptureFilters, CaptureStatsSnapshot, CaptureStorage, CapturedQuery, ParamValue,
+    PerformanceComparison, QueryCaptureService, QueryParam, QueryReplayResult, QueryReplayService,
+    ReplayConfig, ReplayMode, ReplayProgress, ReplayReport, ReplayStatsSnapshot, ReplayStatus,
+    ResultComparison, RowDiff, ShadowStatsSnapshot, ShadowTarget, ShadowTrafficService,
 };
 
 // Auto-Scaling
@@ -837,8 +907,8 @@ pub use auto_scaling::{
 // Data Retention & Compliance
 pub use data_retention::{
     AnonymizationStrategy, ComplianceReport, ComplianceRequirement, DataCategory,
-    DataRetentionManager, DataSubjectRequest, DataSubjectRequestType, ExportFormat,
-    LegalHold, LegalHoldScope, LegalHoldStatus, PurgeAction, PurgeEvent, PurgeSchedule,
-    RequestNote, RequestResult, RequestStatus, RetentionError, RetentionPeriod, RetentionPolicy,
-    RetentionScope, RetentionStatsSnapshot, TableRef as RetentionTableRef,
+    DataRetentionManager, DataSubjectRequest, DataSubjectRequestType, ExportFormat, LegalHold,
+    LegalHoldScope, LegalHoldStatus, PurgeAction, PurgeEvent, PurgeSchedule, RequestNote,
+    RequestResult, RequestStatus, RetentionError, RetentionPeriod, RetentionPolicy, RetentionScope,
+    RetentionStatsSnapshot, TableRef as RetentionTableRef,
 };

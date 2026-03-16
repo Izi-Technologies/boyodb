@@ -3,9 +3,9 @@
 //! Query S3, URL, and HDFS directly without importing data.
 //! Supports lazy loading, predicate pushdown, and parallel scanning.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// External table type
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +119,7 @@ impl ExternalTableRegistry {
     /// Register an external table
     pub fn register(&self, config: ExternalTableConfig) -> Result<(), ExternalTableError> {
         let mut tables = self.tables.write();
-        
+
         if tables.contains_key(&config.name) {
             return Err(ExternalTableError::AlreadyExists(config.name.clone()));
         }
@@ -134,7 +134,7 @@ impl ExternalTableRegistry {
     /// Unregister an external table
     pub fn unregister(&self, name: &str) -> Result<(), ExternalTableError> {
         let mut tables = self.tables.write();
-        
+
         if tables.remove(name).is_none() {
             return Err(ExternalTableError::NotFound(name.into()));
         }
@@ -169,7 +169,9 @@ impl ExternalTableRegistry {
 
     fn create_s3_table(&self, args: &[String]) -> Result<ExternalTableConfig, ExternalTableError> {
         if args.is_empty() {
-            return Err(ExternalTableError::InvalidArguments("s3() requires at least a path".into()));
+            return Err(ExternalTableError::InvalidArguments(
+                "s3() requires at least a path".into(),
+            ));
         }
 
         let location = &args[0];
@@ -181,7 +183,7 @@ impl ExternalTableRegistry {
 
         let mut options = HashMap::new();
         let s3_opts = self.s3_options.read();
-        
+
         if let Some(ref region) = s3_opts.region {
             options.insert("region".into(), region.clone());
         }
@@ -204,7 +206,9 @@ impl ExternalTableRegistry {
 
     fn create_url_table(&self, args: &[String]) -> Result<ExternalTableConfig, ExternalTableError> {
         if args.is_empty() {
-            return Err(ExternalTableError::InvalidArguments("url() requires a URL".into()));
+            return Err(ExternalTableError::InvalidArguments(
+                "url() requires a URL".into(),
+            ));
         }
 
         let location = &args[0];
@@ -227,9 +231,14 @@ impl ExternalTableRegistry {
         })
     }
 
-    fn create_file_table(&self, args: &[String]) -> Result<ExternalTableConfig, ExternalTableError> {
+    fn create_file_table(
+        &self,
+        args: &[String],
+    ) -> Result<ExternalTableConfig, ExternalTableError> {
         if args.is_empty() {
-            return Err(ExternalTableError::InvalidArguments("file() requires a path".into()));
+            return Err(ExternalTableError::InvalidArguments(
+                "file() requires a path".into(),
+            ));
         }
 
         let location = &args[0];
@@ -252,9 +261,14 @@ impl ExternalTableRegistry {
         })
     }
 
-    fn create_hdfs_table(&self, args: &[String]) -> Result<ExternalTableConfig, ExternalTableError> {
+    fn create_hdfs_table(
+        &self,
+        args: &[String],
+    ) -> Result<ExternalTableConfig, ExternalTableError> {
         if args.is_empty() {
-            return Err(ExternalTableError::InvalidArguments("hdfs() requires a path".into()));
+            return Err(ExternalTableError::InvalidArguments(
+                "hdfs() requires a path".into(),
+            ));
         }
 
         let location = &args[0];
@@ -292,7 +306,7 @@ impl ExternalTableRegistry {
 
     fn infer_format(&self, path: &str) -> Result<FileFormat, ExternalTableError> {
         let path_lower = path.to_lowercase();
-        
+
         // Remove compression extensions first
         let path_clean = path_lower
             .trim_end_matches(".gz")
@@ -315,21 +329,23 @@ impl ExternalTableRegistry {
             ExternalTableType::S3 => {
                 if !config.location.starts_with("s3://") && !config.location.starts_with("s3a://") {
                     return Err(ExternalTableError::InvalidLocation(
-                        "S3 location must start with s3:// or s3a://".into()
+                        "S3 location must start with s3:// or s3a://".into(),
                     ));
                 }
             }
             ExternalTableType::Url => {
-                if !config.location.starts_with("http://") && !config.location.starts_with("https://") {
+                if !config.location.starts_with("http://")
+                    && !config.location.starts_with("https://")
+                {
                     return Err(ExternalTableError::InvalidLocation(
-                        "URL must start with http:// or https://".into()
+                        "URL must start with http:// or https://".into(),
                     ));
                 }
             }
             ExternalTableType::Hdfs => {
                 if !config.location.starts_with("hdfs://") {
                     return Err(ExternalTableError::InvalidLocation(
-                        "HDFS location must start with hdfs://".into()
+                        "HDFS location must start with hdfs://".into(),
                     ));
                 }
             }
@@ -366,11 +382,14 @@ pub struct ExternalScanOptions {
 /// External table scanner (trait for different implementations)
 pub trait ExternalScanner: Send + Sync {
     /// Scan the external table
-    fn scan(&self, options: &ExternalScanOptions) -> Result<Box<dyn Iterator<Item = ScanBatch>>, ExternalTableError>;
-    
+    fn scan(
+        &self,
+        options: &ExternalScanOptions,
+    ) -> Result<Box<dyn Iterator<Item = ScanBatch>>, ExternalTableError>;
+
     /// Get estimated row count
     fn estimated_rows(&self) -> Option<u64>;
-    
+
     /// Get estimated size in bytes
     fn estimated_bytes(&self) -> Option<u64>;
 }
@@ -434,10 +453,9 @@ mod tests {
             ..Default::default()
         });
 
-        let config = registry.create_table_function(
-            "s3",
-            &["s3://bucket/path/data.parquet".into()]
-        ).unwrap();
+        let config = registry
+            .create_table_function("s3", &["s3://bucket/path/data.parquet".into()])
+            .unwrap();
 
         assert_eq!(config.source_type, ExternalTableType::S3);
         assert_eq!(config.format, FileFormat::Parquet);
@@ -448,10 +466,9 @@ mod tests {
     fn test_url_table_function() {
         let registry = ExternalTableRegistry::new();
 
-        let config = registry.create_table_function(
-            "url",
-            &["https://example.com/data.csv".into()]
-        ).unwrap();
+        let config = registry
+            .create_table_function("url", &["https://example.com/data.csv".into()])
+            .unwrap();
 
         assert_eq!(config.source_type, ExternalTableType::Url);
         assert_eq!(config.format, FileFormat::Csv);
@@ -461,9 +478,18 @@ mod tests {
     fn test_format_inference() {
         let registry = ExternalTableRegistry::new();
 
-        assert_eq!(registry.infer_format("data.parquet").unwrap(), FileFormat::Parquet);
-        assert_eq!(registry.infer_format("data.csv.gz").unwrap(), FileFormat::Csv);
-        assert_eq!(registry.infer_format("data.json.zst").unwrap(), FileFormat::Json);
+        assert_eq!(
+            registry.infer_format("data.parquet").unwrap(),
+            FileFormat::Parquet
+        );
+        assert_eq!(
+            registry.infer_format("data.csv.gz").unwrap(),
+            FileFormat::Csv
+        );
+        assert_eq!(
+            registry.infer_format("data.json.zst").unwrap(),
+            FileFormat::Json
+        );
     }
 
     #[test]
@@ -476,8 +502,16 @@ mod tests {
             location: "s3://bucket/data/".into(),
             format: FileFormat::Parquet,
             schema: vec![
-                ColumnDef { name: "id".into(), data_type: "INT64".into(), nullable: false },
-                ColumnDef { name: "name".into(), data_type: "STRING".into(), nullable: true },
+                ColumnDef {
+                    name: "id".into(),
+                    data_type: "INT64".into(),
+                    nullable: false,
+                },
+                ColumnDef {
+                    name: "name".into(),
+                    data_type: "STRING".into(),
+                    nullable: true,
+                },
             ],
             partition_columns: vec!["date".into()],
             options: HashMap::new(),
@@ -486,7 +520,7 @@ mod tests {
         };
 
         registry.register(config).unwrap();
-        
+
         let retrieved = registry.get("my_s3_table").unwrap();
         assert_eq!(retrieved.schema.len(), 2);
     }

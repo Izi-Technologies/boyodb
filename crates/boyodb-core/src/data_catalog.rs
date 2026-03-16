@@ -6,9 +6,9 @@
 //! - Search and discovery
 //! - Business glossary
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Catalog entry types
@@ -182,23 +182,31 @@ impl LineageGraph {
     }
 
     pub fn upstream(&self, node_id: &str) -> Vec<&LineageNode> {
-        let upstream_ids: HashSet<_> = self.edges
+        let upstream_ids: HashSet<_> = self
+            .edges
             .iter()
             .filter(|e| e.target == node_id)
             .map(|e| &e.source)
             .collect();
 
-        self.nodes.iter().filter(|n| upstream_ids.contains(&n.id)).collect()
+        self.nodes
+            .iter()
+            .filter(|n| upstream_ids.contains(&n.id))
+            .collect()
     }
 
     pub fn downstream(&self, node_id: &str) -> Vec<&LineageNode> {
-        let downstream_ids: HashSet<_> = self.edges
+        let downstream_ids: HashSet<_> = self
+            .edges
             .iter()
             .filter(|e| e.source == node_id)
             .map(|e| &e.target)
             .collect();
 
-        self.nodes.iter().filter(|n| downstream_ids.contains(&n.id)).collect()
+        self.nodes
+            .iter()
+            .filter(|n| downstream_ids.contains(&n.id))
+            .collect()
     }
 }
 
@@ -400,11 +408,7 @@ impl DataCatalog {
 
     /// Get entry by FQN
     pub fn get_by_fqn(&self, fqn: &str) -> Option<CatalogEntry> {
-        self.entries
-            .read()
-            .values()
-            .find(|e| e.fqn == fqn)
-            .cloned()
+        self.entries.read().values().find(|e| e.fqn == fqn).cloned()
     }
 
     /// Update entry
@@ -494,7 +498,8 @@ impl DataCatalog {
         let search_index = self.search_index.read();
 
         // Find matching entry IDs
-        let search_words: Vec<String> = query.text
+        let search_words: Vec<String> = query
+            .text
             .to_lowercase()
             .split_whitespace()
             .map(String::from)
@@ -526,7 +531,7 @@ impl DataCatalog {
         let mut results: Vec<SearchResult> = entry_scores
             .into_iter()
             .filter_map(|(id, (score, matched))| {
-                entries.get(&id).map(|entry| {
+                entries.get(&id).and_then(|entry| {
                     // Apply filters
                     if let Some(ref types) = query.entry_types {
                         if !types.contains(&entry.entry_type) {
@@ -558,7 +563,8 @@ impl DataCatalog {
 
                     // Generate snippet
                     let snippet = if !entry.description.is_empty() {
-                        let words: Vec<&str> = entry.description.split_whitespace().take(20).collect();
+                        let words: Vec<&str> =
+                            entry.description.split_whitespace().take(20).collect();
                         words.join(" ") + "..."
                     } else {
                         entry.name.clone()
@@ -570,7 +576,7 @@ impl DataCatalog {
                         matched_fields: matched,
                         snippet,
                     })
-                }).flatten()
+                })
             })
             .collect();
 
@@ -709,7 +715,10 @@ impl DataCatalog {
             .filter(|term| {
                 term.name.to_lowercase().contains(&lower_query)
                     || term.definition.to_lowercase().contains(&lower_query)
-                    || term.abbreviations.iter().any(|a| a.to_lowercase().contains(&lower_query))
+                    || term
+                        .abbreviations
+                        .iter()
+                        .any(|a| a.to_lowercase().contains(&lower_query))
             })
             .cloned()
             .collect()
@@ -775,7 +784,9 @@ impl DataCatalog {
 
         let mut type_counts: HashMap<String, usize> = HashMap::new();
         for entry in entries.values() {
-            *type_counts.entry(format!("{:?}", entry.entry_type)).or_insert(0) += 1;
+            *type_counts
+                .entry(format!("{:?}", entry.entry_type))
+                .or_insert(0) += 1;
         }
 
         CatalogStats {

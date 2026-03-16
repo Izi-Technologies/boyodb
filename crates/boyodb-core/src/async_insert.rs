@@ -88,7 +88,11 @@ impl TableBuffer {
             rows: Vec::new(),
             total_bytes: 0,
             first_insert: None,
-            dedup_set: if deduplicate { Some(Default::default()) } else { None },
+            dedup_set: if deduplicate {
+                Some(Default::default())
+            } else {
+                None
+            },
         }
     }
 
@@ -275,9 +279,9 @@ impl AsyncInsertBuffer {
 
     /// Check if buffer should be flushed
     fn should_flush(&self, buffer: &TableBuffer) -> bool {
-        buffer.total_bytes >= self.config.max_buffer_bytes ||
-        buffer.row_count() >= self.config.max_buffer_rows ||
-        buffer.age_ms() >= self.config.max_wait_ms
+        buffer.total_bytes >= self.config.max_buffer_bytes
+            || buffer.row_count() >= self.config.max_buffer_rows
+            || buffer.age_ms() >= self.config.max_wait_ms
     }
 
     /// Flush a specific table buffer
@@ -291,9 +295,10 @@ impl AsyncInsertBuffer {
         }
 
         // Don't flush if below minimums (unless forced)
-        if buffer.total_bytes < self.config.min_buffer_bytes &&
-           buffer.row_count() < self.config.min_buffer_rows &&
-           buffer.age_ms() < self.config.max_wait_ms {
+        if buffer.total_bytes < self.config.min_buffer_bytes
+            && buffer.row_count() < self.config.min_buffer_rows
+            && buffer.age_ms() < self.config.max_wait_ms
+        {
             return None;
         }
 
@@ -302,7 +307,7 @@ impl AsyncInsertBuffer {
         let rows_count = buffer.row_count();
         let bytes_count = buffer.total_bytes;
         let rows: Vec<BufferedRow> = buffer.rows.drain(..).collect();
-        
+
         buffer.clear();
 
         // Update stats
@@ -350,19 +355,15 @@ impl AsyncInsertBuffer {
 
     /// Flush all buffers
     pub fn flush_all(&self) -> Vec<FlushResult> {
-        let keys: Vec<String> = {
-            self.buffers.read().keys().cloned().collect()
-        };
+        let keys: Vec<String> = { self.buffers.read().keys().cloned().collect() };
 
-        keys.iter()
-            .filter_map(|k| self.flush_table(k))
-            .collect()
+        keys.iter().filter_map(|k| self.flush_table(k)).collect()
     }
 
     /// Force flush (ignore minimums)
     pub fn force_flush(&self, database: &str, table: &str) -> Option<FlushResult> {
         let key = format!("{}.{}", database, table);
-        
+
         let buffers = self.buffers.read();
         let buffer_mutex = buffers.get(&key)?;
         let mut buffer = buffer_mutex.lock();
@@ -376,7 +377,7 @@ impl AsyncInsertBuffer {
         let rows_count = buffer.row_count();
         let bytes_count = buffer.total_bytes;
         let rows: Vec<BufferedRow> = buffer.rows.drain(..).collect();
-        
+
         buffer.clear();
         drop(buffer);
         drop(buffers);
@@ -438,7 +439,8 @@ impl AsyncInsertBuffer {
     /// Get all buffer statuses
     pub fn all_buffer_statuses(&self) -> Vec<BufferStatus> {
         let buffers = self.buffers.read();
-        buffers.values()
+        buffers
+            .values()
             .map(|m| {
                 let b = m.lock();
                 BufferStatus {
@@ -461,12 +463,11 @@ impl AsyncInsertBuffer {
     pub fn start_background_flusher(self: Arc<Self>) {
         // Use compare_exchange to atomically check and set running flag
         // This avoids race conditions when multiple threads try to start the flusher
-        if self.running.compare_exchange(
-            false,
-            true,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ).is_err() {
+        if self
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             // Already running
             return;
         }
@@ -483,7 +484,10 @@ impl AsyncInsertBuffer {
                 // The wait_mutex is ONLY used for condvar wait, not held during flush
                 {
                     let mut guard = this.wait_mutex.lock();
-                    this.condvar.wait_for(&mut guard, Duration::from_millis(this.config.max_wait_ms / 2));
+                    this.condvar.wait_for(
+                        &mut guard,
+                        Duration::from_millis(this.config.max_wait_ms / 2),
+                    );
                 }
                 // wait_mutex is released here BEFORE calling flush operations
 
@@ -507,7 +511,8 @@ impl AsyncInsertBuffer {
     fn check_and_flush_aged(&self) {
         let keys: Vec<String> = {
             let buffers = self.buffers.read();
-            buffers.iter()
+            buffers
+                .iter()
                 .filter_map(|(k, m)| {
                     let b = m.lock();
                     if b.age_ms() >= self.config.max_wait_ms && !b.is_empty() {
@@ -561,7 +566,12 @@ mod tests {
     }
 
     impl FlushCallback for MockCallback {
-        fn on_flush(&self, _database: &str, _table: &str, rows: Vec<BufferedRow>) -> Result<(), String> {
+        fn on_flush(
+            &self,
+            _database: &str,
+            _table: &str,
+            rows: Vec<BufferedRow>,
+        ) -> Result<(), String> {
             *self.flush_count.lock() += rows.len();
             Ok(())
         }
@@ -612,10 +622,10 @@ mod tests {
         });
 
         let key = vec![1, 2, 3];
-        
+
         let r1 = buffer.buffer_row("db", "table", vec![1], Some(key.clone()));
         assert_eq!(r1, BufferResult::Buffered);
-        
+
         let r2 = buffer.buffer_row("db", "table", vec![2], Some(key.clone()));
         assert_eq!(r2, BufferResult::Deduplicated);
 
@@ -626,14 +636,14 @@ mod tests {
     #[test]
     fn test_force_flush() {
         let mut buffer = AsyncInsertBuffer::new(AsyncInsertConfig::default());
-        
+
         let callback = Arc::new(MockCallback {
             flush_count: Mutex::new(0),
         });
         buffer.set_flush_callback(callback.clone());
 
         buffer.buffer_row("db", "table", vec![1, 2, 3], None);
-        
+
         let result = buffer.force_flush("db", "table");
         assert!(result.is_some());
         assert!(result.unwrap().success);

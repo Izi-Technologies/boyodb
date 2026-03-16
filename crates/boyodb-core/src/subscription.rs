@@ -4,11 +4,11 @@
 //! BoyoDB to subscribe to changes from PostgreSQL or other compatible
 //! publishers using the logical replication protocol.
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -406,7 +406,9 @@ impl Subscription {
                 self.stats.deletes_applied.fetch_add(1, Ordering::Relaxed);
             }
             ReplicationOp::Commit => {
-                self.stats.transactions_applied.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .transactions_applied
+                    .fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }

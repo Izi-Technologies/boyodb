@@ -66,7 +66,10 @@ impl TimePoint {
         let s = s.trim();
 
         // VERSION syntax
-        if let Some(ver_str) = s.strip_prefix("VERSION ").or_else(|| s.strip_prefix("version ")) {
+        if let Some(ver_str) = s
+            .strip_prefix("VERSION ")
+            .or_else(|| s.strip_prefix("version "))
+        {
             if let Ok(v) = ver_str.trim().parse::<u64>() {
                 return Some(TimePoint::Version(v));
             }
@@ -122,7 +125,7 @@ impl TimePoint {
         // Format: YYYY-MM-DD HH:MM:SS or YYYY-MM-DD
         let s = s.trim().trim_matches('\'').trim_matches('"');
 
-        let parts: Vec<&str> = s.split(|c| c == ' ' || c == 'T').collect();
+        let parts: Vec<&str> = s.split([' ', 'T']).collect();
 
         let date_str = parts.first()?;
         let time_str = parts.get(1).copied().unwrap_or("00:00:00");
@@ -145,9 +148,11 @@ impl TimePoint {
         let second = time_parts.get(2).copied().unwrap_or(0);
 
         // Simple calculation (not accounting for leap years precisely)
-        let days_since_epoch = (year - 1970) * 365 + (year - 1969) / 4
+        let days_since_epoch = (year - 1970) * 365
+            + (year - 1969) / 4
             + days_before_month(month, is_leap_year(year))
-            + day - 1;
+            + day
+            - 1;
 
         let timestamp_secs = (days_since_epoch as i64) * 86400
             + (hour as i64) * 3600
@@ -308,11 +313,7 @@ impl VersionHistory {
         self.enforce_limits(&mut versions, &mut index);
     }
 
-    fn enforce_limits(
-        &self,
-        versions: &mut Vec<VersionSnapshot>,
-        index: &mut Vec<(i64, u64)>,
-    ) {
+    fn enforce_limits(&self, versions: &mut Vec<VersionSnapshot>, index: &mut Vec<(i64, u64)>) {
         let now_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -364,7 +365,11 @@ impl VersionHistory {
 
     /// Get a specific version
     pub fn get_version(&self, version: u64) -> Option<VersionSnapshot> {
-        self.versions.read().iter().find(|v| v.version == version).cloned()
+        self.versions
+            .read()
+            .iter()
+            .find(|v| v.version == version)
+            .cloned()
     }
 
     /// Get the latest version
@@ -423,7 +428,10 @@ impl TimeTravelManager {
         histories
             .entry(table_id.to_string())
             .or_insert_with(|| {
-                Arc::new(VersionHistory::new(table_id.to_string(), self.config.clone()))
+                Arc::new(VersionHistory::new(
+                    table_id.to_string(),
+                    self.config.clone(),
+                ))
             })
             .clone()
     }
@@ -591,7 +599,10 @@ impl TimeTravelClause {
         if upper.contains("AS OF TIMESTAMP") || upper.contains("AS OF '") {
             if let Some(pos) = upper.find("AS OF") {
                 let rest = &joined[pos + 5..].trim();
-                let ts_str = rest.trim_start_matches("TIMESTAMP").trim_start_matches("timestamp").trim();
+                let ts_str = rest
+                    .trim_start_matches("TIMESTAMP")
+                    .trim_start_matches("timestamp")
+                    .trim();
                 if let Some(tp) = TimePoint::parse(ts_str) {
                     return Some(TimeTravelClause {
                         as_of: Some(tp),
@@ -627,10 +638,7 @@ mod tests {
     #[test]
     fn test_time_point_parse() {
         // Version
-        assert_eq!(
-            TimePoint::parse("VERSION 42"),
-            Some(TimePoint::Version(42))
-        );
+        assert_eq!(TimePoint::parse("VERSION 42"), Some(TimePoint::Version(42)));
 
         // Relative
         let tp = TimePoint::parse("-1 hour");
@@ -708,7 +716,10 @@ mod tests {
     fn test_time_travel_clause_parse() {
         let clause = TimeTravelClause::parse(&["AS", "OF", "VERSION", "42"]);
         assert!(clause.is_some());
-        assert!(matches!(clause.unwrap().as_of, Some(TimePoint::Version(42))));
+        assert!(matches!(
+            clause.unwrap().as_of,
+            Some(TimePoint::Version(42))
+        ));
 
         let clause = TimeTravelClause::parse(&["AS", "OF", "TIMESTAMP", "'2024-01-15'"]);
         assert!(clause.is_some());

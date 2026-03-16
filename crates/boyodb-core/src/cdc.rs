@@ -3,11 +3,11 @@
 //! Native CDC with Debezium-compatible output format for real-time data streaming.
 //! Captures INSERT, UPDATE, DELETE events and publishes them to sinks.
 
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// CDC event type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,7 +436,7 @@ impl CdcConnector {
                     ts_ms,
                 },
             };
-            
+
             for sink in sinks.iter() {
                 let _ = sink.send(&tombstone);
             }
@@ -456,7 +456,7 @@ impl CdcConnector {
 
     fn should_capture(&self, database: &str, table: &str) -> bool {
         let full_name = format!("{}.{}", database, table);
-        
+
         for pattern in &self.config.tables {
             if pattern == "*" {
                 return true;
@@ -471,7 +471,7 @@ impl CdcConnector {
                 }
             }
         }
-        
+
         false
     }
 
@@ -553,7 +553,7 @@ mod tests {
     fn test_cdc_connector() {
         let config = CdcConnectorConfig::default();
         let connector = CdcConnector::new(config);
-        
+
         let sink = Arc::new(MemorySink::new(100));
         connector.add_sink(sink.clone());
         connector.start();
@@ -563,27 +563,31 @@ mod tests {
         row.insert("id".into(), serde_json::json!(1));
         row.insert("name".into(), serde_json::json!("Alice"));
 
-        connector.emit_change(
-            CdcEventType::Create,
-            "mydb",
-            "users",
-            None,
-            Some(row.clone()),
-            Some(1),
-        ).unwrap();
+        connector
+            .emit_change(
+                CdcEventType::Create,
+                "mydb",
+                "users",
+                None,
+                Some(row.clone()),
+                Some(1),
+            )
+            .unwrap();
 
-        connector.emit_change(
-            CdcEventType::Update,
-            "mydb",
-            "users",
-            Some(row.clone()),
-            Some({
-                let mut new_row = row.clone();
-                new_row.insert("name".into(), serde_json::json!("Alice Smith"));
-                new_row
-            }),
-            Some(2),
-        ).unwrap();
+        connector
+            .emit_change(
+                CdcEventType::Update,
+                "mydb",
+                "users",
+                Some(row.clone()),
+                Some({
+                    let mut new_row = row.clone();
+                    new_row.insert("name".into(), serde_json::json!("Alice Smith"));
+                    new_row
+                }),
+                Some(2),
+            )
+            .unwrap();
 
         let events = sink.events();
         assert_eq!(events.len(), 2);
@@ -598,30 +602,34 @@ mod tests {
             ..Default::default()
         };
         let connector = CdcConnector::new(config);
-        
+
         let sink = Arc::new(MemorySink::new(100));
         connector.add_sink(sink.clone());
         connector.start();
 
         // This should be captured
-        connector.emit_change(
-            CdcEventType::Create,
-            "mydb",
-            "users",
-            None,
-            Some(HashMap::new()),
-            None,
-        ).unwrap();
+        connector
+            .emit_change(
+                CdcEventType::Create,
+                "mydb",
+                "users",
+                None,
+                Some(HashMap::new()),
+                None,
+            )
+            .unwrap();
 
         // This should not be captured
-        connector.emit_change(
-            CdcEventType::Create,
-            "otherdb",
-            "users",
-            None,
-            Some(HashMap::new()),
-            None,
-        ).unwrap();
+        connector
+            .emit_change(
+                CdcEventType::Create,
+                "otherdb",
+                "users",
+                None,
+                Some(HashMap::new()),
+                None,
+            )
+            .unwrap();
 
         let events = sink.events();
         assert_eq!(events.len(), 1);
@@ -635,14 +643,16 @@ mod tests {
         connector.start();
 
         for i in 0..5 {
-            connector.emit_change(
-                CdcEventType::Create,
-                "db",
-                "table",
-                None,
-                Some(HashMap::new()),
-                Some(i),
-            ).unwrap();
+            connector
+                .emit_change(
+                    CdcEventType::Create,
+                    "db",
+                    "table",
+                    None,
+                    Some(HashMap::new()),
+                    Some(i),
+                )
+                .unwrap();
         }
 
         let stats = connector.stats();

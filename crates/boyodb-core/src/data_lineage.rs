@@ -12,10 +12,10 @@
 //! - Anomaly detection
 //! - Impact analysis for schema changes
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Data Lineage Types
@@ -179,12 +179,14 @@ impl LineageManager {
         let target_id = edge.target.to_id();
         let source_id = edge.source.to_id();
 
-        self.edges.write()
+        self.edges
+            .write()
             .entry(target_id)
             .or_insert_with(Vec::new)
             .push(edge.clone());
 
-        self.reverse_edges.write()
+        self.reverse_edges
+            .write()
             .entry(source_id)
             .or_insert_with(Vec::new)
             .push(edge);
@@ -199,7 +201,11 @@ impl LineageManager {
     /// Get downstream lineage for a column (what columns depend on this column)
     pub fn get_downstream(&self, column: &ColumnRef) -> Vec<LineageEdge> {
         let col_id = column.to_id();
-        self.reverse_edges.read().get(&col_id).cloned().unwrap_or_default()
+        self.reverse_edges
+            .read()
+            .get(&col_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Get full upstream lineage (recursive)
@@ -262,7 +268,8 @@ impl LineageManager {
     pub fn impact_analysis(&self, column: &ColumnRef) -> ImpactAnalysis {
         let downstream = self.get_full_downstream(column);
 
-        let affected_tables: HashSet<_> = downstream.edges
+        let affected_tables: HashSet<_> = downstream
+            .edges
             .iter()
             .map(|e| e.target.asset_id())
             .collect();
@@ -377,12 +384,15 @@ impl SchemaEvolutionManager {
 
     /// Set compatibility level for an asset
     pub fn set_compatibility(&self, asset_id: &str, level: CompatibilityLevel) {
-        self.compatibility.write().insert(asset_id.to_string(), level);
+        self.compatibility
+            .write()
+            .insert(asset_id.to_string(), level);
     }
 
     /// Get compatibility level for an asset
     pub fn get_compatibility(&self, asset_id: &str) -> CompatibilityLevel {
-        self.compatibility.read()
+        self.compatibility
+            .read()
             .get(asset_id)
             .copied()
             .unwrap_or(CompatibilityLevel::None)
@@ -497,7 +507,8 @@ impl SchemaEvolutionManager {
 
     /// Get schema history for an asset
     pub fn get_history(&self, asset_id: &str) -> Vec<SchemaVersion> {
-        self.history.read()
+        self.history
+            .read()
             .get(asset_id)
             .cloned()
             .unwrap_or_default()
@@ -636,7 +647,8 @@ impl DataQualityManager {
 
     /// Assign rule to asset
     pub fn assign_rule(&self, asset_id: &str, rule_id: &str) {
-        self.assignments.write()
+        self.assignments
+            .write()
             .entry(asset_id.to_string())
             .or_insert_with(Vec::new)
             .push(rule_id.to_string());
@@ -647,9 +659,11 @@ impl DataQualityManager {
         let assignments = self.assignments.read();
         let rules = self.rules.read();
 
-        assignments.get(asset_id)
+        assignments
+            .get(asset_id)
             .map(|rule_ids| {
-                rule_ids.iter()
+                rule_ids
+                    .iter()
                     .filter_map(|id| rules.get(id).cloned())
                     .collect()
             })
@@ -669,7 +683,8 @@ impl DataQualityManager {
 
     /// Get failed checks
     pub fn get_failed_checks(&self) -> Vec<QualityCheckResult> {
-        self.history.read()
+        self.history
+            .read()
             .iter()
             .filter(|r| !r.passed)
             .cloned()
@@ -692,7 +707,11 @@ impl DataQualityManager {
     }
 
     pub fn create_unique_rule(name: &str, columns: Vec<ColumnRef>) -> DataQualityRule {
-        let id = columns.iter().map(|c| c.to_id()).collect::<Vec<_>>().join("_");
+        let id = columns
+            .iter()
+            .map(|c| c.to_id())
+            .collect::<Vec<_>>()
+            .join("_");
         DataQualityRule {
             id: format!("unique_{}", id),
             name: name.to_string(),
@@ -766,7 +785,10 @@ impl DataQualityManager {
             parameters: params,
             severity: RuleSeverity::Warning,
             enabled: true,
-            description: Some(format!("Data must be no older than {} seconds", max_age_seconds)),
+            description: Some(format!(
+                "Data must be no older than {} seconds",
+                max_age_seconds
+            )),
             created_at: current_timestamp(),
         }
     }
@@ -955,7 +977,11 @@ impl AnomalyDetector {
                 value: Some(value),
                 expected_value: Some(stats.mean),
                 deviation,
-                severity: if deviation > 5.0 { RuleSeverity::Critical } else { RuleSeverity::Warning },
+                severity: if deviation > 5.0 {
+                    RuleSeverity::Critical
+                } else {
+                    RuleSeverity::Warning
+                },
                 message: format!(
                     "Value {} is {:.1} standard deviations from mean {:.2}",
                     value, deviation, stats.mean
@@ -982,7 +1008,9 @@ impl AnomalyDetector {
                         severity: RuleSeverity::Warning,
                         message: format!(
                             "Value spiked {:.1}% from {} to {}",
-                            change_rate * 100.0, last_value, value
+                            change_rate * 100.0,
+                            last_value,
+                            value
                         ),
                         acknowledged: false,
                     });
@@ -1000,7 +1028,9 @@ impl AnomalyDetector {
                         severity: RuleSeverity::Warning,
                         message: format!(
                             "Value dropped {:.1}% from {} to {}",
-                            change_rate.abs() * 100.0, last_value, value
+                            change_rate.abs() * 100.0,
+                            last_value,
+                            value
                         ),
                         acknowledged: false,
                     });
@@ -1019,7 +1049,8 @@ impl AnomalyDetector {
 
     /// Get unacknowledged anomalies
     pub fn get_unacknowledged(&self) -> Vec<Anomaly> {
-        self.anomalies.read()
+        self.anomalies
+            .read()
             .iter()
             .filter(|a| !a.acknowledged)
             .cloned()

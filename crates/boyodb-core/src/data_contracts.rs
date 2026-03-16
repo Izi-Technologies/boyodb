@@ -8,9 +8,9 @@
 //! - Contract validation
 //! - Breaking change detection
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Data contract definition
@@ -83,7 +83,11 @@ pub struct SemanticVersion {
 impl SemanticVersion {
     /// Create new version
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        SemanticVersion { major, minor, patch }
+        SemanticVersion {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse version string
@@ -271,7 +275,10 @@ pub enum DataType {
     /// Array
     Array(Box<DataType>),
     /// Map
-    Map { key: Box<DataType>, value: Box<DataType> },
+    Map {
+        key: Box<DataType>,
+        value: Box<DataType>,
+    },
     /// Struct
     Struct(Vec<FieldDefinition>),
     /// Union of types
@@ -362,11 +369,19 @@ pub enum ValidationRuleType {
     /// Field must be unique
     Unique { fields: Vec<String> },
     /// Field must be in range
-    Range { field: String, min: Option<f64>, max: Option<f64> },
+    Range {
+        field: String,
+        min: Option<f64>,
+        max: Option<f64>,
+    },
     /// Field must match pattern
     Pattern { field: String, regex: String },
     /// Field length constraint
-    Length { field: String, min: Option<usize>, max: Option<usize> },
+    Length {
+        field: String,
+        min: Option<usize>,
+        max: Option<usize>,
+    },
     /// Custom SQL expression
     Expression { sql: String },
     /// Foreign key reference
@@ -460,17 +475,11 @@ impl CompatibilityChecker {
         let mut changes = Vec::new();
         let mut warnings = Vec::new();
 
-        let old_fields: HashMap<&String, &FieldDefinition> = old_schema
-            .fields
-            .iter()
-            .map(|f| (&f.name, f))
-            .collect();
+        let old_fields: HashMap<&String, &FieldDefinition> =
+            old_schema.fields.iter().map(|f| (&f.name, f)).collect();
 
-        let new_fields: HashMap<&String, &FieldDefinition> = new_schema
-            .fields
-            .iter()
-            .map(|f| (&f.name, f))
-            .collect();
+        let new_fields: HashMap<&String, &FieldDefinition> =
+            new_schema.fields.iter().map(|f| (&f.name, f)).collect();
 
         // Check for removed fields
         for (name, old_field) in &old_fields {
@@ -480,7 +489,10 @@ impl CompatibilityChecker {
                     path: (*name).clone(),
                     old_value: Some(old_field.data_type.name()),
                     new_value: None,
-                    is_breaking: matches!(mode, CompatibilityMode::Backward | CompatibilityMode::Full),
+                    is_breaking: matches!(
+                        mode,
+                        CompatibilityMode::Backward | CompatibilityMode::Full
+                    ),
                     migration: Some(format!("ALTER TABLE DROP COLUMN {}", name)),
                 });
             }
@@ -489,8 +501,9 @@ impl CompatibilityChecker {
         // Check for added fields
         for (name, new_field) in &new_fields {
             if !old_fields.contains_key(name) {
-                let is_breaking = !new_field.nullable && new_field.default.is_none() &&
-                    matches!(mode, CompatibilityMode::Forward | CompatibilityMode::Full);
+                let is_breaking = !new_field.nullable
+                    && new_field.default.is_none()
+                    && matches!(mode, CompatibilityMode::Forward | CompatibilityMode::Full);
 
                 changes.push(SchemaChange {
                     change_type: ChangeType::FieldAdded,
@@ -542,11 +555,11 @@ impl CompatibilityChecker {
                         path: (*name).clone(),
                         old_value: Some("nullable".to_string()),
                         new_value: Some("required".to_string()),
-                        is_breaking: matches!(mode, CompatibilityMode::Forward | CompatibilityMode::Full),
-                        migration: Some(format!(
-                            "ALTER TABLE ALTER COLUMN {} SET NOT NULL",
-                            name
-                        )),
+                        is_breaking: matches!(
+                            mode,
+                            CompatibilityMode::Forward | CompatibilityMode::Full
+                        ),
+                        migration: Some(format!("ALTER TABLE ALTER COLUMN {} SET NOT NULL", name)),
                     });
                 } else if !old_field.nullable && new_field.nullable {
                     changes.push(SchemaChange {
@@ -554,11 +567,11 @@ impl CompatibilityChecker {
                         path: (*name).clone(),
                         old_value: Some("required".to_string()),
                         new_value: Some("nullable".to_string()),
-                        is_breaking: matches!(mode, CompatibilityMode::Backward | CompatibilityMode::Full),
-                        migration: Some(format!(
-                            "ALTER TABLE ALTER COLUMN {} DROP NOT NULL",
-                            name
-                        )),
+                        is_breaking: matches!(
+                            mode,
+                            CompatibilityMode::Backward | CompatibilityMode::Full
+                        ),
+                        migration: Some(format!("ALTER TABLE ALTER COLUMN {} DROP NOT NULL", name)),
                     });
                 }
 
@@ -576,7 +589,10 @@ impl CompatibilityChecker {
                     warnings.push(format!(
                         "Field '{}' has been deprecated: {}",
                         name,
-                        new_field.deprecation_message.as_deref().unwrap_or("No message")
+                        new_field
+                            .deprecation_message
+                            .as_deref()
+                            .unwrap_or("No message")
                     ));
                 }
             }
@@ -594,11 +610,8 @@ impl CompatibilityChecker {
             });
         }
 
-        let breaking_changes: Vec<SchemaChange> = changes
-            .iter()
-            .filter(|c| c.is_breaking)
-            .cloned()
-            .collect();
+        let breaking_changes: Vec<SchemaChange> =
+            changes.iter().filter(|c| c.is_breaking).cloned().collect();
 
         let compatible = breaking_changes.is_empty();
 
@@ -643,7 +656,10 @@ impl ContractRegistry {
         let key = format!("{}:{}", contract.id, contract.version);
 
         if self.contracts.contains_key(&key) {
-            return Err(format!("Contract {} version {} already exists", contract.id, contract.version));
+            return Err(format!(
+                "Contract {} version {} already exists",
+                contract.id, contract.version
+            ));
         }
 
         // Check compatibility with previous version
@@ -663,7 +679,11 @@ impl ContractRegistry {
                             contract.id,
                             contract.version,
                             prev_version,
-                            result.breaking_changes.iter().map(|c| &c.path).collect::<Vec<_>>()
+                            result
+                                .breaking_changes
+                                .iter()
+                                .map(|c| &c.path)
+                                .collect::<Vec<_>>()
                         ));
                     }
                 }
@@ -711,7 +731,12 @@ impl ContractRegistry {
     }
 
     /// Check if data matches contract
-    pub fn validate(&self, contract_id: &str, version: &SemanticVersion, data: &HashMap<String, String>) -> ValidationResult {
+    pub fn validate(
+        &self,
+        contract_id: &str,
+        version: &SemanticVersion,
+        data: &HashMap<String, String>,
+    ) -> ValidationResult {
         let mut errors = Vec::new();
 
         if let Some(contract) = self.get(contract_id, version) {
@@ -725,14 +750,18 @@ impl ContractRegistry {
             }
 
             // Check for unknown fields
-            let known_fields: HashSet<&String> = contract.schema.fields.iter().map(|f| &f.name).collect();
+            let known_fields: HashSet<&String> =
+                contract.schema.fields.iter().map(|f| &f.name).collect();
             for key in data.keys() {
                 if !known_fields.contains(key) {
                     errors.push(format!("Unknown field: {}", key));
                 }
             }
         } else {
-            errors.push(format!("Contract {} version {} not found", contract_id, version));
+            errors.push(format!(
+                "Contract {} version {} not found",
+                contract_id, version
+            ));
         }
 
         ValidationResult {
@@ -772,9 +801,7 @@ impl ContractStore {
 
     /// Register contract
     pub fn register(&self, contract: DataContract) -> Result<(), String> {
-        self.registry
-            .write()
-            .register(contract)
+        self.registry.write().register(contract)
     }
 
     /// Get latest contract
@@ -784,7 +811,12 @@ impl ContractStore {
     }
 
     /// Validate data
-    pub fn validate(&self, contract_id: &str, version: &SemanticVersion, data: &HashMap<String, String>) -> Result<ValidationResult, String> {
+    pub fn validate(
+        &self,
+        contract_id: &str,
+        version: &SemanticVersion,
+        data: &HashMap<String, String>,
+    ) -> Result<ValidationResult, String> {
         let registry = self.registry.read();
         Ok(registry.validate(contract_id, version, data))
     }
@@ -831,11 +863,8 @@ mod tests {
         new_schema.add_field(FieldDefinition::new("name", DataType::String));
         new_schema.add_field(FieldDefinition::new("email", DataType::String)); // New nullable field
 
-        let result = CompatibilityChecker::check(
-            &old_schema,
-            &new_schema,
-            &CompatibilityMode::Backward,
-        );
+        let result =
+            CompatibilityChecker::check(&old_schema, &new_schema, &CompatibilityMode::Backward);
 
         assert!(result.compatible);
         assert_eq!(result.suggested_version_bump, VersionBump::Minor);
@@ -850,11 +879,8 @@ mod tests {
         // Type changed from Int64 to String - breaking
         new_schema.add_field(FieldDefinition::new("id", DataType::String));
 
-        let result = CompatibilityChecker::check(
-            &old_schema,
-            &new_schema,
-            &CompatibilityMode::Backward,
-        );
+        let result =
+            CompatibilityChecker::check(&old_schema, &new_schema, &CompatibilityMode::Backward);
 
         assert!(!result.compatible);
         assert_eq!(result.suggested_version_bump, VersionBump::Major);

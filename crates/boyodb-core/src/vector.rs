@@ -620,7 +620,11 @@ pub fn hybrid_search(
 
             // Sort by RRF score (descending)
             let mut results: Vec<_> = scores.into_iter().collect();
-            results.sort_by(|a, b| b.1 .2.partial_cmp(&a.1 .2).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| {
+                b.1 .2
+                    .partial_cmp(&a.1 .2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             results.truncate(k);
 
             results
@@ -668,7 +672,11 @@ pub fn hybrid_search(
             }
 
             let mut results: Vec<_> = scores.into_iter().collect();
-            results.sort_by(|a, b| b.1 .2.partial_cmp(&a.1 .2).unwrap_or(std::cmp::Ordering::Equal));
+            results.sort_by(|a, b| {
+                b.1 .2
+                    .partial_cmp(&a.1 .2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             results.truncate(k);
 
             results
@@ -751,7 +759,10 @@ pub enum ChunkingStrategy {
     /// Fixed token count per chunk
     FixedTokens { size: u32, overlap: u32 },
     /// Split by sentences with max size
-    Sentence { max_tokens: u32, overlap_sentences: u32 },
+    Sentence {
+        max_tokens: u32,
+        overlap_sentences: u32,
+    },
     /// Split by paragraphs
     Paragraph { max_tokens: u32 },
     /// Semantic chunking (split at topic boundaries)
@@ -790,10 +801,13 @@ pub fn chunk_text(text: &str, strategy: ChunkingStrategy) -> Vec<String> {
 
             chunks
         }
-        ChunkingStrategy::Sentence { max_tokens, overlap_sentences } => {
+        ChunkingStrategy::Sentence {
+            max_tokens,
+            overlap_sentences,
+        } => {
             // Split by sentence-ending punctuation
             let sentences: Vec<&str> = text
-                .split(|c| c == '.' || c == '!' || c == '?')
+                .split(['.', '!', '?'])
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -812,7 +826,10 @@ pub fn chunk_text(text: &str, strategy: ChunkingStrategy) -> Vec<String> {
                     // Keep overlap sentences
                     let keep = current_chunk.len().saturating_sub(overlap);
                     current_chunk = current_chunk[keep..].to_vec();
-                    current_len = current_chunk.iter().map(|s: &&str| s.split_whitespace().count()).sum();
+                    current_len = current_chunk
+                        .iter()
+                        .map(|s: &&str| s.split_whitespace().count())
+                        .sum();
                 }
 
                 current_chunk.push(*sentence);
@@ -875,7 +892,8 @@ pub fn chunk_text(text: &str, strategy: ChunkingStrategy) -> Vec<String> {
                     || (line.len() < 100 && line.ends_with(':'))
                     || line.chars().all(|c| c.is_uppercase() || c.is_whitespace());
 
-                if (is_heading || current_len + line_len > max_tokens) && !current_chunk.is_empty() {
+                if (is_heading || current_len + line_len > max_tokens) && !current_chunk.is_empty()
+                {
                     chunks.push(current_chunk.trim().to_string());
                     current_chunk = String::new();
                     current_len = 0;
@@ -914,7 +932,11 @@ pub fn rerank_results(
     scores: &[f32],
     k: usize,
 ) -> Vec<(u64, f32)> {
-    assert_eq!(documents.len(), scores.len(), "Documents and scores must have same length");
+    assert_eq!(
+        documents.len(),
+        scores.len(),
+        "Documents and scores must have same length"
+    );
 
     let mut ranked: Vec<(u64, f32)> = documents
         .iter()
@@ -1176,9 +1198,9 @@ mod tests {
     fn test_hybrid_search_rrf() {
         // Vector results (sorted by distance, lower = better)
         let vector_results: Vec<(u64, f32)> = vec![
-            (1, 0.1),  // Rank 1
-            (2, 0.2),  // Rank 2
-            (3, 0.5),  // Rank 3
+            (1, 0.1), // Rank 1
+            (2, 0.2), // Rank 2
+            (3, 0.5), // Rank 3
         ];
 
         // Text/BM25 results (sorted by score, higher = better)
@@ -1201,7 +1223,13 @@ mod tests {
     #[test]
     fn test_chunk_text_fixed_tokens() {
         let text = "This is a test. It has multiple sentences. We want to chunk it properly.";
-        let chunks = chunk_text(text, ChunkingStrategy::FixedTokens { size: 5, overlap: 2 });
+        let chunks = chunk_text(
+            text,
+            ChunkingStrategy::FixedTokens {
+                size: 5,
+                overlap: 2,
+            },
+        );
 
         assert!(!chunks.is_empty());
         // Each chunk should have roughly 5 words
@@ -1242,14 +1270,8 @@ mod tests {
 
     #[test]
     fn test_similarity_matrix() {
-        let vectors_a = vec![
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-        ];
-        let vectors_b = vec![
-            vec![1.0, 0.0],
-            vec![0.5, 0.5],
-        ];
+        let vectors_a = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let vectors_b = vec![vec![1.0, 0.0], vec![0.5, 0.5]];
 
         let matrix = similarity_matrix(&vectors_a, &vectors_b, DistanceMetric::Cosine);
 
@@ -1272,7 +1294,7 @@ mod tests {
 
         // Should find pairs (0,1) and (2,3) as near duplicates
         assert!(duplicates.len() >= 2);
-        assert!(duplicates.iter().any(|(i, j, _)| (*i == 0 && *j == 1)));
-        assert!(duplicates.iter().any(|(i, j, _)| (*i == 2 && *j == 3)));
+        assert!(duplicates.iter().any(|(i, j, _)| *i == 0 && *j == 1));
+        assert!(duplicates.iter().any(|(i, j, _)| *i == 2 && *j == 3));
     }
 }

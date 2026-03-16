@@ -9,7 +9,6 @@ use arrow_schema::{DataType, Field, Schema};
 use boyodb_core::engine::{Db, EngineConfig, IngestBatch, QueryRequest};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio;
 
 fn create_phone_batch(ids: Vec<i64>, phones: Vec<&str>) -> Vec<u8> {
     let schema = Schema::new(vec![
@@ -265,7 +264,10 @@ async fn test_fulltext_index_segment_pruning() {
     let batches = boyodb_core::engine::read_ipc_batches(&resp.records_ipc).unwrap();
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 3, "Should find 3 rows with '254' (Kenya segment)");
+    assert_eq!(
+        total_rows, 3,
+        "Should find 3 rows with '254' (Kenya segment)"
+    );
 
     // Query for pattern not in any segment - should return 0 rows or error
     let req = QueryRequest {
@@ -394,9 +396,7 @@ async fn test_fulltext_index_count_query() {
         Field::new("msisdn", DataType::Utf8, false),
     ]);
 
-    let phones: Vec<String> = (0..100)
-        .map(|i| format!("25471{:07}", i))
-        .collect();
+    let phones: Vec<String> = (0..100).map(|i| format!("25471{:07}", i)).collect();
     let phone_refs: Vec<&str> = phones.iter().map(|s| s.as_str()).collect();
 
     let batch = RecordBatch::try_new(
@@ -445,10 +445,11 @@ async fn test_fulltext_index_count_query() {
     } else if let Some(arr) = count_col.as_any().downcast_ref::<UInt64Array>() {
         arr.value(0) as i64
     } else {
-        panic!(
-            "Unexpected count column type: {:?}",
-            count_col.data_type()
-        );
+        panic!("Unexpected count column type: {:?}", count_col.data_type());
     };
-    assert!(count >= 10, "Should find at least 10 rows with '254710', got {}", count);
+    assert!(
+        count >= 10,
+        "Should find at least 10 rows with '254710', got {}",
+        count
+    );
 }

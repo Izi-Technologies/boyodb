@@ -214,9 +214,8 @@ impl BenchmarkRunner {
         let max_latency = self.latencies.last().copied().unwrap_or_default();
 
         let bytes_processed = self.bytes_per_op.map(|b| b * ops);
-        let throughput_mbps = bytes_processed.map(|b| {
-            (b as f64 / 1024.0 / 1024.0) / total_duration.as_secs_f64()
-        });
+        let throughput_mbps =
+            bytes_processed.map(|b| (b as f64 / 1024.0 / 1024.0) / total_duration.as_secs_f64());
 
         BenchmarkResult {
             name: self.name.clone(),
@@ -279,7 +278,9 @@ impl LatencyHistogram {
         self.total += 1;
 
         // Find bucket
-        let idx = self.buckets.iter()
+        let idx = self
+            .buckets
+            .iter()
             .position(|&b| us < b)
             .unwrap_or(self.buckets.len());
         self.counts[idx] += 1;
@@ -327,7 +328,10 @@ impl LatencyHistogram {
     /// Print histogram
     pub fn print(&self) {
         println!("Latency Histogram (total: {})", self.total);
-        println!("{:>12} {:>12} {:>10} {:>10}", "Bucket", "Count", "Percent", "Cumulative");
+        println!(
+            "{:>12} {:>12} {:>10} {:>10}",
+            "Bucket", "Count", "Percent", "Cumulative"
+        );
 
         let mut cumulative = 0u64;
         for (i, &count) in self.counts.iter().enumerate() {
@@ -347,7 +351,10 @@ impl LatencyHistogram {
                 format!(">{}", self.buckets.last().unwrap_or(&0))
             };
 
-            println!("{:>12} {:>12} {:>9.2}% {:>9.2}%", bucket_label, count, pct, cum_pct);
+            println!(
+                "{:>12} {:>12} {:>9.2}% {:>9.2}%",
+                bucket_label, count, pct, cum_pct
+            );
         }
 
         println!("\nPercentiles:");
@@ -402,7 +409,8 @@ impl ThroughputTracker {
         if self.samples.len() >= self.window_size {
             self.samples.remove(0);
         }
-        self.samples.push((Instant::now(), self.operations, self.bytes));
+        self.samples
+            .push((Instant::now(), self.operations, self.bytes));
     }
 
     /// Get current ops/sec
@@ -506,9 +514,7 @@ impl BenchmarkSuite {
     where
         F: FnMut(),
     {
-        let result = BenchmarkRunner::new(name)
-            .iterations(iterations)
-            .run(f);
+        let result = BenchmarkRunner::new(name).iterations(iterations).run(f);
         self.results.push(result);
     }
 
@@ -523,7 +529,8 @@ impl BenchmarkSuite {
 
     /// Get results as JSON
     pub fn to_json(&self) -> String {
-        let results: Vec<serde_json::Value> = self.results
+        let results: Vec<serde_json::Value> = self
+            .results
             .iter()
             .map(|r| serde_json::from_str(&r.to_json()).unwrap())
             .collect();
@@ -539,10 +546,8 @@ impl BenchmarkSuite {
     pub fn compare(&self, other: &BenchmarkSuite) -> HashMap<String, f64> {
         let mut comparisons = HashMap::new();
 
-        let other_by_name: HashMap<&str, &BenchmarkResult> = other.results
-            .iter()
-            .map(|r| (r.name.as_str(), r))
-            .collect();
+        let other_by_name: HashMap<&str, &BenchmarkResult> =
+            other.results.iter().map(|r| (r.name.as_str(), r)).collect();
 
         for result in &self.results {
             if let Some(other_result) = other_by_name.get(result.name.as_str()) {
@@ -579,9 +584,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_runner() {
-        let mut runner = BenchmarkRunner::new("test")
-            .warmup(10)
-            .iterations(100);
+        let mut runner = BenchmarkRunner::new("test").warmup(10).iterations(100);
 
         let result = runner.run(|| {
             let _x: u64 = (0..1000).sum();

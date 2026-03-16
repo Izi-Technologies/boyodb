@@ -5,6 +5,7 @@ use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
 use base64::{engine::general_purpose, Engine as _};
+use boyodb_core::cluster::ReplicationState;
 use boyodb_core::engine::EngineError;
 use boyodb_core::planner_distributed::LocalPlan;
 use boyodb_core::pubsub::PubSubManager;
@@ -15,7 +16,6 @@ use boyodb_core::{
     MergeWhenMatched, MergeWhenNotMatched, OnConflictAction, Privilege, PrivilegeTarget,
     QueryRequest, SqlStatement, SqlValue, TableConstraint, UpdateCommand,
 };
-use boyodb_core::cluster::ReplicationState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Seek, Write};
@@ -48,7 +48,9 @@ static PUBSUB_MANAGER: std::sync::OnceLock<Arc<PubSubManager>> = std::sync::Once
 
 /// Get the global pub/sub manager
 fn get_pubsub_manager() -> Arc<PubSubManager> {
-    PUBSUB_MANAGER.get_or_init(|| Arc::new(PubSubManager::new())).clone()
+    PUBSUB_MANAGER
+        .get_or_init(|| Arc::new(PubSubManager::new()))
+        .clone()
 }
 
 /// Per-connection state information
@@ -85,7 +87,9 @@ impl ConnectionTracker {
 
     /// Register a new connection, returns connection ID
     fn register(&self, peer_addr: std::net::SocketAddr) -> u64 {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let now = std::time::Instant::now();
         let info = ConnectionInfo {
             created_at: now,
@@ -201,7 +205,8 @@ struct QueryPermit<'a> {
 
 impl Drop for QueryPermit<'_> {
     fn drop(&mut self) {
-        self.active_queries.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.active_queries
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -240,13 +245,11 @@ impl ConnectionStats {
     }
 
     /// Try to acquire a query permit with timeout (returns None if overloaded or timeout)
-    async fn try_acquire_query_with_timeout(
-        &self,
-        timeout: Duration,
-    ) -> Option<QueryPermit<'_>> {
+    async fn try_acquire_query_with_timeout(&self, timeout: Duration) -> Option<QueryPermit<'_>> {
         match tokio::time::timeout(timeout, self.query_semaphore.acquire()).await {
             Ok(Ok(permit)) => {
-                self.active_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.active_queries
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(QueryPermit {
                     _permit: permit,
                     active_queries: &self.active_queries,
@@ -260,7 +263,8 @@ impl ConnectionStats {
     fn try_acquire_query(&self) -> Option<QueryPermit<'_>> {
         match self.query_semaphore.try_acquire() {
             Ok(permit) => {
-                self.active_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.active_queries
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(QueryPermit {
                     _permit: permit,
                     active_queries: &self.active_queries,
@@ -272,7 +276,8 @@ impl ConnectionStats {
 
     /// Get current active query count
     fn active_queries(&self) -> usize {
-        self.active_queries.load(std::sync::atomic::Ordering::Relaxed)
+        self.active_queries
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get max concurrent queries
@@ -311,11 +316,13 @@ impl ConnectionStats {
     }
 
     fn query_admitted(&self) {
-        self.queries_admitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.queries_admitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn query_rejected(&self) {
-        self.queries_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.queries_rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn current(&self) -> usize {
@@ -327,11 +334,13 @@ impl ConnectionStats {
     }
 
     fn queries_admitted(&self) -> u64 {
-        self.queries_admitted.load(std::sync::atomic::Ordering::Relaxed)
+        self.queries_admitted
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn queries_rejected(&self) -> u64 {
-        self.queries_rejected.load(std::sync::atomic::Ordering::Relaxed)
+        self.queries_rejected
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2095,7 +2104,9 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Initialize ReplicationState for cluster mode
-    let replication_state: Option<Arc<ReplicationState>> = if let Some(ref cluster) = cluster_manager {
+    let replication_state: Option<Arc<ReplicationState>> = if let Some(ref cluster) =
+        cluster_manager
+    {
         let node_id = boyodb_core::cluster::NodeId(
             cfg.node_id.clone().unwrap_or_else(|| "node-1".to_string()),
         );
@@ -2226,7 +2237,11 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "Automatic backups enabled: every {} hours, max {} backups retained",
             cfg.backup_interval_hours,
-            if backup_max_count == 0 { "unlimited".to_string() } else { backup_max_count.to_string() }
+            if backup_max_count == 0 {
+                "unlimited".to_string()
+            } else {
+                backup_max_count.to_string()
+            }
         );
         tokio::spawn(async move {
             // Wait for initial interval before first backup
@@ -2250,7 +2265,12 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                                     // Filter to only automatic backups
                                     let auto_backups: Vec<_> = backups
                                         .iter()
-                                        .filter(|b| b.label.as_deref().map(|l| l.starts_with("auto-")).unwrap_or(false))
+                                        .filter(|b| {
+                                            b.label
+                                                .as_deref()
+                                                .map(|l| l.starts_with("auto-"))
+                                                .unwrap_or(false)
+                                        })
                                         .collect();
                                     // Delete oldest backups if we have too many
                                     if auto_backups.len() > backup_max_count {
@@ -2869,8 +2889,9 @@ async fn handle_conn(
                                     Err(e) => {
                                         // Fall back to uncompressed on compression failure
                                         warn!("zstd compression failed, falling back to uncompressed: {}", e);
-                                        resp.ipc_base64 =
-                                            Some(general_purpose::STANDARD.encode(&response.records_ipc));
+                                        resp.ipc_base64 = Some(
+                                            general_purpose::STANDARD.encode(&response.records_ipc),
+                                        );
                                     }
                                 }
                                 resp.ipc_len = Some(response.records_ipc.len() as u64);
@@ -3410,11 +3431,9 @@ async fn process_request(
                 })
             } else {
                 if accept_compression.as_deref() == Some("zstd") {
-                    let compressed = zstd::stream::encode_all(
-                        std::io::Cursor::new(&response.records_ipc),
-                        3,
-                    )
-                    .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
+                    let compressed =
+                        zstd::stream::encode_all(std::io::Cursor::new(&response.records_ipc), 3)
+                            .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
                     Ok(Response {
                         ipc_base64: Some(general_purpose::STANDARD.encode(&compressed)),
                         ipc_len: Some(response.records_ipc.len() as u64),
@@ -3466,7 +3485,8 @@ async fn process_request(
                 SqlStatement::Ddl(ddl_cmd) => {
                     // Handle DDL commands - apply effective_db for unqualified table names
                     let adjusted_cmd = apply_default_database_to_ddl(ddl_cmd, effective_db);
-                    execute_ddl_command(&db, adjusted_cmd, &require_privilege, &auto_repair_state).await
+                    execute_ddl_command(&db, adjusted_cmd, &require_privilege, &auto_repair_state)
+                        .await
                 }
                 SqlStatement::Query(parsed) => {
                     // Determine effective databases for primary and join tables when a default is supplied
@@ -3655,20 +3675,32 @@ async fn process_request(
                 SqlStatement::PreparedStatement(cmd) => {
                     use boyodb_core::PreparedStatementCommand;
                     match cmd {
-                        PreparedStatementCommand::Prepare { name, statement, param_types } => {
+                        PreparedStatementCommand::Prepare {
+                            name,
+                            statement,
+                            param_types,
+                        } => {
                             // Store in prepared statement cache using existing infrastructure
                             if let Ok(mut cache) = prepared_cache.lock() {
                                 // Use insert method with empty table_refs for now
                                 let id = cache.insert(statement.clone(), Vec::new());
                                 // Store mapping from user-provided name to generated id
                                 return Ok(Response {
-                                    message: Some(format!("PREPARE {} ({} params)", name, param_types.len())),
+                                    message: Some(format!(
+                                        "PREPARE {} ({} params)",
+                                        name,
+                                        param_types.len()
+                                    )),
                                     prepared_id: Some(id),
                                     ..Default::default()
                                 });
                             }
                             Ok(Response {
-                                message: Some(format!("PREPARE {} ({} params)", name, param_types.len())),
+                                message: Some(format!(
+                                    "PREPARE {} ({} params)",
+                                    name,
+                                    param_types.len()
+                                )),
                                 prepared_id: Some(name),
                                 ..Default::default()
                             })
@@ -3690,7 +3722,9 @@ async fn process_request(
                                         SqlValue::Null => "NULL".to_string(),
                                         SqlValue::Integer(n) => n.to_string(),
                                         SqlValue::Float(f) => f.to_string(),
-                                        SqlValue::String(s) => format!("'{}'", s.replace("'", "''")),
+                                        SqlValue::String(s) => {
+                                            format!("'{}'", s.replace("'", "''"))
+                                        }
                                         SqlValue::Boolean(b) => b.to_string(),
                                     };
                                     final_sql = final_sql.replace(&placeholder, &value_str);
@@ -3742,7 +3776,9 @@ async fn process_request(
                         }
                         PubSubCommand::Unlisten { channel } => {
                             match pubsub.unlisten(session_id, &channel) {
-                                Ok(()) => Ok(Response::ok_message(&format!("UNLISTEN {}", channel))),
+                                Ok(()) => {
+                                    Ok(Response::ok_message(&format!("UNLISTEN {}", channel)))
+                                }
                                 Err(e) => Err(ServerError::Db(format!("UNLISTEN error: {}", e))),
                             }
                         }
@@ -8149,22 +8185,19 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
         .await?;
 
         // Determine conflict columns: use specified columns or default to primary key
-        let conflict_columns: Vec<String> = conflict_clause
-            .columns
-            .clone()
-            .unwrap_or_else(|| {
-                // Find primary key columns as default conflict target
-                constraints
-                    .iter()
-                    .find_map(|c| {
-                        if let TableConstraint::PrimaryKey { columns, .. } = c {
-                            Some(columns.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default()
-            });
+        let conflict_columns: Vec<String> = conflict_clause.columns.clone().unwrap_or_else(|| {
+            // Find primary key columns as default conflict target
+            constraints
+                .iter()
+                .find_map(|c| {
+                    if let TableConstraint::PrimaryKey { columns, .. } = c {
+                        Some(columns.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        });
 
         if conflict_columns.is_empty() {
             return Err(ServerError::BadRequest(
@@ -8233,16 +8266,22 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
                         if !ipc_data.is_empty() {
                             let cursor = std::io::Cursor::new(ipc_data);
                             if let Ok(reader) = StreamReader::try_new(cursor, None) {
-                                for batch_result in reader {
-                                    if let Ok(batch) = batch_result {
-                                        if batch.num_rows() > 0 {
-                                            // Get first value from count column
-                                            if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow_array::Int64Array>() {
-                                                return Ok::<bool, ServerError>(col.value(0) > 0);
-                                            }
-                                            if let Some(col) = batch.column(0).as_any().downcast_ref::<arrow_array::UInt64Array>() {
-                                                return Ok(col.value(0) > 0);
-                                            }
+                                for batch in reader.flatten() {
+                                    if batch.num_rows() > 0 {
+                                        // Get first value from count column
+                                        if let Some(col) = batch
+                                            .column(0)
+                                            .as_any()
+                                            .downcast_ref::<arrow_array::Int64Array>(
+                                        ) {
+                                            return Ok::<bool, ServerError>(col.value(0) > 0);
+                                        }
+                                        if let Some(col) = batch
+                                            .column(0)
+                                            .as_any()
+                                            .downcast_ref::<arrow_array::UInt64Array>(
+                                        ) {
+                                            return Ok(col.value(0) > 0);
                                         }
                                     }
                                 }
@@ -8281,7 +8320,9 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
                     let mut sql_assignments: Vec<(String, SqlValue)> = Vec::new();
                     for (col_name, expr) in assignments {
                         // Handle special EXCLUDED.column syntax
-                        let value = if expr.starts_with("EXCLUDED.") || expr.starts_with("excluded.") {
+                        let value = if expr.starts_with("EXCLUDED.")
+                            || expr.starts_with("excluded.")
+                        {
                             // Extract column name from EXCLUDED.column
                             let excluded_col = expr.split('.').nth(1).unwrap_or(col_name);
                             // Find the value from the current row
@@ -8440,8 +8481,9 @@ async fn execute_insert(db: &Arc<Db>, cmd: InsertCommand) -> Result<Response, Se
             .collect();
         let insert_schema = Arc::new(Schema::new(fields));
 
-        let batch = RecordBatch::try_new(insert_schema.clone(), arrays)
-            .map_err(|e| ServerError::BadRequest(format!("failed to create record batch: {}", e)))?;
+        let batch = RecordBatch::try_new(insert_schema.clone(), arrays).map_err(|e| {
+            ServerError::BadRequest(format!("failed to create record batch: {}", e))
+        })?;
 
         // Convert to Arrow IPC
         let mut ipc_buffer = Vec::new();
@@ -8646,7 +8688,10 @@ fn format_returning_response(
     operation: &str,
 ) -> Result<Response, ServerError> {
     if count == 0 || batches.is_empty() {
-        return Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)));
+        return Ok(Response::ok_message(&format!(
+            "{} row(s) {}",
+            count, operation
+        )));
     }
 
     let schema = batches[0].schema();
@@ -8656,7 +8701,10 @@ fn format_returning_response(
         Some(cols) if !cols.is_empty() => cols,
         _ => {
             // No RETURNING clause, just return count
-            return Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)));
+            return Ok(Response::ok_message(&format!(
+                "{} row(s) {}",
+                count, operation
+            )));
         }
     };
 
@@ -8667,13 +8715,13 @@ fn format_returning_response(
             let mut writer = StreamWriter::try_new(&mut output, &schema)
                 .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
             for batch in &batches {
-                writer.write(batch).map_err(|e| {
-                    ServerError::Encode(format!("failed to write batch: {}", e))
-                })?;
+                writer
+                    .write(batch)
+                    .map_err(|e| ServerError::Encode(format!("failed to write batch: {}", e)))?;
             }
-            writer.finish().map_err(|e| {
-                ServerError::Encode(format!("failed to finish writer: {}", e))
-            })?;
+            writer
+                .finish()
+                .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
         }
         let ipc_base64 = general_purpose::STANDARD.encode(&output);
         return Ok(Response {
@@ -8685,7 +8733,8 @@ fn format_returning_response(
     }
 
     // RETURNING specific columns - filter to only requested columns
-    let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+    let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> =
+        vec![Vec::new(); returning_cols.len()];
     let mut selected_fields: Vec<Field> = Vec::new();
     let mut field_initialized = false;
 
@@ -8716,20 +8765,18 @@ fn format_returning_response(
 
         let selected_schema = Arc::new(Schema::new(selected_fields));
         let selected_batch = RecordBatch::try_new(selected_schema.clone(), final_arrays)
-            .map_err(|e| {
-                ServerError::Encode(format!("failed to create returning batch: {}", e))
-            })?;
+            .map_err(|e| ServerError::Encode(format!("failed to create returning batch: {}", e)))?;
 
         let mut output = Vec::new();
         {
             let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
                 .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
-            writer.write(&selected_batch).map_err(|e| {
-                ServerError::Encode(format!("failed to write batch: {}", e))
-            })?;
-            writer.finish().map_err(|e| {
-                ServerError::Encode(format!("failed to finish writer: {}", e))
-            })?;
+            writer
+                .write(&selected_batch)
+                .map_err(|e| ServerError::Encode(format!("failed to write batch: {}", e)))?;
+            writer
+                .finish()
+                .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
         }
         let ipc_base64 = general_purpose::STANDARD.encode(&output);
         return Ok(Response {
@@ -8740,7 +8787,10 @@ fn format_returning_response(
         });
     }
 
-    Ok(Response::ok_message(&format!("{} row(s) {}", count, operation)))
+    Ok(Response::ok_message(&format!(
+        "{} row(s) {}",
+        count, operation
+    )))
 }
 
 async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, ServerError> {
@@ -8802,16 +8852,17 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
             // RETURNING * - return all columns
             let mut output = Vec::new();
             {
-                let mut writer = StreamWriter::try_new(&mut output, &schema)
-                    .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                let mut writer = StreamWriter::try_new(&mut output, &schema).map_err(|e| {
+                    ServerError::Encode(format!("failed to write returning: {}", e))
+                })?;
                 for batch in &batches {
                     writer.write(batch).map_err(|e| {
                         ServerError::Encode(format!("failed to write batch: {}", e))
                     })?;
                 }
-                writer.finish().map_err(|e| {
-                    ServerError::Encode(format!("failed to finish writer: {}", e))
-                })?;
+                writer
+                    .finish()
+                    .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
             }
             let ipc_base64 = general_purpose::STANDARD.encode(&output);
             return Ok(Response {
@@ -8822,7 +8873,8 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
             });
         } else {
             // RETURNING specific columns - filter to only requested columns
-            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> =
+                vec![Vec::new(); returning_cols.len()];
             let mut selected_fields: Vec<Field> = Vec::new();
             let mut field_initialized = false;
 
@@ -8845,8 +8897,9 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
                     if !col_arrays.is_empty() {
                         let refs: Vec<&dyn arrow_array::Array> =
                             col_arrays.iter().map(|a| a.as_ref()).collect();
-                        let concatenated = arrow_select::concat::concat(&refs)
-                            .map_err(|e| ServerError::Encode(format!("failed to concat arrays: {}", e)))?;
+                        let concatenated = arrow_select::concat::concat(&refs).map_err(|e| {
+                            ServerError::Encode(format!("failed to concat arrays: {}", e))
+                        })?;
                         final_arrays.push(concatenated);
                     }
                 }
@@ -8859,8 +8912,10 @@ async fn execute_update(_db: &Arc<Db>, cmd: UpdateCommand) -> Result<Response, S
 
                 let mut output = Vec::new();
                 {
-                    let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
-                        .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                    let mut writer =
+                        StreamWriter::try_new(&mut output, &selected_schema).map_err(|e| {
+                            ServerError::Encode(format!("failed to write returning: {}", e))
+                        })?;
                     writer.write(&selected_batch).map_err(|e| {
                         ServerError::Encode(format!("failed to write batch: {}", e))
                     })?;
@@ -8947,16 +9002,17 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
             // RETURNING * - return all columns
             let mut output = Vec::new();
             {
-                let mut writer = StreamWriter::try_new(&mut output, &schema)
-                    .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                let mut writer = StreamWriter::try_new(&mut output, &schema).map_err(|e| {
+                    ServerError::Encode(format!("failed to write returning: {}", e))
+                })?;
                 for batch in &batches {
                     writer.write(batch).map_err(|e| {
                         ServerError::Encode(format!("failed to write batch: {}", e))
                     })?;
                 }
-                writer.finish().map_err(|e| {
-                    ServerError::Encode(format!("failed to finish writer: {}", e))
-                })?;
+                writer
+                    .finish()
+                    .map_err(|e| ServerError::Encode(format!("failed to finish writer: {}", e)))?;
             }
             let ipc_base64 = general_purpose::STANDARD.encode(&output);
             return Ok(Response {
@@ -8967,7 +9023,8 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
             });
         } else {
             // RETURNING specific columns - filter to only requested columns
-            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> = vec![Vec::new(); returning_cols.len()];
+            let mut selected_arrays: Vec<Vec<arrow_array::ArrayRef>> =
+                vec![Vec::new(); returning_cols.len()];
             let mut selected_fields: Vec<Field> = Vec::new();
             let mut field_initialized = false;
 
@@ -8990,8 +9047,9 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
                     if !col_arrays.is_empty() {
                         let refs: Vec<&dyn arrow_array::Array> =
                             col_arrays.iter().map(|a| a.as_ref()).collect();
-                        let concatenated = arrow_select::concat::concat(&refs)
-                            .map_err(|e| ServerError::Encode(format!("failed to concat arrays: {}", e)))?;
+                        let concatenated = arrow_select::concat::concat(&refs).map_err(|e| {
+                            ServerError::Encode(format!("failed to concat arrays: {}", e))
+                        })?;
                         final_arrays.push(concatenated);
                     }
                 }
@@ -9004,8 +9062,10 @@ async fn execute_delete(_db: &Arc<Db>, cmd: DeleteCommand) -> Result<Response, S
 
                 let mut output = Vec::new();
                 {
-                    let mut writer = StreamWriter::try_new(&mut output, &selected_schema)
-                        .map_err(|e| ServerError::Encode(format!("failed to write returning: {}", e)))?;
+                    let mut writer =
+                        StreamWriter::try_new(&mut output, &selected_schema).map_err(|e| {
+                            ServerError::Encode(format!("failed to write returning: {}", e))
+                        })?;
                     writer.write(&selected_batch).map_err(|e| {
                         ServerError::Encode(format!("failed to write batch: {}", e))
                     })?;
@@ -9897,13 +9957,21 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 if_exists,
             }
         }
-        DdlCommand::RefreshMaterializedView { database, name, incremental } => {
+        DdlCommand::RefreshMaterializedView {
+            database,
+            name,
+            incremental,
+        } => {
             let db = if database == "default" {
                 effective_db.to_string()
             } else {
                 database
             };
-            DdlCommand::RefreshMaterializedView { database: db, name, incremental }
+            DdlCommand::RefreshMaterializedView {
+                database: db,
+                name,
+                incremental,
+            }
         }
         DdlCommand::ShowMaterializedViews { database } => {
             let db = database
@@ -9975,7 +10043,11 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             }
         }
         // Maintenance commands need database substitution
-        DdlCommand::AnalyzeTable { database, table, columns } => {
+        DdlCommand::AnalyzeTable {
+            database,
+            table,
+            columns,
+        } => {
             let db = if database == "default" {
                 effective_db.to_string()
             } else {
@@ -9987,7 +10059,11 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 columns,
             }
         }
-        DdlCommand::ShowStatistics { database, table, column } => {
+        DdlCommand::ShowStatistics {
+            database,
+            table,
+            column,
+        } => {
             let db = if database == "default" {
                 effective_db.to_string()
             } else {
@@ -10352,7 +10428,10 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 Some(d) if d == "default" => Some(effective_db.to_string()),
                 other => other,
             };
-            DdlCommand::RepairSegments { database: db, table }
+            DdlCommand::RepairSegments {
+                database: db,
+                table,
+            }
         }
         DdlCommand::CheckManifest => DdlCommand::CheckManifest,
         DdlCommand::ShowRepairStatus => DdlCommand::ShowRepairStatus,
@@ -10362,7 +10441,10 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             } else {
                 database
             };
-            DdlCommand::CompactTable { database: db, table }
+            DdlCommand::CompactTable {
+                database: db,
+                table,
+            }
         }
         DdlCommand::CompactAll => DdlCommand::CompactAll,
         // Transaction commands don't need database binding
@@ -10388,7 +10470,9 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             or_replace,
             language,
         },
-        DdlCommand::DropFunction { name, if_exists } => DdlCommand::DropFunction { name, if_exists },
+        DdlCommand::DropFunction { name, if_exists } => {
+            DdlCommand::DropFunction { name, if_exists }
+        }
         DdlCommand::ShowFunctions { pattern } => DdlCommand::ShowFunctions { pattern },
         DdlCommand::CreateStream {
             name,

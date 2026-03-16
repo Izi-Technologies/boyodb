@@ -3,9 +3,9 @@
 //! Multi-level JIT compilation strategy for query execution.
 //! Starts with interpretation, then compiles hot paths progressively.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Compilation tier
@@ -89,13 +89,20 @@ pub enum IROp {
     /// Project columns
     Project { columns: Vec<String> },
     /// Aggregate
-    Aggregate { group_by: Vec<String>, aggregates: Vec<IRAggregate> },
+    Aggregate {
+        group_by: Vec<String>,
+        aggregates: Vec<IRAggregate>,
+    },
     /// Sort
     Sort { columns: Vec<(String, bool)> },
     /// Limit
     Limit { count: u64, offset: u64 },
     /// Join
-    Join { join_type: String, left_key: String, right_key: String },
+    Join {
+        join_type: String,
+        left_key: String,
+        right_key: String,
+    },
     /// Hash build
     HashBuild { key: String },
     /// Hash probe
@@ -247,7 +254,8 @@ impl TieredCompilationManager {
     /// Record execution for tier promotion tracking
     pub fn record_execution(&self, fingerprint: &str, execution_time: Duration) {
         let mut counters = self.counters.write();
-        let counter = counters.entry(fingerprint.to_string())
+        let counter = counters
+            .entry(fingerprint.to_string())
             .or_insert_with(ExecutionCounter::default);
 
         counter.count += 1;
@@ -288,7 +296,10 @@ impl TieredCompilationManager {
         // Queue for compilation (would be done in production)
         // For now, just track the request
         let mut pending = self.pending.write();
-        if !pending.iter().any(|p| p.fingerprint == fingerprint && p.target_tier >= target_tier) {
+        if !pending
+            .iter()
+            .any(|p| p.fingerprint == fingerprint && p.target_tier >= target_tier)
+        {
             pending.push(CompilationRequest {
                 fingerprint: fingerprint.to_string(),
                 target_tier,
@@ -383,7 +394,10 @@ impl TieredCompilationManager {
                     bytecode.push(0x03); // PROJECT opcode
                     bytecode.push(columns.len() as u8);
                 }
-                IROp::Aggregate { group_by, aggregates } => {
+                IROp::Aggregate {
+                    group_by,
+                    aggregates,
+                } => {
                     bytecode.push(0x04); // AGGREGATE opcode
                     bytecode.push(group_by.len() as u8);
                     bytecode.push(aggregates.len() as u8);
@@ -396,7 +410,11 @@ impl TieredCompilationManager {
                     bytecode.push(0x06); // LIMIT opcode
                     bytecode.extend(&count.to_le_bytes());
                 }
-                IROp::Join { join_type: _, left_key: _, right_key: _ } => {
+                IROp::Join {
+                    join_type: _,
+                    left_key: _,
+                    right_key: _,
+                } => {
                     bytecode.push(0x07); // JOIN opcode
                 }
                 IROp::HashBuild { key: _ } => {
@@ -453,7 +471,8 @@ impl TieredCompilationManager {
 
     /// Evict least recently used entries
     fn evict_lru(&self, cache: &mut HashMap<String, CompiledCode>, needed: usize) {
-        let mut entries: Vec<_> = cache.iter()
+        let mut entries: Vec<_> = cache
+            .iter()
             .map(|(k, v)| (k.clone(), v.last_used, v.code_size))
             .collect();
 
@@ -475,7 +494,8 @@ impl TieredCompilationManager {
     /// Get current tier for a query
     pub fn get_tier(&self, fingerprint: &str) -> CompilationTier {
         let cache = self.cache.read();
-        cache.get(fingerprint)
+        cache
+            .get(fingerprint)
             .map(|c| c.tier)
             .unwrap_or(CompilationTier::Interpreted)
     }
@@ -599,13 +619,20 @@ mod tests {
 
         let ir = QueryIR {
             ops: vec![
-                IROp::Scan { table: "users".into(), columns: vec!["id".into(), "name".into()] },
-                IROp::Filter { predicate: IRPredicate {
-                    column: "status".into(),
-                    op: "=".into(),
-                    value: IRValue::String("active".into()),
-                }},
-                IROp::Project { columns: vec!["id".into(), "name".into()] },
+                IROp::Scan {
+                    table: "users".into(),
+                    columns: vec!["id".into(), "name".into()],
+                },
+                IROp::Filter {
+                    predicate: IRPredicate {
+                        column: "status".into(),
+                        op: "=".into(),
+                        value: IRValue::String("active".into()),
+                    },
+                },
+                IROp::Project {
+                    columns: vec!["id".into(), "name".into()],
+                },
             ],
             inputs: vec![],
             outputs: vec!["id".into(), "name".into()],
@@ -645,7 +672,9 @@ mod tests {
         // Should have baseline compilation pending
         let pending = manager.pending.read();
         assert!(!pending.is_empty());
-        assert!(pending.iter().any(|p| p.target_tier == CompilationTier::Baseline));
+        assert!(pending
+            .iter()
+            .any(|p| p.target_tier == CompilationTier::Baseline));
     }
 
     #[test]
@@ -653,7 +682,10 @@ mod tests {
         let manager = TieredCompilationManager::default();
 
         let ir = QueryIR {
-            ops: vec![IROp::Scan { table: "test".into(), columns: vec![] }],
+            ops: vec![IROp::Scan {
+                table: "test".into(),
+                columns: vec![],
+            }],
             inputs: vec![],
             outputs: vec![],
             estimated_rows: 100,
@@ -700,7 +732,10 @@ mod tests {
         let manager = TieredCompilationManager::default();
 
         let ir = QueryIR {
-            ops: vec![IROp::Scan { table: "data".into(), columns: vec![] }],
+            ops: vec![IROp::Scan {
+                table: "data".into(),
+                columns: vec![],
+            }],
             inputs: vec![],
             outputs: vec![],
             estimated_rows: 1000000,

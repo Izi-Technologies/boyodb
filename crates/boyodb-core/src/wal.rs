@@ -3,6 +3,7 @@ use crate::engine::{
     persist_segment_ipc, EngineError,
 };
 use crate::replication::ManifestEntry;
+use parking_lot::{Condvar, Mutex};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -10,7 +11,6 @@ use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -635,7 +635,10 @@ impl Wal {
     }
 
     /// Serialize a segment record to bytes (for group commit batching)
-    fn serialize_segment_record(entry: &ManifestEntry, payload: &[u8]) -> Result<Vec<u8>, EngineError> {
+    fn serialize_segment_record(
+        entry: &ManifestEntry,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, EngineError> {
         let rec = WalRecord::Segment {
             entry: entry.clone(),
             payload: payload.to_vec(),
@@ -727,9 +730,9 @@ impl Wal {
 
     /// Get group commit statistics
     pub fn group_commit_stats(&self) -> Option<(usize, u64)> {
-        self.group_commit.as_ref().map(|gc| {
-            (gc.pending_count(), gc.pending_bytes())
-        })
+        self.group_commit
+            .as_ref()
+            .map(|gc| (gc.pending_count(), gc.pending_bytes()))
     }
 
     pub fn replay(
@@ -1080,7 +1083,10 @@ fn replay_wal_file_parallel(
         let line = match line_result {
             Ok(l) => l,
             Err(e) => {
-                warn!("WAL read error at line {}: {} - stopping replay", line_num, e);
+                warn!(
+                    "WAL read error at line {}: {} - stopping replay",
+                    line_num, e
+                );
                 break;
             }
         };
@@ -1093,7 +1099,10 @@ fn replay_wal_file_parallel(
             }
             WalParseResult::Corrupt(reason) => {
                 corrupt_count += 1;
-                warn!("WAL corrupt record at line {}: {} - skipping", line_num, reason);
+                warn!(
+                    "WAL corrupt record at line {}: {} - skipping",
+                    line_num, reason
+                );
                 continue;
             }
             WalParseResult::Record(rec) => {
@@ -1215,8 +1224,12 @@ pub fn repair_wal(wal_path: &Path) -> Result<(usize, usize), EngineError> {
                 let bytes = serde_json::to_vec(&rec)
                     .map_err(|e| EngineError::Internal(format!("wal re-encode: {e}")))?;
                 let checksum = xxhash_rust::xxh64::xxh64(&bytes, 0);
-                let line = format!("{} {:016x} {}\n", bytes.len(), checksum,
-                    String::from_utf8_lossy(&bytes));
+                let line = format!(
+                    "{} {:016x} {}\n",
+                    bytes.len(),
+                    checksum,
+                    String::from_utf8_lossy(&bytes)
+                );
                 valid_records.push(line);
                 recovered_count += 1;
             }
@@ -1233,10 +1246,12 @@ pub fn repair_wal(wal_path: &Path) -> Result<(usize, usize), EngineError> {
         let mut temp_file = File::create(&temp_path)
             .map_err(|e| EngineError::Io(format!("create temp wal failed: {e}")))?;
         for record in &valid_records {
-            temp_file.write_all(record.as_bytes())
+            temp_file
+                .write_all(record.as_bytes())
                 .map_err(|e| EngineError::Io(format!("write temp wal failed: {e}")))?;
         }
-        temp_file.sync_all()
+        temp_file
+            .sync_all()
             .map_err(|e| EngineError::Io(format!("sync temp wal failed: {e}")))?;
     }
 

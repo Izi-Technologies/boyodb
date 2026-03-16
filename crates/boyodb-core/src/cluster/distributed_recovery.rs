@@ -113,10 +113,10 @@ pub struct DistributedRecoveryConfig {
 impl Default for DistributedRecoveryConfig {
     fn default() -> Self {
         Self {
-            suspect_timeout_ms: 5_000,       // 5 seconds
+            suspect_timeout_ms: 5_000,        // 5 seconds
             crash_confirm_timeout_ms: 15_000, // 15 seconds
             max_recovery_attempts: 3,
-            recovery_timeout_ms: 300_000,    // 5 minutes
+            recovery_timeout_ms: 300_000,      // 5 minutes
             progress_check_interval_ms: 1_000, // 1 second
             auto_rebuild_on_corruption: true,
             recovery_metadata_path: PathBuf::from("/tmp/boyodb_recovery"),
@@ -176,11 +176,7 @@ pub struct DistributedRecoveryManager {
 
 impl DistributedRecoveryManager {
     /// Create a new distributed recovery manager.
-    pub fn new(
-        config: DistributedRecoveryConfig,
-        local_node_id: NodeId,
-        db: Arc<Db>,
-    ) -> Self {
+    pub fn new(config: DistributedRecoveryConfig, local_node_id: NodeId, db: Arc<Db>) -> Self {
         Self {
             config,
             node_states: RwLock::new(HashMap::new()),
@@ -301,7 +297,9 @@ impl DistributedRecoveryManager {
                 NodeRecoveryState::Suspected { since_ms } => {
                     let suspect_duration = now.saturating_sub(*since_ms);
                     if suspect_duration > self.config.crash_confirm_timeout_ms {
-                        info.state = NodeRecoveryState::Crashed { detected_at_ms: now };
+                        info.state = NodeRecoveryState::Crashed {
+                            detected_at_ms: now,
+                        };
                         tracing::error!(
                             node_id = %node_id.0,
                             suspect_duration_ms = suspect_duration,
@@ -340,7 +338,9 @@ impl DistributedRecoveryManager {
                             recovery_duration_ms = recovery_duration,
                             "recovery timed out"
                         );
-                        info.state = NodeRecoveryState::Crashed { detected_at_ms: now };
+                        info.state = NodeRecoveryState::Crashed {
+                            detected_at_ms: now,
+                        };
                         info.recovery_attempts += 1;
                         info.last_error = Some("recovery timeout".to_string());
                     }
@@ -358,7 +358,11 @@ impl DistributedRecoveryManager {
     }
 
     /// Determine the appropriate recovery action for a crashed node.
-    fn determine_recovery_action(&self, node_id: &NodeId, info: &NodeRecoveryInfo) -> RecoveryAction {
+    fn determine_recovery_action(
+        &self,
+        node_id: &NodeId,
+        info: &NodeRecoveryInfo,
+    ) -> RecoveryAction {
         let cluster_lsn = self.cluster_lsn.load(Ordering::SeqCst);
         let lag = cluster_lsn.saturating_sub(info.last_known_lsn);
 
@@ -384,7 +388,11 @@ impl DistributedRecoveryManager {
     }
 
     /// Start recovery for a node.
-    pub fn start_recovery(&self, node_id: &NodeId, action: RecoveryAction) -> Result<(), EngineError> {
+    pub fn start_recovery(
+        &self,
+        node_id: &NodeId,
+        action: RecoveryAction,
+    ) -> Result<(), EngineError> {
         if self.recovery_in_progress.swap(true, Ordering::SeqCst) {
             return Err(EngineError::InvalidArgument(
                 "recovery already in progress".into(),
@@ -419,7 +427,12 @@ impl DistributedRecoveryManager {
     }
 
     /// Update recovery progress for a node.
-    pub fn update_recovery_progress(&self, node_id: &NodeId, current_lsn: u64, progress_percent: u8) {
+    pub fn update_recovery_progress(
+        &self,
+        node_id: &NodeId,
+        current_lsn: u64,
+        progress_percent: u8,
+    ) {
         let mut states = self.node_states.write();
         if let Some(info) = states.get_mut(node_id) {
             if let NodeRecoveryState::Recovering {
@@ -448,19 +461,28 @@ impl DistributedRecoveryManager {
     }
 
     /// Complete recovery for a node.
-    pub fn complete_recovery(&self, node_id: &NodeId, final_lsn: u64, success: bool, error: Option<String>) -> RecoveryResult {
+    pub fn complete_recovery(
+        &self,
+        node_id: &NodeId,
+        final_lsn: u64,
+        success: bool,
+        error: Option<String>,
+    ) -> RecoveryResult {
         let mut states = self.node_states.write();
         let now = current_timestamp_ms();
 
         let result = if let Some(info) = states.get_mut(node_id) {
-            let duration_ms = if let NodeRecoveryState::Recovering { started_at_ms, .. } = info.state {
-                now.saturating_sub(started_at_ms)
-            } else {
-                0
-            };
+            let duration_ms =
+                if let NodeRecoveryState::Recovering { started_at_ms, .. } = info.state {
+                    now.saturating_sub(started_at_ms)
+                } else {
+                    0
+                };
 
             if success {
-                info.state = NodeRecoveryState::PendingVerification { recovered_at_ms: now };
+                info.state = NodeRecoveryState::PendingVerification {
+                    recovered_at_ms: now,
+                };
                 info.last_known_lsn = final_lsn;
                 info.last_error = None;
                 tracing::info!(
@@ -470,7 +492,9 @@ impl DistributedRecoveryManager {
                     "recovery completed successfully, pending verification"
                 );
             } else {
-                info.state = NodeRecoveryState::Crashed { detected_at_ms: now };
+                info.state = NodeRecoveryState::Crashed {
+                    detected_at_ms: now,
+                };
                 info.last_error = error.clone();
                 tracing::error!(
                     node_id = %node_id.0,
@@ -504,7 +528,12 @@ impl DistributedRecoveryManager {
     }
 
     /// Verify a recovered node's data integrity.
-    pub fn verify_recovery(&self, node_id: &NodeId, reported_lsn: u64, reported_manifest_version: u64) -> bool {
+    pub fn verify_recovery(
+        &self,
+        node_id: &NodeId,
+        reported_lsn: u64,
+        reported_manifest_version: u64,
+    ) -> bool {
         let mut states = self.node_states.write();
 
         if let Some(info) = states.get_mut(node_id) {
@@ -749,11 +778,7 @@ impl LocalRecoveryProtocol {
         };
 
         self.write_metadata(&metadata)?;
-        tracing::info!(
-            lsn = current_lsn,
-            manifest_version,
-            "marked clean shutdown"
-        );
+        tracing::info!(lsn = current_lsn, manifest_version, "marked clean shutdown");
         Ok(())
     }
 
@@ -836,10 +861,7 @@ impl LocalRecoveryProtocol {
             // This is OK for a fresh database
         }
 
-        tracing::info!(
-            wal_lsn,
-            "data integrity verification passed"
-        );
+        tracing::info!(wal_lsn, "data integrity verification passed");
         Ok(true)
     }
 
@@ -883,7 +905,9 @@ mod tests {
         assert!(matches!(info.state, NodeRecoveryState::Suspected { .. }));
 
         // Test transition to Crashed
-        info.state = NodeRecoveryState::Crashed { detected_at_ms: 3000 };
+        info.state = NodeRecoveryState::Crashed {
+            detected_at_ms: 3000,
+        };
         assert!(matches!(info.state, NodeRecoveryState::Crashed { .. }));
 
         // Test transition to Recovering
@@ -896,8 +920,13 @@ mod tests {
         assert!(matches!(info.state, NodeRecoveryState::Recovering { .. }));
 
         // Test transition to PendingVerification
-        info.state = NodeRecoveryState::PendingVerification { recovered_at_ms: 5000 };
-        assert!(matches!(info.state, NodeRecoveryState::PendingVerification { .. }));
+        info.state = NodeRecoveryState::PendingVerification {
+            recovered_at_ms: 5000,
+        };
+        assert!(matches!(
+            info.state,
+            NodeRecoveryState::PendingVerification { .. }
+        ));
 
         // Test transition back to Healthy
         info.state = NodeRecoveryState::Healthy;

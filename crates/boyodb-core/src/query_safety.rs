@@ -30,10 +30,10 @@
 //! WHERE state = 'active' AND query_start < now() - interval '5 minutes';
 //! ```
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::{RwLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -102,7 +102,11 @@ impl std::fmt::Display for QuerySafetyError {
                 write!(f, "canceling statement due to user request: {}", reason)
             }
             Self::BackendTerminated { pid, reason } => {
-                write!(f, "terminating connection due to administrator command: {}", reason)
+                write!(
+                    f,
+                    "terminating connection due to administrator command: {}",
+                    reason
+                )
             }
             Self::QueryNotFound(id) => write!(f, "query {} not found", id),
             Self::BackendNotFound(pid) => write!(f, "backend {} not found", pid),
@@ -452,7 +456,8 @@ impl QueryManager {
 
     /// Set long query threshold
     pub fn set_long_query_threshold(&self, threshold_ms: u64) {
-        self.long_query_threshold_ms.store(threshold_ms, Ordering::Relaxed);
+        self.long_query_threshold_ms
+            .store(threshold_ms, Ordering::Relaxed);
     }
 
     /// Register a new query
@@ -762,7 +767,9 @@ impl QueryTimeoutGuard {
 
     /// Get cancel flag for async checking
     pub fn cancel_flag(&self) -> Option<Arc<AtomicBool>> {
-        self.manager.get_query(self.query_id).map(|ctx| ctx.cancel_flag())
+        self.manager
+            .get_query(self.query_id)
+            .map(|ctx| ctx.cancel_flag())
     }
 }
 
@@ -827,7 +834,10 @@ mod tests {
 
         // Check should return error
         let result = ctx.check();
-        assert!(matches!(result, Err(QuerySafetyError::QueryCancelled { .. })));
+        assert!(matches!(
+            result,
+            Err(QuerySafetyError::QueryCancelled { .. })
+        ));
     }
 
     #[test]
@@ -892,7 +902,10 @@ mod tests {
 
         // Check should return timeout error
         let result = manager.check_query(query_id);
-        assert!(matches!(result, Err(QuerySafetyError::StatementTimeout { .. })));
+        assert!(matches!(
+            result,
+            Err(QuerySafetyError::StatementTimeout { .. })
+        ));
     }
 
     #[test]

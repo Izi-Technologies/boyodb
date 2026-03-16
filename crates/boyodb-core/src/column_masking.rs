@@ -64,7 +64,10 @@ pub enum MaskingFunction {
     /// Hash the value (one-way)
     Hash,
     /// Custom regex replacement
-    Regex { pattern: String, replacement: String },
+    Regex {
+        pattern: String,
+        replacement: String,
+    },
     /// Replace with constant
     Constant { value: String },
     /// Shuffle characters
@@ -217,18 +220,27 @@ impl MaskingEngine {
     /// Apply masking function to a value
     fn apply_function(&self, function: &MaskingFunction, value: &str) -> String {
         match function {
-            MaskingFunction::Full => {
-                self.config.mask_char.to_string().repeat(value.len().min(10))
-            }
+            MaskingFunction::Full => self
+                .config
+                .mask_char
+                .to_string()
+                .repeat(value.len().min(10)),
 
-            MaskingFunction::Partial { show_first, show_last } => {
+            MaskingFunction::Partial {
+                show_first,
+                show_last,
+            } => {
                 let len = value.len();
                 if len <= show_first + show_last {
                     return self.config.mask_char.to_string().repeat(len);
                 }
                 let first: String = value.chars().take(*show_first).collect();
                 let last: String = value.chars().skip(len - show_last).collect();
-                let middle = self.config.mask_char.to_string().repeat(len - show_first - show_last);
+                let middle = self
+                    .config
+                    .mask_char
+                    .to_string()
+                    .repeat(len - show_first - show_last);
                 format!("{}{}{}", first, middle, last)
             }
 
@@ -238,7 +250,10 @@ impl MaskingEngine {
                     let masked_local = self.config.mask_char.to_string().repeat(at_pos.min(5));
                     format!("{}{}", masked_local, domain)
                 } else {
-                    self.config.mask_char.to_string().repeat(value.len().min(10))
+                    self.config
+                        .mask_char
+                        .to_string()
+                        .repeat(value.len().min(10))
                 }
             }
 
@@ -310,7 +325,10 @@ impl MaskingEngine {
                 format!("{:016x}", hash)
             }
 
-            MaskingFunction::Regex { pattern, replacement } => {
+            MaskingFunction::Regex {
+                pattern,
+                replacement,
+            } => {
                 let mut cache = self.regex_cache.write();
                 let re = cache.entry(pattern.clone()).or_insert_with(|| {
                     Regex::new(pattern).unwrap_or_else(|_| Regex::new(".*").unwrap())
@@ -500,9 +518,20 @@ mod tests {
     #[test]
     fn test_credit_card_masking() {
         let engine = MaskingEngine::new(MaskingConfig::default());
-        engine.add_policy(PredefinedPolicies::credit_card("db", "payments", "card_number"));
+        engine.add_policy(PredefinedPolicies::credit_card(
+            "db",
+            "payments",
+            "card_number",
+        ));
 
-        let result = engine.mask("db", "payments", "card_number", "4111111111111234", None, &[]);
+        let result = engine.mask(
+            "db",
+            "payments",
+            "card_number",
+            "4111111111111234",
+            None,
+            &[],
+        );
         assert!(result.was_masked);
         assert!(result.masked_value.contains("1234"));
         assert!(result.masked_value.contains("****"));
@@ -526,11 +555,25 @@ mod tests {
         });
 
         // Regular user - should be masked
-        let result = engine.mask("db", "users", "ssn", "123-45-6789", None, &["user".to_string()]);
+        let result = engine.mask(
+            "db",
+            "users",
+            "ssn",
+            "123-45-6789",
+            None,
+            &["user".to_string()],
+        );
         assert!(result.was_masked);
 
         // Admin - should not be masked
-        let result = engine.mask("db", "users", "ssn", "123-45-6789", None, &["admin".to_string()]);
+        let result = engine.mask(
+            "db",
+            "users",
+            "ssn",
+            "123-45-6789",
+            None,
+            &["admin".to_string()],
+        );
         assert!(!result.was_masked);
         assert_eq!(result.masked_value, "123-45-6789");
     }

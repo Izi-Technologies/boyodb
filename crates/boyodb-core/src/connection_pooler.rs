@@ -20,29 +20,22 @@ use parking_lot::{Mutex, RwLock};
 fn md5_hash(data: &[u8]) -> [u8; 16] {
     // Simple MD5 implementation (RFC 1321)
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-        5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
-        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
 
     const K: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
     ];
 
     // Pad message
@@ -872,7 +865,10 @@ impl ConnectionPooler {
     /// Get database pause state
     pub fn get_database_state(&self, database: &str) -> DatabasePauseState {
         let paused = self.paused_databases.read();
-        paused.get(database).copied().unwrap_or(DatabasePauseState::Active)
+        paused
+            .get(database)
+            .copied()
+            .unwrap_or(DatabasePauseState::Active)
     }
 
     /// Add user credentials
@@ -923,7 +919,9 @@ impl ConnectionPooler {
     /// Remove a database configuration
     pub fn remove_database(&self, name: &str) -> Result<(), PoolerError> {
         let mut databases = self.databases.write();
-        databases.remove(name).ok_or_else(|| PoolerError::UnknownDatabase(name.to_string()))?;
+        databases
+            .remove(name)
+            .ok_or_else(|| PoolerError::UnknownDatabase(name.to_string()))?;
         Ok(())
     }
 
@@ -994,9 +992,11 @@ impl ConnectionPooler {
     ) -> Result<(), PoolerError> {
         let (database, user) = {
             let clients = self.clients.read();
-            let client_lock = clients.get(&client_id).ok_or(PoolerError::AuthenticationFailed(
-                "client not found".to_string(),
-            ))?;
+            let client_lock = clients
+                .get(&client_id)
+                .ok_or(PoolerError::AuthenticationFailed(
+                    "client not found".to_string(),
+                ))?;
             let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
@@ -1068,9 +1068,11 @@ impl ConnectionPooler {
     ) -> Result<(), PoolerError> {
         let (database, user) = {
             let clients = self.clients.read();
-            let client_lock = clients.get(&client_id).ok_or(PoolerError::AuthenticationFailed(
-                "client not found".to_string(),
-            ))?;
+            let client_lock = clients
+                .get(&client_id)
+                .ok_or(PoolerError::AuthenticationFailed(
+                    "client not found".to_string(),
+                ))?;
             let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
@@ -1121,7 +1123,9 @@ impl ConnectionPooler {
     pub fn get_server_connection(&self, client_id: u64) -> Result<u64, PoolerError> {
         let (database, user) = {
             let clients = self.clients.read();
-            let client_lock = clients.get(&client_id).ok_or(PoolerError::ConnectionTimeout)?;
+            let client_lock = clients
+                .get(&client_id)
+                .ok_or(PoolerError::ConnectionTimeout)?;
             let client = client_lock.lock();
             (client.database.clone(), client.user.clone())
         };
@@ -1145,7 +1149,9 @@ impl ConnectionPooler {
         }
 
         // No idle connection, create new one if possible
-        let config = self.get_database(&database).ok_or(PoolerError::UnknownDatabase(database.clone()))?;
+        let config = self
+            .get_database(&database)
+            .ok_or(PoolerError::UnknownDatabase(database.clone()))?;
 
         // Check if we can create more connections
         {
@@ -1190,7 +1196,8 @@ impl ConnectionPooler {
             }
         }
 
-        let config = self.get_database(database)
+        let config = self
+            .get_database(database)
             .ok_or_else(|| PoolerError::UnknownDatabase(database.to_string()))?;
 
         let pool = ConnectionPool::new(database.to_string(), user.to_string(), config);
@@ -1363,9 +1370,9 @@ impl ConnectionPooler {
         let (mut backend_pid, mut backend_key) = (0u32, 0u32);
         loop {
             let mut header = [0u8; 5];
-            stream.read_exact(&mut header).map_err(|e| {
-                PoolerError::ServerConnectionFailed(format!("read failed: {}", e))
-            })?;
+            stream
+                .read_exact(&mut header)
+                .map_err(|e| PoolerError::ServerConnectionFailed(format!("read failed: {}", e)))?;
 
             let msg_type = header[0] as char;
             let msg_len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
@@ -1464,7 +1471,9 @@ impl ConnectionPooler {
     ) -> Result<(), PoolerError> {
         let (database, user, server_id) = {
             let clients = self.clients.read();
-            let client_lock = clients.get(&client_id).ok_or(PoolerError::ConnectionTimeout)?;
+            let client_lock = clients
+                .get(&client_id)
+                .ok_or(PoolerError::ConnectionTimeout)?;
             let mut client = client_lock.lock();
 
             let server_id = client.server_id.take();
@@ -1538,8 +1547,12 @@ impl ConnectionPooler {
         }
 
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_bytes_sent.fetch_add(bytes_sent, Ordering::Relaxed);
-        self.stats.total_bytes_received.fetch_add(bytes_received, Ordering::Relaxed);
+        self.stats
+            .total_bytes_sent
+            .fetch_add(bytes_sent, Ordering::Relaxed);
+        self.stats
+            .total_bytes_received
+            .fetch_add(bytes_received, Ordering::Relaxed);
     }
 
     /// Disconnect a client
@@ -1569,7 +1582,9 @@ impl ConnectionPooler {
         // Get server info
         let (database, user) = {
             let servers = self.servers.read();
-            let server_lock = servers.get(&server_id).ok_or(PoolerError::ConnectionTimeout)?;
+            let server_lock = servers
+                .get(&server_id)
+                .ok_or(PoolerError::ConnectionTimeout)?;
             let server = server_lock.lock();
             (server.database.clone(), server.user.clone())
         };
@@ -1615,53 +1630,62 @@ impl ConnectionPooler {
     /// List all pools
     pub fn list_pools(&self) -> Vec<PoolSummary> {
         let pools = self.pools.read();
-        pools.iter().map(|(key, pool_lock)| {
-            let pool = pool_lock.lock();
-            PoolSummary {
-                database: pool.database.clone(),
-                user: pool.user.clone(),
-                idle_count: pool.idle_count(),
-                active_count: pool.active_count(),
-                waiting_count: pool.waiting_count(),
-                pool_mode: pool.config.pool_mode,
-            }
-        }).collect()
+        pools
+            .iter()
+            .map(|(key, pool_lock)| {
+                let pool = pool_lock.lock();
+                PoolSummary {
+                    database: pool.database.clone(),
+                    user: pool.user.clone(),
+                    idle_count: pool.idle_count(),
+                    active_count: pool.active_count(),
+                    waiting_count: pool.waiting_count(),
+                    pool_mode: pool.config.pool_mode,
+                }
+            })
+            .collect()
     }
 
     /// List all clients
     pub fn list_clients(&self) -> Vec<ClientSummary> {
         let clients = self.clients.read();
-        clients.values().map(|lock| {
-            let client = lock.lock();
-            ClientSummary {
-                id: client.id,
-                database: client.database.clone(),
-                user: client.user.clone(),
-                addr: client.addr.clone(),
-                state: client.state,
-                server_id: client.server_id,
-                connect_time_secs: client.connect_time.elapsed().as_secs(),
-            }
-        }).collect()
+        clients
+            .values()
+            .map(|lock| {
+                let client = lock.lock();
+                ClientSummary {
+                    id: client.id,
+                    database: client.database.clone(),
+                    user: client.user.clone(),
+                    addr: client.addr.clone(),
+                    state: client.state,
+                    server_id: client.server_id,
+                    connect_time_secs: client.connect_time.elapsed().as_secs(),
+                }
+            })
+            .collect()
     }
 
     /// List all servers
     pub fn list_servers(&self) -> Vec<ServerSummary> {
         let servers = self.servers.read();
-        servers.values().map(|lock| {
-            let server = lock.lock();
-            ServerSummary {
-                id: server.id,
-                database: server.database.clone(),
-                user: server.user.clone(),
-                host: server.host.clone(),
-                port: server.port,
-                state: server.state,
-                client_id: server.client_id,
-                connect_time_secs: server.connect_time.elapsed().as_secs(),
-                query_count: server.query_count,
-            }
-        }).collect()
+        servers
+            .values()
+            .map(|lock| {
+                let server = lock.lock();
+                ServerSummary {
+                    id: server.id,
+                    database: server.database.clone(),
+                    user: server.user.clone(),
+                    host: server.host.clone(),
+                    port: server.port,
+                    state: server.state,
+                    client_id: server.client_id,
+                    connect_time_secs: server.connect_time.elapsed().as_secs(),
+                    query_count: server.query_count,
+                }
+            })
+            .collect()
     }
 
     /// Initiate shutdown
@@ -1760,7 +1784,8 @@ impl ConnectionPooler {
         // Find and close all server connections for this database
         let server_ids: Vec<u64> = {
             let servers = self.servers.read();
-            servers.iter()
+            servers
+                .iter()
                 .filter_map(|(&id, lock)| {
                     let server = lock.lock();
                     if server.database == database {
@@ -1804,9 +1829,8 @@ impl ConnectionPooler {
         };
 
         // Read and parse config file
-        let contents = std::fs::read_to_string(&path).map_err(|e| {
-            PoolerError::ReloadFailed(format!("failed to read config file: {}", e))
-        })?;
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| PoolerError::ReloadFailed(format!("failed to read config file: {}", e)))?;
 
         // Parse the INI-style config (PgBouncer-compatible format)
         let new_config = Self::parse_config(&contents)?;
@@ -1857,9 +1881,9 @@ impl ConnectionPooler {
             match key.as_str() {
                 "listen_addr" => config.listen_addr = value.to_string(),
                 "listen_port" => {
-                    config.listen_port = value.parse().map_err(|_| {
-                        PoolerError::ConfigError("invalid listen_port".to_string())
-                    })?;
+                    config.listen_port = value
+                        .parse()
+                        .map_err(|_| PoolerError::ConfigError("invalid listen_port".to_string()))?;
                 }
                 "max_client_conn" => {
                     config.max_client_conn = value.parse().map_err(|_| {
@@ -1906,10 +1930,7 @@ impl ConnectionPooler {
                     config.stats_period = Duration::from_secs(secs);
                 }
                 "admin_users" => {
-                    config.admin_users = value
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .collect();
+                    config.admin_users = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
                 _ => {
                     // Ignore unknown parameters for forward compatibility
@@ -2058,7 +2079,10 @@ impl AdminCommands {
                         .collect();
                     Ok(AdminResult::PausedDatabases(paused_dbs))
                 }
-                _ => Err(PoolerError::QueryFailed(format!("unknown show target: {}", target))),
+                _ => Err(PoolerError::QueryFailed(format!(
+                    "unknown show target: {}",
+                    target
+                ))),
             }
         } else if upper.starts_with("PAUSE ") {
             let db = command.trim()[6..].trim();
@@ -2096,7 +2120,10 @@ impl AdminCommands {
             Self::handle_set_command(pooler, rest)?;
             Ok(AdminResult::Ok)
         } else {
-            Err(PoolerError::QueryFailed(format!("unknown command: {}", command)))
+            Err(PoolerError::QueryFailed(format!(
+                "unknown command: {}",
+                command
+            )))
         }
     }
 
@@ -2295,7 +2322,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         assert_eq!(client_id, 1);
 
         let stats = pooler.get_stats();
@@ -2321,8 +2350,12 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
-        assert!(pooler.authenticate_client(client_id, Some("password")).is_ok());
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
+        assert!(pooler
+            .authenticate_client(client_id, Some("password"))
+            .is_ok());
     }
 
     #[test]
@@ -2335,7 +2368,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
 
         let server_id = pooler.get_server_connection(client_id).unwrap();
@@ -2356,7 +2391,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
         pooler.get_server_connection(client_id).unwrap();
 
@@ -2380,7 +2417,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
         pooler.get_server_connection(client_id).unwrap();
 
@@ -2402,7 +2441,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
 
         assert_eq!(pooler.get_stats().current_clients, 1);
 
@@ -2440,7 +2481,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
         pooler.get_server_connection(client_id).unwrap();
 
@@ -2515,7 +2558,9 @@ mod tests {
         };
         pooler.add_database(db_config).unwrap();
 
-        let client_id = pooler.accept_client("session_db", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("session_db", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
         pooler.get_server_connection(client_id).unwrap();
 
@@ -2565,11 +2610,15 @@ mod tests {
         pooler.add_database(db_config).unwrap();
 
         // Create some connections
-        let client1 = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client1 = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client1, None).unwrap();
         pooler.get_server_connection(client1).unwrap();
 
-        let client2 = pooler.accept_client("testdb", "user2", "127.0.0.1").unwrap();
+        let client2 = pooler
+            .accept_client("testdb", "user2", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client2, None).unwrap();
         pooler.get_server_connection(client2).unwrap();
 
@@ -2612,9 +2661,15 @@ mod tests {
             PoolerError::UnknownDatabase("test".to_string()).to_string(),
             "unknown database: test"
         );
-        assert_eq!(PoolerError::ConnectionTimeout.to_string(), "connection timeout");
+        assert_eq!(
+            PoolerError::ConnectionTimeout.to_string(),
+            "connection timeout"
+        );
         assert_eq!(PoolerError::PoolTimeout.to_string(), "pool timeout");
-        assert_eq!(PoolerError::ShuttingDown.to_string(), "pooler is shutting down");
+        assert_eq!(
+            PoolerError::ShuttingDown.to_string(),
+            "pooler is shutting down"
+        );
     }
 
     #[test]
@@ -2687,12 +2742,18 @@ mod tests {
 
         // Database should not be paused initially
         assert!(!pooler.is_database_paused("testdb"));
-        assert_eq!(pooler.get_database_state("testdb"), DatabasePauseState::Active);
+        assert_eq!(
+            pooler.get_database_state("testdb"),
+            DatabasePauseState::Active
+        );
 
         // Pause database
         pooler.pause_database("testdb").unwrap();
         assert!(pooler.is_database_paused("testdb"));
-        assert_eq!(pooler.get_database_state("testdb"), DatabasePauseState::Paused);
+        assert_eq!(
+            pooler.get_database_state("testdb"),
+            DatabasePauseState::Paused
+        );
 
         // Should reject new connections to paused database
         let result = pooler.accept_client("testdb", "user1", "127.0.0.1");
@@ -2726,7 +2787,9 @@ mod tests {
         pooler.add_database(db_config).unwrap();
 
         // Create connection
-        let client_id = pooler.accept_client("testdb", "user1", "127.0.0.1").unwrap();
+        let client_id = pooler
+            .accept_client("testdb", "user1", "127.0.0.1")
+            .unwrap();
         pooler.authenticate_client(client_id, None).unwrap();
         pooler.get_server_connection(client_id).unwrap();
 
@@ -2786,7 +2849,8 @@ mod tests {
         assert_eq!(pooler.get_config().max_client_conn, 500);
 
         // SET server_reset_query
-        let result = AdminCommands::execute(&pooler, "SET server_reset_query = 'RESET ALL'").unwrap();
+        let result =
+            AdminCommands::execute(&pooler, "SET server_reset_query = 'RESET ALL'").unwrap();
         assert!(matches!(result, AdminResult::Ok));
         assert_eq!(pooler.get_config().server_reset_query, "RESET ALL");
     }

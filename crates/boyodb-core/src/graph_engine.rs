@@ -6,10 +6,10 @@
 //! - Path finding algorithms (BFS, DFS, Dijkstra)
 //! - Graph algorithms (PageRank, community detection)
 
-use std::collections::{HashMap, HashSet, VecDeque, BinaryHeap};
-use std::cmp::Ordering;
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 /// Node in the graph
 #[derive(Debug, Clone)]
@@ -213,7 +213,10 @@ impl PartialEq for DijkstraEntry {
 
 impl Ord for DijkstraEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.distance.partial_cmp(&self.distance).unwrap_or(Ordering::Equal)
+        other
+            .distance
+            .partial_cmp(&self.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -252,7 +255,12 @@ impl GraphDatabase {
     }
 
     /// Create a node
-    pub fn create_node(&self, id: &str, labels: Vec<String>, properties: HashMap<String, PropertyValue>) -> Node {
+    pub fn create_node(
+        &self,
+        id: &str,
+        labels: Vec<String>,
+        properties: HashMap<String, PropertyValue>,
+    ) -> Node {
         let node = Node {
             id: id.to_string(),
             labels: labels.clone(),
@@ -306,17 +314,20 @@ impl GraphDatabase {
         self.edges.write().insert(id.to_string(), edge.clone());
 
         // Update adjacency lists
-        self.outgoing.write()
+        self.outgoing
+            .write()
             .entry(source.to_string())
             .or_default()
             .push(id.to_string());
-        self.incoming.write()
+        self.incoming
+            .write()
             .entry(target.to_string())
             .or_default()
             .push(id.to_string());
 
         // Update edge type index
-        self.edge_type_index.write()
+        self.edge_type_index
+            .write()
             .entry(edge_type.to_string())
             .or_insert_with(HashSet::new)
             .insert(id.to_string());
@@ -427,7 +438,14 @@ impl GraphDatabase {
             result.push((node, depth));
 
             for neighbor_id in self.neighbors(node_id, direction) {
-                self.dfs_recursive(&neighbor_id, depth + 1, max_depth, direction, visited, result);
+                self.dfs_recursive(
+                    &neighbor_id,
+                    depth + 1,
+                    max_depth,
+                    direction,
+                    visited,
+                    result,
+                );
             }
         }
     }
@@ -464,7 +482,8 @@ impl GraphDatabase {
 
                         if new_distance < *distances.get(&edge.target).unwrap_or(&f64::INFINITY) {
                             distances.insert(edge.target.clone(), new_distance);
-                            previous.insert(edge.target.clone(), (node_id.clone(), edge_id.clone()));
+                            previous
+                                .insert(edge.target.clone(), (node_id.clone(), edge_id.clone()));
                             heap.push(DijkstraEntry {
                                 node_id: edge.target.clone(),
                                 distance: new_distance,
@@ -478,7 +497,12 @@ impl GraphDatabase {
         None
     }
 
-    fn reconstruct_path(&self, start: &str, end: &str, previous: &HashMap<String, (String, String)>) -> Path {
+    fn reconstruct_path(
+        &self,
+        start: &str,
+        end: &str,
+        previous: &HashMap<String, (String, String)>,
+    ) -> Path {
         let mut path = Path::new();
         let mut current = end.to_string();
 
@@ -513,7 +537,14 @@ impl GraphDatabase {
         let mut current_path = Vec::new();
         let mut visited = HashSet::new();
 
-        self.all_paths_recursive(start, end, max_depth, &mut current_path, &mut visited, &mut results);
+        self.all_paths_recursive(
+            start,
+            end,
+            max_depth,
+            &mut current_path,
+            &mut visited,
+            &mut results,
+        );
 
         results
     }
@@ -554,9 +585,11 @@ impl GraphDatabase {
                 let edges = self.edges.read();
                 let outgoing = self.outgoing.read();
 
-                outgoing.get(current)
+                outgoing
+                    .get(current)
                     .map(|edge_ids| {
-                        edge_ids.iter()
+                        edge_ids
+                            .iter()
                             .filter_map(|edge_id| {
                                 edges.get(edge_id).and_then(|edge| {
                                     if !visited.contains(&edge.target) {
@@ -598,9 +631,7 @@ impl GraphDatabase {
             return HashMap::new();
         }
 
-        let mut ranks: HashMap<String, f64> = nodes.keys()
-            .map(|k| (k.clone(), 1.0 / n))
-            .collect();
+        let mut ranks: HashMap<String, f64> = nodes.keys().map(|k| (k.clone(), 1.0 / n)).collect();
 
         for _ in 0..iterations {
             let mut new_ranks: HashMap<String, f64> = HashMap::new();
@@ -631,7 +662,8 @@ impl GraphDatabase {
         let nodes = self.nodes.read();
 
         // Initialize: each node in its own community
-        let mut labels: HashMap<String, usize> = nodes.keys()
+        let mut labels: HashMap<String, usize> = nodes
+            .keys()
             .enumerate()
             .map(|(i, k)| (k.clone(), i))
             .collect();
@@ -655,7 +687,8 @@ impl GraphDatabase {
                 }
 
                 // Find most common label
-                if let Some((&most_common, _)) = label_counts.iter().max_by_key(|(_, &count)| count) {
+                if let Some((&most_common, _)) = label_counts.iter().max_by_key(|(_, &count)| count)
+                {
                     if labels.get(node_id) != Some(&most_common) {
                         labels.insert(node_id.clone(), most_common);
                         changed = true;

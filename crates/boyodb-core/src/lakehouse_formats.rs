@@ -9,9 +9,9 @@
 //! - Schema evolution
 //! - Partition pruning
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Delta Lake table
@@ -135,14 +135,26 @@ pub enum DeltaType {
     Long,
     Float,
     Double,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     String,
     Binary,
     Date,
     Timestamp,
-    Array { element_type: Box<DeltaType>, contains_null: bool },
-    Map { key_type: Box<DeltaType>, value_type: Box<DeltaType>, value_contains_null: bool },
-    Struct { fields: Vec<DeltaField> },
+    Array {
+        element_type: Box<DeltaType>,
+        contains_null: bool,
+    },
+    Map {
+        key_type: Box<DeltaType>,
+        value_type: Box<DeltaType>,
+        value_contains_null: bool,
+    },
+    Struct {
+        fields: Vec<DeltaField>,
+    },
 }
 
 /// Delta transaction log action
@@ -495,7 +507,10 @@ pub enum IcebergType {
     Long,
     Float,
     Double,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     Date,
     Time,
     Timestamp,
@@ -504,9 +519,21 @@ pub enum IcebergType {
     Uuid,
     Fixed(u32),
     Binary,
-    List { element_id: i32, element: Box<IcebergType>, element_required: bool },
-    Map { key_id: i32, key: Box<IcebergType>, value_id: i32, value: Box<IcebergType>, value_required: bool },
-    Struct { fields: Vec<IcebergField> },
+    List {
+        element_id: i32,
+        element: Box<IcebergType>,
+        element_required: bool,
+    },
+    Map {
+        key_id: i32,
+        key: Box<IcebergType>,
+        value_id: i32,
+        value: Box<IcebergType>,
+        value_required: bool,
+    },
+    Struct {
+        fields: Vec<IcebergField>,
+    },
 }
 
 /// Partition spec
@@ -700,7 +727,10 @@ impl LakehouseStore {
     /// Create Delta table
     pub fn create_delta_table(&mut self, table: DeltaTable) -> Result<(), String> {
         if self.delta_tables.contains_key(&table.location) {
-            return Err(format!("Delta table at '{}' already exists", table.location));
+            return Err(format!(
+                "Delta table at '{}' already exists",
+                table.location
+            ));
         }
         self.delta_tables.insert(table.location.clone(), table);
         Ok(())
@@ -738,11 +768,16 @@ impl LakehouseStore {
 
     /// Time travel query for Delta
     pub fn delta_time_travel(&self, location: &str, version: u64) -> Result<&DeltaTable, String> {
-        let table = self.delta_tables.get(location)
+        let table = self
+            .delta_tables
+            .get(location)
             .ok_or_else(|| format!("Table not found: {}", location))?;
 
         if version > table.version {
-            return Err(format!("Version {} not available (current: {})", version, table.version));
+            return Err(format!(
+                "Version {} not available (current: {})",
+                version, table.version
+            ));
         }
 
         // In production, would reconstruct table state from log
@@ -750,11 +785,20 @@ impl LakehouseStore {
     }
 
     /// Time travel query for Iceberg
-    pub fn iceberg_time_travel(&self, name: &str, snapshot_id: i64) -> Result<Option<&IcebergSnapshot>, String> {
-        let table = self.iceberg_tables.get(name)
+    pub fn iceberg_time_travel(
+        &self,
+        name: &str,
+        snapshot_id: i64,
+    ) -> Result<Option<&IcebergSnapshot>, String> {
+        let table = self
+            .iceberg_tables
+            .get(name)
             .ok_or_else(|| format!("Table not found: {}", name))?;
 
-        Ok(table.snapshots.iter().find(|s| s.snapshot_id == snapshot_id))
+        Ok(table
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_id == snapshot_id))
     }
 }
 
@@ -779,24 +823,28 @@ impl LakehouseRegistry {
 
     /// Create Delta table
     pub fn create_delta_table(&self, table: DeltaTable) -> Result<(), String> {
-        self.store
-            .write()
-            .create_delta_table(table)
+        self.store.write().create_delta_table(table)
     }
 
     /// Create Iceberg table
     pub fn create_iceberg_table(&self, table: IcebergTable) -> Result<(), String> {
-        self.store
-            .write()
-            .create_iceberg_table(table)
+        self.store.write().create_iceberg_table(table)
     }
 
     /// List tables
     pub fn list_tables(&self) -> Result<(Vec<String>, Vec<String>), String> {
         let store = self.store.read();
         Ok((
-            store.list_delta_tables().iter().map(|s| s.to_string()).collect(),
-            store.list_iceberg_tables().iter().map(|s| s.to_string()).collect(),
+            store
+                .list_delta_tables()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            store
+                .list_iceberg_tables()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         ))
     }
 }
@@ -886,7 +934,8 @@ mod tests {
         // Create Iceberg table
         let iceberg_schema = IcebergSchema::new(0);
         let identifier = TableIdentifier::new(vec!["analytics".to_string()], "metrics");
-        let iceberg_table = IcebergTable::new(identifier, "/warehouse/analytics/metrics", iceberg_schema);
+        let iceberg_table =
+            IcebergTable::new(identifier, "/warehouse/analytics/metrics", iceberg_schema);
         store.create_iceberg_table(iceberg_table).unwrap();
 
         assert_eq!(store.list_delta_tables().len(), 1);

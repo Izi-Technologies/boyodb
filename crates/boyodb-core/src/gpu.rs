@@ -33,11 +33,11 @@
 
 use arrow_array::{Array, ArrayRef, Float64Array, Int64Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // GPU Device Information
@@ -778,8 +778,15 @@ impl std::fmt::Display for GpuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GpuError::NotAvailable(msg) => write!(f, "GPU not available: {}", msg),
-            GpuError::OutOfMemory { requested, available } => {
-                write!(f, "Out of GPU memory: {} bytes required, {} available", requested, available)
+            GpuError::OutOfMemory {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "Out of GPU memory: {} bytes required, {} available",
+                    requested, available
+                )
             }
             GpuError::UnsupportedOperation(op) => write!(f, "Unsupported operation: {}", op),
             GpuError::InvalidColumn(idx) => write!(f, "Invalid column index: {}", idx),
@@ -1019,7 +1026,12 @@ impl MetalExecutor {
     }
 
     #[cfg(all(target_os = "macos", feature = "metal-gpu"))]
-    fn detect_metal_devices() -> (Vec<MetalDeviceInfo>, GpuStatus, Option<metal::Device>, Option<metal::CommandQueue>) {
+    fn detect_metal_devices() -> (
+        Vec<MetalDeviceInfo>,
+        GpuStatus,
+        Option<metal::Device>,
+        Option<metal::CommandQueue>,
+    ) {
         use metal::Device;
 
         // Get the default Metal device
@@ -1035,7 +1047,12 @@ impl MetalExecutor {
             };
 
             let command_queue = device.new_command_queue();
-            (vec![device_info], GpuStatus::Available, Some(device), Some(command_queue))
+            (
+                vec![device_info],
+                GpuStatus::Available,
+                Some(device),
+                Some(command_queue),
+            )
         } else {
             (vec![], GpuStatus::NoDevices, None, None)
         }
@@ -1087,12 +1104,18 @@ impl MetalExecutor {
         use metal::MTLResourceOptions;
 
         if !self.is_available() || !self.config.enabled {
-            return Err(GpuError::NotAvailable("Metal GPU not available".to_string()));
+            return Err(GpuError::NotAvailable(
+                "Metal GPU not available".to_string(),
+            ));
         }
 
-        let device = self.device.as_ref()
+        let device = self
+            .device
+            .as_ref()
             .ok_or_else(|| GpuError::NotAvailable("No Metal device".to_string()))?;
-        let command_queue = self.command_queue.as_ref()
+        let command_queue = self
+            .command_queue
+            .as_ref()
             .ok_or_else(|| GpuError::NotAvailable("No command queue".to_string()))?;
 
         // Collect data from batches
@@ -1143,9 +1166,7 @@ impl MetalExecutor {
                 let sum: f64 = all_values.iter().sum();
                 AggregateResult::Float(sum)
             }
-            AggregationType::Count => {
-                AggregateResult::Int(all_values.len() as i64)
-            }
+            AggregationType::Count => AggregateResult::Int(all_values.len() as i64),
             AggregationType::Avg => {
                 let sum: f64 = all_values.iter().sum();
                 AggregateResult::Float(sum / all_values.len() as f64)
@@ -1238,7 +1259,9 @@ impl GpuVectorOps {
     ) -> Result<ArrayRef, GpuError> {
         let data_size = (left.len() + right.len()) * 8; // Estimate
 
-        let decision = self.executor.should_use_gpu(GpuOperation::Math, data_size as u64);
+        let decision = self
+            .executor
+            .should_use_gpu(GpuOperation::Math, data_size as u64);
 
         if decision.use_gpu {
             // GPU path (would use CUDA/Metal kernels)
@@ -1273,26 +1296,26 @@ impl GpuVectorOps {
             right.as_any().downcast_ref::<Int64Array>(),
         ) {
             let result: Int64Array = match op {
-                VectorOp::Add => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
-                        .collect()
-                }
-                VectorOp::Sub => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
-                        .collect()
-                }
-                VectorOp::Mul => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
-                        .collect()
-                }
-                VectorOp::Div => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0).map(|y| x / y)))
-                        .collect()
-                }
+                VectorOp::Add => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
+                    .collect(),
+                VectorOp::Sub => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
+                    .collect(),
+                VectorOp::Mul => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
+                    .collect(),
+                VectorOp::Div => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0).map(|y| x / y)))
+                    .collect(),
                 _ => return Err(GpuError::UnsupportedOperation(format!("{:?}", op))),
             };
             return Ok(Arc::new(result));
@@ -1304,48 +1327,52 @@ impl GpuVectorOps {
             right.as_any().downcast_ref::<Float64Array>(),
         ) {
             let result: Float64Array = match op {
-                VectorOp::Add => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
-                        .collect()
-                }
-                VectorOp::Sub => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
-                        .collect()
-                }
-                VectorOp::Mul => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
-                        .collect()
-                }
-                VectorOp::Div => {
-                    l.iter().zip(r.iter())
-                        .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0.0).map(|y| x / y)))
-                        .collect()
-                }
+                VectorOp::Add => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x + y)))
+                    .collect(),
+                VectorOp::Sub => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x - y)))
+                    .collect(),
+                VectorOp::Mul => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.map(|y| x * y)))
+                    .collect(),
+                VectorOp::Div => l
+                    .iter()
+                    .zip(r.iter())
+                    .map(|(a, b)| a.and_then(|x| b.filter(|&y| y != 0.0).map(|y| x / y)))
+                    .collect(),
                 _ => return Err(GpuError::UnsupportedOperation(format!("{:?}", op))),
             };
             return Ok(Arc::new(result));
         }
 
-        Err(GpuError::UnsupportedDataType("Unsupported array type for vector ops".to_string()))
+        Err(GpuError::UnsupportedDataType(
+            "Unsupported array type for vector ops".to_string(),
+        ))
     }
 
     /// Execute unary operation on an array
     pub fn unary_op(&self, arr: &ArrayRef, op: VectorOp) -> Result<ArrayRef, GpuError> {
         if op != VectorOp::Not {
-            return Err(GpuError::UnsupportedOperation("Only NOT supported for unary".to_string()));
+            return Err(GpuError::UnsupportedOperation(
+                "Only NOT supported for unary".to_string(),
+            ));
         }
 
         if let Some(int_arr) = arr.as_any().downcast_ref::<Int64Array>() {
-            let result: Int64Array = int_arr.iter()
-                .map(|v| v.map(|x| !x))
-                .collect();
+            let result: Int64Array = int_arr.iter().map(|v| v.map(|x| !x)).collect();
             return Ok(Arc::new(result));
         }
 
-        Err(GpuError::UnsupportedDataType("Unsupported type for unary op".to_string()))
+        Err(GpuError::UnsupportedDataType(
+            "Unsupported type for unary op".to_string(),
+        ))
     }
 }
 

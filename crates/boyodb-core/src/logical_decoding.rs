@@ -6,10 +6,10 @@
 // - Replication slots for change tracking
 // - Streaming changes to subscribers
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -178,7 +178,11 @@ impl OutputPlugin for TestDecodingPlugin {
 
     fn format_change(&self, change: &DecodedChange) -> Result<Vec<u8>, DecodingError> {
         let output = match change {
-            DecodedChange::Begin { xid, commit_time, lsn } => {
+            DecodedChange::Begin {
+                xid,
+                commit_time,
+                lsn,
+            } => {
                 let mut s = String::from("BEGIN");
                 if self.include_xids {
                     s.push_str(&format!(" {}", xid));
@@ -197,10 +201,7 @@ impl OutputPlugin for TestDecodingPlugin {
                     OperationType::Truncate => "TRUNCATE",
                 };
 
-                let mut s = format!(
-                    "table {}.{}: {}: ",
-                    change.schema, change.table, op
-                );
+                let mut s = format!("table {}.{}: {}: ", change.schema, change.table, op);
 
                 match change.operation {
                     OperationType::Insert => {
@@ -231,7 +232,11 @@ impl OutputPlugin for TestDecodingPlugin {
                 let _ = (xid, lsn); // Available for extensions
                 s
             }
-            DecodedChange::Commit { xid, commit_lsn, commit_time } => {
+            DecodedChange::Commit {
+                xid,
+                commit_lsn,
+                commit_time,
+            } => {
                 let mut s = String::from("COMMIT");
                 if self.include_xids {
                     s.push_str(&format!(" {}", xid));
@@ -242,10 +247,18 @@ impl OutputPlugin for TestDecodingPlugin {
                 let _ = commit_lsn;
                 s
             }
-            DecodedChange::Truncate { xid: _, lsn: _, schema, table, .. } => {
+            DecodedChange::Truncate {
+                xid: _,
+                lsn: _,
+                schema,
+                table,
+                ..
+            } => {
                 format!("table {}.{}: TRUNCATE", schema, table)
             }
-            DecodedChange::Message { prefix, content, .. } => {
+            DecodedChange::Message {
+                prefix, content, ..
+            } => {
                 format!("message: prefix={} content={:?}", prefix, content)
             }
         };
@@ -266,7 +279,9 @@ impl TestDecodingPlugin {
     fn format_tuple(&self, columns: &[String], tuple: &TupleData) -> String {
         let mut parts = Vec::new();
         for (i, col) in columns.iter().enumerate() {
-            let val = tuple.values.get(i)
+            let val = tuple
+                .values
+                .get(i)
                 .and_then(|v| v.clone())
                 .unwrap_or_else(|| "null".to_string());
             parts.push(format!("{}[text]:'{}'", col, val));
@@ -325,7 +340,11 @@ impl OutputPlugin for PgOutputPlugin {
         let mut output = Vec::new();
 
         match change {
-            DecodedChange::Begin { xid, commit_time, lsn } => {
+            DecodedChange::Begin {
+                xid,
+                commit_time,
+                lsn,
+            } => {
                 output.push(b'B'); // Begin message type
                 output.extend(&lsn.to_be_bytes());
                 output.extend(&commit_time.to_be_bytes());
@@ -364,19 +383,30 @@ impl OutputPlugin for PgOutputPlugin {
                     }
                 }
             }
-            DecodedChange::Commit { xid: _, commit_lsn, commit_time } => {
+            DecodedChange::Commit {
+                xid: _,
+                commit_lsn,
+                commit_time,
+            } => {
                 output.push(b'C'); // Commit message type
                 output.extend(&commit_lsn.to_be_bytes());
                 output.extend(&commit_time.to_be_bytes());
             }
-            DecodedChange::Truncate { lsn, schema, table, .. } => {
+            DecodedChange::Truncate {
+                lsn, schema, table, ..
+            } => {
                 output.push(b'T');
                 output.extend(&lsn.to_be_bytes());
                 let rel_name = format!("{}.{}", schema, table);
                 output.extend((rel_name.len() as u32).to_be_bytes());
                 output.extend(rel_name.as_bytes());
             }
-            DecodedChange::Message { lsn, transactional, prefix, content } => {
+            DecodedChange::Message {
+                lsn,
+                transactional,
+                prefix,
+                content,
+            } => {
                 output.push(b'M');
                 output.extend(&lsn.to_be_bytes());
                 output.push(if *transactional { 1 } else { 0 });
@@ -434,10 +464,16 @@ impl OutputPlugin for JsonOutputPlugin {
 
     fn format_change(&self, change: &DecodedChange) -> Result<Vec<u8>, DecodingError> {
         let json = match change {
-            DecodedChange::Begin { xid, commit_time, lsn } => {
+            DecodedChange::Begin {
+                xid,
+                commit_time,
+                lsn,
+            } => {
                 format!(
                     r#"{{"type":"begin","xid":{},"timestamp":{},"lsn":"{}"}}"#,
-                    xid, commit_time, format_lsn(*lsn)
+                    xid,
+                    commit_time,
+                    format_lsn(*lsn)
                 )
             }
             DecodedChange::Change { xid, lsn, change } => {
@@ -449,36 +485,72 @@ impl OutputPlugin for JsonOutputPlugin {
                 };
 
                 let columns_json = self.format_columns_json(&change.columns, &change.column_types);
-                let old_json = change.old_tuple.as_ref()
+                let old_json = change
+                    .old_tuple
+                    .as_ref()
                     .map(|t| self.format_tuple_json(&change.columns, t))
                     .unwrap_or_else(|| "null".to_string());
-                let new_json = change.new_tuple.as_ref()
+                let new_json = change
+                    .new_tuple
+                    .as_ref()
                     .map(|t| self.format_tuple_json(&change.columns, t))
                     .unwrap_or_else(|| "null".to_string());
 
                 format!(
                     r#"{{"type":"{}","xid":{},"lsn":"{}","schema":"{}","table":"{}","columns":{},"old":{},"new":{}}}"#,
-                    op, xid, format_lsn(*lsn), change.schema, change.table,
-                    columns_json, old_json, new_json
+                    op,
+                    xid,
+                    format_lsn(*lsn),
+                    change.schema,
+                    change.table,
+                    columns_json,
+                    old_json,
+                    new_json
                 )
             }
-            DecodedChange::Commit { xid, commit_lsn, commit_time } => {
+            DecodedChange::Commit {
+                xid,
+                commit_lsn,
+                commit_time,
+            } => {
                 format!(
                     r#"{{"type":"commit","xid":{},"lsn":"{}","timestamp":{}}}"#,
-                    xid, format_lsn(*commit_lsn), commit_time
+                    xid,
+                    format_lsn(*commit_lsn),
+                    commit_time
                 )
             }
-            DecodedChange::Truncate { xid, lsn, schema, table, cascade, restart_identity } => {
+            DecodedChange::Truncate {
+                xid,
+                lsn,
+                schema,
+                table,
+                cascade,
+                restart_identity,
+            } => {
                 format!(
                     r#"{{"type":"truncate","xid":{},"lsn":"{}","schema":"{}","table":"{}","cascade":{},"restart_identity":{}}}"#,
-                    xid, format_lsn(*lsn), schema, table, cascade, restart_identity
+                    xid,
+                    format_lsn(*lsn),
+                    schema,
+                    table,
+                    cascade,
+                    restart_identity
                 )
             }
-            DecodedChange::Message { lsn, transactional, prefix, content } => {
+            DecodedChange::Message {
+                lsn,
+                transactional,
+                prefix,
+                content,
+            } => {
                 let content_str = String::from_utf8_lossy(content);
                 format!(
                     r#"{{"type":"message","lsn":"{}","transactional":{},"prefix":"{}","content":"{}"}}"#,
-                    format_lsn(*lsn), transactional, prefix, escape_json(&content_str)
+                    format_lsn(*lsn),
+                    transactional,
+                    prefix,
+                    escape_json(&content_str)
                 )
             }
         };
@@ -497,19 +569,21 @@ impl OutputPlugin for JsonOutputPlugin {
 
 impl JsonOutputPlugin {
     fn format_columns_json(&self, columns: &[String], types: &[String]) -> String {
-        let cols: Vec<String> = columns.iter().zip(types.iter())
+        let cols: Vec<String> = columns
+            .iter()
+            .zip(types.iter())
             .map(|(name, typ)| format!(r#"{{"name":"{}","type":"{}"}}"#, name, typ))
             .collect();
         format!("[{}]", cols.join(","))
     }
 
     fn format_tuple_json(&self, columns: &[String], tuple: &TupleData) -> String {
-        let pairs: Vec<String> = columns.iter().zip(tuple.values.iter())
-            .map(|(col, val)| {
-                match val {
-                    Some(v) => format!(r#""{}":"{}""#, col, escape_json(v)),
-                    None => format!(r#""{}":null"#, col),
-                }
+        let pairs: Vec<String> = columns
+            .iter()
+            .zip(tuple.values.iter())
+            .map(|(col, val)| match val {
+                Some(v) => format!(r#""{}":"{}""#, col, escape_json(v)),
+                None => format!(r#""{}":null"#, col),
             })
             .collect();
         format!("{{{}}}", pairs.join(","))
@@ -682,7 +756,11 @@ impl SlotManager {
     }
 
     /// Create a physical replication slot
-    pub fn create_physical_slot(&self, name: &str, temporary: bool) -> Result<Arc<ReplicationSlot>, DecodingError> {
+    pub fn create_physical_slot(
+        &self,
+        name: &str,
+        temporary: bool,
+    ) -> Result<Arc<ReplicationSlot>, DecodingError> {
         self.validate_slot_name(name)?;
 
         let mut slots = self.slots.write();
@@ -730,7 +808,8 @@ impl SlotManager {
     pub fn drop_slot(&self, name: &str) -> Result<(), DecodingError> {
         let mut slots = self.slots.write();
 
-        let slot = slots.get(name)
+        let slot = slots
+            .get(name)
             .ok_or_else(|| DecodingError::SlotNotFound(name.to_string()))?;
 
         if slot.is_active() {
@@ -765,7 +844,9 @@ impl SlotManager {
             return Err(DecodingError::InvalidSlotName("name too long".to_string()));
         }
         if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(DecodingError::InvalidSlotName("invalid characters".to_string()));
+            return Err(DecodingError::InvalidSlotName(
+                "invalid characters".to_string(),
+            ));
         }
         Ok(())
     }
@@ -847,7 +928,8 @@ impl LogicalDecoder {
         }
 
         self.active.store(true, Ordering::SeqCst);
-        self.last_lsn.store(self.slot.get_flush_lsn(), Ordering::SeqCst);
+        self.last_lsn
+            .store(self.slot.get_flush_lsn(), Ordering::SeqCst);
 
         Ok(())
     }
@@ -916,7 +998,8 @@ impl LogicalDecoder {
     pub fn get_all_changes(&self) -> Result<Vec<Vec<u8>>, DecodingError> {
         let changes: Vec<_> = self.buffer.write().drain(..).collect();
         let plugin = self.plugin.read();
-        changes.into_iter()
+        changes
+            .into_iter()
             .map(|c| plugin.format_change(&c))
             .collect()
     }
@@ -949,7 +1032,10 @@ pub struct ChangeStream {
 
 impl ChangeStream {
     pub fn new(decoder: Arc<LogicalDecoder>, batch_size: usize) -> Self {
-        Self { decoder, batch_size }
+        Self {
+            decoder,
+            batch_size,
+        }
     }
 
     /// Read next batch of changes
@@ -1208,7 +1294,9 @@ mod tests {
         assert_eq!(slot.name, "phys1");
         assert!(!slot.temporary);
 
-        let slot = manager.create_logical_slot("log1", "test_decoding", 16384, true).unwrap();
+        let slot = manager
+            .create_logical_slot("log1", "test_decoding", 16384, true)
+            .unwrap();
         assert_eq!(slot.name, "log1");
         assert!(slot.temporary);
     }
@@ -1279,7 +1367,11 @@ mod tests {
 
     #[test]
     fn test_logical_decoder() {
-        let slot = Arc::new(ReplicationSlot::new_logical("decoder_slot", "test_decoding", 16384));
+        let slot = Arc::new(ReplicationSlot::new_logical(
+            "decoder_slot",
+            "test_decoding",
+            16384,
+        ));
         let plugin = Box::new(TestDecodingPlugin::new());
         let config = DecodingConfig::default();
 
@@ -1290,7 +1382,11 @@ mod tests {
 
     #[test]
     fn test_decoder_start_stop() {
-        let slot = Arc::new(ReplicationSlot::new_logical("start_stop", "test_decoding", 16384));
+        let slot = Arc::new(ReplicationSlot::new_logical(
+            "start_stop",
+            "test_decoding",
+            16384,
+        ));
         let plugin = Box::new(TestDecodingPlugin::new());
         let config = DecodingConfig::default();
 
@@ -1307,7 +1403,11 @@ mod tests {
 
     #[test]
     fn test_decoder_changes() {
-        let slot = Arc::new(ReplicationSlot::new_logical("changes", "test_decoding", 16384));
+        let slot = Arc::new(ReplicationSlot::new_logical(
+            "changes",
+            "test_decoding",
+            16384,
+        ));
         let plugin = Box::new(TestDecodingPlugin::new());
         let config = DecodingConfig::default();
 
@@ -1315,17 +1415,21 @@ mod tests {
         decoder.start(12345, &HashMap::new()).unwrap();
 
         // Decode some changes
-        decoder.decode_change(DecodedChange::Begin {
-            xid: 100,
-            commit_time: 123456,
-            lsn: 0x100001000,
-        }).unwrap();
+        decoder
+            .decode_change(DecodedChange::Begin {
+                xid: 100,
+                commit_time: 123456,
+                lsn: 0x100001000,
+            })
+            .unwrap();
 
-        decoder.decode_change(DecodedChange::Commit {
-            xid: 100,
-            commit_lsn: 0x100001100,
-            commit_time: 123457,
-        }).unwrap();
+        decoder
+            .decode_change(DecodedChange::Commit {
+                xid: 100,
+                commit_lsn: 0x100001100,
+                commit_time: 123457,
+            })
+            .unwrap();
 
         assert_eq!(decoder.buffer_size(), 2);
 
@@ -1338,7 +1442,11 @@ mod tests {
 
     #[test]
     fn test_change_stream() {
-        let slot = Arc::new(ReplicationSlot::new_logical("stream", "test_decoding", 16384));
+        let slot = Arc::new(ReplicationSlot::new_logical(
+            "stream",
+            "test_decoding",
+            16384,
+        ));
         let plugin = Box::new(TestDecodingPlugin::new());
         let config = DecodingConfig::default();
 
@@ -1347,11 +1455,13 @@ mod tests {
 
         // Add changes
         for i in 0..5 {
-            decoder.decode_change(DecodedChange::Begin {
-                xid: i,
-                commit_time: 123456,
-                lsn: 0x100001000 + i,
-            }).unwrap();
+            decoder
+                .decode_change(DecodedChange::Begin {
+                    xid: i,
+                    commit_time: 123456,
+                    lsn: 0x100001000 + i,
+                })
+                .unwrap();
         }
 
         let stream = ChangeStream::new(decoder.clone(), 3);

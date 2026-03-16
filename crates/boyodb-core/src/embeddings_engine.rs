@@ -6,10 +6,10 @@
 //! - Multimodal embeddings (CLIP-style)
 //! - Embedding caching and batching
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Embedding model types
@@ -123,7 +123,12 @@ impl Embedding {
             return 0.0;
         }
 
-        let dot: f32 = self.values.iter().zip(other.values.iter()).map(|(a, b)| a * b).sum();
+        let dot: f32 = self
+            .values
+            .iter()
+            .zip(other.values.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let norm_a: f32 = self.values.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm_b: f32 = other.values.iter().map(|x| x * x).sum::<f32>().sqrt();
 
@@ -241,7 +246,11 @@ impl Tokenizer {
 
         for word in text.split_whitespace() {
             let word_lower = word.to_lowercase();
-            let token_id = self.vocab.get(&word_lower).copied().unwrap_or(self.unk_token_id);
+            let token_id = self
+                .vocab
+                .get(&word_lower)
+                .copied()
+                .unwrap_or(self.unk_token_id);
             tokens.push(token_id);
 
             if tokens.len() >= self.max_length - 1 {
@@ -324,10 +333,7 @@ impl EmbeddingCache {
         // Evict if over size
         if cache.len() >= self.max_size {
             // Remove oldest entry
-            let oldest = cache
-                .iter()
-                .min_by_key(|(_, (_, ts))| ts)
-                .map(|(k, _)| *k);
+            let oldest = cache.iter().min_by_key(|(_, (_, ts))| ts).map(|(k, _)| *k);
             if let Some(key) = oldest {
                 cache.remove(&key);
             }
@@ -465,7 +471,9 @@ impl EmbeddingsEngine {
             cache.put(text, embedding.clone());
         }
 
-        self.stats.embeddings_generated.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .embeddings_generated
+            .fetch_add(1, Ordering::Relaxed);
         embedding
     }
 
@@ -494,21 +502,20 @@ impl EmbeddingsEngine {
             embedding.normalize();
         }
 
-        self.stats.embeddings_generated.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .embeddings_generated
+            .fetch_add(1, Ordering::Relaxed);
         embedding
     }
 
     /// Generate multimodal embedding (text + image)
     pub fn embed_multimodal(&self, text: &str, _image_data: Option<&[u8]>) -> Embedding {
-        let text_embedding = self.embed_text(text);
-
         // In a real CLIP-style implementation, we would:
         // 1. Generate text embedding
         // 2. Generate image embedding
         // 3. Project both to shared space
         // 4. Combine or return separately
-
-        text_embedding
+        self.embed_text(text)
     }
 
     /// Compute similarity between two texts
@@ -519,7 +526,12 @@ impl EmbeddingsEngine {
     }
 
     /// Find most similar texts from a list
-    pub fn find_similar(&self, query: &str, candidates: &[&str], top_k: usize) -> Vec<(usize, f32)> {
+    pub fn find_similar(
+        &self,
+        query: &str,
+        candidates: &[&str],
+        top_k: usize,
+    ) -> Vec<(usize, f32)> {
         let query_emb = self.embed_text(query);
         let candidate_embs = self.embed_batch(candidates);
 
@@ -536,11 +548,7 @@ impl EmbeddingsEngine {
 
     /// Get engine statistics
     pub fn stats(&self) -> EmbeddingStats {
-        let (cache_hits, cache_misses) = self
-            .cache
-            .as_ref()
-            .map(|c| c.stats())
-            .unwrap_or((0, 0));
+        let (cache_hits, cache_misses) = self.cache.as_ref().map(|c| c.stats()).unwrap_or((0, 0));
 
         EmbeddingStats {
             embeddings_generated: self.stats.embeddings_generated.load(Ordering::Relaxed),

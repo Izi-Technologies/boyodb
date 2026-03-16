@@ -3,9 +3,9 @@
 //! ClickHouse-style parallel replica query execution for scaling read performance.
 //! Distributes query parts across multiple replicas for parallel processing.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Replica endpoint
@@ -185,7 +185,8 @@ impl ParallelReplicaCoordinator {
 
     /// Get healthy replicas
     pub fn healthy_replicas(&self) -> Vec<ReplicaEndpoint> {
-        self.replicas.read()
+        self.replicas
+            .read()
             .values()
             .filter(|r| r.healthy)
             .cloned()
@@ -223,9 +224,10 @@ impl ParallelReplicaCoordinator {
     ) -> ParallelQueryPlan {
         let healthy = self.healthy_replicas();
 
-        if !self.config.enabled ||
-           healthy.is_empty() ||
-           estimated_rows < self.config.min_rows_for_parallel {
+        if !self.config.enabled
+            || healthy.is_empty()
+            || estimated_rows < self.config.min_rows_for_parallel
+        {
             return ParallelQueryPlan {
                 parallel: false,
                 parts: vec![QueryPart {
@@ -307,10 +309,9 @@ impl ParallelReplicaCoordinator {
                 *counter = counter.wrapping_add(1);
                 Some(healthy[idx].clone())
             }
-            LoadBalanceStrategy::LeastLoaded => {
-                healthy.into_iter()
-                    .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap())
-            }
+            LoadBalanceStrategy::LeastLoaded => healthy
+                .into_iter()
+                .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap()),
             LoadBalanceStrategy::Random => {
                 use std::time::SystemTime;
                 let seed = SystemTime::now()
@@ -341,9 +342,7 @@ impl ParallelReplicaCoordinator {
                 }
                 None
             }
-            LoadBalanceStrategy::FirstAvailable => {
-                healthy.into_iter().next()
-            }
+            LoadBalanceStrategy::FirstAvailable => healthy.into_iter().next(),
         }
     }
 
@@ -489,11 +488,7 @@ mod tests {
         coordinator.register_replica(ReplicaEndpoint::new("r3".into(), "host3".into(), 8765));
 
         // Plan query with enough rows for parallelism
-        let plan = coordinator.plan_parallel_query(
-            "SELECT * FROM test",
-            1_000_000,
-            &[],
-        );
+        let plan = coordinator.plan_parallel_query("SELECT * FROM test", 1_000_000, &[]);
 
         assert!(plan.parallel);
         assert_eq!(plan.replicas_used, 3);
@@ -528,11 +523,7 @@ mod tests {
             "2024-04".into(),
         ];
 
-        let plan = coordinator.plan_parallel_query(
-            "SELECT * FROM test",
-            1_000_000,
-            &partitions,
-        );
+        let plan = coordinator.plan_parallel_query("SELECT * FROM test", 1_000_000, &partitions);
 
         assert!(plan.parallel);
         assert_eq!(plan.parts.len(), 4);

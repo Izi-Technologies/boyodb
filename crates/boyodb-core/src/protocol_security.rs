@@ -216,7 +216,10 @@ impl PgError {
 
     /// Create a read-only transaction error
     pub fn read_only() -> Self {
-        Self::new("25006", "cannot execute statement in a read-only transaction")
+        Self::new(
+            "25006",
+            "cannot execute statement in a read-only transaction",
+        )
     }
 
     /// Create an internal error
@@ -532,7 +535,10 @@ impl ProtocolCodec {
                 if length >= 16 {
                     let pid = i32::from_be_bytes([data[8], data[9], data[10], data[11]]);
                     let key = i32::from_be_bytes([data[12], data[13], data[14], data[15]]);
-                    Ok(StartupMessage::CancelRequest { pid, secret_key: key })
+                    Ok(StartupMessage::CancelRequest {
+                        pid,
+                        secret_key: key,
+                    })
                 } else {
                     Err(ProtocolError::InvalidMessage)
                 }
@@ -605,7 +611,9 @@ impl std::fmt::Display for ProtocolError {
         match self {
             ProtocolError::InsufficientData => write!(f, "insufficient data"),
             ProtocolError::InvalidMessage => write!(f, "invalid message format"),
-            ProtocolError::UnsupportedProtocol(v) => write!(f, "unsupported protocol version: {}", v),
+            ProtocolError::UnsupportedProtocol(v) => {
+                write!(f, "unsupported protocol version: {}", v)
+            }
             ProtocolError::IoError(e) => write!(f, "I/O error: {}", e),
         }
     }
@@ -673,7 +681,9 @@ impl ScramState {
         }
 
         if username.is_empty() || client_nonce.is_empty() {
-            return Err(ScramError::InvalidMessage("missing username or nonce".into()));
+            return Err(ScramError::InvalidMessage(
+                "missing username or nonce".into(),
+            ));
         }
 
         // Client first message bare (without GS2 header)
@@ -702,7 +712,7 @@ impl ScramState {
         self.iterations = iterations;
 
         // r=combined-nonce,s=base64-salt,i=iterations
-        use base64::{Engine, engine::general_purpose::STANDARD};
+        use base64::{engine::general_purpose::STANDARD, Engine};
         let salt_b64 = STANDARD.encode(&self.salt);
         self.server_first = format!("r={},s={},i={}", self.nonce, salt_b64, self.iterations);
         self.server_first.clone()
@@ -737,7 +747,7 @@ impl ScramState {
             return Err(ScramError::InvalidNonce);
         }
 
-        use base64::{Engine, engine::general_purpose::STANDARD};
+        use base64::{engine::general_purpose::STANDARD, Engine};
 
         // Decode client proof
         let client_proof = STANDARD
@@ -809,7 +819,7 @@ fn generate_nonce() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    use base64::{Engine, engine::general_purpose::STANDARD};
+    use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.encode(format!("{:032x}", seed).as_bytes())
 }
 
@@ -941,7 +951,9 @@ impl TlsConfig {
     /// Validate configuration
     pub fn validate(&self) -> Result<(), TlsError> {
         if self.require_client_cert && self.ca_path.is_none() {
-            return Err(TlsError::Config("CA certificate required for client auth".into()));
+            return Err(TlsError::Config(
+                "CA certificate required for client auth".into(),
+            ));
         }
         Ok(())
     }
@@ -1402,7 +1414,10 @@ mod tests {
     fn test_ssl_mode_parse() {
         assert_eq!("disable".parse::<SslMode>().unwrap(), SslMode::Disable);
         assert_eq!("require".parse::<SslMode>().unwrap(), SslMode::Require);
-        assert_eq!("verify-full".parse::<SslMode>().unwrap(), SslMode::VerifyFull);
+        assert_eq!(
+            "verify-full".parse::<SslMode>().unwrap(),
+            SslMode::VerifyFull
+        );
     }
 
     #[test]
@@ -1463,10 +1478,14 @@ host    all         all         ::1/128               scram-sha-256
             options: HashMap::new(),
         });
 
-        let rule = config.find_rule("host", "mydb", "admin", "192.168.1.1").unwrap();
+        let rule = config
+            .find_rule("host", "mydb", "admin", "192.168.1.1")
+            .unwrap();
         assert_eq!(rule.auth_method, AuthMethod::ScramSha256);
 
-        let rule = config.find_rule("host", "mydb", "other", "192.168.1.1").unwrap();
+        let rule = config
+            .find_rule("host", "mydb", "other", "192.168.1.1")
+            .unwrap();
         assert_eq!(rule.auth_method, AuthMethod::MD5);
     }
 

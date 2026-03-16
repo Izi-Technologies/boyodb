@@ -256,11 +256,7 @@ impl NamespaceEncryptionManager {
     }
 
     /// Get active key for a namespace
-    pub fn get_active_key(
-        &self,
-        tenant_id: &str,
-        namespace: &str,
-    ) -> Option<DataEncryptionKey> {
+    pub fn get_active_key(&self, tenant_id: &str, namespace: &str) -> Option<DataEncryptionKey> {
         let keys = self.data_keys.read();
         keys.get(&(tenant_id.to_string(), namespace.to_string()))
             .and_then(|ks| ks.iter().find(|k| k.active).cloned())
@@ -651,7 +647,9 @@ impl TenantBackupManager {
             // Keep pending/in-progress restores, or completed ones within max_age
             r.status == RestoreState::Pending
                 || r.status == RestoreState::InProgress
-                || r.completed_at.map(|t| now - t < max_age_secs).unwrap_or(true)
+                || r.completed_at
+                    .map(|t| now - t < max_age_secs)
+                    .unwrap_or(true)
         });
     }
 
@@ -682,9 +680,7 @@ impl TenantBackupManager {
 
     /// Configure backup for a tenant
     pub fn configure(&self, tenant_id: &str, config: TenantBackupConfig) {
-        self.configs
-            .write()
-            .insert(tenant_id.to_string(), config);
+        self.configs.write().insert(tenant_id.to_string(), config);
     }
 
     /// Start a backup for a tenant
@@ -1271,7 +1267,9 @@ mod tests {
             .start_backup("tenant1", BackupType::Full, None)
             .unwrap();
 
-        assert!(backup_manager.complete_backup(&backup_id, 1000, "abc123").is_ok());
+        assert!(backup_manager
+            .complete_backup(&backup_id, 1000, "abc123")
+            .is_ok());
 
         let backup = backup_manager.get_backup(&backup_id).unwrap();
         assert_eq!(backup.status, BackupStatus::Completed);

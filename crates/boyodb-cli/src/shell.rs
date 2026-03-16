@@ -260,35 +260,77 @@ const SQL_KEYWORDS: &[&str] = &[
 /// Meta-commands for tab completion (psql/mysql compatible)
 const META_COMMANDS: &[&str] = &[
     // Quit/Help
-    "\\q", "\\quit", "\\h", "\\help", "\\?",
+    "\\q",
+    "\\quit",
+    "\\h",
+    "\\help",
+    "\\?",
     // Database/Schema info
-    "\\l", "\\dt", "\\d", "\\du", "\\di", "\\dv", "\\df", "\\dn", "\\dp", "\\ds",
+    "\\l",
+    "\\dt",
+    "\\d",
+    "\\du",
+    "\\di",
+    "\\dv",
+    "\\df",
+    "\\dn",
+    "\\dp",
+    "\\ds",
     // Connection/Database
-    "\\c", "\\connect", "\\conninfo",
+    "\\c",
+    "\\connect",
+    "\\conninfo",
     // Output/Display
-    "\\x", "\\o", "\\t", "\\a", "\\H", "\\pset", "\\pager", "\\format",
+    "\\x",
+    "\\o",
+    "\\t",
+    "\\a",
+    "\\H",
+    "\\pset",
+    "\\pager",
+    "\\format",
     // Input/Execution
-    "\\i", "\\e", "\\g", "\\gx", "\\r", "\\p", "\\w", "\\s",
+    "\\i",
+    "\\e",
+    "\\g",
+    "\\gx",
+    "\\r",
+    "\\p",
+    "\\w",
+    "\\s",
     // Variables
-    "\\set", "\\unset", "\\echo", "\\qecho",
+    "\\set",
+    "\\unset",
+    "\\echo",
+    "\\qecho",
     // Timing/Stats
     "\\timing",
     // Copy/Import
     "\\copy",
     // Prepared/Views
-    "\\ps", "\\views",
+    "\\ps",
+    "\\views",
     // History
     "\\history",
     // Misc
-    "\\!", "\\cd", "\\password", "\\watch",
+    "\\!",
+    "\\cd",
+    "\\password",
+    "\\watch",
     // MySQL style
     "\\G",
     // Transaction
-    "\\begin", "\\commit", "\\rollback", "\\savepoint",
+    "\\begin",
+    "\\commit",
+    "\\rollback",
+    "\\savepoint",
     // Saved queries
-    "\\save", "\\load", "\\queries",
+    "\\save",
+    "\\load",
+    "\\queries",
     // Tee
-    "\\tee", "\\notee",
+    "\\tee",
+    "\\notee",
 ];
 
 /// Tab completion helper for the shell
@@ -454,9 +496,9 @@ impl Highlighter for BoyodbHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         // Simple syntax highlighting for SQL keywords
         // ANSI color codes
-        const KEYWORD_COLOR: &str = "\x1b[1;34m";  // Bold blue
-        const STRING_COLOR: &str = "\x1b[32m";     // Green for strings
-        const NUMBER_COLOR: &str = "\x1b[33m";    // Yellow for numbers
+        const KEYWORD_COLOR: &str = "\x1b[1;34m"; // Bold blue
+        const STRING_COLOR: &str = "\x1b[32m"; // Green for strings
+        const NUMBER_COLOR: &str = "\x1b[33m"; // Yellow for numbers
         const RESET: &str = "\x1b[0m";
 
         let mut result = String::with_capacity(line.len() * 2);
@@ -914,12 +956,18 @@ impl ShellState {
         // Transaction state indicator (like psql)
         let txn_indicator = match self.transaction_state {
             TransactionState::None => "",
-            TransactionState::Active => "*",      // Active transaction
-            TransactionState::Failed => "!",      // Failed transaction (needs rollback)
+            TransactionState::Active => "*", // Active transaction
+            TransactionState::Failed => "!", // Failed transaction (needs rollback)
         };
         match &self.current_db {
-            Some(db) => format!("{}boyodb{}[{}]{}> ", user_indicator, tls_indicator, db, txn_indicator),
-            None => format!("{}boyodb{}{}> ", user_indicator, tls_indicator, txn_indicator),
+            Some(db) => format!(
+                "{}boyodb{}[{}]{}> ",
+                user_indicator, tls_indicator, db, txn_indicator
+            ),
+            None => format!(
+                "{}boyodb{}{}> ",
+                user_indicator, tls_indicator, txn_indicator
+            ),
         }
     }
 
@@ -939,7 +987,10 @@ impl ShellState {
 
             // :"name" (double quoted)
             let dquoted_pattern = format!(":\"{}\"", name);
-            result = result.replace(&dquoted_pattern, &format!("\"{}\"", value.replace('"', "\\\"")));
+            result = result.replace(
+                &dquoted_pattern,
+                &format!("\"{}\"", value.replace('"', "\\\"")),
+            );
         }
 
         result
@@ -1302,7 +1353,12 @@ async fn async_execute_sql_query(
     database: Option<&str>,
     format: &str,
 ) -> Result<String> {
-    let mut state = ShellState::new(host.to_string(), token, database.map(|s| s.to_string()), tls_config);
+    let mut state = ShellState::new(
+        host.to_string(),
+        token,
+        database.map(|s| s.to_string()),
+        tls_config,
+    );
 
     // Handle authentication
     if let Some((username, password)) = cli_auth {
@@ -2407,11 +2463,7 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             if parts.len() > 1 {
                 let cmd = parts[1..].join(" ");
                 let cmd = cmd.trim_end_matches(';');
-                match std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .status()
-                {
+                match std::process::Command::new("sh").arg("-c").arg(cmd).status() {
                     Ok(status) => {
                         if !status.success() {
                             eprintln!("Command exited with status: {}", status);
@@ -2679,10 +2731,7 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             }
 
             // Open editor
-            match std::process::Command::new(&editor)
-                .arg(&temp_path)
-                .status()
-            {
+            match std::process::Command::new(&editor).arg(&temp_path).status() {
                 Ok(status) if status.success() => {
                     // Read back and execute
                     if let Ok(query) = std::fs::read_to_string(&temp_path) {
@@ -2708,7 +2757,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             };
 
             if let Some(ref query) = state.last_query.clone() {
-                println!("Repeating query every {} seconds (Ctrl+C to stop)...", interval);
+                println!(
+                    "Repeating query every {} seconds (Ctrl+C to stop)...",
+                    interval
+                );
                 loop {
                     print!("\x1B[2J\x1B[1;1H"); // Clear screen
                     println!("Every {}s: {}\n", interval, truncate_sql(query, 60));
@@ -2869,7 +2921,11 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             } else {
                 let name = parts[1].trim_end_matches(';');
                 if let Some(query) = state.saved_queries.get(name).cloned() {
-                    println!("Executing saved query '{}': {}", name, truncate_sql(&query, 50));
+                    println!(
+                        "Executing saved query '{}': {}",
+                        name,
+                        truncate_sql(&query, 50)
+                    );
                     execute_sql(state, &query).await?;
                 } else {
                     eprintln!("No saved query named '{}'", name);
@@ -2898,7 +2954,14 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                 println!("  null = '{}'", state.display_settings.null_display);
                 println!("  tuples_only = {}", state.display_settings.tuples_only);
                 println!("  timing = {}", state.display_settings.timing);
-                println!("  expanded = {}", if state.output_format == OutputFormat::Vertical { "on" } else { "off" });
+                println!(
+                    "  expanded = {}",
+                    if state.output_format == OutputFormat::Vertical {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
                 println!("  format = {:?}", state.output_format);
                 println!("  lineno = {}", state.display_settings.line_numbers);
             } else {
@@ -2919,7 +2982,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         if !value.is_empty() {
                             state.display_settings.null_display = value.to_string();
                         }
-                        println!("Null display is \"{}\".", state.display_settings.null_display);
+                        println!(
+                            "Null display is \"{}\".",
+                            state.display_settings.null_display
+                        );
                     }
                     "tuples_only" | "t" => {
                         if value == "on" || value == "1" {
@@ -2927,9 +2993,17 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         } else if value == "off" || value == "0" {
                             state.display_settings.tuples_only = false;
                         } else if !value.is_empty() {
-                            state.display_settings.tuples_only = !state.display_settings.tuples_only;
+                            state.display_settings.tuples_only =
+                                !state.display_settings.tuples_only;
                         }
-                        println!("Tuples only is {}.", if state.display_settings.tuples_only { "on" } else { "off" });
+                        println!(
+                            "Tuples only is {}.",
+                            if state.display_settings.tuples_only {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        );
                     }
                     "expanded" | "x" => {
                         if value == "on" || value == "1" {
@@ -2945,7 +3019,14 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                                 state.output_format = OutputFormat::Vertical;
                             }
                         }
-                        println!("Expanded display is {}.", if state.output_format == OutputFormat::Vertical { "on" } else { "off" });
+                        println!(
+                            "Expanded display is {}.",
+                            if state.output_format == OutputFormat::Vertical {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        );
                     }
                     "format" => {
                         match value {
@@ -2961,15 +3042,26 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         } else if value == "off" || value == "0" {
                             state.display_settings.line_numbers = false;
                         } else {
-                            state.display_settings.line_numbers = !state.display_settings.line_numbers;
+                            state.display_settings.line_numbers =
+                                !state.display_settings.line_numbers;
                         }
-                        println!("Line numbers is {}.", if state.display_settings.line_numbers { "on" } else { "off" });
+                        println!(
+                            "Line numbers is {}.",
+                            if state.display_settings.line_numbers {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        );
                     }
                     "fieldsep" => {
                         if !value.is_empty() {
                             state.display_settings.field_sep = value.to_string();
                         }
-                        println!("Field separator is \"{}\".", state.display_settings.field_sep);
+                        println!(
+                            "Field separator is \"{}\".",
+                            state.display_settings.field_sep
+                        );
                     }
                     _ => {
                         eprintln!("Unknown pset option: {}", setting);
@@ -2996,8 +3088,8 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                 eprintln!("Password cannot be empty");
                 return Ok(false);
             }
-            let confirm = rpassword::prompt_password("Confirm password: ")
-                .unwrap_or_else(|_| String::new());
+            let confirm =
+                rpassword::prompt_password("Confirm password: ").unwrap_or_else(|_| String::new());
             if new_password != confirm {
                 eprintln!("Passwords do not match");
                 return Ok(false);
@@ -3016,7 +3108,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
             if resp.status == "ok" {
                 println!("Password changed for user '{}'", target_user);
             } else {
-                eprintln!("Failed to change password: {}", resp.message.unwrap_or_default());
+                eprintln!(
+                    "Failed to change password: {}",
+                    resp.message.unwrap_or_default()
+                );
             }
             return Ok(false);
         }
@@ -3046,7 +3141,11 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                         let sql = format!("{};", stmt);
                         match send_request(
                             state,
-                            build_query_operation(sql.clone(), state.timeout_millis, state.current_db.clone()),
+                            build_query_operation(
+                                sql.clone(),
+                                state.timeout_millis,
+                                state.current_db.clone(),
+                            ),
                         )
                         .await
                         {
@@ -3054,7 +3153,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                                 if resp.status == "ok" {
                                     success_count += 1;
                                 } else {
-                                    eprintln!("Error: {}", resp.message.unwrap_or_else(|| "unknown".to_string()));
+                                    eprintln!(
+                                        "Error: {}",
+                                        resp.message.unwrap_or_else(|| "unknown".to_string())
+                                    );
                                     error_count += 1;
                                 }
                             }
@@ -3064,7 +3166,10 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
                             }
                         }
                     }
-                    println!("Executed {} statement(s), {} error(s)", success_count, error_count);
+                    println!(
+                        "Executed {} statement(s), {} error(s)",
+                        success_count, error_count
+                    );
                 }
                 Err(e) => eprintln!("Cannot read file '{}': {}", file_path, e),
             }
@@ -3109,7 +3214,11 @@ async fn process_input(state: &mut ShellState, input: &str) -> Result<bool> {
     }
 
     // Handle transaction statements
-    if lower.starts_with("begin") || lower == "begin;" || lower == "start transaction" || lower == "start transaction;" {
+    if lower.starts_with("begin")
+        || lower == "begin;"
+        || lower == "start transaction"
+        || lower == "start transaction;"
+    {
         if state.transaction_state == TransactionState::Active {
             eprintln!("WARNING: Already in a transaction");
         }

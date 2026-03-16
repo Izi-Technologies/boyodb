@@ -538,9 +538,9 @@ impl TransactionManager {
         // Phase 1: Validate and extract data to process (holding the lock)
         let (undo_records, locks_to_release) = {
             let mut active = self.active_transactions.write();
-            let txn = active
-                .get_mut(&txn_id)
-                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+            let txn = active.get_mut(&txn_id).ok_or_else(|| {
+                EngineError::NotFound(format!("Transaction {} not found", txn_id))
+            })?;
 
             if !txn.state.is_active() {
                 return Err(EngineError::InvalidArgument(format!(
@@ -661,9 +661,9 @@ impl TransactionManager {
         // Phase 1: Validate and prepare commit (holding the lock)
         let (commit_version, locks_to_release) = {
             let mut active = self.active_transactions.write();
-            let txn = active
-                .get_mut(&txn_id)
-                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+            let txn = active.get_mut(&txn_id).ok_or_else(|| {
+                EngineError::NotFound(format!("Transaction {} not found", txn_id))
+            })?;
 
             if !txn.state.can_commit() {
                 return Err(EngineError::InvalidArgument(format!(
@@ -737,9 +737,9 @@ impl TransactionManager {
         // Phase 1: Validate and prepare rollback (holding the lock)
         let (undo_records, locks_to_release) = {
             let mut active = self.active_transactions.write();
-            let txn = active
-                .get_mut(&txn_id)
-                .ok_or_else(|| EngineError::NotFound(format!("Transaction {} not found", txn_id)))?;
+            let txn = active.get_mut(&txn_id).ok_or_else(|| {
+                EngineError::NotFound(format!("Transaction {} not found", txn_id))
+            })?;
 
             if !txn.state.can_rollback() {
                 return Err(EngineError::InvalidArgument(format!(

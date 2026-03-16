@@ -30,10 +30,10 @@
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Core Types
@@ -363,14 +363,14 @@ impl MaskingType {
                 if value.len() <= 4 {
                     "****".to_string()
                 } else {
-                    format!("{}****{}", &value[..2], &value[value.len()-2..])
+                    format!("{}****{}", &value[..2], &value[value.len() - 2..])
                 }
             }
             MaskingType::Hash => {
                 // Simple hash for demonstration
-                let hash: u64 = value.bytes().fold(0u64, |acc, b| {
-                    acc.wrapping_mul(31).wrapping_add(b as u64)
-                });
+                let hash: u64 = value
+                    .bytes()
+                    .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
                 format!("{:016x}", hash)
             }
             MaskingType::Email => {
@@ -382,21 +382,21 @@ impl MaskingType {
             }
             MaskingType::Phone => {
                 if value.len() >= 4 {
-                    format!("***-***-{}", &value[value.len()-4..])
+                    format!("***-***-{}", &value[value.len() - 4..])
                 } else {
                     "***-***-****".to_string()
                 }
             }
             MaskingType::CreditCard => {
                 if value.len() >= 4 {
-                    format!("****-****-****-{}", &value[value.len()-4..])
+                    format!("****-****-****-{}", &value[value.len() - 4..])
                 } else {
                     "****-****-****-****".to_string()
                 }
             }
             MaskingType::Ssn => {
                 if value.len() >= 4 {
-                    format!("***-**-{}", &value[value.len()-4..])
+                    format!("***-**-{}", &value[value.len() - 4..])
                 } else {
                     "***-**-****".to_string()
                 }
@@ -730,7 +730,12 @@ impl PermissionManager {
         }
     }
 
-    fn get_cached(&self, user_id: &str, column: &ColumnRef, permission: Permission) -> Option<bool> {
+    fn get_cached(
+        &self,
+        user_id: &str,
+        column: &ColumnRef,
+        permission: Permission,
+    ) -> Option<bool> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -756,7 +761,9 @@ impl PermissionManager {
 
         let mut cache = self.cache.write();
         let key = (user_id.to_string(), column.clone(), permission);
-        cache.entries.insert(key, (allowed, now + self.cache_ttl_secs));
+        cache
+            .entries
+            .insert(key, (allowed, now + self.cache_ttl_secs));
     }
 
     fn invalidate_cache(&self) {
@@ -843,7 +850,10 @@ impl RbacQueryFilter {
 
     /// Check if user can INSERT into table
     pub fn check_insert(&self, user_id: &str, table: &TableRef) -> Result<(), RbacError> {
-        if self.permission_manager.check_table_permission(user_id, table, Permission::Insert) {
+        if self
+            .permission_manager
+            .check_table_permission(user_id, table, Permission::Insert)
+        {
             Ok(())
         } else {
             Err(RbacError::AccessDenied(format!(
@@ -878,7 +888,10 @@ impl RbacQueryFilter {
 
     /// Check if user can DELETE from table
     pub fn check_delete(&self, user_id: &str, table: &TableRef) -> Result<(), RbacError> {
-        if self.permission_manager.check_table_permission(user_id, table, Permission::Delete) {
+        if self
+            .permission_manager
+            .check_table_permission(user_id, table, Permission::Delete)
+        {
             Ok(())
         } else {
             Err(RbacError::AccessDenied(format!(
@@ -1061,9 +1074,15 @@ mod tests {
     #[test]
     fn test_masking() {
         assert_eq!(MaskingType::Full.apply("secret"), "***MASKED***");
-        assert_eq!(MaskingType::Email.apply("user@example.com"), "****@example.com");
+        assert_eq!(
+            MaskingType::Email.apply("user@example.com"),
+            "****@example.com"
+        );
         assert_eq!(MaskingType::Phone.apply("1234567890"), "***-***-7890");
-        assert_eq!(MaskingType::CreditCard.apply("4111111111111111"), "****-****-****-1111");
+        assert_eq!(
+            MaskingType::CreditCard.apply("4111111111111111"),
+            "****-****-****-1111"
+        );
         assert_eq!(MaskingType::Ssn.apply("123456789"), "***-**-6789");
     }
 

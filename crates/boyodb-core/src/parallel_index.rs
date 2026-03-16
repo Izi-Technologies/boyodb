@@ -4,11 +4,11 @@
 //! concurrent writes. Unlike regular index creation which holds a lock
 //! for the entire duration, CONCURRENTLY mode allows ongoing DML operations.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -564,7 +564,9 @@ impl ParallelIndexBuilder {
         self.stats.builds_completed.fetch_add(1, Ordering::Relaxed);
 
         let entries = self.progress.entries_created.load(Ordering::Relaxed);
-        self.stats.total_entries.fetch_add(entries, Ordering::Relaxed);
+        self.stats
+            .total_entries
+            .fetch_add(entries, Ordering::Relaxed);
         self.stats
             .total_build_time_ms
             .fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
@@ -606,15 +608,18 @@ impl ParallelIndexBuilder {
             for (row_id, key, heap_tid) in &batch {
                 self.add_entry(key.clone(), *heap_tid);
                 self.progress.rows_processed.fetch_add(1, Ordering::Relaxed);
-                self.progress.entries_created.fetch_add(1, Ordering::Relaxed);
+                self.progress
+                    .entries_created
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             offset += batch_size;
         }
 
-        self.progress
-            .total_rows
-            .store(self.progress.rows_processed.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.progress.total_rows.store(
+            self.progress.rows_processed.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
 
         Ok(())
     }
@@ -964,13 +969,9 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = ParallelIndexBuilder::new(
-            "test_table",
-            "idx_test",
-            vec!["id".to_string()],
-            config,
-        )
-        .unwrap();
+        let builder =
+            ParallelIndexBuilder::new("test_table", "idx_test", vec!["id".to_string()], config)
+                .unwrap();
 
         // Simulated row data
         let row_iterator = |offset: u64, limit: u64| {
@@ -997,13 +998,9 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = ParallelIndexBuilder::new(
-            "test_table",
-            "idx_test",
-            vec!["id".to_string()],
-            config,
-        )
-        .unwrap();
+        let builder =
+            ParallelIndexBuilder::new("test_table", "idx_test", vec!["id".to_string()], config)
+                .unwrap();
 
         // Start the change tracker manually to simulate ongoing changes
         builder.change_tracker.start(0);
@@ -1036,27 +1033,18 @@ mod tests {
     fn test_build_cancellation() {
         let config = ParallelIndexConfig::default();
 
-        let builder = ParallelIndexBuilder::new(
-            "test_table",
-            "idx_test",
-            vec!["id".to_string()],
-            config,
-        )
-        .unwrap();
+        let builder =
+            ParallelIndexBuilder::new("test_table", "idx_test", vec!["id".to_string()], config)
+                .unwrap();
 
         // Cancel before starting
         builder.progress.cancel();
 
-        let row_iterator = |_: u64, _: u64| {
-            vec![(0u64, vec![0u8], (0u32, 0u16))]
-        };
+        let row_iterator = |_: u64, _: u64| vec![(0u64, vec![0u8], (0u32, 0u16))];
 
         let result = builder.build(row_iterator);
         assert!(matches!(result, Err(ParallelIndexError::BuildCancelled)));
-        assert_eq!(
-            builder.progress.current_state(),
-            IndexBuildState::Cancelled
-        );
+        assert_eq!(builder.progress.current_state(), IndexBuildState::Cancelled);
     }
 
     #[test]

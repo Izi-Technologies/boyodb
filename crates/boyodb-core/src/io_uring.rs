@@ -147,6 +147,7 @@ impl BufferPool {
     }
 
     /// Acquire a buffer from the pool
+    #[allow(clippy::mut_from_ref)]
     pub fn acquire(&self) -> Option<(usize, &mut [u8])> {
         let mut free = self.free_indices.lock();
         if let Some(idx) = free.pop_front() {
@@ -197,7 +198,10 @@ pub struct AsyncIoEngine {
 impl AsyncIoEngine {
     pub fn new(config: IoUringConfig) -> io::Result<Self> {
         let buffer_pool = if config.fixed_buffers {
-            Some(BufferPool::new(config.num_fixed_buffers, config.fixed_buffer_size))
+            Some(BufferPool::new(
+                config.num_fixed_buffers,
+                config.fixed_buffer_size,
+            ))
         } else {
             None
         };
@@ -214,13 +218,7 @@ impl AsyncIoEngine {
     }
 
     /// Submit a read request
-    pub fn submit_read(
-        &self,
-        fd: i32,
-        offset: u64,
-        len: usize,
-        user_data: u64,
-    ) -> u64 {
+    pub fn submit_read(&self, fd: i32, offset: u64, len: usize, user_data: u64) -> u64 {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
 
         let request = IoRequest {
@@ -238,13 +236,7 @@ impl AsyncIoEngine {
     }
 
     /// Submit a write request
-    pub fn submit_write(
-        &self,
-        fd: i32,
-        offset: u64,
-        data: Vec<u8>,
-        user_data: u64,
-    ) -> u64 {
+    pub fn submit_write(&self, fd: i32, offset: u64, data: Vec<u8>, user_data: u64) -> u64 {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
         let len = data.len();
 
@@ -531,7 +523,7 @@ impl AsyncFile {
             let _ = self.engine.process_pending();
             if let Some(completion) = self.engine.wait_for(request_id) {
                 if completion.result < 0 {
-                    return Err(io::Error::new(io::ErrorKind::Other, "read failed"));
+                    return Err(io::Error::other("read failed"));
                 }
                 return Ok(completion.buffer.unwrap_or_default());
             }
@@ -546,7 +538,7 @@ impl AsyncFile {
             let _ = self.engine.process_pending();
             if let Some(completion) = self.engine.wait_for(request_id) {
                 if completion.result < 0 {
-                    return Err(io::Error::new(io::ErrorKind::Other, "write failed"));
+                    return Err(io::Error::other("write failed"));
                 }
                 return Ok(completion.result as usize);
             }
@@ -561,7 +553,7 @@ impl AsyncFile {
             let _ = self.engine.process_pending();
             if let Some(completion) = self.engine.wait_for(request_id) {
                 if completion.result < 0 {
-                    return Err(io::Error::new(io::ErrorKind::Other, "fsync failed"));
+                    return Err(io::Error::other("fsync failed"));
                 }
                 return Ok(());
             }
@@ -640,7 +632,10 @@ impl BatchReader {
                 let _ = self.engine.process_pending();
 
                 for completion in self.engine.poll_completions(request_ids.len()) {
-                    if let Some((_, user_data)) = request_ids.iter().find(|(id, _)| *id == completion.request_id) {
+                    if let Some((_, user_data)) = request_ids
+                        .iter()
+                        .find(|(id, _)| *id == completion.request_id)
+                    {
                         if completion.result >= 0 {
                             results.push((*user_data, completion.buffer.unwrap_or_default()));
                         }

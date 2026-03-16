@@ -17,10 +17,10 @@
 //! GET /api/v1/metrics -> JSON format
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -442,7 +442,9 @@ impl Histogram {
             name,
             help,
             labels,
-            vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+            vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ],
         )
     }
 
@@ -507,9 +509,7 @@ impl Histogram {
             .collect();
         bucket_counts.insert(labels.clone(), bucket_vec);
 
-        self.sums
-            .write()
-            .insert(labels.clone(), AtomicU64::new(0));
+        self.sums.write().insert(labels.clone(), AtomicU64::new(0));
         self.counts.write().insert(labels, AtomicU64::new(0));
     }
 
@@ -770,9 +770,7 @@ impl MonitoringManager {
 
     /// Register a health check
     pub fn register_health_check(&self, name: &str, check: HealthCheckFn) {
-        self.health_checks
-            .write()
-            .insert(name.to_string(), check);
+        self.health_checks.write().insert(name.to_string(), check);
     }
 
     /// Mark as ready
@@ -843,14 +841,14 @@ impl MonitoringManager {
             .map(|g| g.get(&[]) as u64)
             .unwrap_or(0);
 
-        let lag_ms = self.lag_gauge.as_ref().map(|g| {
+        let lag_ms = self.lag_gauge.as_ref().and_then(|g| {
             let v = g.get(&[]);
             if v > 0 {
                 Some(v as u64)
             } else {
                 None
             }
-        }).flatten();
+        });
 
         ReadinessCheckResult {
             status,
@@ -1077,7 +1075,9 @@ mod tests {
         metrics
             .queries_total
             .inc(vec!["mydb".to_string(), "SELECT".to_string()]);
-        metrics.query_duration.observe(vec!["mydb".to_string()], 0.5);
+        metrics
+            .query_duration
+            .observe(vec!["mydb".to_string()], 0.5);
 
         assert_eq!(
             metrics

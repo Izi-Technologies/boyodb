@@ -5,10 +5,10 @@
 //! - Prepared statement caching and reuse
 //! - COPY command for bulk data import/export
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -225,7 +225,13 @@ impl PlanNode {
     }
 
     /// Set actual execution statistics
-    pub fn with_actual(mut self, startup_time: f64, total_time: f64, rows: u64, loops: u64) -> Self {
+    pub fn with_actual(
+        mut self,
+        startup_time: f64,
+        total_time: f64,
+        rows: u64,
+        loops: u64,
+    ) -> Self {
         self.stats.actual_startup_time = Some(startup_time);
         self.stats.actual_total_time = Some(total_time);
         self.stats.actual_rows = Some(rows);
@@ -293,7 +299,10 @@ impl PlanNode {
         if let Some(ref filter) = self.filter {
             output.push_str(&format!("{}      Filter: {}\n", prefix, filter));
             if let Some(removed) = self.rows_removed_by_filter {
-                output.push_str(&format!("{}      Rows Removed by Filter: {}\n", prefix, removed));
+                output.push_str(&format!(
+                    "{}      Rows Removed by Filter: {}\n",
+                    prefix, removed
+                ));
             }
         }
         if let Some(ref cond) = self.hash_cond {
@@ -373,9 +382,11 @@ impl PlanNode {
         }
 
         if !self.children.is_empty() {
-            obj["Plans"] = serde_json::json!(
-                self.children.iter().map(|c| c.format_json()).collect::<Vec<_>>()
-            );
+            obj["Plans"] = serde_json::json!(self
+                .children
+                .iter()
+                .map(|c| c.format_json())
+                .collect::<Vec<_>>());
         }
 
         obj
@@ -712,8 +723,12 @@ pub enum PrepareError {
 impl std::fmt::Display for PrepareError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PrepareError::NotFound(name) => write!(f, "prepared statement \"{}\" does not exist", name),
-            PrepareError::AlreadyExists(name) => write!(f, "prepared statement \"{}\" already exists", name),
+            PrepareError::NotFound(name) => {
+                write!(f, "prepared statement \"{}\" does not exist", name)
+            }
+            PrepareError::AlreadyExists(name) => {
+                write!(f, "prepared statement \"{}\" already exists", name)
+            }
             PrepareError::CacheFull => write!(f, "prepared statement cache is full"),
             PrepareError::InvalidSql(msg) => write!(f, "invalid SQL: {}", msg),
             PrepareError::TypeMismatch { expected, got } => {
@@ -947,29 +962,28 @@ impl CopyExecutor {
         // Write data rows
         for row in data {
             let line = match options.format {
-                CopyFormat::Csv => {
-                    row.iter()
-                        .map(|field| {
-                            if field.contains(options.delimiter)
-                                || field.contains(options.quote)
-                                || field.contains('\n')
-                            {
-                                format!(
-                                    "{}{}{}",
+                CopyFormat::Csv => row
+                    .iter()
+                    .map(|field| {
+                        if field.contains(options.delimiter)
+                            || field.contains(options.quote)
+                            || field.contains('\n')
+                        {
+                            format!(
+                                "{}{}{}",
+                                options.quote,
+                                field.replace(
                                     options.quote,
-                                    field.replace(
-                                        options.quote,
-                                        &format!("{}{}", options.escape, options.quote)
-                                    ),
-                                    options.quote
-                                )
-                            } else {
-                                field.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(&options.delimiter.to_string())
-                }
+                                    &format!("{}{}", options.escape, options.quote)
+                                ),
+                                options.quote
+                            )
+                        } else {
+                            field.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(&options.delimiter.to_string()),
                 CopyFormat::Text => row
                     .iter()
                     .map(|f| {
@@ -1141,11 +1155,9 @@ impl QueryManager {
                 let mut join = PlanNode::new(PlanNodeType::HashJoin);
                 join.join_type = Some("Inner".to_string());
                 join.hash_cond = Some("(a.id = b.id)".to_string());
-                join.with_child(PlanNode::seq_scan("table_a"))
-                    .with_child(
-                        PlanNode::new(PlanNodeType::Hash)
-                            .with_child(PlanNode::seq_scan("table_b")),
-                    )
+                join.with_child(PlanNode::seq_scan("table_a")).with_child(
+                    PlanNode::new(PlanNodeType::Hash).with_child(PlanNode::seq_scan("table_b")),
+                )
             } else {
                 let mut join = PlanNode::new(PlanNodeType::NestedLoop);
                 join.join_type = Some("Inner".to_string());
@@ -1153,11 +1165,9 @@ impl QueryManager {
                     .with_child(PlanNode::index_scan("inner_table", "idx_id"))
             }
         } else if sql_upper.contains("ORDER BY") {
-            PlanNode::new(PlanNodeType::Sort)
-                .with_child(PlanNode::seq_scan("table"))
+            PlanNode::new(PlanNodeType::Sort).with_child(PlanNode::seq_scan("table"))
         } else if sql_upper.contains("GROUP BY") {
-            PlanNode::new(PlanNodeType::HashAggregate)
-                .with_child(PlanNode::seq_scan("table"))
+            PlanNode::new(PlanNodeType::HashAggregate).with_child(PlanNode::seq_scan("table"))
         } else if sql_upper.contains("WHERE") && sql_upper.contains("id =") {
             PlanNode::index_scan("table", "idx_pk")
         } else {
@@ -1243,9 +1253,7 @@ mod tests {
         let inner = PlanNode::seq_scan("orders");
         let outer = PlanNode::new(PlanNodeType::HashJoin)
             .with_child(PlanNode::seq_scan("users"))
-            .with_child(
-                PlanNode::new(PlanNodeType::Hash).with_child(inner),
-            );
+            .with_child(PlanNode::new(PlanNodeType::Hash).with_child(inner));
 
         let output = outer.format_text(0, false);
         assert!(output.contains("Hash Join"));
@@ -1281,7 +1289,11 @@ mod tests {
         let cache = PreparedStatementCache::new(10);
 
         cache
-            .prepare("stmt1", "SELECT * FROM users WHERE id = $1", vec!["int".to_string()])
+            .prepare(
+                "stmt1",
+                "SELECT * FROM users WHERE id = $1",
+                vec!["int".to_string()],
+            )
             .unwrap();
 
         let stmt = cache.get("stmt1").unwrap();
@@ -1374,7 +1386,9 @@ mod tests {
         options.columns = vec!["id".to_string(), "name".to_string(), "age".to_string()];
 
         let mut output = Vec::new();
-        let result = executor.copy_to("users", &mut output, &options, &data).unwrap();
+        let result = executor
+            .copy_to("users", &mut output, &options, &data)
+            .unwrap();
 
         assert_eq!(result.rows_processed, 2);
         let csv = String::from_utf8(output).unwrap();

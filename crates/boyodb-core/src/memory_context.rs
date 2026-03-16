@@ -4,13 +4,17 @@
 //! memory allocation within queries. Each query gets its own memory context
 //! that tracks allocations and can be reset/freed when the query completes.
 
+// Allow Arc wrapping non-Send/Sync types - this is intentional for memory contexts
+// that manage memory blocks with raw pointers
+#![allow(clippy::arc_with_non_send_sync)]
+
+use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
-use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -19,7 +23,11 @@ use parking_lot::RwLock;
 #[derive(Debug, Clone)]
 pub enum MemoryContextError {
     /// Memory limit exceeded
-    LimitExceeded { requested: usize, limit: usize, used: usize },
+    LimitExceeded {
+        requested: usize,
+        limit: usize,
+        used: usize,
+    },
     /// Allocation failed
     AllocationFailed(usize),
     /// Context not found
@@ -144,7 +152,8 @@ impl MemoryContextStats {
     }
 
     fn record_allocation(&self, size: usize) {
-        self.total_allocated.fetch_add(size as u64, Ordering::Relaxed);
+        self.total_allocated
+            .fetch_add(size as u64, Ordering::Relaxed);
         let new_used = self.current_used.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
 
         // Update peak if necessary
@@ -354,7 +363,9 @@ impl MemoryContext {
             }
         } else {
             // No limit, just increment
-            self.stats.current_used.fetch_add(size as u64, Ordering::Relaxed);
+            self.stats
+                .current_used
+                .fetch_add(size as u64, Ordering::Relaxed);
         }
 
         // Note: We don't update parent's current_used here because total_usage()
@@ -366,7 +377,9 @@ impl MemoryContext {
 
     /// Release reserved memory
     fn release_memory(&self, size: usize) {
-        self.stats.current_used.fetch_sub(size as u64, Ordering::Relaxed);
+        self.stats
+            .current_used
+            .fetch_sub(size as u64, Ordering::Relaxed);
         // Note: Don't update parent - total_usage() handles aggregation
     }
 
@@ -413,7 +426,9 @@ impl MemoryContext {
         }
 
         // Update other stats (current_used already updated in reserve_memory)
-        self.stats.total_allocated.fetch_add(size as u64, Ordering::Relaxed);
+        self.stats
+            .total_allocated
+            .fetch_add(size as u64, Ordering::Relaxed);
         self.stats.allocation_count.fetch_add(1, Ordering::Relaxed);
 
         // Update peak if necessary
@@ -459,7 +474,9 @@ impl MemoryContext {
 
                     // Release memory tracking
                     self.release_memory(size);
-                    self.stats.deallocation_count.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .deallocation_count
+                        .fetch_add(1, Ordering::Relaxed);
 
                     // Block is dropped here when `take()` moves it out and it goes out of scope
                     // Mark this slot as free for reuse
@@ -793,7 +810,9 @@ impl MemoryContextManager {
         let mut contexts = self.query_contexts.write();
         if let Some(ctx) = contexts.remove(&query_id) {
             ctx.reset();
-            self.stats.contexts_destroyed.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .contexts_destroyed
+                .fetch_add(1, Ordering::Relaxed);
             self.stats.active_contexts.fetch_sub(1, Ordering::Relaxed);
         }
     }

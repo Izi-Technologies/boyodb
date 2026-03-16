@@ -3,11 +3,11 @@
 //! Provides CREATE SEQUENCE, NEXTVAL(), CURRVAL(), SETVAL() functionality
 //! for auto-increment ID generation.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::SystemTime;
 
 /// Sequence error types
@@ -268,21 +268,15 @@ impl SequenceManager {
         let increment = options.increment.unwrap_or(1);
         let ascending = increment > 0;
 
-        let min_value = options.min_value.unwrap_or_else(|| {
-            if ascending {
-                1
-            } else {
-                data_type.min_value()
-            }
-        });
+        let min_value =
+            options
+                .min_value
+                .unwrap_or_else(|| if ascending { 1 } else { data_type.min_value() });
 
-        let max_value = options.max_value.unwrap_or_else(|| {
-            if ascending {
-                data_type.max_value()
-            } else {
-                -1
-            }
-        });
+        let max_value =
+            options
+                .max_value
+                .unwrap_or_else(|| if ascending { data_type.max_value() } else { -1 });
 
         let start_value = options
             .start
@@ -668,11 +662,7 @@ impl SequenceManager {
         self.definitions
             .read()
             .values()
-            .filter(|s| {
-                s.owned_by
-                    .as_ref()
-                    .map_or(false, |o| o.starts_with(table))
-            })
+            .filter(|s| s.owned_by.as_ref().map_or(false, |o| o.starts_with(table)))
             .cloned()
             .collect()
     }
@@ -732,7 +722,12 @@ mod tests {
         let manager = SequenceManager::default();
 
         manager
-            .create_sequence("public", "test_seq", "admin", CreateSequenceOptions::default())
+            .create_sequence(
+                "public",
+                "test_seq",
+                "admin",
+                CreateSequenceOptions::default(),
+            )
             .unwrap();
 
         let seq = manager.get_sequence("public", "test_seq").unwrap();
@@ -747,7 +742,12 @@ mod tests {
         let mut session = SessionSequenceState::new();
 
         manager
-            .create_sequence("public", "id_seq", "admin", CreateSequenceOptions::default())
+            .create_sequence(
+                "public",
+                "id_seq",
+                "admin",
+                CreateSequenceOptions::default(),
+            )
             .unwrap();
 
         let v1 = manager.nextval("public", "id_seq", &mut session).unwrap();
@@ -766,7 +766,12 @@ mod tests {
         let mut session = SessionSequenceState::new();
 
         manager
-            .create_sequence("public", "test_seq", "admin", CreateSequenceOptions::default())
+            .create_sequence(
+                "public",
+                "test_seq",
+                "admin",
+                CreateSequenceOptions::default(),
+            )
             .unwrap();
 
         // CURRVAL before NEXTVAL should fail
@@ -789,7 +794,12 @@ mod tests {
         let mut session = SessionSequenceState::new();
 
         manager
-            .create_sequence("public", "test_seq", "admin", CreateSequenceOptions::default())
+            .create_sequence(
+                "public",
+                "test_seq",
+                "admin",
+                CreateSequenceOptions::default(),
+            )
             .unwrap();
 
         // Set to 100, is_called = true
@@ -858,11 +868,31 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(manager.nextval("public", "cycle_seq", &mut session).unwrap(), 1);
-        assert_eq!(manager.nextval("public", "cycle_seq", &mut session).unwrap(), 2);
-        assert_eq!(manager.nextval("public", "cycle_seq", &mut session).unwrap(), 3);
+        assert_eq!(
+            manager
+                .nextval("public", "cycle_seq", &mut session)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            manager
+                .nextval("public", "cycle_seq", &mut session)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            manager
+                .nextval("public", "cycle_seq", &mut session)
+                .unwrap(),
+            3
+        );
         // Should cycle back
-        assert_eq!(manager.nextval("public", "cycle_seq", &mut session).unwrap(), 1);
+        assert_eq!(
+            manager
+                .nextval("public", "cycle_seq", &mut session)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -885,8 +915,18 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(manager.nextval("public", "small_seq", &mut session).unwrap(), 1);
-        assert_eq!(manager.nextval("public", "small_seq", &mut session).unwrap(), 2);
+        assert_eq!(
+            manager
+                .nextval("public", "small_seq", &mut session)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            manager
+                .nextval("public", "small_seq", &mut session)
+                .unwrap(),
+            2
+        );
         // Should fail
         let result = manager.nextval("public", "small_seq", &mut session);
         assert!(matches!(result, Err(SequenceError::Exhausted(_))));
@@ -898,10 +938,17 @@ mod tests {
         let mut session = SessionSequenceState::new();
 
         manager
-            .create_sequence("public", "alter_seq", "admin", CreateSequenceOptions::default())
+            .create_sequence(
+                "public",
+                "alter_seq",
+                "admin",
+                CreateSequenceOptions::default(),
+            )
             .unwrap();
 
-        manager.nextval("public", "alter_seq", &mut session).unwrap();
+        manager
+            .nextval("public", "alter_seq", &mut session)
+            .unwrap();
 
         // Alter increment
         manager
@@ -915,7 +962,9 @@ mod tests {
             )
             .unwrap();
 
-        let v = manager.nextval("public", "alter_seq", &mut session).unwrap();
+        let v = manager
+            .nextval("public", "alter_seq", &mut session)
+            .unwrap();
         assert_eq!(v, 11); // 1 + 10
 
         // Restart
@@ -930,7 +979,9 @@ mod tests {
             )
             .unwrap();
 
-        let v = manager.nextval("public", "alter_seq", &mut session).unwrap();
+        let v = manager
+            .nextval("public", "alter_seq", &mut session)
+            .unwrap();
         assert_eq!(v, 100);
     }
 }

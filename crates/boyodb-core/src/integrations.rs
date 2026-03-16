@@ -11,10 +11,10 @@
 //! - Airflow operator definitions
 //! - Presto/Trino connector specification
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Common Types
@@ -157,38 +157,85 @@ impl SparkConnector {
 
     fn default_type_mappings() -> Vec<TypeMapping> {
         vec![
-            TypeMapping { boyodb_type: "INT8".into(), external_type: "ByteType".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT16".into(), external_type: "ShortType".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT32".into(), external_type: "IntegerType".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT64".into(), external_type: "LongType".into(), nullable: true },
-            TypeMapping { boyodb_type: "FLOAT32".into(), external_type: "FloatType".into(), nullable: true },
-            TypeMapping { boyodb_type: "FLOAT64".into(), external_type: "DoubleType".into(), nullable: true },
-            TypeMapping { boyodb_type: "VARCHAR".into(), external_type: "StringType".into(), nullable: true },
-            TypeMapping { boyodb_type: "BOOLEAN".into(), external_type: "BooleanType".into(), nullable: true },
-            TypeMapping { boyodb_type: "DATE".into(), external_type: "DateType".into(), nullable: true },
-            TypeMapping { boyodb_type: "TIMESTAMP".into(), external_type: "TimestampType".into(), nullable: true },
-            TypeMapping { boyodb_type: "BINARY".into(), external_type: "BinaryType".into(), nullable: true },
+            TypeMapping {
+                boyodb_type: "INT8".into(),
+                external_type: "ByteType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT16".into(),
+                external_type: "ShortType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT32".into(),
+                external_type: "IntegerType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT64".into(),
+                external_type: "LongType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "FLOAT32".into(),
+                external_type: "FloatType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "FLOAT64".into(),
+                external_type: "DoubleType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "VARCHAR".into(),
+                external_type: "StringType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "BOOLEAN".into(),
+                external_type: "BooleanType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "DATE".into(),
+                external_type: "DateType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "TIMESTAMP".into(),
+                external_type: "TimestampType".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "BINARY".into(),
+                external_type: "BinaryType".into(),
+                nullable: true,
+            },
         ]
     }
 
     /// Get partitions for a table read
-    pub fn get_partitions(&self, table: &str, num_partitions: Option<usize>) -> Vec<SparkPartition> {
+    pub fn get_partitions(
+        &self,
+        table: &str,
+        num_partitions: Option<usize>,
+    ) -> Vec<SparkPartition> {
         let n = num_partitions.unwrap_or(self.config.num_partitions);
-        (0..n).map(|i| SparkPartition {
-            partition_id: i as i32,
-            start_offset: 0,
-            end_offset: -1, // Unknown
-            preferred_locations: vec![],
-        }).collect()
+        (0..n)
+            .map(|i| SparkPartition {
+                partition_id: i as i32,
+                start_offset: 0,
+                end_offset: -1, // Unknown
+                preferred_locations: vec![],
+            })
+            .collect()
     }
 
     /// Generate JDBC-compatible connection URL
     pub fn jdbc_url(&self) -> String {
         let c = &self.config.connection;
-        format!(
-            "jdbc:boyodb://{}:{}/{}",
-            c.host, c.port, c.database
-        )
+        format!("jdbc:boyodb://{}:{}/{}", c.host, c.port, c.database)
     }
 
     /// Generate Spark DataSource options
@@ -197,9 +244,18 @@ impl SparkConnector {
         opts.insert("url".to_string(), self.jdbc_url());
         opts.insert("dbtable".to_string(), table.to_string());
         opts.insert("batchsize".to_string(), self.config.batch_size.to_string());
-        opts.insert("numPartitions".to_string(), self.config.num_partitions.to_string());
-        opts.insert("pushDownPredicate".to_string(), self.config.predicate_pushdown.to_string());
-        opts.insert("pushDownAggregate".to_string(), self.config.aggregate_pushdown.to_string());
+        opts.insert(
+            "numPartitions".to_string(),
+            self.config.num_partitions.to_string(),
+        );
+        opts.insert(
+            "pushDownPredicate".to_string(),
+            self.config.predicate_pushdown.to_string(),
+        );
+        opts.insert(
+            "pushDownAggregate".to_string(),
+            self.config.aggregate_pushdown.to_string(),
+        );
 
         if let Some(ref user) = self.config.connection.username {
             opts.insert("user".to_string(), user.clone());
@@ -286,13 +342,25 @@ impl FlinkDdlGenerator {
 
         ddl.push_str(") WITH (\n");
         ddl.push_str("  'connector' = 'boyodb',\n");
-        ddl.push_str(&format!("  'hostname' = '{}',\n", self.config.connection.host));
+        ddl.push_str(&format!(
+            "  'hostname' = '{}',\n",
+            self.config.connection.host
+        ));
         ddl.push_str(&format!("  'port' = '{}',\n", self.config.connection.port));
-        ddl.push_str(&format!("  'database' = '{}',\n", self.config.connection.database));
+        ddl.push_str(&format!(
+            "  'database' = '{}',\n",
+            self.config.connection.database
+        ));
         ddl.push_str(&format!("  'table-name' = '{}',\n", table_name));
-        ddl.push_str(&format!("  'sink.buffer-flush.max-rows' = '{}',\n", self.config.buffer_size));
-        ddl.push_str(&format!("  'sink.buffer-flush.interval' = '{}ms'\n", self.config.flush_interval_ms));
-        ddl.push_str(")");
+        ddl.push_str(&format!(
+            "  'sink.buffer-flush.max-rows' = '{}',\n",
+            self.config.buffer_size
+        ));
+        ddl.push_str(&format!(
+            "  'sink.buffer-flush.interval' = '{}ms'\n",
+            self.config.flush_interval_ms
+        ));
+        ddl.push(')');
 
         ddl
     }
@@ -436,7 +504,8 @@ impl DbtProfileGenerator {
   WHERE database_name = '{{ relation.database }}'
     AND table_name = '{{ relation.identifier }}';
 {% endmacro %}
-"#.to_string()
+"#
+        .to_string()
     }
 }
 
@@ -503,7 +572,8 @@ impl AirflowOperatorGenerator {
 
     /// Generate Python operator code
     pub fn generate_operator(&self) -> String {
-        format!(r#"from airflow.models import BaseOperator
+        format!(
+            r#"from airflow.models import BaseOperator
 from airflow.utils.decorators import apply_defaults
 from airflow.hooks.base import BaseHook
 import socket
@@ -665,7 +735,9 @@ class BoyoDBToFileOperator(BaseOperator):
             raise ValueError(f"Unsupported format: {{self.file_format}}")
 
         return self.file_path
-"#, conn_id = self.config.conn_id)
+"#,
+            conn_id = self.config.conn_id
+        )
     }
 
     /// Generate Airflow connection configuration
@@ -675,7 +747,10 @@ class BoyoDBToFileOperator(BaseOperator):
         conn.insert("conn_type".to_string(), "boyodb".to_string());
         conn.insert("host".to_string(), self.config.connection.host.clone());
         conn.insert("port".to_string(), self.config.connection.port.to_string());
-        conn.insert("schema".to_string(), self.config.connection.database.clone());
+        conn.insert(
+            "schema".to_string(),
+            self.config.connection.database.clone(),
+        );
 
         if let Some(ref user) = self.config.connection.username {
             conn.insert("login".to_string(), user.clone());
@@ -756,17 +831,61 @@ boyodb.metadata-cache-ttl={cache_ttl}s
     /// Generate type mappings for Presto/Trino
     pub fn get_type_mappings(&self) -> Vec<TypeMapping> {
         vec![
-            TypeMapping { boyodb_type: "INT8".into(), external_type: "TINYINT".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT16".into(), external_type: "SMALLINT".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT32".into(), external_type: "INTEGER".into(), nullable: true },
-            TypeMapping { boyodb_type: "INT64".into(), external_type: "BIGINT".into(), nullable: true },
-            TypeMapping { boyodb_type: "FLOAT32".into(), external_type: "REAL".into(), nullable: true },
-            TypeMapping { boyodb_type: "FLOAT64".into(), external_type: "DOUBLE".into(), nullable: true },
-            TypeMapping { boyodb_type: "VARCHAR".into(), external_type: "VARCHAR".into(), nullable: true },
-            TypeMapping { boyodb_type: "BOOLEAN".into(), external_type: "BOOLEAN".into(), nullable: true },
-            TypeMapping { boyodb_type: "DATE".into(), external_type: "DATE".into(), nullable: true },
-            TypeMapping { boyodb_type: "TIMESTAMP".into(), external_type: "TIMESTAMP".into(), nullable: true },
-            TypeMapping { boyodb_type: "BINARY".into(), external_type: "VARBINARY".into(), nullable: true },
+            TypeMapping {
+                boyodb_type: "INT8".into(),
+                external_type: "TINYINT".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT16".into(),
+                external_type: "SMALLINT".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT32".into(),
+                external_type: "INTEGER".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "INT64".into(),
+                external_type: "BIGINT".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "FLOAT32".into(),
+                external_type: "REAL".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "FLOAT64".into(),
+                external_type: "DOUBLE".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "VARCHAR".into(),
+                external_type: "VARCHAR".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "BOOLEAN".into(),
+                external_type: "BOOLEAN".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "DATE".into(),
+                external_type: "DATE".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "TIMESTAMP".into(),
+                external_type: "TIMESTAMP".into(),
+                nullable: true,
+            },
+            TypeMapping {
+                boyodb_type: "BINARY".into(),
+                external_type: "VARBINARY".into(),
+                nullable: true,
+            },
         ]
     }
 }
@@ -817,7 +936,10 @@ impl IntegrationManager {
     }
 
     pub fn get_spark(&self, name: &str) -> Option<SparkConnector> {
-        self.spark_configs.read().get(name).map(|c| SparkConnector::new(c.clone()))
+        self.spark_configs
+            .read()
+            .get(name)
+            .map(|c| SparkConnector::new(c.clone()))
     }
 
     // Flink methods
@@ -826,7 +948,10 @@ impl IntegrationManager {
     }
 
     pub fn get_flink_ddl_generator(&self, name: &str) -> Option<FlinkDdlGenerator> {
-        self.flink_configs.read().get(name).map(|c| FlinkDdlGenerator::new(c.clone()))
+        self.flink_configs
+            .read()
+            .get(name)
+            .map(|c| FlinkDdlGenerator::new(c.clone()))
     }
 
     // dbt methods
@@ -835,16 +960,24 @@ impl IntegrationManager {
     }
 
     pub fn get_dbt_generator(&self, name: &str) -> Option<DbtProfileGenerator> {
-        self.dbt_configs.read().get(name).map(|c| DbtProfileGenerator::new(c.clone()))
+        self.dbt_configs
+            .read()
+            .get(name)
+            .map(|c| DbtProfileGenerator::new(c.clone()))
     }
 
     // Airflow methods
     pub fn register_airflow(&self, name: &str, config: AirflowOperatorConfig) {
-        self.airflow_configs.write().insert(name.to_string(), config);
+        self.airflow_configs
+            .write()
+            .insert(name.to_string(), config);
     }
 
     pub fn get_airflow_generator(&self, name: &str) -> Option<AirflowOperatorGenerator> {
-        self.airflow_configs.read().get(name).map(|c| AirflowOperatorGenerator::new(c.clone()))
+        self.airflow_configs
+            .read()
+            .get(name)
+            .map(|c| AirflowOperatorGenerator::new(c.clone()))
     }
 
     // Presto methods
@@ -853,7 +986,10 @@ impl IntegrationManager {
     }
 
     pub fn get_presto_generator(&self, name: &str) -> Option<PrestoConnectorGenerator> {
-        self.presto_configs.read().get(name).map(|c| PrestoConnectorGenerator::new(c.clone()))
+        self.presto_configs
+            .read()
+            .get(name)
+            .map(|c| PrestoConnectorGenerator::new(c.clone()))
     }
 }
 
@@ -884,7 +1020,10 @@ mod tests {
         };
 
         let connector = SparkConnector::new(config);
-        assert_eq!(connector.jdbc_url(), "jdbc:boyodb://db.example.com:8765/mydb");
+        assert_eq!(
+            connector.jdbc_url(),
+            "jdbc:boyodb://db.example.com:8765/mydb"
+        );
     }
 
     #[test]

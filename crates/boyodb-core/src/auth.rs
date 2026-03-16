@@ -10,13 +10,13 @@
 //! - Session management with authentication tokens
 //! - Audit logging for security events
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
@@ -700,10 +700,7 @@ impl AuthManager {
 
     /// Persist the auth store to disk
     fn persist(&self) -> Result<(), AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
         let content = serde_json::to_string_pretty(&*store)
             .map_err(|e| AuthError::Serialization(e.to_string()))?;
 
@@ -760,10 +757,7 @@ impl AuthManager {
 
     /// Validate password against policy
     pub fn validate_password(&self, password: &str) -> Result<(), AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
         Self::validate_password_with_policy(&store.password_policy, password)
     }
 
@@ -779,10 +773,7 @@ impl AuthManager {
         // Validate password
         self.validate_password(password)?;
 
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         if store.users.contains_key(username) {
             return Err(AuthError::UserAlreadyExists(username.to_string()));
@@ -829,10 +820,7 @@ impl AuthManager {
             return Err(AuthError::CannotModifySuperuser);
         }
 
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         if !store.users.contains_key(username) {
             return Err(AuthError::UserNotFound(username.to_string()));
@@ -875,10 +863,7 @@ impl AuthManager {
     ) -> Result<(), AuthError> {
         self.validate_password(new_password)?;
 
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         // Extract policy values before mutable borrow
         let history_count = store.password_policy.history_count;
@@ -944,10 +929,7 @@ impl AuthManager {
             return Err(AuthError::CannotModifySuperuser);
         }
 
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -982,10 +964,7 @@ impl AuthManager {
 
     /// Unlock a user account
     pub fn unlock_user(&self, username: &str, unlocked_by: &str) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1027,10 +1006,7 @@ impl AuthManager {
         is_superuser: bool,
         set_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1070,10 +1046,7 @@ impl AuthManager {
 
     /// List all users
     pub fn list_users(&self) -> Result<Vec<UserInfo>, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
 
         Ok(store
             .users
@@ -1092,10 +1065,7 @@ impl AuthManager {
 
     /// Get user info
     pub fn get_user(&self, username: &str) -> Result<UserInfo, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
 
         let user = store
             .users
@@ -1115,10 +1085,7 @@ impl AuthManager {
 
     /// Get user privileges
     pub fn get_user_privileges(&self, username: &str) -> Result<Vec<PrivilegeGrant>, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
 
         let user = store
             .users
@@ -1137,10 +1104,7 @@ impl AuthManager {
         description: Option<&str>,
         created_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         if store.roles.contains_key(name) {
             return Err(AuthError::RoleAlreadyExists(name.to_string()));
@@ -1177,10 +1141,7 @@ impl AuthManager {
             return Err(AuthError::AccessDenied("cannot drop built-in role".into()));
         }
 
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         if !store.roles.contains_key(name) {
             return Err(AuthError::RoleNotFound(name.to_string()));
@@ -1219,10 +1180,7 @@ impl AuthManager {
         role: &str,
         granted_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         if !store.roles.contains_key(role) {
             return Err(AuthError::RoleNotFound(role.to_string()));
@@ -1268,10 +1226,7 @@ impl AuthManager {
         role: &str,
         revoked_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1306,10 +1261,7 @@ impl AuthManager {
 
     /// List all roles
     pub fn list_roles(&self) -> Result<Vec<RoleInfo>, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
 
         Ok(store
             .roles
@@ -1338,10 +1290,7 @@ impl AuthManager {
         with_grant_option: bool,
         granted_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1405,10 +1354,7 @@ impl AuthManager {
         target: PrivilegeTarget,
         revoked_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1451,10 +1397,7 @@ impl AuthManager {
         with_grant_option: bool,
         granted_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let role = store
             .roles
@@ -1517,10 +1460,7 @@ impl AuthManager {
         target: PrivilegeTarget,
         revoked_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let role = store
             .roles
@@ -1570,10 +1510,7 @@ impl AuthManager {
         client_ip: Option<&str>,
         application_name: Option<&str>,
     ) -> Result<String, AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         // Extract policy values before mutable borrow
         let max_failed_attempts = store.password_policy.max_failed_attempts;
@@ -1711,10 +1648,7 @@ impl AuthManager {
 
     /// Validate a session and return the username
     pub fn validate_session(&self, session_id: &str) -> Result<String, AuthError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            ;
+        let mut sessions = self.sessions.write();
 
         let session = sessions
             .get_mut(session_id)
@@ -1731,10 +1665,7 @@ impl AuthManager {
 
     /// Invalidate a session (logout)
     pub fn invalidate_session(&self, session_id: &str) -> Result<(), AuthError> {
-        let mut sessions = self
-            .sessions
-            .write()
-            ;
+        let mut sessions = self.sessions.write();
 
         if let Some(session) = sessions.remove(session_id) {
             self.audit(AuditLogEntry {
@@ -1770,10 +1701,7 @@ impl AuthManager {
         required_privilege: Privilege,
         target: &PrivilegeTarget,
     ) -> Result<bool, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
 
         let user = store
             .users
@@ -1871,10 +1799,7 @@ impl AuthManager {
         database: Option<&str>,
         _set_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1898,10 +1823,7 @@ impl AuthManager {
         limit: u32,
         _set_by: &str,
     ) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
 
         let user = store
             .users
@@ -1920,10 +1842,7 @@ impl AuthManager {
 
     /// Update password policy
     pub fn set_password_policy(&self, policy: PasswordPolicy) -> Result<(), AuthError> {
-        let mut store = self
-            .store
-            .write()
-            ;
+        let mut store = self.store.write();
         store.password_policy = policy;
         drop(store);
         self.persist()
@@ -1931,10 +1850,7 @@ impl AuthManager {
 
     /// Get password policy
     pub fn get_password_policy(&self) -> Result<PasswordPolicy, AuthError> {
-        let store = self
-            .store
-            .read()
-            ;
+        let store = self.store.read();
         Ok(store.password_policy.clone())
     }
 }

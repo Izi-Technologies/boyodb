@@ -29,6 +29,7 @@ use lz4_flex::{
     compress_prepend_size as lz4_compress, decompress_size_prepended as lz4_decompress,
 };
 use parking_lot::Mutex as ParkingMutex;
+use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use snap::{read::FrameDecoder as SnappyDecoder, write::FrameEncoder as SnappyEncoder};
@@ -41,7 +42,6 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use tempfile::tempdir;
@@ -719,24 +719,24 @@ impl EngineConfig {
             wal_sync_interval_ms: 0,
             allow_manifest_import: false,
             retention_watermark_micros: None,
-            compact_min_segments: 2,  // Aggressive: merge when 2+ parts (faster reduction)
+            compact_min_segments: 2, // Aggressive: merge when 2+ parts (faster reduction)
             enable_compaction: true,
             compaction_target_bytes: 256 * 1024 * 1024, // 256MB target (ClickHouse standard: 150MB-1GB)
-            compaction_interval_ms: 10_000,    // Check every 10s for faster response
+            compaction_interval_ms: 10_000,             // Check every 10s for faster response
             s3_bucket: None,
             s3_region: None,
             s3_endpoint: None,
             s3_access_key: None,
             s3_secret_key: None,
-            auto_compact_interval_secs: 10,     // Check every 10 seconds (industry: aggressive)
-            max_concurrent_compactions: 8,      // 8 concurrent compactions (very aggressive)
-            compaction_cooldown_secs: 1,        // 1s cooldown (fastest reaction)
-            compaction_passes_per_cycle: 128,   // 128 passes per cycle (maximum catch-up)
-            max_segments_per_compaction: 64,    // Merge up to 64 segments at once
+            auto_compact_interval_secs: 10, // Check every 10 seconds (industry: aggressive)
+            max_concurrent_compactions: 8,  // 8 concurrent compactions (very aggressive)
+            compaction_cooldown_secs: 1,    // 1s cooldown (fastest reaction)
+            compaction_passes_per_cycle: 128, // 128 passes per cycle (maximum catch-up)
+            max_segments_per_compaction: 64, // Merge up to 64 segments at once
             emergency_compaction_parallelism: 8, // 8 tables in parallel during emergency
-            parallel_filter_threshold: 100,     // Lower threshold for more parallelism
-            bloom_cache_entries_per_shard: 0,   // 0 = auto-scale based on segment count
-            tier_warm_after_millis: 3_600_000,  // 1h
+            parallel_filter_threshold: 100, // Lower threshold for more parallelism
+            bloom_cache_entries_per_shard: 0, // 0 = auto-scale based on segment count
+            tier_warm_after_millis: 3_600_000, // 1h
             tier_cold_after_millis: 86_400_000, // 24h
             tier_hot_compression: Some("lz4".to_string()), // LZ4 for hot tier (fast)
             tier_warm_compression: Some("zstd".to_string()), // ZSTD for warm tier (balanced)
@@ -774,128 +774,128 @@ impl EngineConfig {
             constraint_validation_enabled: true,
             transactions_enabled: false,
             // Auto-stats defaults (enabled by default for query optimization)
-            auto_stats_enabled: true,           // Enable automatic stats updates
+            auto_stats_enabled: true, // Enable automatic stats updates
             auto_stats_min_rows_changed: 10000, // Update after 10K rows changed
-            auto_stats_cooldown_secs: 60,       // At most once per minute per table
+            auto_stats_cooldown_secs: 60, // At most once per minute per table
             skip_damaged_segments: true, // Default to true for resilience
             // Data integrity defaults
-            scrubbing_enabled: true,           // Enable proactive corruption detection
-            scrubbing_interval_secs: 3600,     // Every hour
-            scrubbing_batch_size: 1000,        // 1000 segments per scan
-            wal_recovery_enabled: true,        // Try WAL recovery before deletion
-            orphan_cleanup_enabled: true,      // Clean up orphaned files
-            orphan_cleanup_age_secs: 86400,    // 24 hours safety buffer
-            wal_skip_corrupt_records: true,    // Skip corrupt WAL records by default
+            scrubbing_enabled: true, // Enable proactive corruption detection
+            scrubbing_interval_secs: 3600, // Every hour
+            scrubbing_batch_size: 1000, // 1000 segments per scan
+            wal_recovery_enabled: true, // Try WAL recovery before deletion
+            orphan_cleanup_enabled: true, // Clean up orphaned files
+            orphan_cleanup_age_secs: 86400, // 24 hours safety buffer
+            wal_skip_corrupt_records: true, // Skip corrupt WAL records by default
             // Rate limiting defaults (disabled by default for backward compatibility)
-            ingest_rate_limit_per_sec: 0,      // Unlimited
-            max_concurrent_ingests: 0,         // Unlimited
+            ingest_rate_limit_per_sec: 0,         // Unlimited
+            max_concurrent_ingests: 0,            // Unlimited
             ingest_backpressure_threshold: 10000, // Return busy when 10K pending ingests
             // Corruption prevention defaults
-            wal_sync_every_write: true,        // Force fsync after every WAL write
-            verify_writes: true,               // Verify checksums after writing
-            manifest_backup_count: 5,          // Keep 5 manifest backups
+            wal_sync_every_write: true, // Force fsync after every WAL write
+            verify_writes: true,        // Verify checksums after writing
+            manifest_backup_count: 5,   // Keep 5 manifest backups
             min_free_disk_bytes: 1024 * 1024 * 1024, // 1GB minimum free space
-            check_disk_space: true,            // Check disk space before writes
-            sync_parent_dirs: true,            // Sync parent dirs after file creation
+            check_disk_space: true,     // Check disk space before writes
+            sync_parent_dirs: true,     // Sync parent dirs after file creation
             // Fast transactional writes defaults (optimized for throughput)
-            group_commit_enabled: true,        // Enable group commit by default
-            group_commit_delay_ms: 5,          // 5ms max delay (good balance)
-            group_commit_max_writes: 1000,     // Flush after 1000 writes
+            group_commit_enabled: true, // Enable group commit by default
+            group_commit_delay_ms: 5,   // 5ms max delay (good balance)
+            group_commit_max_writes: 1000, // Flush after 1000 writes
             group_commit_max_bytes: 16 * 1024 * 1024, // 16MB max batch size
             // Recovery/scrubbing performance defaults
-            recovery_max_threads: 0,           // 0 = use all cores (set to 1-2 to reduce CPU)
-            recovery_throttle_ms: 0,           // 0 = no throttling (set to 10-50 to reduce CPU)
+            recovery_max_threads: 0, // 0 = use all cores (set to 1-2 to reduce CPU)
+            recovery_throttle_ms: 0, // 0 = no throttling (set to 10-50 to reduce CPU)
             // Enhanced fault tolerance defaults
-            validate_schema_on_load: true,     // Validate schema hash on every load
-            deep_scrub_validate_ipc: true,     // Validate IPC format during deep scrub
-            auto_repair_on_corruption: true,   // Auto-repair when corruption detected
-            verify_s3_uploads: true,           // Verify S3 uploads
+            validate_schema_on_load: true, // Validate schema hash on every load
+            deep_scrub_validate_ipc: true, // Validate IPC format during deep scrub
+            auto_repair_on_corruption: true, // Auto-repair when corruption detected
+            verify_s3_uploads: true,       // Verify S3 uploads
             segment_checksum_journal_enabled: true, // Enable checksum journal
-            segment_checksum_journal_path: None,    // Use default path
-            segment_operation_max_retries: 3,  // Retry failed operations up to 3 times
+            segment_checksum_journal_path: None, // Use default path
+            segment_operation_max_retries: 3, // Retry failed operations up to 3 times
             segment_operation_retry_delay_ms: 100, // 100ms between retries
             // Read replica defaults (disabled by default)
-            read_only: false,                  // Not a read-only replica by default
-            replica_sync_interval_ms: 1000,    // 1 second sync interval
-            replica_primary_addr: None,        // No primary server configured
+            read_only: false,               // Not a read-only replica by default
+            replica_sync_interval_ms: 1000, // 1 second sync interval
+            replica_primary_addr: None,     // No primary server configured
             // Segment limits & stability defaults (ClickHouse-style protection)
-            max_segments_emergency_threshold: 1000,  // Emergency at 1K (very aggressive)
-            max_segments_hard_limit: 5000,           // Hard reject at 5K (prevent runaway)
-            max_segments_per_table: 200,             // Per-table emergency at 200 (very aggressive)
-            max_segments_per_query: 1000,            // Cap query at 1K segments
-            adaptive_backpressure_enabled: true,     // Enable adaptive throttling
-            adaptive_backpressure_start_pct: 30,     // Start throttling at 30% (earlier)
-            adaptive_backpressure_max_delay_ms: 50,  // Max 50ms delay (lower latency)
+            max_segments_emergency_threshold: 1000, // Emergency at 1K (very aggressive)
+            max_segments_hard_limit: 5000,          // Hard reject at 5K (prevent runaway)
+            max_segments_per_table: 200,            // Per-table emergency at 200 (very aggressive)
+            max_segments_per_query: 1000,           // Cap query at 1K segments
+            adaptive_backpressure_enabled: true,    // Enable adaptive throttling
+            adaptive_backpressure_start_pct: 30,    // Start throttling at 30% (earlier)
+            adaptive_backpressure_max_delay_ms: 50, // Max 50ms delay (lower latency)
             emergency_compaction_target_segments: 50, // Compact to 50 segments per table
             emergency_compaction_bypass_cooldown: true, // Bypass cooldown in emergency
             // Memory-mapped segment access defaults
-            mmap_segments: true,                     // Enable mmap by default for large segments
-            mmap_min_bytes: 4 * 1024 * 1024,         // 4MB threshold for using mmap
+            mmap_segments: true, // Enable mmap by default for large segments
+            mmap_min_bytes: 4 * 1024 * 1024, // 4MB threshold for using mmap
             // Write buffering defaults (ClickHouse-style)
             // Disabled by default to preserve immediate visibility guarantee
             // Enable with --write-buffer for high-throughput scenarios
-            write_buffer_enabled: false,             // Opt-in for production high-throughput
+            write_buffer_enabled: false, // Opt-in for production high-throughput
             write_buffer_max_bytes: 64 * 1024 * 1024, // 64MB buffer (industry: 64-256MB)
-            write_buffer_flush_interval_ms: 500,     // Flush every 500ms max latency
-            min_segment_bytes: 8 * 1024 * 1024,      // 8MB minimum segment (industry: 8-64MB)
+            write_buffer_flush_interval_ms: 500, // Flush every 500ms max latency
+            min_segment_bytes: 8 * 1024 * 1024, // 8MB minimum segment (industry: 8-64MB)
             // Leveled compaction defaults (ClickHouse MergeTree-style)
-            leveled_compaction_enabled: true,        // Enable leveled compaction
-            level_base_bytes: 8 * 1024 * 1024,       // 8MB base (level 0) - industry standard
-            level_multiplier: 10,                    // 10x between levels (8MB, 80MB, 800MB, 8GB)
-            max_levels: 4,                           // 4 levels (8MB -> 8GB range)
-            segments_per_level_trigger: 3,           // Merge when 3+ segments (industry standard)
+            leveled_compaction_enabled: true, // Enable leveled compaction
+            level_base_bytes: 8 * 1024 * 1024, // 8MB base (level 0) - industry standard
+            level_multiplier: 10,             // 10x between levels (8MB, 80MB, 800MB, 8GB)
+            max_levels: 4,                    // 4 levels (8MB -> 8GB range)
+            segments_per_level_trigger: 3,    // Merge when 3+ segments (industry standard)
             // Continuous compaction defaults
-            continuous_compaction_enabled: true,     // Enable continuous compaction
-            compaction_threads: 2,                   // 2 dedicated compaction threads
-            compaction_idle_sleep_ms: 100,           // 100ms sleep when idle
+            continuous_compaction_enabled: true, // Enable continuous compaction
+            compaction_threads: 2,               // 2 dedicated compaction threads
+            compaction_idle_sleep_ms: 100,       // 100ms sleep when idle
             // Low-latency / low-resource defaults (industry standard)
             query_memory_limit_bytes: 10 * 1024 * 1024 * 1024, // 10GB per query (ClickHouse default)
-            lightweight_reads: true,                 // Enable lightweight read path
-            query_timeout_ms: 60000,                 // 60 second timeout (industry standard)
-            prefer_cache: true,                      // Prefer cached results
-            max_result_rows: 1_000_000_000,          // 1 billion rows max (ClickHouse default)
+            lightweight_reads: true,                           // Enable lightweight read path
+            query_timeout_ms: 60000, // 60 second timeout (industry standard)
+            prefer_cache: true,      // Prefer cached results
+            max_result_rows: 1_000_000_000, // 1 billion rows max (ClickHouse default)
             // Compression optimization defaults
             compression_skip_threshold_bytes: 4 * 1024, // 4KB - skip compression for tiny payloads
-            adaptive_compression_levels: true,       // Use higher levels for larger payloads
+            adaptive_compression_levels: true,          // Use higher levels for larger payloads
             // Write path optimization defaults
-            write_verify_sample_rate: 1,             // Verify all writes (safest)
+            write_verify_sample_rate: 1, // Verify all writes (safest)
             // Parallel compaction defaults
-            parallel_merge_enabled: true,            // Enable parallel merging
-            parallel_merge_min_segments: 4,          // Parallelize when merging 4+ segments
+            parallel_merge_enabled: true,   // Enable parallel merging
+            parallel_merge_min_segments: 4, // Parallelize when merging 4+ segments
             // Bounded aggregation defaults
             aggregation_memory_limit_bytes: 1024 * 1024 * 1024, // 1GB limit
-            aggregation_spill_enabled: true,         // Enable spill-to-disk
-            aggregation_spill_dir: None,             // Use default (data_dir/spill)
+            aggregation_spill_enabled: true,                    // Enable spill-to-disk
+            aggregation_spill_dir: None,                        // Use default (data_dir/spill)
             // Aggressive segment elimination defaults
-            target_segments_per_table: 100,          // Very aggressive target
-            auto_merge_micro_segments: true,         // Auto-merge tiny segments
+            target_segments_per_table: 100,  // Very aggressive target
+            auto_merge_micro_segments: true, // Auto-merge tiny segments
             micro_segment_threshold_bytes: 1024 * 1024, // 1MB threshold
-            compressed_cache_enabled: true,          // 2-3x more cache capacity
-            predicate_pushdown_enabled: true,        // Filter during load
-            sync_compact_threshold: 500,             // Sync compact above 500 segments
+            compressed_cache_enabled: true,  // 2-3x more cache capacity
+            predicate_pushdown_enabled: true, // Filter during load
+            sync_compact_threshold: 500,     // Sync compact above 500 segments
             // Query profiling defaults
-            query_profiling_enabled: true,           // Enable EXPLAIN ANALYZE
+            query_profiling_enabled: true, // Enable EXPLAIN ANALYZE
             // I/O optimization defaults
-            prefetch_enabled: true,                  // Enable read-ahead
-            prefetch_segments: 4,                    // Prefetch 4 segments ahead
-            direct_io_enabled: false,                // OS cache usually better
+            prefetch_enabled: true,   // Enable read-ahead
+            prefetch_segments: 4,     // Prefetch 4 segments ahead
+            direct_io_enabled: false, // OS cache usually better
             // Result streaming defaults
-            result_streaming_enabled: true,          // Stream large results
-            streaming_batch_size: 10000,             // 10K rows per batch
+            result_streaming_enabled: true, // Stream large results
+            streaming_batch_size: 10000,    // 10K rows per batch
             // Partition pruning defaults
-            partition_pruning_enabled: true,         // Enable time-based pruning
-            partition_granularity_secs: 86400,       // Daily partitions
+            partition_pruning_enabled: true, // Enable time-based pruning
+            partition_granularity_secs: 86400, // Daily partitions
             // Column encoding defaults
-            advanced_encoding_enabled: true,         // Enable Delta/RLE/Dictionary
-            dictionary_encoding_threshold_pct: 50,   // Dictionary if <50% unique
-            delta_encoding_enabled: true,            // Delta for sorted numerics
-            rle_encoding_enabled: true,              // RLE for repeated values
+            advanced_encoding_enabled: true, // Enable Delta/RLE/Dictionary
+            dictionary_encoding_threshold_pct: 50, // Dictionary if <50% unique
+            delta_encoding_enabled: true,    // Delta for sorted numerics
+            rle_encoding_enabled: true,      // RLE for repeated values
             // Self-repair defaults
-            auto_repair_enabled: true,               // Auto-repair from backups
-            repair_parallelism: 4,                   // 4 parallel repairs
+            auto_repair_enabled: true, // Auto-repair from backups
+            repair_parallelism: 4,     // 4 parallel repairs
             // Cost-based optimizer defaults
-            cost_based_optimizer_enabled: true,      // Enable CBO
-            stats_sample_size: 10000,                // 10K row sample for stats
+            cost_based_optimizer_enabled: true, // Enable CBO
+            stats_sample_size: 10000,           // 10K row sample for stats
         }
     }
 
@@ -1340,8 +1340,16 @@ impl BatchCacheShard {
         self.lru.get(segment_id).map(|e| e.batches.clone())
     }
 
-    fn insert(&mut self, segment_id: String, batches: Vec<RecordBatch>, max_shard_bytes: u64) -> Arc<Vec<RecordBatch>> {
-        let size_bytes = batches.iter().map(|b| b.get_array_memory_size() as u64).sum();
+    fn insert(
+        &mut self,
+        segment_id: String,
+        batches: Vec<RecordBatch>,
+        max_shard_bytes: u64,
+    ) -> Arc<Vec<RecordBatch>> {
+        let size_bytes = batches
+            .iter()
+            .map(|b| b.get_array_memory_size() as u64)
+            .sum();
         let arc_batches = Arc::new(batches);
 
         if max_shard_bytes == 0 || size_bytes > max_shard_bytes {
@@ -1361,7 +1369,13 @@ impl BatchCacheShard {
         }
 
         self.current_bytes = self.current_bytes.saturating_add(size_bytes);
-        self.lru.put(segment_id, BatchCacheEntry { batches: arc_batches.clone(), size_bytes });
+        self.lru.put(
+            segment_id,
+            BatchCacheEntry {
+                batches: arc_batches.clone(),
+                size_bytes,
+            },
+        );
         arc_batches
     }
 
@@ -1418,7 +1432,9 @@ impl ShardedBatchCache {
 
     fn insert(&self, segment_id: String, batches: Vec<RecordBatch>) -> Arc<Vec<RecordBatch>> {
         let idx = self.shard_index(&segment_id);
-        self.shards[idx].lock().insert(segment_id, batches, self.max_bytes_per_shard)
+        self.shards[idx]
+            .lock()
+            .insert(segment_id, batches, self.max_bytes_per_shard)
     }
 
     fn invalidate(&self, segment_id: &str) {
@@ -1480,7 +1496,6 @@ struct PlanCache {
     lru: LruCache<u64, PlanCacheEntry>,
     ttl: std::time::Duration,
 }
-
 
 impl std::fmt::Debug for QueryCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2114,7 +2129,11 @@ impl BloomCacheShard {
         self.lru.get(key).map(Arc::clone)
     }
 
-    fn insert(&mut self, key: BloomCacheKey, bloom: bloomfilter::Bloom<u64>) -> Arc<bloomfilter::Bloom<u64>> {
+    fn insert(
+        &mut self,
+        key: BloomCacheKey,
+        bloom: bloomfilter::Bloom<u64>,
+    ) -> Arc<bloomfilter::Bloom<u64>> {
         let arc_bloom = Arc::new(bloom);
         self.lru.put(key, Arc::clone(&arc_bloom));
         arc_bloom
@@ -2245,19 +2264,25 @@ pub struct Metrics {
 impl Metrics {
     /// Record a query latency in microseconds
     pub fn record_query_latency(&self, latency_us: u64) {
-        self.query_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.query_latency_sum_us
+            .fetch_add(latency_us, Ordering::Relaxed);
         if latency_us < 1_000 {
-            self.query_latency_bucket_1ms.fetch_add(1, Ordering::Relaxed);
+            self.query_latency_bucket_1ms
+                .fetch_add(1, Ordering::Relaxed);
         } else if latency_us < 10_000 {
-            self.query_latency_bucket_10ms.fetch_add(1, Ordering::Relaxed);
+            self.query_latency_bucket_10ms
+                .fetch_add(1, Ordering::Relaxed);
         } else if latency_us < 100_000 {
-            self.query_latency_bucket_100ms.fetch_add(1, Ordering::Relaxed);
+            self.query_latency_bucket_100ms
+                .fetch_add(1, Ordering::Relaxed);
         } else if latency_us < 1_000_000 {
             self.query_latency_bucket_1s.fetch_add(1, Ordering::Relaxed);
         } else if latency_us < 10_000_000 {
-            self.query_latency_bucket_10s.fetch_add(1, Ordering::Relaxed);
+            self.query_latency_bucket_10s
+                .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.query_latency_bucket_inf.fetch_add(1, Ordering::Relaxed);
+            self.query_latency_bucket_inf
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -2398,13 +2423,34 @@ impl Metrics {
         let cum_10s = cum_1s + bucket_10s;
         let cum_inf = cum_10s + bucket_inf;
 
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.001\"}} {}\n", cum_1ms));
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.01\"}} {}\n", cum_10ms));
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"0.1\"}} {}\n", cum_100ms));
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"1\"}} {}\n", cum_1s));
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"10\"}} {}\n", cum_10s));
-        out.push_str(&format!("boyodb_query_latency_seconds_bucket{{le=\"+Inf\"}} {}\n", cum_inf));
-        out.push_str(&format!("boyodb_query_latency_seconds_sum {}\n", latency_sum_us as f64 / 1_000_000.0));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"0.001\"}} {}\n",
+            cum_1ms
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"0.01\"}} {}\n",
+            cum_10ms
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"0.1\"}} {}\n",
+            cum_100ms
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"1\"}} {}\n",
+            cum_1s
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"10\"}} {}\n",
+            cum_10s
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_bucket{{le=\"+Inf\"}} {}\n",
+            cum_inf
+        ));
+        out.push_str(&format!(
+            "boyodb_query_latency_seconds_sum {}\n",
+            latency_sum_us as f64 / 1_000_000.0
+        ));
         out.push_str(&format!("boyodb_query_latency_seconds_count {}\n", cum_inf));
 
         out
@@ -2434,11 +2480,19 @@ impl Metrics {
         // Rate limiting/throttler metrics
         out.push_str("# HELP boyodb_throttler_admitted_total Total admitted queries\n");
         out.push_str("# TYPE boyodb_throttler_admitted_total counter\n");
-        out.push_str(&format!("boyodb_throttler_admitted_total {}\n", queries_admitted));
+        out.push_str(&format!(
+            "boyodb_throttler_admitted_total {}\n",
+            queries_admitted
+        ));
 
-        out.push_str("# HELP boyodb_throttler_rejected_total Total rejected queries (rate limited)\n");
+        out.push_str(
+            "# HELP boyodb_throttler_rejected_total Total rejected queries (rate limited)\n",
+        );
         out.push_str("# TYPE boyodb_throttler_rejected_total counter\n");
-        out.push_str(&format!("boyodb_throttler_rejected_total {}\n", queries_rejected));
+        out.push_str(&format!(
+            "boyodb_throttler_rejected_total {}\n",
+            queries_rejected
+        ));
 
         // Active query concurrency metrics
         out.push_str("# HELP boyodb_queries_active Currently executing queries\n");
@@ -2733,7 +2787,15 @@ impl WriteBuffer {
     }
 
     /// Add a batch to the buffer, returns true if flush is needed
-    fn add(&mut self, database: &str, table: &str, payload: Vec<u8>, shard_id: u16, watermark: u64, schema: Option<Arc<Schema>>) -> bool {
+    fn add(
+        &mut self,
+        database: &str,
+        table: &str,
+        payload: Vec<u8>,
+        shard_id: u16,
+        watermark: u64,
+        schema: Option<Arc<Schema>>,
+    ) -> bool {
         let bytes = payload.len() as u64;
         self.total_bytes += bytes;
 
@@ -3277,17 +3339,24 @@ impl ExplainPlan {
         } else {
             "Seq Scan"
         };
-        output.push_str(&format!("   └─→ {} on {}.{}\n", scan_type, self.database, self.table));
+        output.push_str(&format!(
+            "   └─→ {} on {}.{}\n",
+            scan_type, self.database, self.table
+        ));
 
         // Scan details
-        output.push_str(&format!("         segments={} bytes={}\n",
+        output.push_str(&format!(
+            "         segments={} bytes={}\n",
             self.segments_to_scan,
             format_bytes(self.total_bytes)
         ));
 
         // Filters
         if !self.filters.is_empty() {
-            output.push_str(&format!("         Filter: {}\n", self.filters.join(" AND ")));
+            output.push_str(&format!(
+                "         Filter: {}\n",
+                self.filters.join(" AND ")
+            ));
             if let Some(sel) = self.selectivity {
                 output.push_str(&format!("         Selectivity: {:.1}%\n", sel * 100.0));
             }
@@ -3320,13 +3389,15 @@ impl ExplainPlan {
             let total = hits + misses;
             if total > 0 {
                 let hit_rate = (hits as f64 / total as f64) * 100.0;
-                output.push_str(&format!("              Cache: {:.1}% hit rate ({}/{})\n",
-                    hit_rate, hits, total));
+                output.push_str(&format!(
+                    "              Cache: {:.1}% hit rate ({}/{})\n",
+                    hit_rate, hits, total
+                ));
             }
         }
 
         // Cost breakdown
-        output.push_str("\n");
+        output.push('\n');
         output.push_str(&"─".repeat(60));
         output.push_str("\nCost Breakdown:\n");
         if let Some(io) = self.io_cost {
@@ -3918,7 +3989,11 @@ impl Db {
         // Apply adaptive backpressure delay if enabled
         let delay_ms = self.calculate_backpressure_delay();
         if delay_ms > 0 {
-            tracing::debug!(delay_ms = delay_ms, segments = current_segments, "Applying adaptive backpressure");
+            tracing::debug!(
+                delay_ms = delay_ms,
+                segments = current_segments,
+                "Applying adaptive backpressure"
+            );
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
 
@@ -3927,8 +4002,16 @@ impl Db {
         // Write buffering: if enabled and payload is small, buffer it
         // Flush when buffer exceeds threshold or time expires
         if self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes {
-            let db_name = batch.database.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
-            let table_name = batch.table.as_deref().filter(|s| !s.is_empty()).unwrap_or("default");
+            let db_name = batch
+                .database
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default");
+            let table_name = batch
+                .table
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("default");
 
             let should_flush = {
                 let mut buffer = self.write_buffer.lock();
@@ -3948,7 +4031,9 @@ impl Db {
             }
 
             self.metrics.ingests_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.ingests_bytes.fetch_add(payload_len, Ordering::Relaxed);
+            self.metrics
+                .ingests_bytes
+                .fetch_add(payload_len, Ordering::Relaxed);
             return Ok(());
         }
         if batch.payload_ipc.is_empty() {
@@ -4328,7 +4413,8 @@ impl Db {
     /// Get segment count for a specific table
     fn get_table_segment_count(&self, database: &str, table: &str) -> usize {
         let index = self.manifest_index.read();
-        index.get_table_entries(database, table)
+        index
+            .get_table_entries(database, table)
             .map(|entries| entries.len())
             .unwrap_or(0)
     }
@@ -4389,7 +4475,11 @@ impl Db {
         // Apply adaptive backpressure delay if enabled
         let delay_ms = self.calculate_backpressure_delay();
         if delay_ms > 0 {
-            tracing::debug!(delay_ms = delay_ms, segments = self.segment_count(), "Applying adaptive backpressure");
+            tracing::debug!(
+                delay_ms = delay_ms,
+                segments = self.segment_count(),
+                "Applying adaptive backpressure"
+            );
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
 
@@ -4404,11 +4494,11 @@ impl Db {
         // Collect validated entries and payloads
         let mut validated_entries: Vec<(
             ManifestEntry,
-            Vec<u8>,  // stored_payload
-            String,   // db_name
-            String,   // table_name
-            u16,      // shard_id
-            u64,      // row_count
+            Vec<u8>, // stored_payload
+            String,  // db_name
+            String,  // table_name
+            u16,     // shard_id
+            u64,     // row_count
         )> = Vec::with_capacity(batches.len());
 
         // Phase 1: Validate all batches (no locks held yet)
@@ -4535,45 +4625,50 @@ impl Db {
         {
             let mut manifest = self.manifest.write();
 
-            entries_for_wal = validated_entries
-                .iter()
-                .map(|(entry, payload, db_name, table_name, _, _)| {
-                    // Ensure database exists
-                    if !manifest.databases.iter().any(|d| d.name == db_name.as_str()) {
-                        manifest.databases.push(crate::replication::DatabaseMeta {
-                            name: db_name.clone(),
-                        });
-                    }
+            entries_for_wal =
+                validated_entries
+                    .iter()
+                    .map(|(entry, payload, db_name, table_name, _, _)| {
+                        // Ensure database exists
+                        if !manifest
+                            .databases
+                            .iter()
+                            .any(|d| d.name == db_name.as_str())
+                        {
+                            manifest.databases.push(crate::replication::DatabaseMeta {
+                                name: db_name.clone(),
+                            });
+                        }
 
-                    // Ensure table exists
-                    if !manifest.tables.iter().any(|t| {
-                        t.database == db_name.as_str() && t.name == table_name.as_str()
-                    }) {
-                        manifest.tables.push(crate::replication::TableMeta {
-                            database: db_name.clone(),
-                            name: table_name.clone(),
-                            schema_json: None,
-                            compression: None,
-                            deduplication: None,
-                            constraints: Vec::new(),
-                            retention_policy: None,
-                            partition_config: None,
-                        });
-                    }
+                        // Ensure table exists
+                        if !manifest.tables.iter().any(|t| {
+                            t.database == db_name.as_str() && t.name == table_name.as_str()
+                        }) {
+                            manifest.tables.push(crate::replication::TableMeta {
+                                database: db_name.clone(),
+                                name: table_name.clone(),
+                                schema_json: None,
+                                compression: None,
+                                deduplication: None,
+                                constraints: Vec::new(),
+                                retention_policy: None,
+                                partition_config: None,
+                            });
+                        }
 
-                    manifest.bump_version();
-                    let mut entry = entry.clone();
-                    entry.version_added = manifest.version;
-                    let entry_index = manifest.entries.len();
-                    manifest.entries.push(entry.clone());
+                        manifest.bump_version();
+                        let mut entry = entry.clone();
+                        entry.version_added = manifest.version;
+                        let entry_index = manifest.entries.len();
+                        manifest.entries.push(entry.clone());
 
-                    // Update index
-                    let mut index = self.manifest_index.write();
-                    index.add_entry(entry_index, &entry);
+                        // Update index
+                        let mut index = self.manifest_index.write();
+                        index.add_entry(entry_index, &entry);
 
-                    (entry, payload.clone())
-                })
-                .collect();
+                        (entry, payload.clone())
+                    })
+                    .collect();
         }
 
         // Phase 4: WAL writes (single fsync for all entries with group commit)
@@ -4618,9 +4713,16 @@ impl Db {
             }
         }
 
-        let total_bytes: u64 = validated_entries.iter().map(|(e, _, _, _, _, _)| e.size_bytes).sum();
-        self.metrics.ingests_total.fetch_add(count as u64, Ordering::Relaxed);
-        self.metrics.ingests_bytes.fetch_add(total_bytes, Ordering::Relaxed);
+        let total_bytes: u64 = validated_entries
+            .iter()
+            .map(|(e, _, _, _, _, _)| e.size_bytes)
+            .sum();
+        self.metrics
+            .ingests_total
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.metrics
+            .ingests_bytes
+            .fetch_add(total_bytes, Ordering::Relaxed);
 
         // Track rows for auto-stats
         for (_, _, db_name, table_name, _, row_count) in validated_entries {
@@ -4910,7 +5012,8 @@ impl Db {
         // Check for information_schema queries (virtual tables)
         if let Some(response) = self.handle_information_schema_query(&request.sql)? {
             self.metrics.queries_total.fetch_add(1, Ordering::Relaxed);
-            self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+            self.metrics
+                .record_query_latency(query_start.elapsed().as_micros() as u64);
             return Ok(response);
         }
 
@@ -4977,7 +5080,8 @@ impl Db {
         };
 
         // Record query latency for all execution paths
-        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+        self.metrics
+            .record_query_latency(query_start.elapsed().as_micros() as u64);
         result
     }
 
@@ -5326,7 +5430,8 @@ impl Db {
         };
 
         self.metrics.queries_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+        self.metrics
+            .record_query_latency(query_start.elapsed().as_micros() as u64);
 
         Ok(QueryResponse {
             records_ipc: Vec::new(),
@@ -5350,7 +5455,10 @@ impl Db {
         let deadline = if timeout_millis > 0 {
             Some(std::time::Instant::now() + std::time::Duration::from_millis(timeout_millis))
         } else if self.cfg.query_timeout_ms > 0 {
-            Some(std::time::Instant::now() + std::time::Duration::from_millis(self.cfg.query_timeout_ms))
+            Some(
+                std::time::Instant::now()
+                    + std::time::Duration::from_millis(self.cfg.query_timeout_ms),
+            )
         } else {
             None
         };
@@ -5381,7 +5489,8 @@ impl Db {
             )),
         };
 
-        self.metrics.record_query_latency(query_start.elapsed().as_micros() as u64);
+        self.metrics
+            .record_query_latency(query_start.elapsed().as_micros() as u64);
         result
     }
 
@@ -5736,8 +5845,10 @@ impl Db {
                 let has_large_data = estimated_bytes > 8 * 1024 * 1024;
                 let has_many_segments = segment_count > 8;
                 let very_large_scan = segment_count > 1000;
-                let worth_parallelizing =
-                    very_large_scan || has_large_data || has_many_segments || avg_segment_size > 4 * 1024 * 1024;
+                let worth_parallelizing = very_large_scan
+                    || has_large_data
+                    || has_many_segments
+                    || avg_segment_size > 4 * 1024 * 1024;
 
                 has_enough_segments && worth_parallelizing && !offset_pushdown
             };
@@ -5758,7 +5869,9 @@ impl Db {
                     .filter_map(|entry| {
                         // Check limit ONLY when we have a meaningful limit (not MAX)
                         // For full table scans without LIMIT, we must scan ALL segments
-                        if limit < usize::MAX && collected_rows_ref.load(Ordering::Relaxed) >= limit as u64 {
+                        if limit < usize::MAX
+                            && collected_rows_ref.load(Ordering::Relaxed) >= limit as u64
+                        {
                             return None;
                         }
                         // Use try_load to skip damaged segments
@@ -5768,7 +5881,11 @@ impl Db {
                             Err(e) => return Some(Err(e)),
                         };
                         // Use projection pushdown when projection is available
-                        let filtered = match filter_ipc_with_projection(&payload, filter_ref, projection_ref) {
+                        let filtered = match filter_ipc_with_projection(
+                            &payload,
+                            filter_ref,
+                            projection_ref,
+                        ) {
                             Ok(f) => f,
                             Err(e) => return Some(Err(e)),
                         };
@@ -5783,7 +5900,9 @@ impl Db {
                                 .unwrap_or_else(|| {
                                     // Fall back to decoding IPC to get accurate row count
                                     read_ipc_batches(&filtered)
-                                        .map(|batches| batches.iter().map(|b| b.num_rows() as u64).sum())
+                                        .map(|batches| {
+                                            batches.iter().map(|b| b.num_rows() as u64).sum()
+                                        })
                                         .unwrap_or(1)
                                 });
                             collected_rows_ref.fetch_add(actual_rows, Ordering::Relaxed);
@@ -5839,8 +5958,7 @@ impl Db {
                     };
                     let original_size = payload.len() as u64;
                     if let Some(ref seg_filter) = segment_filter {
-                        let batches =
-                            filter_ipc_batches(read_ipc_batches(&payload)?, seg_filter)?;
+                        let batches = filter_ipc_batches(read_ipc_batches(&payload)?, seg_filter)?;
                         if batches.is_empty() {
                             data_skipped_bytes += original_size;
                             continue;
@@ -5858,7 +5976,8 @@ impl Db {
                         records.extend_from_slice(&ipc);
                     } else {
                         // Use projection pushdown when available
-                        let filtered = filter_ipc_with_projection(&payload, &filter, projection.as_deref())?;
+                        let filtered =
+                            filter_ipc_with_projection(&payload, &filter, projection.as_deref())?;
                         if filtered.is_empty() {
                             data_skipped_bytes += original_size;
                         } else {
@@ -5957,7 +6076,11 @@ impl Db {
 
                 // Build COUNT(*) result - use alias if provided, otherwise default to "count"
                 let col_name = agg_plan.aggs[0].output_name();
-                let schema = Arc::new(Schema::new(vec![Field::new(&col_name, DataType::UInt64, false)]));
+                let schema = Arc::new(Schema::new(vec![Field::new(
+                    &col_name,
+                    DataType::UInt64,
+                    false,
+                )]));
                 let count_array = UInt64Array::from(vec![total_count]);
                 let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(count_array)])
                     .map_err(|e| EngineError::Internal(format!("count result: {e}")))?;
@@ -5965,9 +6088,11 @@ impl Db {
                 {
                     let mut writer = StreamWriter::try_new(&mut buf, &schema)
                         .map_err(|e| EngineError::Internal(format!("ipc writer: {e}")))?;
-                    writer.write(&batch)
+                    writer
+                        .write(&batch)
                         .map_err(|e| EngineError::Internal(format!("ipc write: {e}")))?;
-                    writer.finish()
+                    writer
+                        .finish()
                         .map_err(|e| EngineError::Internal(format!("ipc finish: {e}")))?;
                 }
                 records = buf;
@@ -6115,7 +6240,9 @@ impl Db {
                     entry.table,
                     e
                 );
-                self.metrics.skipped_segments.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .skipped_segments
+                    .fetch_add(1, Ordering::Relaxed);
                 Ok(None)
             }
             Err(e) => Err(e),
@@ -6457,10 +6584,15 @@ impl Db {
                                 None
                             } else if right_batches.is_empty() {
                                 // All left rows have no match - return all left rows
-                                Some(arrow_select::concat::concat_batches(
-                                    &left_batches[0].schema(),
-                                    &left_batches,
-                                ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?)
+                                Some(
+                                    arrow_select::concat::concat_batches(
+                                        &left_batches[0].schema(),
+                                        &left_batches,
+                                    )
+                                    .map_err(|e| {
+                                        EngineError::Internal(format!("concat failed: {e}"))
+                                    })?,
+                                )
                             } else {
                                 Self::semi_join_batches(
                                     &left_batches,
@@ -6643,10 +6775,15 @@ impl Db {
                         if current_batches.is_empty() {
                             None
                         } else {
-                            Some(arrow_select::concat::concat_batches(
-                                &current_batches[0].schema(),
-                                &current_batches,
-                            ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?)
+                            Some(
+                                arrow_select::concat::concat_batches(
+                                    &current_batches[0].schema(),
+                                    &current_batches,
+                                )
+                                .map_err(|e| {
+                                    EngineError::Internal(format!("concat failed: {e}"))
+                                })?,
+                            )
                         }
                     } else if current_batches.is_empty() {
                         None
@@ -7437,10 +7574,10 @@ impl Db {
         if right_batches.is_empty() {
             // No right rows: semi-join returns nothing, anti-join returns all left rows
             if anti {
-                return Ok(Some(arrow_select::concat::concat_batches(
-                    &left_batches[0].schema(),
-                    left_batches,
-                ).map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?));
+                return Ok(Some(
+                    arrow_select::concat::concat_batches(&left_batches[0].schema(), left_batches)
+                        .map_err(|e| EngineError::Internal(format!("concat failed: {e}")))?,
+                ));
             } else {
                 return Ok(None);
             }
@@ -7531,7 +7668,10 @@ impl Db {
         // Extract left timestamps
         for (batch_idx, batch) in left_batches.iter().enumerate() {
             let col_idx = batch.schema().index_of(left_col).map_err(|_| {
-                EngineError::InvalidArgument(format!("column '{}' not found in left table", left_col))
+                EngineError::InvalidArgument(format!(
+                    "column '{}' not found in left table",
+                    left_col
+                ))
             })?;
             let col = batch.column(col_idx);
 
@@ -7544,7 +7684,10 @@ impl Db {
         // Extract right timestamps
         for (batch_idx, batch) in right_batches.iter().enumerate() {
             let col_idx = batch.schema().index_of(right_col).map_err(|_| {
-                EngineError::InvalidArgument(format!("column '{}' not found in right table", right_col))
+                EngineError::InvalidArgument(format!(
+                    "column '{}' not found in right table",
+                    right_col
+                ))
             })?;
             let col = batch.column(col_idx);
 
@@ -7565,12 +7708,14 @@ impl Db {
         for &(left_ts, left_batch, left_row) in &left_rows {
             let best_match = if backward {
                 // Find the largest right timestamp <= left timestamp
-                right_rows.iter()
+                right_rows
+                    .iter()
                     .filter(|r| r.0 <= left_ts)
                     .max_by_key(|r| r.0)
             } else {
                 // Find the smallest right timestamp >= left timestamp
-                right_rows.iter()
+                right_rows
+                    .iter()
                     .filter(|r| r.0 >= left_ts)
                     .min_by_key(|r| r.0)
             };
@@ -7620,14 +7765,18 @@ impl Db {
             result_arrays.push(array);
         }
 
-        let result_batch = RecordBatch::try_new(result_schema, result_arrays)
-            .map_err(|e| EngineError::Internal(format!("failed to create ASOF join result: {e}")))?;
+        let result_batch = RecordBatch::try_new(result_schema, result_arrays).map_err(|e| {
+            EngineError::Internal(format!("failed to create ASOF join result: {e}"))
+        })?;
 
         Ok(Some(result_batch))
     }
 
     /// Extract a timestamp/numeric value from an array for ASOF join comparison
-    fn extract_timestamp_value(col: &dyn arrow_array::Array, row_idx: usize) -> Result<i64, EngineError> {
+    fn extract_timestamp_value(
+        col: &dyn arrow_array::Array,
+        row_idx: usize,
+    ) -> Result<i64, EngineError> {
         use arrow_array::*;
 
         if col.is_null(row_idx) {
@@ -7644,7 +7793,9 @@ impl Db {
                 Ok(arr.value(row_idx) as i64)
             }
             DataType::Timestamp(_, _) => {
-                let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
                     .or_else(|| None);
                 if let Some(ts_arr) = arr {
                     Ok(ts_arr.value(row_idx))
@@ -7652,12 +7803,17 @@ impl Db {
                     // Try nanoseconds
                     if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
                         Ok(ts_arr.value(row_idx) / 1000) // Convert to micros
-                    } else if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                    } else if let Some(ts_arr) =
+                        col.as_any().downcast_ref::<TimestampMillisecondArray>()
+                    {
                         Ok(ts_arr.value(row_idx) * 1000) // Convert to micros
-                    } else if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampSecondArray>() {
+                    } else if let Some(ts_arr) = col.as_any().downcast_ref::<TimestampSecondArray>()
+                    {
                         Ok(ts_arr.value(row_idx) * 1_000_000) // Convert to micros
                     } else {
-                        Err(EngineError::InvalidArgument("unsupported timestamp type for ASOF join".into()))
+                        Err(EngineError::InvalidArgument(
+                            "unsupported timestamp type for ASOF join".into(),
+                        ))
                     }
                 }
             }
@@ -8556,10 +8712,8 @@ impl Db {
 
         for batch in &batches {
             let schema = batch.schema();
-            let col_indices: Vec<Option<usize>> = columns
-                .iter()
-                .map(|c| schema.index_of(c).ok())
-                .collect();
+            let col_indices: Vec<Option<usize>> =
+                columns.iter().map(|c| schema.index_of(c).ok()).collect();
 
             // Check if all columns exist
             if col_indices.iter().any(|i| i.is_none()) {
@@ -8603,7 +8757,9 @@ impl Db {
             .tables
             .iter()
             .find(|t| t.database == database && t.name == table)
-            .ok_or_else(|| EngineError::NotFound(format!("table {}.{} not found", database, table)))?;
+            .ok_or_else(|| {
+                EngineError::NotFound(format!("table {}.{} not found", database, table))
+            })?;
 
         let defaults: Vec<SqlValue> = columns
             .iter()
@@ -9574,8 +9730,7 @@ impl Db {
                     // For distinct count, use HyperLogLog-style estimation (max of segments)
                     // since summing overestimates due to duplicates across segments
                     if let Some(distinct) = col_stats.distinct_count {
-                        entry_stats.distinct_count =
-                            entry_stats.distinct_count.max(distinct);
+                        entry_stats.distinct_count = entry_stats.distinct_count.max(distinct);
                     }
 
                     // Null count sums across segments
@@ -9614,8 +9769,14 @@ impl Db {
             let mut col_stats = OptimizerColStats {
                 distinct_count: col_meta.distinct_count,
                 null_count: col_meta.null_count,
-                min_value: col_meta.min_value.as_ref().and_then(|s| parse_stat_value(s)),
-                max_value: col_meta.max_value.as_ref().and_then(|s| parse_stat_value(s)),
+                min_value: col_meta
+                    .min_value
+                    .as_ref()
+                    .and_then(|s| parse_stat_value(s)),
+                max_value: col_meta
+                    .max_value
+                    .as_ref()
+                    .and_then(|s| parse_stat_value(s)),
                 avg_length: col_meta.avg_length,
                 histogram: None,
                 most_common_values: None,
@@ -9669,7 +9830,9 @@ impl Db {
     }
 
     /// Convert HistogramMeta to optimizer Histogram format
-    fn convert_histogram_meta(meta: &crate::replication::HistogramMeta) -> crate::optimizer::Histogram {
+    fn convert_histogram_meta(
+        meta: &crate::replication::HistogramMeta,
+    ) -> crate::optimizer::Histogram {
         use crate::optimizer::{Histogram, HistogramBucket, StatValue};
 
         let mut buckets = Vec::with_capacity(meta.num_buckets);
@@ -9710,12 +9873,7 @@ impl Db {
 
     /// Track rows changed for a table and trigger stats update if needed
     /// This is called after successful data ingestion
-    fn track_rows_and_maybe_update_stats(
-        &self,
-        database: &str,
-        table: &str,
-        rows_ingested: u64,
-    ) {
+    fn track_rows_and_maybe_update_stats(&self, database: &str, table: &str, rows_ingested: u64) {
         if !self.cfg.auto_stats_enabled {
             return;
         }
@@ -9728,18 +9886,21 @@ impl Db {
 
         let should_update = {
             let mut tracker = self.stats_tracker.write();
-            let state = tracker.tables.entry(table_key.clone()).or_insert(TableStatsState {
-                rows_changed: 0,
-                last_update_secs: 0,
-                updating: false,
-            });
+            let state = tracker
+                .tables
+                .entry(table_key.clone())
+                .or_insert(TableStatsState {
+                    rows_changed: 0,
+                    last_update_secs: 0,
+                    updating: false,
+                });
 
             state.rows_changed += rows_ingested;
 
             // Check if we should trigger an update
             let rows_threshold_met = state.rows_changed >= self.cfg.auto_stats_min_rows_changed;
-            let cooldown_elapsed =
-                now_secs.saturating_sub(state.last_update_secs) >= self.cfg.auto_stats_cooldown_secs;
+            let cooldown_elapsed = now_secs.saturating_sub(state.last_update_secs)
+                >= self.cfg.auto_stats_cooldown_secs;
 
             // Prevent concurrent updates (race condition fix)
             if rows_threshold_met && cooldown_elapsed && !state.updating {
@@ -9767,12 +9928,7 @@ impl Db {
             }
 
             if let Err(e) = result {
-                tracing::warn!(
-                    "Auto-stats update failed for {}.{}: {}",
-                    database,
-                    table,
-                    e
-                );
+                tracing::warn!("Auto-stats update failed for {}.{}: {}", database, table, e);
             } else {
                 tracing::debug!(
                     "Auto-stats updated for {}.{} (rows threshold reached)",
@@ -10066,7 +10222,9 @@ impl Db {
         let manifest = self.manifest.read();
         let mut counts: HashMap<(String, String), usize> = HashMap::new();
         for entry in manifest.entries.iter() {
-            *counts.entry((entry.database.clone(), entry.table.clone())).or_insert(0) += 1;
+            *counts
+                .entry((entry.database.clone(), entry.table.clone()))
+                .or_insert(0) += 1;
         }
         counts
     }
@@ -10103,19 +10261,24 @@ impl Db {
     /// Calculate adaptive backpressure delay based on segment count
     /// Returns delay in milliseconds (0 = no delay)
     pub fn calculate_backpressure_delay(&self) -> u64 {
-        if !self.cfg.adaptive_backpressure_enabled || self.cfg.max_segments_emergency_threshold == 0 {
+        if !self.cfg.adaptive_backpressure_enabled || self.cfg.max_segments_emergency_threshold == 0
+        {
             return 0;
         }
         let count = self.segment_count();
         let start_threshold = (self.cfg.max_segments_emergency_threshold as u64
-            * self.cfg.adaptive_backpressure_start_pct as u64) / 100;
+            * self.cfg.adaptive_backpressure_start_pct as u64)
+            / 100;
 
         if count < start_threshold as usize {
             return 0;
         }
 
         // Linear interpolation from start_threshold to emergency_threshold
-        let range = self.cfg.max_segments_emergency_threshold.saturating_sub(start_threshold as usize);
+        let range = self
+            .cfg
+            .max_segments_emergency_threshold
+            .saturating_sub(start_threshold as usize);
         if range == 0 {
             return self.cfg.adaptive_backpressure_max_delay_ms;
         }
@@ -10182,63 +10345,66 @@ impl Db {
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
         pool.install(|| {
-            tables_to_compact.par_iter().for_each(|((database, table), initial_count)| {
-                tracing::info!(
-                    database = %database,
-                    table = %table,
-                    segments = initial_count,
-                    target = target,
-                    "Emergency compacting table (parallel)"
-                );
+            tables_to_compact
+                .par_iter()
+                .for_each(|((database, table), initial_count)| {
+                    tracing::info!(
+                        database = %database,
+                        table = %table,
+                        segments = initial_count,
+                        target = target,
+                        "Emergency compacting table (parallel)"
+                    );
 
-                let mut iterations = 0;
-                loop {
-                    iterations += 1;
-                    if iterations > max_iterations {
-                        tracing::warn!(
-                            database = %database,
-                            table = %table,
-                            iterations = iterations,
-                            "Emergency compaction: max iterations reached"
-                        );
-                        break;
-                    }
+                    let mut iterations = 0;
+                    loop {
+                        iterations += 1;
+                        if iterations > max_iterations {
+                            tracing::warn!(
+                                database = %database,
+                                table = %table,
+                                iterations = iterations,
+                                "Emergency compaction: max iterations reached"
+                            );
+                            break;
+                        }
 
-                    match self.compact_table(database, table) {
-                        Ok(Some(_)) => {
-                            compacted.fetch_add(1, AtomicOrdering::Relaxed);
-                            // Check if we've reached target
-                            let new_count = self.segment_counts_per_table()
-                                .get(&(database.clone(), table.clone()))
-                                .copied()
-                                .unwrap_or(0);
-                            if new_count <= target {
-                                tracing::info!(
+                        match self.compact_table(database, table) {
+                            Ok(Some(_)) => {
+                                compacted.fetch_add(1, AtomicOrdering::Relaxed);
+                                // Check if we've reached target
+                                let new_count = self
+                                    .segment_counts_per_table()
+                                    .get(&(database.clone(), table.clone()))
+                                    .copied()
+                                    .unwrap_or(0);
+                                if new_count <= target {
+                                    tracing::info!(
+                                        database = %database,
+                                        table = %table,
+                                        new_count = new_count,
+                                        iterations = iterations,
+                                        "Emergency compaction: reached target"
+                                    );
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                // No more segments to compact
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::error!(
                                     database = %database,
                                     table = %table,
-                                    new_count = new_count,
-                                    iterations = iterations,
-                                    "Emergency compaction: reached target"
+                                    error = %e,
+                                    "Emergency compaction failed"
                                 );
                                 break;
                             }
                         }
-                        Ok(None) => {
-                            // No more segments to compact
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                database = %database,
-                                table = %table,
-                                error = %e,
-                                "Emergency compaction failed"
-                            );
-                            break;
-                        }
                     }
-                }
-            });
+                });
         });
 
         let total_compacted = compacted.load(AtomicOrdering::Relaxed);
@@ -10439,8 +10605,12 @@ impl Db {
 
         // Record compaction metrics
         let original_bytes: u64 = entries.iter().map(|e| e.size_bytes).sum();
-        self.metrics.compactions_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.compactions_bytes.fetch_add(original_bytes, Ordering::Relaxed);
+        self.metrics
+            .compactions_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .compactions_bytes
+            .fetch_add(original_bytes, Ordering::Relaxed);
 
         Ok(new_entry)
     }
@@ -11117,7 +11287,13 @@ impl Db {
                 .materialized_views
                 .iter()
                 .find(|v| v.database == database && v.name == name)
-                .map(|v| (v.query_sql.clone(), v.last_refresh_micros, v.data_segment_id.clone()))
+                .map(|v| {
+                    (
+                        v.query_sql.clone(),
+                        v.last_refresh_micros,
+                        v.data_segment_id.clone(),
+                    )
+                })
                 .ok_or_else(|| {
                     EngineError::NotFound(format!("materialized view not found: {database}.{name}"))
                 })?
@@ -11579,7 +11755,11 @@ impl Db {
 
     /// Extract LIKE patterns from the filter for a specific column
     /// Returns Vec<(pattern, negate)> where negate=true means NOT LIKE
-    fn get_like_patterns_for_column(&self, filter: &QueryFilter, column: &str) -> Vec<(String, bool)> {
+    fn get_like_patterns_for_column(
+        &self,
+        filter: &QueryFilter,
+        column: &str,
+    ) -> Vec<(String, bool)> {
         filter.all_like_patterns_for_column(column)
     }
 
@@ -11682,8 +11862,9 @@ impl Db {
             crate::sql::IndexType::Fulltext => {
                 if let Some(builder) = fulltext_builder {
                     let bytes = builder.build()?;
-                    fs::write(&path, bytes)
-                        .map_err(|e| EngineError::Io(format!("write fulltext index failed: {e}")))?;
+                    fs::write(&path, bytes).map_err(|e| {
+                        EngineError::Io(format!("write fulltext index failed: {e}"))
+                    })?;
                 }
             }
             _ => {}
@@ -12126,7 +12307,9 @@ impl Db {
             // Track distinct value - takes &str, only allocates when inserting new
             #[inline]
             fn track_distinct(&mut self, value: &str) {
-                if self.distinct_values.len() < MAX_DISTINCT_TRACK && !self.distinct_values.contains(value) {
+                if self.distinct_values.len() < MAX_DISTINCT_TRACK
+                    && !self.distinct_values.contains(value)
+                {
                     self.distinct_values.insert(value.to_owned());
                 }
             }
@@ -12164,7 +12347,11 @@ impl Db {
             let payload = match self.load_segment_cached(entry) {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!("ANALYZE: failed to load segment {}: {}", entry.segment_id, e);
+                    tracing::warn!(
+                        "ANALYZE: failed to load segment {}: {}",
+                        entry.segment_id,
+                        e
+                    );
                     continue;
                 }
             };
@@ -12203,8 +12390,10 @@ impl Db {
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i) as i64;
-                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
-                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.min_i64 =
+                                            Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 =
+                                            Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
                                         accum.track_histogram(v as f64);
                                         // Convert to string and track (single allocation path)
                                         accum.track_string_value(&v.to_string());
@@ -12218,8 +12407,10 @@ impl Db {
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i) as i64;
-                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
-                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.min_i64 =
+                                            Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 =
+                                            Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
                                         accum.track_histogram(v as f64);
                                         // Convert to string and track (single allocation path)
                                         accum.track_string_value(&v.to_string());
@@ -12233,8 +12424,10 @@ impl Db {
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i) as i64;
-                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
-                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.min_i64 =
+                                            Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 =
+                                            Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
                                         accum.track_histogram(v as f64);
                                         // Convert to string and track (single allocation path)
                                         accum.track_string_value(&v.to_string());
@@ -12248,8 +12441,10 @@ impl Db {
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i);
-                                        accum.min_i64 = Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
-                                        accum.max_i64 = Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
+                                        accum.min_i64 =
+                                            Some(accum.min_i64.map_or(v, |m: i64| m.min(v)));
+                                        accum.max_i64 =
+                                            Some(accum.max_i64.map_or(v, |m: i64| m.max(v)));
                                         accum.track_histogram(v as f64);
                                         // Convert to string and track (single allocation path)
                                         accum.track_string_value(&v.to_string());
@@ -12264,8 +12459,10 @@ impl Db {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i) as f64;
                                         if v.is_finite() {
-                                            accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
-                                            accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
+                                            accum.min_f64 =
+                                                Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
+                                            accum.max_f64 =
+                                                Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
                                             accum.track_histogram(v);
                                             // Use ryu for fast float formatting if available, else format
                                             accum.track_string_value(&format!("{:.6}", v));
@@ -12281,8 +12478,10 @@ impl Db {
                                     if !arr.is_null(i) {
                                         let v = arr.value(i);
                                         if v.is_finite() {
-                                            accum.min_f64 = Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
-                                            accum.max_f64 = Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
+                                            accum.min_f64 =
+                                                Some(accum.min_f64.map_or(v, |m: f64| m.min(v)));
+                                            accum.max_f64 =
+                                                Some(accum.max_f64.map_or(v, |m: f64| m.max(v)));
                                             accum.track_histogram(v);
                                             // Use ryu for fast float formatting if available, else format
                                             accum.track_string_value(&format!("{:.6}", v));
@@ -12312,7 +12511,8 @@ impl Db {
                             }
                         }
                         arrow_schema::DataType::LargeUtf8 => {
-                            if let Some(arr) = col_array.as_any().downcast_ref::<LargeStringArray>() {
+                            if let Some(arr) = col_array.as_any().downcast_ref::<LargeStringArray>()
+                            {
                                 accum.is_string = true;
                                 for i in 0..arr.len() {
                                     if !arr.is_null(i) {
@@ -12378,7 +12578,8 @@ impl Db {
                     }
 
                     // Use slices directly to avoid allocation
-                    if let Some(corr) = Self::pearson_correlation(&col1_vals[..n], &col2_vals[..n]) {
+                    if let Some(corr) = Self::pearson_correlation(&col1_vals[..n], &col2_vals[..n])
+                    {
                         if corr.abs() > 0.1 {
                             let key = if col1_name < col2_name {
                                 format!("{}:{}", col1_name, col2_name)
@@ -12394,8 +12595,10 @@ impl Db {
         };
 
         // Build statistics metadata
-        let mut col_stats_meta: std::collections::HashMap<String, crate::replication::ColumnStatsMeta> =
-            std::collections::HashMap::new();
+        let mut col_stats_meta: std::collections::HashMap<
+            String,
+            crate::replication::ColumnStatsMeta,
+        > = std::collections::HashMap::new();
 
         let column_count = column_stats.len();
         for (col_name, mut accum) in column_stats {
@@ -12513,7 +12716,10 @@ impl Db {
     }
 
     /// Build equi-height histogram from sorted values
-    fn build_histogram(values: &mut [f64], num_buckets: usize) -> crate::replication::HistogramMeta {
+    fn build_histogram(
+        values: &mut [f64],
+        num_buckets: usize,
+    ) -> crate::replication::HistogramMeta {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = values.len();
@@ -12540,10 +12746,8 @@ impl Db {
             counts.push((end - start) as u64);
 
             // Count distinct in bucket using raw bits (avoids string allocation)
-            let bucket_distinct: std::collections::HashSet<u64> = values[start..end]
-                .iter()
-                .map(|v| v.to_bits())
-                .collect();
+            let bucket_distinct: std::collections::HashSet<u64> =
+                values[start..end].iter().map(|v| v.to_bits()).collect();
             distinct_counts.push(bucket_distinct.len() as u64);
         }
 
@@ -12743,7 +12947,8 @@ impl Db {
                         if force {
                             tracing::warn!(
                                 "VACUUM FORCE: skipping damaged segment {}: {}",
-                                entry.segment_id, e
+                                entry.segment_id,
+                                e
                             );
                             skipped_segments += 1;
                         } else {
@@ -12755,7 +12960,8 @@ impl Db {
             if skipped_segments > 0 {
                 tracing::info!(
                     "VACUUM FORCE: skipped {} damaged segments out of {}",
-                    skipped_segments, original_count
+                    skipped_segments,
+                    original_count
                 );
             }
 
@@ -12985,8 +13191,11 @@ impl Db {
     /// Segments are organized into exponential size levels:
     /// - Level 0: < level_base_bytes (default 1MB)
     /// - Level N: level_base_bytes * level_multiplier^(N-1) to level_base_bytes * level_multiplier^N
+    ///
     /// When a level has >= segments_per_level_trigger segments, they're merged to the next level
-    pub fn get_leveled_compaction_candidates(&self) -> Result<Vec<LeveledCompactionCandidate>, EngineError> {
+    pub fn get_leveled_compaction_candidates(
+        &self,
+    ) -> Result<Vec<LeveledCompactionCandidate>, EngineError> {
         if !self.cfg.leveled_compaction_enabled {
             return Ok(Vec::new());
         }
@@ -13013,8 +13222,10 @@ impl Db {
         };
 
         // Group segments by (database, table, level)
-        let mut table_levels: std::collections::HashMap<(String, String), Vec<Vec<&ManifestEntry>>> =
-            std::collections::HashMap::new();
+        let mut table_levels: std::collections::HashMap<
+            (String, String),
+            Vec<Vec<&ManifestEntry>>,
+        > = std::collections::HashMap::new();
 
         for entry in &manifest.entries {
             // Only compact Hot tier segments
@@ -13025,7 +13236,9 @@ impl Db {
             let key = (entry.database.clone(), entry.table.clone());
             let level = get_level(entry.size_bytes);
 
-            let levels = table_levels.entry(key).or_insert_with(|| vec![Vec::new(); max_levels]);
+            let levels = table_levels
+                .entry(key)
+                .or_insert_with(|| vec![Vec::new(); max_levels]);
             if level < levels.len() {
                 levels[level].push(entry);
             }
@@ -13054,7 +13267,8 @@ impl Db {
                 }
 
                 let total_bytes: u64 = segments.iter().map(|e| e.size_bytes).sum();
-                let segment_ids: Vec<String> = segments.iter().map(|e| e.segment_id.clone()).collect();
+                let segment_ids: Vec<String> =
+                    segments.iter().map(|e| e.segment_id.clone()).collect();
 
                 // Calculate target level after merge
                 let merged_size = total_bytes;
@@ -13188,11 +13402,15 @@ impl Db {
 
         for candidate in candidates.into_iter().take(max_per_cycle) {
             // Check concurrency limit
-            if !self.compaction_state.can_start_compaction(self.cfg.max_concurrent_compactions) {
+            if !self
+                .compaction_state
+                .can_start_compaction(self.cfg.max_concurrent_compactions)
+            {
                 break;
             }
 
-            self.compaction_state.start_compaction(&candidate.database, &candidate.table);
+            self.compaction_state
+                .start_compaction(&candidate.database, &candidate.table);
 
             // Use merge_specific_segments to merge exactly the segments at this level
             match self.merge_segments_by_ids(
@@ -13248,7 +13466,9 @@ impl Db {
         let entries_to_merge: Vec<ManifestEntry> = segment_ids
             .iter()
             .filter_map(|id| {
-                manifest.entries.iter()
+                manifest
+                    .entries
+                    .iter()
                     .find(|e| &e.segment_id == id && e.database == database && e.table == table)
                     .cloned()
             })
@@ -13284,7 +13504,9 @@ impl Db {
         // Get compression from table settings
         let compression = {
             let manifest = self.manifest.read();
-            manifest.tables.iter()
+            manifest
+                .tables
+                .iter()
                 .find(|t| t.database == database && t.name == table)
                 .and_then(|t| t.compression.clone())
                 .or_else(|| self.cfg.tier_warm_compression.clone())
@@ -13305,19 +13527,38 @@ impl Db {
         let size_bytes = compressed.len() as u64;
 
         // Persist to disk
-        let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", new_segment_id));
+        let segment_path = self
+            .cfg
+            .segments_dir
+            .join(format!("{}.ipc", new_segment_id));
         std::fs::write(&segment_path, &compressed)
             .map_err(|e| EngineError::Io(format!("write merged segment failed: {e}")))?;
 
         // Compute stats by merging stats from source entries
         // This avoids recomputing from the actual data
-        let event_time_min = entries_to_merge.iter().filter_map(|e| e.event_time_min).min();
-        let event_time_max = entries_to_merge.iter().filter_map(|e| e.event_time_max).max();
-        let tenant_id_min = entries_to_merge.iter().filter_map(|e| e.tenant_id_min).min();
-        let tenant_id_max = entries_to_merge.iter().filter_map(|e| e.tenant_id_max).max();
+        let event_time_min = entries_to_merge
+            .iter()
+            .filter_map(|e| e.event_time_min)
+            .min();
+        let event_time_max = entries_to_merge
+            .iter()
+            .filter_map(|e| e.event_time_max)
+            .max();
+        let tenant_id_min = entries_to_merge
+            .iter()
+            .filter_map(|e| e.tenant_id_min)
+            .min();
+        let tenant_id_max = entries_to_merge
+            .iter()
+            .filter_map(|e| e.tenant_id_max)
+            .max();
         let route_id_min = entries_to_merge.iter().filter_map(|e| e.route_id_min).min();
         let route_id_max = entries_to_merge.iter().filter_map(|e| e.route_id_max).max();
-        let watermark_micros = entries_to_merge.iter().map(|e| e.watermark_micros).max().unwrap_or(0);
+        let watermark_micros = entries_to_merge
+            .iter()
+            .map(|e| e.watermark_micros)
+            .max()
+            .unwrap_or(0);
 
         // Compute schema hash from IPC
         let schema_hash = compute_schema_hash_from_payload(&ipc, None).ok();
@@ -13355,7 +13596,9 @@ impl Db {
 
             // Remove old segments
             let old_ids: std::collections::HashSet<_> = segment_ids.iter().collect();
-            manifest.entries.retain(|e| !old_ids.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !old_ids.contains(&e.segment_id));
 
             // Add new segment
             let mut entry_with_version = new_entry;
@@ -13396,7 +13639,9 @@ impl Db {
         // Get primary key columns from table schema
         let manifest = self.manifest.read();
 
-        let pk_cols: Vec<String> = manifest.tables.iter()
+        let pk_cols: Vec<String> = manifest
+            .tables
+            .iter()
             .find(|t| t.database == database && t.name == table)
             .map(|t| {
                 // Use common CDR columns as default sort key
@@ -13417,7 +13662,8 @@ impl Db {
         }
 
         // Build sort columns
-        let sort_cols: Vec<SortColumn> = pk_cols.iter()
+        let sort_cols: Vec<SortColumn> = pk_cols
+            .iter()
             .filter_map(|name| {
                 batch.column_by_name(name).map(|col| SortColumn {
                     values: col.clone(),
@@ -13435,7 +13681,9 @@ impl Db {
             .map_err(|e| EngineError::Internal(format!("sort failed: {e}")))?;
 
         // Apply sort indices
-        let sorted_columns: Vec<_> = batch.columns().iter()
+        let sorted_columns: Vec<_> = batch
+            .columns()
+            .iter()
             .map(|col| arrow_select::take::take(col.as_ref(), &indices, None))
             .collect::<Result<_, _>>()
             .map_err(|e| EngineError::Internal(format!("take failed: {e}")))?;
@@ -14036,7 +14284,11 @@ impl Db {
     /// List all user-defined functions
     pub fn list_functions(&self, pattern: Option<&str>) -> Vec<UserDefinedFunction> {
         let registry = self.udf_registry.read();
-        registry.list_matching(pattern).into_iter().cloned().collect()
+        registry
+            .list_matching(pattern)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get a specific user-defined function
@@ -14051,24 +14303,30 @@ impl Db {
         name: &str,
         args: Vec<ScalarValue>,
     ) -> Result<ScalarValue, EngineError> {
-        let udf = self.get_function(name).ok_or_else(|| {
-            EngineError::NotFound(format!("function '{}' not found", name))
-        })?;
+        let udf = self
+            .get_function(name)
+            .ok_or_else(|| EngineError::NotFound(format!("function '{}' not found", name)))?;
 
         // Validate argument count
-        let required_params: Vec<_> = udf.parameters.iter()
+        let required_params: Vec<_> = udf
+            .parameters
+            .iter()
             .filter(|p| p.default_value.is_none())
             .collect();
         if args.len() < required_params.len() {
             return Err(EngineError::InvalidArgument(format!(
                 "function '{}' requires at least {} arguments, got {}",
-                name, required_params.len(), args.len()
+                name,
+                required_params.len(),
+                args.len()
             )));
         }
         if args.len() > udf.parameters.len() {
             return Err(EngineError::InvalidArgument(format!(
                 "function '{}' accepts at most {} arguments, got {}",
-                name, udf.parameters.len(), args.len()
+                name,
+                udf.parameters.len(),
+                args.len()
             )));
         }
 
@@ -14192,7 +14450,8 @@ impl Db {
             let parts: Vec<&str> = inner.split(',').collect();
             let mut result = String::new();
             for part in parts {
-                let val = self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
+                let val =
+                    self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
                 result.push_str(&val.to_string());
             }
             return Ok(ScalarValue::Utf8(result));
@@ -14203,7 +14462,8 @@ impl Db {
             let inner = &trimmed[9..trimmed.len() - 1];
             let parts: Vec<&str> = inner.split(',').collect();
             for part in parts {
-                let val = self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
+                let val =
+                    self.evaluate_udf_expression_with_depth(part.trim(), bindings, depth + 1)?;
                 if !matches!(val, ScalarValue::Null) {
                     return Ok(val);
                 }
@@ -14216,7 +14476,8 @@ impl Db {
             let inner = &trimmed[3..trimmed.len() - 1];
             let parts: Vec<&str> = inner.splitn(3, ',').collect();
             if parts.len() == 3 {
-                let condition = self.evaluate_udf_expression_with_depth(parts[0].trim(), bindings, depth + 1)?;
+                let condition =
+                    self.evaluate_udf_expression_with_depth(parts[0].trim(), bindings, depth + 1)?;
                 let is_true = match condition {
                     ScalarValue::Bool(b) => b,
                     ScalarValue::Int64(i) => i != 0,
@@ -14243,7 +14504,14 @@ impl Db {
         depth: usize,
     ) -> Result<Option<ScalarValue>, EngineError> {
         // Handle binary operators: +, -, *, /, %, ||
-        let operators = [("||", "concat"), ("+", "add"), ("-", "sub"), ("*", "mul"), ("/", "div"), ("%", "mod")];
+        let operators = [
+            ("||", "concat"),
+            ("+", "add"),
+            ("-", "sub"),
+            ("*", "mul"),
+            ("/", "div"),
+            ("%", "mod"),
+        ];
 
         for (op, op_name) in operators {
             if let Some(pos) = expr.find(op) {
@@ -14256,13 +14524,13 @@ impl Db {
                     continue;
                 }
 
-                let left = self.evaluate_udf_expression_with_depth(before.trim(), bindings, depth + 1)?;
-                let right = self.evaluate_udf_expression_with_depth(after.trim(), bindings, depth + 1)?;
+                let left =
+                    self.evaluate_udf_expression_with_depth(before.trim(), bindings, depth + 1)?;
+                let right =
+                    self.evaluate_udf_expression_with_depth(after.trim(), bindings, depth + 1)?;
 
                 let result = match op_name {
-                    "concat" => {
-                        ScalarValue::Utf8(format!("{}{}", left, right))
-                    }
+                    "concat" => ScalarValue::Utf8(format!("{}{}", left, right)),
                     "add" => Self::numeric_op(left, right, |a, b| a + b, |a, b| a + b)?,
                     "sub" => Self::numeric_op(left, right, |a, b| a - b, |a, b| a - b)?,
                     "mul" => Self::numeric_op(left, right, |a, b| a * b, |a, b| a * b)?,
@@ -14302,10 +14570,18 @@ impl Db {
     {
         match (left, right) {
             (ScalarValue::Int64(a), ScalarValue::Int64(b)) => Ok(ScalarValue::Int64(int_op(a, b))),
-            (ScalarValue::Float64(a), ScalarValue::Float64(b)) => Ok(ScalarValue::Float64(float_op(a, b))),
-            (ScalarValue::Int64(a), ScalarValue::Float64(b)) => Ok(ScalarValue::Float64(float_op(a as f64, b))),
-            (ScalarValue::Float64(a), ScalarValue::Int64(b)) => Ok(ScalarValue::Float64(float_op(a, b as f64))),
-            _ => Err(EngineError::InvalidArgument("invalid operand types for arithmetic".into())),
+            (ScalarValue::Float64(a), ScalarValue::Float64(b)) => {
+                Ok(ScalarValue::Float64(float_op(a, b)))
+            }
+            (ScalarValue::Int64(a), ScalarValue::Float64(b)) => {
+                Ok(ScalarValue::Float64(float_op(a as f64, b)))
+            }
+            (ScalarValue::Float64(a), ScalarValue::Int64(b)) => {
+                Ok(ScalarValue::Float64(float_op(a, b as f64)))
+            }
+            _ => Err(EngineError::InvalidArgument(
+                "invalid operand types for arithmetic".into(),
+            )),
         }
     }
 
@@ -14341,7 +14617,9 @@ impl Db {
         // Verify target table exists while holding both locks to prevent TOCTOU race
         let manifest = self.manifest.read();
 
-        let table_exists = manifest.tables.iter()
+        let table_exists = manifest
+            .tables
+            .iter()
             .any(|t| t.database == target_database && t.name == target_table);
 
         if !table_exists {
@@ -14400,7 +14678,10 @@ impl Db {
         } else if if_exists {
             Ok(())
         } else {
-            Err(EngineError::NotFound(format!("stream '{}' not found", name)))
+            Err(EngineError::NotFound(format!(
+                "stream '{}' not found",
+                name
+            )))
         }
     }
 
@@ -14408,7 +14689,8 @@ impl Db {
     pub fn start_stream(&self, name: &str) -> Result<(), EngineError> {
         let mut registry = self.stream_registry.write();
 
-        let stream = registry.get_mut(name)
+        let stream = registry
+            .get_mut(name)
             .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))?;
 
         if stream.state == StreamState::Running {
@@ -14429,7 +14711,8 @@ impl Db {
     pub fn stop_stream(&self, name: &str) -> Result<(), EngineError> {
         let mut registry = self.stream_registry.write();
 
-        let stream = registry.get_mut(name)
+        let stream = registry
+            .get_mut(name)
             .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))?;
 
         if stream.state == StreamState::Stopped {
@@ -14448,7 +14731,8 @@ impl Db {
     /// Get stream status
     pub fn get_stream_status(&self, name: &str) -> Result<StreamDefinition, EngineError> {
         let registry = self.stream_registry.read();
-        registry.get(name)
+        registry
+            .get(name)
             .cloned()
             .ok_or_else(|| EngineError::NotFound(format!("stream '{}' not found", name)))
     }
@@ -16497,9 +16781,7 @@ impl Db {
         new_column: &str,
     ) -> Result<(), EngineError> {
         if old_column.trim().is_empty() || new_column.trim().is_empty() {
-            return Err(EngineError::InvalidArgument(
-                "column name required".into(),
-            ));
+            return Err(EngineError::InvalidArgument("column name required".into()));
         }
 
         if old_column == new_column {
@@ -16544,9 +16826,7 @@ impl Db {
         let field = fields
             .iter_mut()
             .find(|f| f.name == old_column)
-            .ok_or_else(|| {
-                EngineError::NotFound(format!("column '{}' not found", old_column))
-            })?;
+            .ok_or_else(|| EngineError::NotFound(format!("column '{}' not found", old_column)))?;
         field.name = new_column.to_string();
 
         let canonical_fields = canonicalize_schema_spec(&fields)?;
@@ -16592,7 +16872,9 @@ impl Db {
         let new_col = new_column.to_string();
         std::thread::spawn(move || match Db::open(cfg) {
             Ok(db) => {
-                if let Err(e) = db.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col) {
+                if let Err(e) =
+                    db.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col)
+                {
                     tracing::warn!(
                         database = %db_name,
                         table = %tbl_name,
@@ -16665,11 +16947,8 @@ impl Db {
             // Rebuild batches with new schema
             let mut new_batches = Vec::new();
             for batch in &batches {
-                let new_batch = RecordBatch::try_new(
-                    new_schema.clone(),
-                    batch.columns().to_vec(),
-                )
-                .map_err(|e| EngineError::Internal(format!("failed to rename column: {e}")))?;
+                let new_batch = RecordBatch::try_new(new_schema.clone(), batch.columns().to_vec())
+                    .map_err(|e| EngineError::Internal(format!("failed to rename column: {e}")))?;
                 new_batches.push(new_batch);
             }
 
@@ -16688,7 +16967,9 @@ impl Db {
             // Remove old segment
             {
                 let mut manifest = self.manifest.write();
-                manifest.entries.retain(|e| e.segment_id != entry.segment_id);
+                manifest
+                    .entries
+                    .retain(|e| e.segment_id != entry.segment_id);
                 persist_manifest(&self.cfg.manifest_path, &manifest)?;
             }
             self.remove_segment_file(&entry.segment_id);
@@ -17162,7 +17443,8 @@ impl Db {
             } = constraint
             {
                 // Get rows that would be deleted to check FK violations
-                let deleted_values = self.get_rows_matching_filter(database, table, &filter, referenced_columns)?;
+                let deleted_values =
+                    self.get_rows_matching_filter(database, table, &filter, referenced_columns)?;
 
                 if deleted_values.is_empty() {
                     continue; // No rows being deleted, no FK action needed
@@ -17174,7 +17456,12 @@ impl Db {
                         let fk_clause = build_fk_where_clause(columns, &deleted_values);
                         if let Some(clause) = &fk_clause {
                             let ref_filter = parse_where_filter(Some(clause))?;
-                            let matching = self.get_rows_matching_filter(ref_db, ref_table, &ref_filter, columns)?;
+                            let matching = self.get_rows_matching_filter(
+                                ref_db,
+                                ref_table,
+                                &ref_filter,
+                                columns,
+                            )?;
                             if !matching.is_empty() {
                                 return Err(EngineError::ConstraintViolation(format!(
                                     "Cannot delete from {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON DELETE {})",
@@ -17526,8 +17813,13 @@ impl Db {
                 };
 
                 // Check if any of the updated columns are part of the referenced columns
-                let updated_cols: HashSet<String> = assignments.iter().map(|(c, _)| c.to_lowercase()).collect();
-                let ref_cols_set: HashSet<String> = fk_referenced_columns.0.iter().map(|c| c.to_lowercase()).collect();
+                let updated_cols: HashSet<String> =
+                    assignments.iter().map(|(c, _)| c.to_lowercase()).collect();
+                let ref_cols_set: HashSet<String> = fk_referenced_columns
+                    .0
+                    .iter()
+                    .map(|c| c.to_lowercase())
+                    .collect();
                 let affects_fk = updated_cols.intersection(&ref_cols_set).count() > 0;
 
                 if !affects_fk {
@@ -17535,7 +17827,12 @@ impl Db {
                 }
 
                 // Get old values from rows being updated
-                let old_values = self.get_rows_matching_filter(database, table, &filter, &fk_referenced_columns.0)?;
+                let old_values = self.get_rows_matching_filter(
+                    database,
+                    table,
+                    &filter,
+                    &fk_referenced_columns.0,
+                )?;
 
                 if old_values.is_empty() {
                     continue; // No rows being updated, no FK action needed
@@ -17544,10 +17841,16 @@ impl Db {
                 match on_update {
                     ForeignKeyAction::Restrict | ForeignKeyAction::NoAction => {
                         // Check if any rows in the referencing table point to old values
-                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        let fk_clause =
+                            build_fk_where_clause(&fk_referenced_columns.1, &old_values);
                         if let Some(clause) = &fk_clause {
                             let ref_filter = parse_where_filter(Some(clause))?;
-                            let matching = self.get_rows_matching_filter(ref_db, ref_table, &ref_filter, &fk_referenced_columns.1)?;
+                            let matching = self.get_rows_matching_filter(
+                                ref_db,
+                                ref_table,
+                                &ref_filter,
+                                &fk_referenced_columns.1,
+                            )?;
                             if !matching.is_empty() {
                                 return Err(EngineError::ConstraintViolation(format!(
                                     "Cannot update {}.{}: foreign key constraint '{}' on {}.{} would be violated (ON UPDATE {})",
@@ -17566,28 +17869,39 @@ impl Db {
                     }
                     ForeignKeyAction::Cascade => {
                         // ON UPDATE CASCADE: update referencing rows with new values
-                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        let fk_clause =
+                            build_fk_where_clause(&fk_referenced_columns.1, &old_values);
                         if let Some(clause) = fk_clause {
                             // Build new assignments from the update
-                            let cascade_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.0
-                                .iter()
-                                .zip(fk_referenced_columns.1.iter())
-                                .filter_map(|(ref_col, fk_col)| {
-                                    assignments.iter()
-                                        .find(|(c, _)| c.eq_ignore_ascii_case(ref_col))
-                                        .map(|(_, v)| (fk_col.clone(), v.clone()))
-                                })
-                                .collect();
+                            let cascade_assignments: Vec<(String, SqlValue)> =
+                                fk_referenced_columns
+                                    .0
+                                    .iter()
+                                    .zip(fk_referenced_columns.1.iter())
+                                    .filter_map(|(ref_col, fk_col)| {
+                                        assignments
+                                            .iter()
+                                            .find(|(c, _)| c.eq_ignore_ascii_case(ref_col))
+                                            .map(|(_, v)| (fk_col.clone(), v.clone()))
+                                    })
+                                    .collect();
                             if !cascade_assignments.is_empty() {
-                                self.update_rows(ref_db, ref_table, &cascade_assignments, Some(&clause))?;
+                                self.update_rows(
+                                    ref_db,
+                                    ref_table,
+                                    &cascade_assignments,
+                                    Some(&clause),
+                                )?;
                             }
                         }
                     }
                     ForeignKeyAction::SetNull => {
                         // ON UPDATE SET NULL: set FK columns to NULL in referencing rows
-                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        let fk_clause =
+                            build_fk_where_clause(&fk_referenced_columns.1, &old_values);
                         if let Some(clause) = fk_clause {
-                            let null_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.1
+                            let null_assignments: Vec<(String, SqlValue)> = fk_referenced_columns
+                                .1
                                 .iter()
                                 .map(|col| (col.clone(), SqlValue::Null))
                                 .collect();
@@ -17596,15 +17910,24 @@ impl Db {
                     }
                     ForeignKeyAction::SetDefault => {
                         // ON UPDATE SET DEFAULT: set FK columns to default values
-                        let defaults = self.get_column_defaults(ref_db, ref_table, &fk_referenced_columns.1)?;
-                        let fk_clause = build_fk_where_clause(&fk_referenced_columns.1, &old_values);
+                        let defaults =
+                            self.get_column_defaults(ref_db, ref_table, &fk_referenced_columns.1)?;
+                        let fk_clause =
+                            build_fk_where_clause(&fk_referenced_columns.1, &old_values);
                         if let Some(clause) = fk_clause {
-                            let default_assignments: Vec<(String, SqlValue)> = fk_referenced_columns.1
-                                .iter()
-                                .zip(defaults.iter())
-                                .map(|(col, def)| (col.clone(), def.clone()))
-                                .collect();
-                            self.update_rows(ref_db, ref_table, &default_assignments, Some(&clause))?;
+                            let default_assignments: Vec<(String, SqlValue)> =
+                                fk_referenced_columns
+                                    .1
+                                    .iter()
+                                    .zip(defaults.iter())
+                                    .map(|(col, def)| (col.clone(), def.clone()))
+                                    .collect();
+                            self.update_rows(
+                                ref_db,
+                                ref_table,
+                                &default_assignments,
+                                Some(&clause),
+                            )?;
                         }
                     }
                 }
@@ -17874,21 +18197,36 @@ impl Db {
 
             for row_idx in 0..src_batch.num_rows() {
                 let src_val = merge_array_value_to_string(src_arr.as_ref(), row_idx);
-                let is_matched = src_val.as_ref().map(|v| target_values.contains(v)).unwrap_or(false);
+                let is_matched = src_val
+                    .as_ref()
+                    .map(|v| target_values.contains(v))
+                    .unwrap_or(false);
 
                 if is_matched {
                     // WHEN MATCHED - apply update/delete actions
                     for action in when_matched {
                         match action {
-                            MergeWhenMatched::Update { assignments, condition } => {
+                            MergeWhenMatched::Update {
+                                assignments,
+                                condition,
+                            } => {
                                 // Build WHERE clause for this specific row
                                 if let Some(key_val) = &src_val {
                                     let where_clause = format!("{} = '{}'", target_col, key_val);
                                     // Check condition if specified
-                                    let should_update = condition.is_none() ||
-                                        evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+                                    let should_update = condition.is_none()
+                                        || evaluate_simple_condition(
+                                            condition.as_ref(),
+                                            src_batch,
+                                            row_idx,
+                                        );
                                     if should_update {
-                                        self.update_rows(database, table, assignments, Some(&where_clause))?;
+                                        self.update_rows(
+                                            database,
+                                            table,
+                                            assignments,
+                                            Some(&where_clause),
+                                        )?;
                                         matched_count += 1;
                                     }
                                 }
@@ -17896,8 +18234,12 @@ impl Db {
                             MergeWhenMatched::Delete { condition } => {
                                 if let Some(key_val) = &src_val {
                                     let where_clause = format!("{} = '{}'", target_col, key_val);
-                                    let should_delete = condition.is_none() ||
-                                        evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+                                    let should_delete = condition.is_none()
+                                        || evaluate_simple_condition(
+                                            condition.as_ref(),
+                                            src_batch,
+                                            row_idx,
+                                        );
                                     if should_delete {
                                         self.delete_rows(database, table, Some(&where_clause))?;
                                         matched_count += 1;
@@ -17909,10 +18251,14 @@ impl Db {
                 } else {
                     // WHEN NOT MATCHED - apply insert actions
                     for action in when_not_matched {
-                        let MergeWhenNotMatched { columns, values, condition } = action;
+                        let MergeWhenNotMatched {
+                            columns,
+                            values,
+                            condition,
+                        } = action;
 
-                        let should_insert = condition.is_none() ||
-                            evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
+                        let should_insert = condition.is_none()
+                            || evaluate_simple_condition(condition.as_ref(), src_batch, row_idx);
 
                         if should_insert && !values.is_empty() {
                             // Build INSERT for this row
@@ -17927,13 +18273,15 @@ impl Db {
                             };
 
                             // Convert InsertCommand to IPC and ingest
-                            if let Ok(ipc) = build_insert_ipc(&insert_batch, self, database, table) {
+                            if let Ok(ipc) = build_insert_ipc(&insert_batch, self, database, table)
+                            {
                                 if let Ok(_) = self.ingest_ipc(IngestBatch {
                                     payload_ipc: ipc,
                                     watermark_micros: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_micros() as u64,
+                                        .as_micros()
+                                        as u64,
                                     shard_override: None,
                                     database: Some(database.to_string()),
                                     table: Some(table.to_string()),
@@ -17965,7 +18313,12 @@ impl Db {
         let mut using_data: Vec<(String, String, Option<String>, Vec<RecordBatch>)> = Vec::new();
         for ut in using_tables {
             let batches = self.load_table_batches(&ut.database, &ut.table)?;
-            using_data.push((ut.database.clone(), ut.table.clone(), ut.alias.clone(), batches));
+            using_data.push((
+                ut.database.clone(),
+                ut.table.clone(),
+                ut.alias.clone(),
+                batches,
+            ));
         }
 
         // Parse WHERE clause to identify join conditions
@@ -18017,7 +18370,12 @@ impl Db {
         let mut from_data: Vec<(String, String, Option<String>, Vec<RecordBatch>)> = Vec::new();
         for ft in from_tables {
             let batches = self.load_table_batches(&ft.database, &ft.table)?;
-            from_data.push((ft.database.clone(), ft.table.clone(), ft.alias.clone(), batches));
+            from_data.push((
+                ft.database.clone(),
+                ft.table.clone(),
+                ft.alias.clone(),
+                batches,
+            ));
         }
 
         // Parse WHERE clause to identify join conditions
@@ -18038,7 +18396,13 @@ impl Db {
         }
 
         // Update the matching rows
-        self.update_rows_by_indices(database, table, assignments, &target_batches, &matching_indices)
+        self.update_rows_by_indices(
+            database,
+            table,
+            assignments,
+            &target_batches,
+            &matching_indices,
+        )
     }
 
     /// Evaluate a join condition between target table and join tables.
@@ -18265,7 +18629,8 @@ impl Db {
     ) -> Result<(), EngineError> {
         // Get old segments to remove
         let old_entries = self.table_entries(database, table)?;
-        let old_segment_ids: Vec<String> = old_entries.iter().map(|e| e.segment_id.clone()).collect();
+        let old_segment_ids: Vec<String> =
+            old_entries.iter().map(|e| e.segment_id.clone()).collect();
 
         // Remove old segments from manifest
         {
@@ -18338,7 +18703,9 @@ impl Db {
                 missing_count += 1;
                 tracing::warn!(
                     "Segment missing on disk: {} (table: {}.{})",
-                    entry.segment_id, entry.database, entry.table
+                    entry.segment_id,
+                    entry.database,
+                    entry.table
                 );
             }
         }
@@ -18605,7 +18972,10 @@ impl Db {
             }
 
             // Check if file exists
-            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+            let path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", entry.segment_id));
             if !path.exists() {
                 missing.push(MissingSegment {
                     segment_id: entry.segment_id.clone(),
@@ -18641,7 +19011,10 @@ impl Db {
             }
 
             // Check if file exists
-            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+            let path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", entry.segment_id));
             if path.exists() {
                 // Read and verify checksum (supports both xxHash64 and legacy CRC32)
                 match std::fs::read(&path) {
@@ -18688,10 +19061,8 @@ impl Db {
         let missing = self.find_missing_segments(database, table)?;
         let corrupted = self.find_corrupted_segments(database, table)?;
 
-        let mut damaged: Vec<DamagedSegment> = missing
-            .into_iter()
-            .map(DamagedSegment::Missing)
-            .collect();
+        let mut damaged: Vec<DamagedSegment> =
+            missing.into_iter().map(DamagedSegment::Missing).collect();
         damaged.extend(corrupted.into_iter().map(DamagedSegment::Corrupted));
 
         Ok(damaged)
@@ -18719,12 +19090,14 @@ impl Db {
         let mut removed_ids: Vec<String> = missing.iter().map(|m| m.segment_id.clone()).collect();
         removed_ids.extend(corrupted.iter().map(|c| c.segment_id.clone()));
 
-        let remove_set: std::collections::HashSet<String> =
-            removed_ids.iter().cloned().collect();
+        let remove_set: std::collections::HashSet<String> = removed_ids.iter().cloned().collect();
 
         // Delete corrupted segment files from disk
         for seg in &corrupted {
-            let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+            let path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", seg.segment_id));
             if path.exists() {
                 if let Err(e) = std::fs::remove_file(&path) {
                     tracing::warn!(
@@ -18739,7 +19112,9 @@ impl Db {
         // Remove from manifest and rebuild index
         {
             let mut manifest = self.manifest.write();
-            manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !remove_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
@@ -18749,7 +19124,9 @@ impl Db {
         }
 
         // Record segments repaired metric
-        self.metrics.segments_repaired.fetch_add(removed_ids.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .segments_repaired
+            .fetch_add(removed_ids.len() as u64, Ordering::Relaxed);
 
         Ok(removed_ids)
     }
@@ -18895,15 +19272,9 @@ impl Db {
             .find(|t| t.database == database && t.name == table)
             .ok_or_else(|| EngineError::NotFound(format!("table {}.{}", database, table)))?;
 
-        let policy = table_meta
-            .retention_policy
-            .as_ref()
-            .ok_or_else(|| {
-                EngineError::InvalidArgument(format!(
-                    "no retention policy for {}.{}",
-                    database, table
-                ))
-            })?;
+        let policy = table_meta.retention_policy.as_ref().ok_or_else(|| {
+            EngineError::InvalidArgument(format!("no retention policy for {}.{}", database, table))
+        })?;
 
         if !policy.enabled {
             return Ok(RetentionResult {
@@ -18950,7 +19321,10 @@ impl Db {
             });
         }
 
-        let segment_ids: Vec<String> = segments_to_delete.iter().map(|(id, _)| id.clone()).collect();
+        let segment_ids: Vec<String> = segments_to_delete
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
         let bytes_reclaimed: u64 = segments_to_delete.iter().map(|(_, sz)| *sz).sum();
         let segment_count = segment_ids.len();
 
@@ -19126,13 +19500,15 @@ impl Db {
                     "unknown".to_string()
                 };
 
-                let info = partitions.entry(partition_key.clone()).or_insert(PartitionInfo {
-                    partition_key: partition_key.clone(),
-                    segment_count: 0,
-                    total_bytes: 0,
-                    min_time: entry.event_time_min,
-                    max_time: entry.event_time_max,
-                });
+                let info = partitions
+                    .entry(partition_key.clone())
+                    .or_insert(PartitionInfo {
+                        partition_key: partition_key.clone(),
+                        segment_count: 0,
+                        total_bytes: 0,
+                        min_time: entry.event_time_min,
+                        max_time: entry.event_time_max,
+                    });
 
                 info.segment_count += 1;
                 info.total_bytes += entry.size_bytes;
@@ -19181,24 +19557,23 @@ impl Db {
                             }
                         }
 
-                        let agg = column_stats
-                            .entry(col_name.clone())
-                            .or_insert(AggregatedColumnStats {
-                                column_name: col_name.clone(),
-                                null_count: 0,
-                                distinct_count: None,
-                                min_value: None,
-                                max_value: None,
-                                avg_length: None,
-                            });
+                        let agg =
+                            column_stats
+                                .entry(col_name.clone())
+                                .or_insert(AggregatedColumnStats {
+                                    column_name: col_name.clone(),
+                                    null_count: 0,
+                                    distinct_count: None,
+                                    min_value: None,
+                                    max_value: None,
+                                    avg_length: None,
+                                });
 
                         agg.null_count += stats.null_count;
 
                         // Track distinct count (approximate sum across segments)
                         if let Some(dc) = stats.distinct_count {
-                            agg.distinct_count = Some(
-                                agg.distinct_count.unwrap_or(0) + dc,
-                            );
+                            agg.distinct_count = Some(agg.distinct_count.unwrap_or(0) + dc);
                         }
 
                         // Track min/max (just take first encountered values for now)
@@ -19320,10 +19695,17 @@ impl Db {
             // Try to recover corrupted segments
             for seg in &corrupted {
                 // First delete the corrupted file
-                let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+                let path = self
+                    .cfg
+                    .segments_dir
+                    .join(format!("{}.ipc", seg.segment_id));
                 if path.exists() {
                     if let Err(e) = std::fs::remove_file(&path) {
-                        tracing::warn!("Failed to delete corrupted segment file {}: {}", seg.segment_id, e);
+                        tracing::warn!(
+                            "Failed to delete corrupted segment file {}: {}",
+                            seg.segment_id,
+                            e
+                        );
                     }
                 }
 
@@ -19357,10 +19739,17 @@ impl Db {
 
             // Delete corrupted segment files
             for seg in &corrupted {
-                let path = self.cfg.segments_dir.join(format!("{}.ipc", seg.segment_id));
+                let path = self
+                    .cfg
+                    .segments_dir
+                    .join(format!("{}.ipc", seg.segment_id));
                 if path.exists() {
                     if let Err(e) = std::fs::remove_file(&path) {
-                        tracing::warn!("Failed to delete corrupted segment file {}: {}", seg.segment_id, e);
+                        tracing::warn!(
+                            "Failed to delete corrupted segment file {}: {}",
+                            seg.segment_id,
+                            e
+                        );
                     }
                 }
             }
@@ -19368,10 +19757,13 @@ impl Db {
 
         // Remove unrecoverable segments from manifest
         if !removed_ids.is_empty() {
-            let remove_set: std::collections::HashSet<String> = removed_ids.iter().cloned().collect();
+            let remove_set: std::collections::HashSet<String> =
+                removed_ids.iter().cloned().collect();
 
             let mut manifest = self.manifest.write();
-            manifest.entries.retain(|e| !remove_set.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !remove_set.contains(&e.segment_id));
             manifest.bump_version();
             persist_manifest(&self.cfg.manifest_path, &manifest)?;
 
@@ -19513,16 +19905,24 @@ impl Db {
             // Throttle to reduce CPU usage during scrub
             std::thread::yield_now();
             if self.cfg.recovery_throttle_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(self.cfg.recovery_throttle_ms));
+                std::thread::sleep(std::time::Duration::from_millis(
+                    self.cfg.recovery_throttle_ms,
+                ));
             }
         }
 
         if !corrupted.is_empty() {
-            tracing::warn!("Scrub completed: found {} corrupted segments", corrupted.len());
+            tracing::warn!(
+                "Scrub completed: found {} corrupted segments",
+                corrupted.len()
+            );
 
             // Auto-repair if enabled
             if self.cfg.auto_repair_on_corruption && !corrupted.is_empty() {
-                tracing::info!("Auto-repair triggered for {} corrupted segments", corrupted.len());
+                tracing::info!(
+                    "Auto-repair triggered for {} corrupted segments",
+                    corrupted.len()
+                );
                 match self.repair_segments_with_recovery(None, None) {
                     Ok((recovered, removed)) => {
                         tracing::info!(
@@ -19553,7 +19953,10 @@ impl Db {
         let mut result = DeepScrubResult::default();
 
         for entry in entries_to_scrub {
-            let path = self.cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+            let path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", entry.segment_id));
 
             if !path.exists() {
                 tracing::warn!("Deep scrub: segment {} is missing", entry.segment_id);
@@ -19567,7 +19970,10 @@ impl Db {
                     let xxhash = compute_checksum(&data);
                     let crc32 = compute_checksum_crc32(&data);
                     if xxhash != entry.checksum && crc32 != entry.checksum {
-                        tracing::warn!("Deep scrub: segment {} checksum mismatch", entry.segment_id);
+                        tracing::warn!(
+                            "Deep scrub: segment {} checksum mismatch",
+                            entry.segment_id
+                        );
                         result.checksum_mismatch.push(entry.segment_id.clone());
                         continue;
                     }
@@ -19601,9 +20007,9 @@ impl Db {
                                                                 "Deep scrub: segment {} schema hash mismatch",
                                                                 entry.segment_id
                                                             );
-                                                            result.schema_mismatch.push(
-                                                                entry.segment_id.clone(),
-                                                            );
+                                                            result
+                                                                .schema_mismatch
+                                                                .push(entry.segment_id.clone());
                                                             continue;
                                                         }
                                                     }
@@ -19613,9 +20019,9 @@ impl Db {
                                                             entry.segment_id,
                                                             e
                                                         );
-                                                        result.ipc_invalid.push(
-                                                            entry.segment_id.clone(),
-                                                        );
+                                                        result
+                                                            .ipc_invalid
+                                                            .push(entry.segment_id.clone());
                                                         continue;
                                                     }
                                                 }
@@ -19654,7 +20060,11 @@ impl Db {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("Deep scrub: failed to read segment {}: {}", entry.segment_id, e);
+                    tracing::warn!(
+                        "Deep scrub: failed to read segment {}: {}",
+                        entry.segment_id,
+                        e
+                    );
                     result.read_errors.push(entry.segment_id.clone());
                 }
             }
@@ -19662,7 +20072,9 @@ impl Db {
             // Throttle to reduce CPU usage during deep scrub
             std::thread::yield_now();
             if self.cfg.recovery_throttle_ms > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(self.cfg.recovery_throttle_ms));
+                std::thread::sleep(std::time::Duration::from_millis(
+                    self.cfg.recovery_throttle_ms,
+                ));
             }
         }
 
@@ -19686,7 +20098,10 @@ impl Db {
                 let _ = self.repair_segments_with_recovery(None, None);
             }
         } else {
-            tracing::info!("Deep scrub completed: {} segments validated", result.valid_count);
+            tracing::info!(
+                "Deep scrub completed: {} segments validated",
+                result.valid_count
+            );
         }
 
         Ok(result)
@@ -20334,7 +20749,8 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
         if entry.size_bytes > 10_000_000_000 {
             tracing::warn!(
                 "manifest entry {} has suspiciously large size: {} bytes (possible corruption)",
-                entry.segment_id, entry.size_bytes
+                entry.segment_id,
+                entry.size_bytes
             );
         }
     }
@@ -20756,7 +21172,11 @@ fn get_version_value(array: &dyn arrow_array::Array, row_idx: usize) -> i64 {
 
 /// Verify segment checksum with backward compatibility.
 /// Tries xxHash64 first (new format), then CRC32 (legacy format).
-fn verify_segment_checksum(data: &[u8], expected: u64, segment_id: &str) -> Result<(), EngineError> {
+fn verify_segment_checksum(
+    data: &[u8],
+    expected: u64,
+    segment_id: &str,
+) -> Result<(), EngineError> {
     // Try xxHash64 first (new format)
     let xxhash = compute_checksum(data);
     if xxhash == expected {
@@ -21557,9 +21977,10 @@ fn apply_distinct_on(ipc_data: &[u8], columns: &[String]) -> Result<Vec<u8>, Eng
         .collect();
 
     if col_indices.is_empty() {
-        return Err(EngineError::InvalidArgument(
-            format!("DISTINCT ON columns not found in result: {:?}", columns)
-        ));
+        return Err(EngineError::InvalidArgument(format!(
+            "DISTINCT ON columns not found in result: {:?}",
+            columns
+        )));
     }
 
     // Concatenate all batches
@@ -21613,22 +22034,28 @@ fn apply_distinct_on(ipc_data: &[u8], columns: &[String]) -> Result<Vec<u8>, Eng
                         }
                     }
                     DataType::LargeUtf8 => {
-                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::LargeStringArray>() {
+                        if let Some(a) = array
+                            .as_any()
+                            .downcast_ref::<arrow_array::LargeStringArray>()
+                        {
                             a.value(row_idx).hash(&mut hasher);
                         }
                     }
                     DataType::Float64 => {
-                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float64Array>() {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float64Array>()
+                        {
                             a.value(row_idx).to_bits().hash(&mut hasher);
                         }
                     }
                     DataType::Float32 => {
-                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float32Array>() {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::Float32Array>()
+                        {
                             a.value(row_idx).to_bits().hash(&mut hasher);
                         }
                     }
                     DataType::Boolean => {
-                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::BooleanArray>() {
+                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::BooleanArray>()
+                        {
                             a.value(row_idx).hash(&mut hasher);
                         }
                     }
@@ -21638,7 +22065,10 @@ fn apply_distinct_on(ipc_data: &[u8], columns: &[String]) -> Result<Vec<u8>, Eng
                         }
                     }
                     DataType::Timestamp(_, _) => {
-                        if let Some(a) = array.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+                        if let Some(a) = array
+                            .as_any()
+                            .downcast_ref::<arrow_array::TimestampMicrosecondArray>()
+                        {
                             a.value(row_idx).hash(&mut hasher);
                         }
                     }
@@ -21826,7 +22256,11 @@ pub struct AggregateExpr {
 
 impl AggregateExpr {
     pub fn new(kind: AggKind) -> Self {
-        Self { kind, alias: None, filter: None }
+        Self {
+            kind,
+            alias: None,
+            filter: None,
+        }
     }
 
     pub fn with_alias(kind: AggKind, alias: String) -> Self {
@@ -21856,7 +22290,11 @@ impl AggregateExpr {
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
             AggKind::ApproxPercentile { column, percentile } => {
-                format!("approx_percentile_{}_{}", (percentile * 100.0) as i32, column)
+                format!(
+                    "approx_percentile_{}_{}",
+                    (percentile * 100.0) as i32,
+                    column
+                )
             }
             AggKind::ApproxMedian { column } => format!("approx_median_{}", column),
             AggKind::Median { column } => format!("median_{}", column),
@@ -21888,37 +22326,95 @@ pub struct AggPlan {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AggKind {
     CountStar,
-    CountDistinct { column: String },
-    Sum { column: String },
-    Avg { column: String },
-    Min { column: String },
-    Max { column: String },
-    StddevSamp { column: String },
-    StddevPop { column: String },
-    VarianceSamp { column: String },
-    VariancePop { column: String },
-    ApproxCountDistinct { column: String },
+    CountDistinct {
+        column: String,
+    },
+    Sum {
+        column: String,
+    },
+    Avg {
+        column: String,
+    },
+    Min {
+        column: String,
+    },
+    Max {
+        column: String,
+    },
+    StddevSamp {
+        column: String,
+    },
+    StddevPop {
+        column: String,
+    },
+    VarianceSamp {
+        column: String,
+    },
+    VariancePop {
+        column: String,
+    },
+    ApproxCountDistinct {
+        column: String,
+    },
     /// APPROX_PERCENTILE - T-Digest based approximate percentile
-    ApproxPercentile { column: String, percentile: f64 },
+    ApproxPercentile {
+        column: String,
+        percentile: f64,
+    },
     /// APPROX_MEDIAN - T-Digest based approximate median
-    ApproxMedian { column: String },
-    Median { column: String },
-    PercentileCont { column: String, percentile: f64 },
-    PercentileDisc { column: String, percentile: f64 },
-    ArrayAgg { column: String, distinct: bool },
-    StringAgg { column: String, delimiter: String, distinct: bool },
+    ApproxMedian {
+        column: String,
+    },
+    Median {
+        column: String,
+    },
+    PercentileCont {
+        column: String,
+        percentile: f64,
+    },
+    PercentileDisc {
+        column: String,
+        percentile: f64,
+    },
+    ArrayAgg {
+        column: String,
+        distinct: bool,
+    },
+    StringAgg {
+        column: String,
+        delimiter: String,
+        distinct: bool,
+    },
     /// MODE - most frequent value
-    Mode { column: String },
+    Mode {
+        column: String,
+    },
     /// STRING_AGG with WITHIN GROUP ordering
-    StringAggOrdered { column: String, delimiter: String, order_by: String, order_desc: bool },
+    StringAggOrdered {
+        column: String,
+        delimiter: String,
+        order_by: String,
+        order_desc: bool,
+    },
     /// ARRAY_AGG with WITHIN GROUP ordering
-    ArrayAggOrdered { column: String, order_by: String, order_desc: bool },
+    ArrayAggOrdered {
+        column: String,
+        order_by: String,
+        order_desc: bool,
+    },
     /// NTH_VALUE - get nth value in ordered group
-    NthValue { column: String, n: usize },
+    NthValue {
+        column: String,
+        n: usize,
+    },
     /// FIRST_VALUE - first value in ordered group
-    FirstValue { column: String },
+    FirstValue {
+        column: String,
+    },
     /// LAST_VALUE - last value in ordered group
-    LastValue { column: String },
+    LastValue {
+        column: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -22000,16 +22496,36 @@ fn agg_kind_from_sql(kind: crate::sql::AggKind) -> AggKind {
         crate::sql::AggKind::ArrayAgg { column, distinct } => {
             AggKind::ArrayAgg { column, distinct }
         }
-        crate::sql::AggKind::StringAgg { column, delimiter, distinct } => {
-            AggKind::StringAgg { column, delimiter, distinct }
-        }
+        crate::sql::AggKind::StringAgg {
+            column,
+            delimiter,
+            distinct,
+        } => AggKind::StringAgg {
+            column,
+            delimiter,
+            distinct,
+        },
         crate::sql::AggKind::Mode { column } => AggKind::Mode { column },
-        crate::sql::AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
-            AggKind::StringAggOrdered { column, delimiter, order_by, order_desc }
-        }
-        crate::sql::AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
-            AggKind::ArrayAggOrdered { column, order_by, order_desc }
-        }
+        crate::sql::AggKind::StringAggOrdered {
+            column,
+            delimiter,
+            order_by,
+            order_desc,
+        } => AggKind::StringAggOrdered {
+            column,
+            delimiter,
+            order_by,
+            order_desc,
+        },
+        crate::sql::AggKind::ArrayAggOrdered {
+            column,
+            order_by,
+            order_desc,
+        } => AggKind::ArrayAggOrdered {
+            column,
+            order_by,
+            order_desc,
+        },
         crate::sql::AggKind::NthValue { column, n } => AggKind::NthValue { column, n },
         crate::sql::AggKind::FirstValue { column } => AggKind::FirstValue { column },
         crate::sql::AggKind::LastValue { column } => AggKind::LastValue { column },
@@ -22925,7 +23441,12 @@ fn evaluate_scalar_function(
         }
 
         // Regex functions
-        ScalarFunction::RegexpReplace { expr, pattern, replacement, flags } => {
+        ScalarFunction::RegexpReplace {
+            expr,
+            pattern,
+            replacement,
+            flags,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             match val {
                 ComputedValue::String(s) => {
@@ -22949,16 +23470,21 @@ fn evaluate_scalar_function(
                             };
                             Ok(ComputedValue::String(result))
                         }
-                        Err(e) => Err(EngineError::InvalidArgument(
-                            format!("Invalid regex pattern: {}", e),
-                        )),
+                        Err(e) => Err(EngineError::InvalidArgument(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))),
                     }
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
                 _ => Ok(ComputedValue::Null),
             }
         }
-        ScalarFunction::RegexpMatch { expr, pattern, flags } => {
+        ScalarFunction::RegexpMatch {
+            expr,
+            pattern,
+            flags,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             match val {
                 ComputedValue::String(s) => {
@@ -22978,37 +23504,41 @@ fn evaluate_scalar_function(
                             let matches = re.is_match(&s);
                             Ok(ComputedValue::Integer(if matches { 1 } else { 0 }))
                         }
-                        Err(e) => Err(EngineError::InvalidArgument(
-                            format!("Invalid regex pattern: {}", e),
-                        )),
+                        Err(e) => Err(EngineError::InvalidArgument(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))),
                     }
                 }
                 ComputedValue::Null => Ok(ComputedValue::Null),
                 _ => Ok(ComputedValue::Null),
             }
         }
-        ScalarFunction::RegexpExtract { expr, pattern, group_index } => {
+        ScalarFunction::RegexpExtract {
+            expr,
+            pattern,
+            group_index,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             match val {
-                ComputedValue::String(s) => {
-                    match regex::Regex::new(pattern) {
-                        Ok(re) => {
-                            if let Some(caps) = re.captures(&s) {
-                                let idx = group_index.unwrap_or(0) as usize;
-                                if let Some(m) = caps.get(idx) {
-                                    Ok(ComputedValue::String(m.as_str().to_string()))
-                                } else {
-                                    Ok(ComputedValue::Null)
-                                }
+                ComputedValue::String(s) => match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        if let Some(caps) = re.captures(&s) {
+                            let idx = group_index.unwrap_or(0) as usize;
+                            if let Some(m) = caps.get(idx) {
+                                Ok(ComputedValue::String(m.as_str().to_string()))
                             } else {
                                 Ok(ComputedValue::Null)
                             }
+                        } else {
+                            Ok(ComputedValue::Null)
                         }
-                        Err(e) => Err(EngineError::InvalidArgument(
-                            format!("Invalid regex pattern: {}", e),
-                        )),
                     }
-                }
+                    Err(e) => Err(EngineError::InvalidArgument(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
                 ComputedValue::Null => Ok(ComputedValue::Null),
                 _ => Ok(ComputedValue::Null),
             }
@@ -23226,7 +23756,11 @@ fn evaluate_scalar_function(
                 .unwrap_or(0);
             Ok(ComputedValue::Date(now))
         }
-        ScalarFunction::DateAdd { expr, interval, unit } => {
+        ScalarFunction::DateAdd {
+            expr,
+            interval,
+            unit,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             let micros = interval_to_micros(*interval, unit);
             match val {
@@ -23240,7 +23774,11 @@ fn evaluate_scalar_function(
                 _ => Ok(ComputedValue::Null),
             }
         }
-        ScalarFunction::DateSub { expr, interval, unit } => {
+        ScalarFunction::DateSub {
+            expr,
+            interval,
+            unit,
+        } => {
             let val = evaluate_expr(expr, ctx)?;
             let micros = interval_to_micros(*interval, unit);
             match val {
@@ -23259,10 +23797,13 @@ fn evaluate_scalar_function(
 
             let (start_micros, end_micros) = match (&start_val, &end_val) {
                 (ComputedValue::Timestamp(s), ComputedValue::Timestamp(e)) => (*s, *e),
-                (ComputedValue::Date(s), ComputedValue::Date(e)) => {
-                    ((*s as i64) * 86400 * 1_000_000, (*e as i64) * 86400 * 1_000_000)
+                (ComputedValue::Date(s), ComputedValue::Date(e)) => (
+                    (*s as i64) * 86400 * 1_000_000,
+                    (*e as i64) * 86400 * 1_000_000,
+                ),
+                (ComputedValue::Null, _) | (_, ComputedValue::Null) => {
+                    return Ok(ComputedValue::Null)
                 }
-                (ComputedValue::Null, _) | (_, ComputedValue::Null) => return Ok(ComputedValue::Null),
                 _ => return Ok(ComputedValue::Null),
             };
 
@@ -23399,7 +23940,10 @@ fn evaluate_scalar_function(
                 }
                 ComputedValue::Date(days) => {
                     let (year, month, day) = days_to_ymd(days);
-                    Ok(ComputedValue::String(format!("{:04}-{:02}-{:02}", year, month, day)))
+                    Ok(ComputedValue::String(format!(
+                        "{:04}-{:02}-{:02}",
+                        year, month, day
+                    )))
                 }
                 _ => Ok(ComputedValue::String(val.to_string_value())),
             }
@@ -23511,8 +24055,10 @@ fn evaluate_scalar_function(
             };
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(serde_json::Value::Object(obj)) => {
-                    let keys: Vec<serde_json::Value> =
-                        obj.keys().map(|k| serde_json::Value::String(k.clone())).collect();
+                    let keys: Vec<serde_json::Value> = obj
+                        .keys()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect();
                     Ok(ComputedValue::String(
                         serde_json::to_string(&keys).unwrap_or_else(|_| "[]".to_string()),
                     ))
@@ -23651,11 +24197,9 @@ fn computed_value_to_json_value(val: &ComputedValue) -> serde_json::Value {
         ComputedValue::Null => serde_json::Value::Null,
         ComputedValue::Boolean(b) => serde_json::Value::Bool(*b),
         ComputedValue::Integer(i) => serde_json::Value::Number((*i).into()),
-        ComputedValue::Float(f) => {
-            serde_json::Number::from_f64(*f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        }
+        ComputedValue::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         ComputedValue::String(s) => serde_json::Value::String(s.clone()),
         ComputedValue::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
         ComputedValue::Date(d) => serde_json::Value::Number((*d as i64).into()),
@@ -23704,7 +24248,10 @@ fn json_extract_scalar(json_str: &str, path: &str) -> Option<String> {
 
 /// Navigate a JSON value using a simple path (no wildcards/recursion)
 /// Returns borrowed reference for efficiency
-fn navigate_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+fn navigate_json_path<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
     let path = path.trim();
     if path.is_empty() || path == "$" {
         return Some(value);
@@ -23738,7 +24285,7 @@ fn navigate_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'
             remaining = &remaining[end + 1..];
         } else {
             // Object key
-            let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+            let end = remaining.find(['.', '[']).unwrap_or(remaining.len());
             let key = &remaining[..end];
             if key.is_empty() {
                 break;
@@ -23794,7 +24341,7 @@ fn navigate_path_impl(value: &serde_json::Value, path: &str) -> Vec<serde_json::
         let mut results = Vec::new();
 
         // Find next path component
-        let next_end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+        let next_end = remaining.find(['.', '[']).unwrap_or(remaining.len());
         let next_key = &remaining[..next_end];
         let rest = &remaining[next_end..];
 
@@ -23879,7 +24426,7 @@ fn navigate_path_impl(value: &serde_json::Value, path: &str) -> Vec<serde_json::
     }
 
     // Object key access
-    let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+    let end = remaining.find(['.', '[']).unwrap_or(remaining.len());
     let key = &remaining[..end];
     let rest = &remaining[end..];
 
@@ -23966,8 +24513,16 @@ fn parse_and_apply_slice(arr: &[serde_json::Value], slice_expr: &str) -> Vec<ser
     };
 
     // Normalize negative indices
-    let start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
-    let end = if end < 0 { (len + end).max(0) } else { end.min(len) } as usize;
+    let start = if start < 0 {
+        (len + start).max(0)
+    } else {
+        start.min(len)
+    } as usize;
+    let end = if end < 0 {
+        (len + end).max(0)
+    } else {
+        end.min(len)
+    } as usize;
 
     if start >= end || step <= 0 {
         return vec![];
@@ -23989,7 +24544,7 @@ fn evaluate_json_filter(value: &serde_json::Value, filter_expr: &str) -> bool {
     let expr = filter_expr.trim();
 
     // Parse simple comparisons: @.field op value
-    if let Some((lhs, rest)) = expr.split_once(|c| c == '=' || c == '>' || c == '<' || c == '!') {
+    if let Some((lhs, rest)) = expr.split_once(['=', '>', '<', '!']) {
         let lhs = lhs.trim();
         let (op, rhs) = if rest.starts_with('=') {
             let rhs = rest[1..].trim();
@@ -24052,7 +24607,12 @@ fn evaluate_json_filter(value: &serde_json::Value, filter_expr: &str) -> bool {
 }
 
 /// Compare JSON value against string literal
-fn compare_json_values<F1, F2>(json_val: &serde_json::Value, rhs: &str, num_cmp: F1, str_cmp: F2) -> bool
+fn compare_json_values<F1, F2>(
+    json_val: &serde_json::Value,
+    rhs: &str,
+    num_cmp: F1,
+    str_cmp: F2,
+) -> bool
 where
     F1: Fn(f64, f64) -> bool,
     F2: Fn(&str, &str) -> bool,
@@ -24117,13 +24677,18 @@ fn json_value_contains(left: &serde_json::Value, right: &serde_json::Value) -> b
         // Arrays: left must contain all elements of right
         (serde_json::Value::Array(l_arr), serde_json::Value::Array(r_arr)) => {
             r_arr.iter().all(|r_elem| {
-                l_arr.iter().any(|l_elem| json_value_contains(l_elem, r_elem))
+                l_arr
+                    .iter()
+                    .any(|l_elem| json_value_contains(l_elem, r_elem))
             })
         }
         // Objects: left must have all keys from right with matching values
         (serde_json::Value::Object(l_obj), serde_json::Value::Object(r_obj)) => {
             r_obj.iter().all(|(k, r_val)| {
-                l_obj.get(k).map(|l_val| json_value_contains(l_val, r_val)).unwrap_or(false)
+                l_obj
+                    .get(k)
+                    .map(|l_val| json_value_contains(l_val, r_val))
+                    .unwrap_or(false)
             })
         }
         // Scalars: must be equal
@@ -24157,7 +24722,7 @@ fn json_remove(json_str: &str, path: &str) -> Option<String> {
             components.push(PathComponent::Index(index_str.parse().ok()?));
             remaining = &remaining[end + 1..];
         } else {
-            let end = remaining.find(|c| c == '.' || c == '[').unwrap_or(remaining.len());
+            let end = remaining.find(['.', '[']).unwrap_or(remaining.len());
             let key = &remaining[..end];
             if !key.is_empty() {
                 components.push(PathComponent::Key(key.to_string()));
@@ -24243,7 +24808,7 @@ fn interval_to_micros(interval: i64, unit: &str) -> i64 {
         "week" | "weeks" => interval * 7 * 86400 * 1_000_000,
         "month" | "months" => interval * 30 * 86400 * 1_000_000, // Approximation
         "year" | "years" => interval * 365 * 86400 * 1_000_000,  // Approximation
-        _ => interval * 86400 * 1_000_000, // Default to days
+        _ => interval * 86400 * 1_000_000,                       // Default to days
     }
 }
 
@@ -24647,7 +25212,9 @@ impl SegmentChecksumJournal {
         };
 
         // Update in-memory map
-        self.entries.write().insert(segment_id.to_string(), entry.clone());
+        self.entries
+            .write()
+            .insert(segment_id.to_string(), entry.clone());
 
         // Append to journal file
         let line = serde_json::to_string(&entry)
@@ -24670,7 +25237,10 @@ impl SegmentChecksumJournal {
 
     /// Verify a segment's checksum against the journal
     pub fn verify(&self, segment_id: &str, actual_checksum: u64) -> Option<bool> {
-        self.entries.read().get(segment_id).map(|entry| entry.checksum == actual_checksum)
+        self.entries
+            .read()
+            .get(segment_id)
+            .map(|entry| entry.checksum == actual_checksum)
     }
 
     /// Get the expected checksum for a segment
@@ -24699,8 +25269,7 @@ impl SegmentChecksumJournal {
             for entry in entries {
                 let line = serde_json::to_string(&entry)
                     .map_err(|e| EngineError::Internal(format!("serialize: {}", e)))?;
-                writeln!(file, "{}", line)
-                    .map_err(|e| EngineError::Io(format!("write: {}", e)))?;
+                writeln!(file, "{}", line).map_err(|e| EngineError::Io(format!("write: {}", e)))?;
             }
 
             file.sync_all()
@@ -25016,8 +25585,9 @@ fn apply_filter_to_batch(
                 let scalar = StringArray::new_scalar(val);
                 if let Ok(cmp) = arr_eq(arr, &scalar) {
                     mask = Some(match mask {
-                        Some(m) => and(&m, &cmp)
-                            .map_err(|e| EngineError::Internal(format!("filter and failed: {}", e)))?,
+                        Some(m) => and(&m, &cmp).map_err(|e| {
+                            EngineError::Internal(format!("filter and failed: {}", e))
+                        })?,
                         None => cmp,
                     });
                 }
@@ -26437,10 +27007,10 @@ fn apply_dictionary_encoding_to_column(col: &ArrayRef) -> ArrayRef {
     // Try to cast to dictionary-encoded type for string columns
     if col.as_any().downcast_ref::<StringArray>().is_some() {
         // Cast to DictionaryArray<Int32>
-        match cast(col, &DataType::Dictionary(
-            Box::new(DataType::Int32),
-            Box::new(DataType::Utf8),
-        )) {
+        match cast(
+            col,
+            &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        ) {
             Ok(dict_arr) => return dict_arr,
             Err(_) => return col.clone(), // Fall back if cast fails
         }
@@ -26607,7 +27177,8 @@ pub fn filter_ipc_with_projection(
     };
 
     // Build the full set of columns needed: projection + filter columns
-    let mut needed_cols: std::collections::HashSet<&str> = proj_cols.iter().map(|s| s.as_str()).collect();
+    let mut needed_cols: std::collections::HashSet<&str> =
+        proj_cols.iter().map(|s| s.as_str()).collect();
 
     // Add columns used in filters
     if filter.tenant_id_eq.is_some() || filter.tenant_id_in.is_some() {
@@ -26666,15 +27237,13 @@ pub fn filter_ipc_with_projection(
     // Now project down to just the requested columns (remove filter-only columns)
     let final_batches = if proj_cols.len() < needed_cols.len() {
         // Need to remove filter-only columns from output
-        let output_schema = filtered
-            .first()
-            .map(|b| {
-                let fields: Vec<_> = proj_cols
-                    .iter()
-                    .filter_map(|col| b.schema().field_with_name(col).ok().cloned())
-                    .collect();
-                Arc::new(arrow_schema::Schema::new(fields))
-            });
+        let output_schema = filtered.first().map(|b| {
+            let fields: Vec<_> = proj_cols
+                .iter()
+                .filter_map(|col| b.schema().field_with_name(col).ok().cloned())
+                .collect();
+            Arc::new(arrow_schema::Schema::new(fields))
+        });
 
         match output_schema {
             Some(schema) => {
@@ -26685,10 +27254,9 @@ pub fn filter_ipc_with_projection(
                         .filter_map(|col| batch.column_by_name(col).cloned())
                         .collect();
                     if columns.len() == proj_cols.len() {
-                        projected.push(
-                            RecordBatch::try_new(schema.clone(), columns)
-                                .map_err(|e| EngineError::Internal(format!("projection error: {e}")))?,
-                        );
+                        projected.push(RecordBatch::try_new(schema.clone(), columns).map_err(
+                            |e| EngineError::Internal(format!("projection error: {e}")),
+                        )?);
                     }
                 }
                 projected
@@ -26774,9 +27342,7 @@ pub fn filter_ipc_batches(
         let mut any_true = true; // Track if mask has any true values
 
         // Helper closure to check if mask is all false (enables early exit)
-        let check_any_true = |m: &BooleanArray| -> bool {
-            m.iter().any(|v| v == Some(true))
-        };
+        let check_any_true = |m: &BooleanArray| -> bool { m.iter().any(|v| v == Some(true)) };
 
         // Apply tenant_id_eq filter
         if let Some(tid) = filter.tenant_id_eq {
@@ -26947,21 +27513,22 @@ pub fn filter_ipc_batches(
             if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
                 let col = batch.column(col_idx);
                 // Convert column to StringArray if needed for LIKE comparison
-                let str_arr: StringArray = if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    arr.clone()
-                } else {
-                    // Convert numeric/other types to string for LIKE pattern matching
-                    let str_values: Vec<Option<String>> = (0..col.len())
-                        .map(|i| {
-                            if col.is_null(i) {
-                                None
-                            } else {
-                                array_value_to_string(col.as_ref(), i).ok()
-                            }
-                        })
-                        .collect();
-                    StringArray::from(str_values)
-                };
+                let str_arr: StringArray =
+                    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                        arr.clone()
+                    } else {
+                        // Convert numeric/other types to string for LIKE pattern matching
+                        let str_values: Vec<Option<String>> = (0..col.len())
+                            .map(|i| {
+                                if col.is_null(i) {
+                                    None
+                                } else {
+                                    array_value_to_string(col.as_ref(), i).ok()
+                                }
+                            })
+                            .collect();
+                        StringArray::from(str_values)
+                    };
                 let pattern_scalar = StringArray::new_scalar(pattern);
                 let cmp = if *negate {
                     nlike(&str_arr, &pattern_scalar)
@@ -26980,21 +27547,22 @@ pub fn filter_ipc_batches(
             if let Some(col_idx) = batch.schema().index_of(col_name).ok() {
                 let col = batch.column(col_idx);
                 // Convert column to StringArray if needed for ILIKE comparison
-                let str_arr: StringArray = if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    arr.clone()
-                } else {
-                    // Convert numeric/other types to string for ILIKE pattern matching
-                    let str_values: Vec<Option<String>> = (0..col.len())
-                        .map(|i| {
-                            if col.is_null(i) {
-                                None
-                            } else {
-                                array_value_to_string(col.as_ref(), i).ok()
-                            }
-                        })
-                        .collect();
-                    StringArray::from(str_values)
-                };
+                let str_arr: StringArray =
+                    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+                        arr.clone()
+                    } else {
+                        // Convert numeric/other types to string for ILIKE pattern matching
+                        let str_values: Vec<Option<String>> = (0..col.len())
+                            .map(|i| {
+                                if col.is_null(i) {
+                                    None
+                                } else {
+                                    array_value_to_string(col.as_ref(), i).ok()
+                                }
+                            })
+                            .collect();
+                        StringArray::from(str_values)
+                    };
                 let pattern_scalar = StringArray::new_scalar(pattern);
                 let cmp = if *negate {
                     nilike(&str_arr, &pattern_scalar)
@@ -27387,19 +27955,19 @@ impl Aggregator {
     fn estimate_agg_state_bytes(state: &AggState) -> u64 {
         let mut bytes: u64 = std::mem::size_of::<AggState>() as u64;
         // Count distinct sets (each hash set entry ~16 bytes)
-        for (_col, set) in &state.count_distinct_sets {
+        for set in state.count_distinct_sets.values() {
             bytes += (set.len() * 16) as u64;
         }
         // Percentile values (each f64 = 8 bytes)
-        for (_col, vals) in &state.percentile_values {
+        for vals in state.percentile_values.values() {
             bytes += (vals.len() * 8) as u64;
         }
         // Array agg values (estimate ~32 bytes per string on average)
-        for (_col, vals) in &state.array_agg_values {
+        for vals in state.array_agg_values.values() {
             bytes += (vals.len() * 32) as u64;
         }
         // String agg values
-        for (_col, vals) in &state.string_agg_values {
+        for vals in state.string_agg_values.values() {
             bytes += vals.iter().map(|s| s.len() as u64).sum::<u64>();
         }
         bytes
@@ -27775,7 +28343,9 @@ impl Aggregator {
                         };
                         if added.insert(name.to_string()) {
                             let dtype = match col {
-                                GroupByColumn::TenantId | GroupByColumn::RouteId => DataType::UInt64,
+                                GroupByColumn::TenantId | GroupByColumn::RouteId => {
+                                    DataType::UInt64
+                                }
                                 GroupByColumn::Named(_) => DataType::Utf8,
                             };
                             fields.push(Field::new(name, dtype, true));
@@ -27875,8 +28445,16 @@ impl Aggregator {
                 AggKind::Avg { column } => {
                     let (sum, count) = if has_filter {
                         (
-                            state.filtered_avg_sums.get(&agg_name).copied().unwrap_or(0.0),
-                            state.filtered_avg_counts.get(&agg_name).copied().unwrap_or(0),
+                            state
+                                .filtered_avg_sums
+                                .get(&agg_name)
+                                .copied()
+                                .unwrap_or(0.0),
+                            state
+                                .filtered_avg_counts
+                                .get(&agg_name)
+                                .copied()
+                                .unwrap_or(0),
                         )
                     } else {
                         (
@@ -27889,9 +28467,17 @@ impl Aggregator {
                 }
                 AggKind::Min { column } => {
                     let min = if has_filter {
-                        state.filtered_mins.get(&agg_name).copied().unwrap_or(f64::INFINITY)
+                        state
+                            .filtered_mins
+                            .get(&agg_name)
+                            .copied()
+                            .unwrap_or(f64::INFINITY)
                     } else {
-                        state.min_values.get(column).copied().unwrap_or(f64::INFINITY)
+                        state
+                            .min_values
+                            .get(column)
+                            .copied()
+                            .unwrap_or(f64::INFINITY)
                     };
                     Arc::new(Int64Array::from(vec![if min.is_infinite() {
                         0
@@ -27901,9 +28487,17 @@ impl Aggregator {
                 }
                 AggKind::Max { column } => {
                     let max = if has_filter {
-                        state.filtered_maxs.get(&agg_name).copied().unwrap_or(f64::NEG_INFINITY)
+                        state
+                            .filtered_maxs
+                            .get(&agg_name)
+                            .copied()
+                            .unwrap_or(f64::NEG_INFINITY)
                     } else {
-                        state.max_values.get(column).copied().unwrap_or(f64::NEG_INFINITY)
+                        state
+                            .max_values
+                            .get(column)
+                            .copied()
+                            .unwrap_or(f64::NEG_INFINITY)
                     };
                     Arc::new(Int64Array::from(vec![if max.is_infinite() {
                         0
@@ -27975,7 +28569,9 @@ impl Aggregator {
                     };
                     Arc::new(StringArray::from(vec![json]))
                 }
-                AggKind::StringAgg { column, delimiter, .. } => {
+                AggKind::StringAgg {
+                    column, delimiter, ..
+                } => {
                     let result = if let Some(values) = state.string_agg_values.get(column) {
                         values.join(delimiter)
                     } else {
@@ -27992,15 +28588,28 @@ impl Aggregator {
                     };
                     Arc::new(StringArray::from(vec![result]))
                 }
-                AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
+                AggKind::StringAggOrdered {
+                    column,
+                    delimiter,
+                    order_by,
+                    order_desc,
+                } => {
                     // Get values with their order keys, sort, then join
                     let result = if let Some(values) = state.ordered_values.get(column) {
                         let mut sorted: Vec<_> = values.iter().cloned().collect();
                         sorted.sort_by(|a, b| {
                             let cmp = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
-                            if *order_desc { cmp.reverse() } else { cmp }
+                            if *order_desc {
+                                cmp.reverse()
+                            } else {
+                                cmp
+                            }
                         });
-                        sorted.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(delimiter)
+                        sorted
+                            .iter()
+                            .map(|(v, _)| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(delimiter)
                     } else if let Some(values) = state.string_agg_values.get(column) {
                         values.join(delimiter)
                     } else {
@@ -28009,12 +28618,20 @@ impl Aggregator {
                     let _ = order_by; // suppress unused warning
                     Arc::new(StringArray::from(vec![result]))
                 }
-                AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
+                AggKind::ArrayAggOrdered {
+                    column,
+                    order_by,
+                    order_desc,
+                } => {
                     let json = if let Some(values) = state.ordered_values.get(column) {
                         let mut sorted: Vec<_> = values.iter().cloned().collect();
                         sorted.sort_by(|a, b| {
                             let cmp = a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal);
-                            if *order_desc { cmp.reverse() } else { cmp }
+                            if *order_desc {
+                                cmp.reverse()
+                            } else {
+                                cmp
+                            }
                         });
                         let vals: Vec<_> = sorted.iter().map(|(v, _)| v.as_str()).collect();
                         serde_json::to_string(&vals).unwrap_or_else(|_| "[]".to_string())
@@ -28423,7 +29040,9 @@ fn accumulate_aggs_into(
                     collect_string_values(col, values, *distinct);
                 }
             }
-            AggKind::StringAgg { column, distinct, .. } => {
+            AggKind::StringAgg {
+                column, distinct, ..
+            } => {
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
                     let values = state
@@ -28449,7 +29068,9 @@ fn accumulate_aggs_into(
                     collect_string_values(col, values, false);
                 }
             }
-            AggKind::StringAggOrdered { column, order_by, .. } => {
+            AggKind::StringAggOrdered {
+                column, order_by, ..
+            } => {
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
                     let order_col = if let Ok(order_idx) = batch.schema().index_of(order_by) {
@@ -28464,7 +29085,9 @@ fn accumulate_aggs_into(
                     collect_ordered_values(col, order_col, values);
                 }
             }
-            AggKind::ArrayAggOrdered { column, order_by, .. } => {
+            AggKind::ArrayAggOrdered {
+                column, order_by, ..
+            } => {
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
                     let order_col = if let Ok(order_idx) = batch.schema().index_of(order_by) {
@@ -28479,7 +29102,9 @@ fn accumulate_aggs_into(
                     collect_ordered_values(col, order_col, values);
                 }
             }
-            AggKind::NthValue { column, .. } | AggKind::FirstValue { column } | AggKind::LastValue { column } => {
+            AggKind::NthValue { column, .. }
+            | AggKind::FirstValue { column }
+            | AggKind::LastValue { column } => {
                 if let Ok(col_idx) = batch.schema().index_of(column) {
                     let col = batch.column(col_idx);
                     let values = state
@@ -28718,27 +29343,24 @@ fn collect_ordered_values(
 
         // Get value as string
         let val = match col.data_type() {
-            DataType::Utf8 => {
-                col.as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(i)
-                    .to_string()
-            }
-            DataType::Int64 => {
-                col.as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
-                    .value(i)
-                    .to_string()
-            }
-            DataType::Float64 => {
-                col.as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(i)
-                    .to_string()
-            }
+            DataType::Utf8 => col
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(i)
+                .to_string(),
+            DataType::Int64 => col
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(i)
+                .to_string(),
+            DataType::Float64 => col
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(i)
+                .to_string(),
             _ => format!("{:?}", col.slice(i, 1)),
         };
 
@@ -28748,20 +29370,16 @@ fn collect_ordered_values(
                 values.len() as f64
             } else {
                 match order.data_type() {
-                    DataType::Int64 => {
-                        order
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .unwrap()
-                            .value(i) as f64
-                    }
-                    DataType::Float64 => {
-                        order
-                            .as_any()
-                            .downcast_ref::<Float64Array>()
-                            .unwrap()
-                            .value(i)
-                    }
+                    DataType::Int64 => order
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(i) as f64,
+                    DataType::Float64 => order
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .value(i),
                     DataType::Utf8 => {
                         // Use string ordering - hash as f64
                         let s = order
@@ -28843,7 +29461,11 @@ fn accumulate_single_row(
                 if !col.is_null(row) {
                     let hash = hash_array_value_u64(col, row);
                     // For filtered COUNT DISTINCT, use aggregate name as key
-                    let key = if has_filter { agg_name.clone() } else { column.clone() };
+                    let key = if has_filter {
+                        agg_name.clone()
+                    } else {
+                        column.clone()
+                    };
                     let set = state
                         .count_distinct_sets
                         .entry(key)
@@ -28872,7 +29494,10 @@ fn accumulate_single_row(
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
                         if has_filter {
-                            *state.filtered_avg_sums.entry(agg_name.clone()).or_insert(0.0) += v;
+                            *state
+                                .filtered_avg_sums
+                                .entry(agg_name.clone())
+                                .or_insert(0.0) += v;
                             *state.filtered_avg_counts.entry(agg_name).or_insert(0) += 1;
                         } else {
                             *state.avg_sums.entry(column.clone()).or_insert(0.0) += v;
@@ -28888,12 +29513,16 @@ fn accumulate_single_row(
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
                         if has_filter {
-                            let entry = state.filtered_mins.entry(agg_name).or_insert(f64::INFINITY);
+                            let entry =
+                                state.filtered_mins.entry(agg_name).or_insert(f64::INFINITY);
                             if v < *entry {
                                 *entry = v;
                             }
                         } else {
-                            let entry = state.min_values.entry(column.clone()).or_insert(f64::INFINITY);
+                            let entry = state
+                                .min_values
+                                .entry(column.clone())
+                                .or_insert(f64::INFINITY);
                             if v < *entry {
                                 *entry = v;
                             }
@@ -28908,12 +29537,18 @@ fn accumulate_single_row(
                 if !col.is_null(row) {
                     if let Some(v) = extract_f64(col, row) {
                         if has_filter {
-                            let entry = state.filtered_maxs.entry(agg_name).or_insert(f64::NEG_INFINITY);
+                            let entry = state
+                                .filtered_maxs
+                                .entry(agg_name)
+                                .or_insert(f64::NEG_INFINITY);
                             if v > *entry {
                                 *entry = v;
                             }
                         } else {
-                            let entry = state.max_values.entry(column.clone()).or_insert(f64::NEG_INFINITY);
+                            let entry = state
+                                .max_values
+                                .entry(column.clone())
+                                .or_insert(f64::NEG_INFINITY);
                             if v > *entry {
                                 *entry = v;
                             }
@@ -29090,8 +29725,12 @@ pub fn aggregation_projection(agg: &AggPlan, proj: &[String]) -> Vec<String> {
                     needed.push(column.clone());
                 }
             }
-            AggKind::StringAggOrdered { column, order_by, .. }
-            | AggKind::ArrayAggOrdered { column, order_by, .. } => {
+            AggKind::StringAggOrdered {
+                column, order_by, ..
+            }
+            | AggKind::ArrayAggOrdered {
+                column, order_by, ..
+            } => {
                 if !needed.contains(column) {
                     needed.push(column.clone());
                 }
@@ -30527,7 +31166,9 @@ pub fn build_match_mask(
                     let val = if let Some(str_arr) = col.as_any().downcast_ref::<StringArray>() {
                         str_arr.value(i).to_lowercase()
                     } else {
-                        array_value_to_string(col.as_ref(), i).unwrap_or_default().to_lowercase()
+                        array_value_to_string(col.as_ref(), i)
+                            .unwrap_or_default()
+                            .to_lowercase()
                     };
                     // Convert pattern to lowercase for case-insensitive match
                     let matches = matches_like_pattern(&val, &pattern.to_lowercase());
@@ -30984,10 +31625,7 @@ impl AutoRepairState {
 ///
 /// Returns an Arc to the AutoRepairState which can be used to query statistics
 /// and control the task.
-pub fn start_auto_repair_task(
-    db: Arc<Db>,
-    config: AutoRepairConfig,
-) -> Arc<AutoRepairState> {
+pub fn start_auto_repair_task(db: Arc<Db>, config: AutoRepairConfig) -> Arc<AutoRepairState> {
     let state = Arc::new(AutoRepairState::new(db, config));
     let state_clone = state.clone();
 
@@ -31019,14 +31657,18 @@ pub fn start_auto_repair_task(
             };
 
             // Update pending count
-            state_clone.pending_count.store(damaged.len(), Ordering::Relaxed);
+            state_clone
+                .pending_count
+                .store(damaged.len(), Ordering::Relaxed);
 
             // Update last scan timestamp
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            state_clone.last_scan_timestamp.store(now, Ordering::Relaxed);
+            state_clone
+                .last_scan_timestamp
+                .store(now, Ordering::Relaxed);
 
             if damaged.is_empty() {
                 continue;
@@ -31055,7 +31697,10 @@ pub fn start_auto_repair_task(
             let mut total_recovered = 0usize;
             let mut total_removed = 0usize;
             for ((database, table), _segments) in by_table {
-                match state_clone.db.repair_segments_with_recovery(Some(&database), Some(&table)) {
+                match state_clone
+                    .db
+                    .repair_segments_with_recovery(Some(&database), Some(&table))
+                {
                     Ok((recovered, removed)) => {
                         if !recovered.is_empty() {
                             tracing::info!(
@@ -31084,12 +31729,7 @@ pub fn start_auto_repair_task(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "auto-repair failed for {}.{}: {}",
-                            database,
-                            table,
-                            e
-                        );
+                        tracing::warn!("auto-repair failed for {}.{}: {}", database, table, e);
                     }
                 }
             }
@@ -31101,7 +31741,10 @@ pub fn start_auto_repair_task(
 
             // Run background scrubbing if enabled
             if state_clone.db.cfg.scrubbing_enabled {
-                match state_clone.db.scrub_segments(state_clone.db.cfg.scrubbing_batch_size) {
+                match state_clone
+                    .db
+                    .scrub_segments(state_clone.db.cfg.scrubbing_batch_size)
+                {
                     Ok(corrupted) => {
                         if !corrupted.is_empty() {
                             tracing::warn!(
@@ -31121,10 +31764,7 @@ pub fn start_auto_repair_task(
                 match state_clone.db.cleanup_orphaned_files() {
                     Ok(cleaned) => {
                         if !cleaned.is_empty() {
-                            tracing::info!(
-                                "Cleaned up {} orphaned segment files",
-                                cleaned.len()
-                            );
+                            tracing::info!("Cleaned up {} orphaned segment files", cleaned.len());
                         }
                     }
                     Err(e) => {
@@ -31169,7 +31809,10 @@ fn log_repair_to_file(path: &Path, database: &str, table: &str, removed: &[Strin
 fn parse_merge_condition(condition: &str) -> Result<(String, String), EngineError> {
     let condition = condition.trim();
     // Remove outer parentheses if present
-    let condition = condition.trim_start_matches('(').trim_end_matches(')').trim();
+    let condition = condition
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
 
     // Look for = sign
     let parts: Vec<&str> = condition.split('=').collect();
@@ -31371,7 +32014,11 @@ fn resolve_value(val: &str, batch: &RecordBatch, row_idx: usize) -> Option<Strin
 }
 
 /// Get a column value as a string for comparison
-fn get_column_value_as_string(batch: &RecordBatch, col_name: &str, row_idx: usize) -> Option<String> {
+fn get_column_value_as_string(
+    batch: &RecordBatch,
+    col_name: &str,
+    row_idx: usize,
+) -> Option<String> {
     let col_idx = batch.schema().index_of(col_name).ok()?;
     let col = batch.column(col_idx);
 
@@ -31382,21 +32029,81 @@ fn get_column_value_as_string(batch: &RecordBatch, col_name: &str, row_idx: usiz
     use arrow_array::*;
 
     Some(match col.data_type() {
-        DataType::Utf8 => col.as_any().downcast_ref::<StringArray>()?.value(row_idx).to_string(),
-        DataType::LargeUtf8 => col.as_any().downcast_ref::<LargeStringArray>()?.value(row_idx).to_string(),
-        DataType::Int8 => col.as_any().downcast_ref::<Int8Array>()?.value(row_idx).to_string(),
-        DataType::Int16 => col.as_any().downcast_ref::<Int16Array>()?.value(row_idx).to_string(),
-        DataType::Int32 => col.as_any().downcast_ref::<Int32Array>()?.value(row_idx).to_string(),
-        DataType::Int64 => col.as_any().downcast_ref::<Int64Array>()?.value(row_idx).to_string(),
-        DataType::UInt8 => col.as_any().downcast_ref::<UInt8Array>()?.value(row_idx).to_string(),
-        DataType::UInt16 => col.as_any().downcast_ref::<UInt16Array>()?.value(row_idx).to_string(),
-        DataType::UInt32 => col.as_any().downcast_ref::<UInt32Array>()?.value(row_idx).to_string(),
-        DataType::UInt64 => col.as_any().downcast_ref::<UInt64Array>()?.value(row_idx).to_string(),
-        DataType::Float32 => col.as_any().downcast_ref::<Float32Array>()?.value(row_idx).to_string(),
-        DataType::Float64 => col.as_any().downcast_ref::<Float64Array>()?.value(row_idx).to_string(),
-        DataType::Boolean => col.as_any().downcast_ref::<BooleanArray>()?.value(row_idx).to_string(),
-        DataType::Date32 => col.as_any().downcast_ref::<Date32Array>()?.value(row_idx).to_string(),
-        DataType::Date64 => col.as_any().downcast_ref::<Date64Array>()?.value(row_idx).to_string(),
+        DataType::Utf8 => col
+            .as_any()
+            .downcast_ref::<StringArray>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::LargeUtf8 => col
+            .as_any()
+            .downcast_ref::<LargeStringArray>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Int8 => col
+            .as_any()
+            .downcast_ref::<Int8Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Int16 => col
+            .as_any()
+            .downcast_ref::<Int16Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Int32 => col
+            .as_any()
+            .downcast_ref::<Int32Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Int64 => col
+            .as_any()
+            .downcast_ref::<Int64Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::UInt8 => col
+            .as_any()
+            .downcast_ref::<UInt8Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::UInt16 => col
+            .as_any()
+            .downcast_ref::<UInt16Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::UInt32 => col
+            .as_any()
+            .downcast_ref::<UInt32Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::UInt64 => col
+            .as_any()
+            .downcast_ref::<UInt64Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Float32 => col
+            .as_any()
+            .downcast_ref::<Float32Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Float64 => col
+            .as_any()
+            .downcast_ref::<Float64Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Boolean => col
+            .as_any()
+            .downcast_ref::<BooleanArray>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Date32 => col
+            .as_any()
+            .downcast_ref::<Date32Array>()?
+            .value(row_idx)
+            .to_string(),
+        DataType::Date64 => col
+            .as_any()
+            .downcast_ref::<Date64Array>()?
+            .value(row_idx)
+            .to_string(),
         DataType::Timestamp(_, _) => {
             if let Some(arr) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
                 arr.value(row_idx).to_string()
@@ -31499,7 +32206,8 @@ fn build_insert_ipc(
     for (field_idx, field) in fields.iter().enumerate() {
         // Find the column index in the INSERT columns list
         let col_idx = columns.as_ref().and_then(|cols| {
-            cols.iter().position(|c| c.eq_ignore_ascii_case(&field.name))
+            cols.iter()
+                .position(|c| c.eq_ignore_ascii_case(&field.name))
         });
 
         let dt = arrow_type_from_str(&field.data_type).unwrap_or(DataType::Utf8);
@@ -31625,9 +32333,11 @@ fn parse_join_predicates(
         let cond = cond.trim();
         if let Some(eq_pos) = cond.find('=') {
             // Skip != and >=, <= etc.
-            if eq_pos > 0 && (cond.as_bytes()[eq_pos - 1] == b'!' ||
-                cond.as_bytes()[eq_pos - 1] == b'<' ||
-                cond.as_bytes()[eq_pos - 1] == b'>') {
+            if eq_pos > 0
+                && (cond.as_bytes()[eq_pos - 1] == b'!'
+                    || cond.as_bytes()[eq_pos - 1] == b'<'
+                    || cond.as_bytes()[eq_pos - 1] == b'>')
+            {
                 continue;
             }
             if eq_pos + 1 < cond.len() && cond.as_bytes()[eq_pos + 1] == b'=' {
@@ -31758,10 +32468,16 @@ fn array_value_to_string_for_join(arr: &dyn arrow_array::Array, idx: usize) -> O
     if let Some(a) = arr.as_any().downcast_ref::<arrow_array::BooleanArray>() {
         return Some(a.value(idx).to_string());
     }
-    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::TimestampMicrosecondArray>() {
+    if let Some(a) = arr
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampMicrosecondArray>()
+    {
         return Some(a.value(idx).to_string());
     }
-    if let Some(a) = arr.as_any().downcast_ref::<arrow_array::TimestampMillisecondArray>() {
+    if let Some(a) = arr
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampMillisecondArray>()
+    {
         return Some(a.value(idx).to_string());
     }
     if let Some(a) = arr.as_any().downcast_ref::<arrow_array::Date32Array>() {
@@ -31775,19 +32491,17 @@ fn array_value_to_string_for_join(arr: &dyn arrow_array::Array, idx: usize) -> O
 }
 
 /// Filter a RecordBatch to only include specific row indices.
-fn filter_batch_by_indices(batch: &RecordBatch, indices: &[usize]) -> Result<RecordBatch, EngineError> {
+fn filter_batch_by_indices(
+    batch: &RecordBatch,
+    indices: &[usize],
+) -> Result<RecordBatch, EngineError> {
     use arrow_array::builder::UInt32Builder;
     use arrow_select::take::take;
 
     if indices.is_empty() {
         // Return empty batch with same schema
-        let empty_cols: Vec<Arc<dyn arrow_array::Array>> = batch
-            .columns()
-            .iter()
-            .map(|col| {
-                col.slice(0, 0)
-            })
-            .collect();
+        let empty_cols: Vec<Arc<dyn arrow_array::Array>> =
+            batch.columns().iter().map(|col| col.slice(0, 0)).collect();
         return RecordBatch::try_new(batch.schema(), empty_cols)
             .map_err(|e| EngineError::Internal(format!("failed to create empty batch: {e}")));
     }
@@ -31801,11 +32515,11 @@ fn filter_batch_by_indices(batch: &RecordBatch, indices: &[usize]) -> Result<Rec
     let new_columns: Result<Vec<Arc<dyn arrow_array::Array>>, _> = batch
         .columns()
         .iter()
-        .map(|col| take(col.as_ref(), &indices_array, None).map(|a| Arc::from(a)))
+        .map(|col| take(col.as_ref(), &indices_array, None))
         .collect();
 
-    let new_columns = new_columns
-        .map_err(|e| EngineError::Internal(format!("failed to filter batch: {e}")))?;
+    let new_columns =
+        new_columns.map_err(|e| EngineError::Internal(format!("failed to filter batch: {e}")))?;
 
     RecordBatch::try_new(batch.schema(), new_columns)
         .map_err(|e| EngineError::Internal(format!("failed to create filtered batch: {e}")))

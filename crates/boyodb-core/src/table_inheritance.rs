@@ -6,9 +6,9 @@
 //! - Column inheritance with overrides
 //! - Constraint inheritance
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // INHERITANCE TYPES
@@ -272,26 +272,17 @@ impl InheritedTable {
 
     /// Get inherited columns only
     pub fn inherited_columns(&self) -> Vec<&InheritedColumn> {
-        self.columns
-            .iter()
-            .filter(|c| c.is_inherited())
-            .collect()
+        self.columns.iter().filter(|c| c.is_inherited()).collect()
     }
 
     /// Get local columns only
     pub fn local_columns(&self) -> Vec<&InheritedColumn> {
-        self.columns
-            .iter()
-            .filter(|c| !c.is_inherited())
-            .collect()
+        self.columns.iter().filter(|c| !c.is_inherited()).collect()
     }
 
     /// Get inherited constraints
     pub fn inherited_constraints(&self) -> Vec<&InheritedConstraint> {
-        self.constraints
-            .iter()
-            .filter(|c| c.is_inherited)
-            .collect()
+        self.constraints.iter().filter(|c| c.is_inherited).collect()
     }
 
     /// Check if table has children
@@ -406,11 +397,7 @@ impl InheritanceManager {
     }
 
     /// Add inheritance relationship
-    pub fn add_inheritance(
-        &self,
-        child: &str,
-        parent: &str,
-    ) -> Result<(), InheritanceError> {
+    pub fn add_inheritance(&self, child: &str, parent: &str) -> Result<(), InheritanceError> {
         // Check for cycles
         if self.would_create_cycle(child, parent) {
             return Err(InheritanceError::CycleDetected {
@@ -443,7 +430,11 @@ impl InheritanceManager {
 
         // Inherit columns
         for parent_col in &parent_table.columns {
-            if let Some(existing) = child_table.columns.iter_mut().find(|c| c.name == parent_col.name) {
+            if let Some(existing) = child_table
+                .columns
+                .iter_mut()
+                .find(|c| c.name == parent_col.name)
+            {
                 // Column exists - check compatibility and merge
                 if existing.data_type != parent_col.data_type {
                     return Err(InheritanceError::TypeMismatch {
@@ -455,7 +446,8 @@ impl InheritanceManager {
                 existing.add_parent(parent);
             } else {
                 // Add inherited column
-                let mut col = InheritedColumn::inherited(&parent_col.name, &parent_col.data_type, parent);
+                let mut col =
+                    InheritedColumn::inherited(&parent_col.name, &parent_col.data_type, parent);
                 col.nullable = parent_col.nullable;
                 col.default_expr = parent_col.default_expr.clone();
                 child_table.columns.push(col);
@@ -488,11 +480,7 @@ impl InheritanceManager {
     }
 
     /// Remove inheritance relationship
-    pub fn remove_inheritance(
-        &self,
-        child: &str,
-        parent: &str,
-    ) -> Result<(), InheritanceError> {
+    pub fn remove_inheritance(&self, child: &str, parent: &str) -> Result<(), InheritanceError> {
         let mut tables = self.tables.write();
         let mut children_map = self.children_map.write();
 
@@ -683,8 +671,7 @@ mod tests {
             .with_column(InheritedColumn::local("id", "integer"));
         manager.register_table(parent).unwrap();
 
-        let child = InheritedTable::new("public", "child")
-            .inherit_from("public.parent");
+        let child = InheritedTable::new("public", "child").inherit_from("public.parent");
         manager.register_table(child).unwrap();
 
         let children = manager.get_children("public.parent");
@@ -704,7 +691,9 @@ mod tests {
             .with_column(InheritedColumn::local("extra", "boolean"));
         manager.register_table(child).unwrap();
 
-        manager.add_inheritance("public.child", "public.parent").unwrap();
+        manager
+            .add_inheritance("public.child", "public.parent")
+            .unwrap();
 
         let child_table = manager.get_table("public.child").unwrap();
         assert_eq!(child_table.columns.len(), 3); // id, name, extra
@@ -728,7 +717,10 @@ mod tests {
 
         // This would create: a -> b -> c -> a
         let result = manager.add_inheritance("public.a", "public.c");
-        assert!(matches!(result, Err(InheritanceError::CycleDetected { .. })));
+        assert!(matches!(
+            result,
+            Err(InheritanceError::CycleDetected { .. })
+        ));
     }
 
     #[test]
@@ -794,10 +786,14 @@ mod tests {
         let child = InheritedTable::new("public", "child");
         manager.register_table(child).unwrap();
 
-        manager.add_inheritance("public.child", "public.parent").unwrap();
+        manager
+            .add_inheritance("public.child", "public.parent")
+            .unwrap();
         assert!(!manager.get_children("public.parent").is_empty());
 
-        manager.remove_inheritance("public.child", "public.parent").unwrap();
+        manager
+            .remove_inheritance("public.child", "public.parent")
+            .unwrap();
         assert!(manager.get_children("public.parent").is_empty());
     }
 

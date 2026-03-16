@@ -7,11 +7,11 @@
 // - Random access read/write
 // - Integration with transactions
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -50,9 +50,18 @@ pub struct AccessMode {
 }
 
 impl AccessMode {
-    pub const READ: Self = Self { read: true, write: false };
-    pub const WRITE: Self = Self { read: false, write: true };
-    pub const READ_WRITE: Self = Self { read: true, write: true };
+    pub const READ: Self = Self {
+        read: true,
+        write: false,
+    };
+    pub const WRITE: Self = Self {
+        read: false,
+        write: true,
+    };
+    pub const READ_WRITE: Self = Self {
+        read: true,
+        write: true,
+    };
 
     pub fn is_readable(&self) -> bool {
         self.read
@@ -182,9 +191,9 @@ impl LargeObject {
 
             // Get or create chunk
             let mut chunks = self.chunks.write();
-            let chunk = chunks.entry(chunk_number).or_insert_with(|| {
-                Chunk::new(chunk_number, vec![0u8; chunk_size])
-            });
+            let chunk = chunks
+                .entry(chunk_number)
+                .or_insert_with(|| Chunk::new(chunk_number, vec![0u8; chunk_size]));
 
             // Calculate how much we can write to this chunk
             let available = chunk_size - chunk_offset;
@@ -208,7 +217,8 @@ impl LargeObject {
             let new_end = offset + data.len() as u64;
             if new_end > metadata.size {
                 metadata.size = new_end;
-                metadata.chunk_count = ((metadata.size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
+                metadata.chunk_count =
+                    ((metadata.size + chunk_size as u64 - 1) / chunk_size as u64) as u32;
             }
             metadata.modified_at = current_timestamp();
         }
@@ -363,7 +373,7 @@ impl LargeObjectHandle {
 impl Read for LargeObjectHandle {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.closed {
-            return Err(io::Error::new(io::ErrorKind::Other, "Handle is closed"));
+            return Err(io::Error::other("Handle is closed"));
         }
         if !self.mode.is_readable() {
             return Err(io::Error::new(
@@ -372,8 +382,10 @@ impl Read for LargeObjectHandle {
             ));
         }
 
-        let data = self.lob.read_at(self.position, buf.len())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let data = self
+            .lob
+            .read_at(self.position, buf.len())
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         let len = data.len();
         buf[..len].copy_from_slice(&data);
@@ -386,7 +398,7 @@ impl Read for LargeObjectHandle {
 impl Write for LargeObjectHandle {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.closed {
-            return Err(io::Error::new(io::ErrorKind::Other, "Handle is closed"));
+            return Err(io::Error::other("Handle is closed"));
         }
         if !self.mode.is_writable() {
             return Err(io::Error::new(
@@ -395,8 +407,10 @@ impl Write for LargeObjectHandle {
             ));
         }
 
-        let written = self.lob.write_at(self.position, buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let written = self
+            .lob
+            .write_at(self.position, buf)
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         self.position += written as u64;
         Ok(written)
@@ -411,7 +425,7 @@ impl Write for LargeObjectHandle {
 impl Seek for LargeObjectHandle {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         if self.closed {
-            return Err(io::Error::new(io::ErrorKind::Other, "Handle is closed"));
+            return Err(io::Error::other("Handle is closed"));
         }
 
         let size = self.lob.size();
@@ -537,11 +551,13 @@ impl LargeObjectManager {
     /// Read from an open large object
     pub fn read(&self, descriptor: i32, length: usize) -> Result<Vec<u8>, LobError> {
         let mut handles = self.handles.write();
-        let handle = handles.get_mut(&descriptor)
+        let handle = handles
+            .get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
         let mut buf = vec![0u8; length];
-        let n = handle.read(&mut buf)
+        let n = handle
+            .read(&mut buf)
             .map_err(|e| LobError::IoError(e.to_string()))?;
         buf.truncate(n);
         Ok(buf)
@@ -550,17 +566,20 @@ impl LargeObjectManager {
     /// Write to an open large object
     pub fn write(&self, descriptor: i32, data: &[u8]) -> Result<usize, LobError> {
         let mut handles = self.handles.write();
-        let handle = handles.get_mut(&descriptor)
+        let handle = handles
+            .get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
-        handle.write(data)
+        handle
+            .write(data)
             .map_err(|e| LobError::IoError(e.to_string()))
     }
 
     /// Seek in an open large object
     pub fn seek(&self, descriptor: i32, offset: i64, whence: i32) -> Result<u64, LobError> {
         let mut handles = self.handles.write();
-        let handle = handles.get_mut(&descriptor)
+        let handle = handles
+            .get_mut(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
         let seek_from = match whence {
@@ -570,14 +589,16 @@ impl LargeObjectManager {
             _ => return Err(LobError::InvalidWhence(whence)),
         };
 
-        handle.seek(seek_from)
+        handle
+            .seek(seek_from)
             .map_err(|e| LobError::IoError(e.to_string()))
     }
 
     /// Get the current position in an open large object
     pub fn tell(&self, descriptor: i32) -> Result<u64, LobError> {
         let handles = self.handles.read();
-        let handle = handles.get(&descriptor)
+        let handle = handles
+            .get(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
         Ok(handle.tell())
     }
@@ -585,7 +606,8 @@ impl LargeObjectManager {
     /// Truncate an open large object
     pub fn truncate(&self, descriptor: i32, length: u64) -> Result<(), LobError> {
         let handles = self.handles.read();
-        let handle = handles.get(&descriptor)
+        let handle = handles
+            .get(&descriptor)
             .ok_or(LobError::InvalidDescriptor(descriptor))?;
 
         if !handle.mode.is_writable() {
@@ -597,7 +619,8 @@ impl LargeObjectManager {
 
     /// List all large objects
     pub fn list(&self) -> Vec<LargeObjectMetadata> {
-        self.objects.read()
+        self.objects
+            .read()
             .values()
             .map(|lob| lob.metadata.read().clone())
             .collect()
@@ -657,7 +680,8 @@ impl LargeObjectManager {
             // Update next_oid if needed
             let next = self.next_oid.load(Ordering::SeqCst) as Oid;
             if requested_oid >= next {
-                self.next_oid.store((requested_oid + 1) as u64, Ordering::SeqCst);
+                self.next_oid
+                    .store((requested_oid + 1) as u64, Ordering::SeqCst);
             }
             requested_oid
         };
@@ -986,10 +1010,12 @@ mod tests {
         assert_eq!(metadata.owner, 100);
         assert_eq!(metadata.object_type, LargeObjectType::Blob);
 
-        manager.update_metadata(oid, |m| {
-            m.description = Some("Test object".to_string());
-            m.mime_type = Some("application/octet-stream".to_string());
-        }).unwrap();
+        manager
+            .update_metadata(oid, |m| {
+                m.description = Some("Test object".to_string());
+                m.mime_type = Some("application/octet-stream".to_string());
+            })
+            .unwrap();
 
         let metadata = manager.get_metadata(oid).unwrap();
         assert_eq!(metadata.description, Some("Test object".to_string()));
@@ -1099,7 +1125,10 @@ mod tests {
             LobError::NotReadable,
             LobError::NotWritable,
             LobError::IoError("test".to_string()),
-            LobError::SizeExceeded { limit: 1000, requested: 2000 },
+            LobError::SizeExceeded {
+                limit: 1000,
+                requested: 2000,
+            },
             LobError::InvalidData("bad".to_string()),
         ];
 

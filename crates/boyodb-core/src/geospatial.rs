@@ -26,8 +26,8 @@ pub enum WkbType {
 /// A 2D coordinate
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coordinate {
-    pub x: f64,  // longitude for geographic
-    pub y: f64,  // latitude for geographic
+    pub x: f64, // longitude for geographic
+    pub y: f64, // latitude for geographic
 }
 
 impl Coordinate {
@@ -49,8 +49,7 @@ impl Coordinate {
         let dlat = (other.y - self.y).to_radians();
         let dlon = (other.x - self.x).to_radians();
 
-        let a = (dlat / 2.0).sin().powi(2)
-            + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+        let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
         let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
 
         EARTH_RADIUS_M * c
@@ -68,7 +67,12 @@ pub struct BoundingBox {
 
 impl BoundingBox {
     pub fn new(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Self {
-        Self { min_x, min_y, max_x, max_y }
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
     }
 
     /// Check if this box contains a point
@@ -204,7 +208,10 @@ impl Geometry {
         } else if wkt.starts_with("MULTIPOLYGON") {
             Ok(Geometry::MultiPolygon(MultiPolygon::from_wkt(&wkt)?))
         } else {
-            Err(GeoError::ParseError(format!("Unknown geometry type: {}", wkt)))
+            Err(GeoError::ParseError(format!(
+                "Unknown geometry type: {}",
+                wkt
+            )))
         }
     }
 
@@ -214,26 +221,16 @@ impl Geometry {
             (Geometry::Point(p1), Geometry::Point(p2)) => {
                 p1.coord().distance_euclidean(&p2.coord())
             }
-            (Geometry::Point(p), Geometry::LineString(ls)) => {
-                ls.distance_to_point(&p.coord())
-            }
-            (Geometry::LineString(ls), Geometry::Point(p)) => {
-                ls.distance_to_point(&p.coord())
-            }
-            (Geometry::Point(p), Geometry::Polygon(poly)) => {
-                poly.distance_to_point(&p.coord())
-            }
-            (Geometry::Polygon(poly), Geometry::Point(p)) => {
-                poly.distance_to_point(&p.coord())
-            }
+            (Geometry::Point(p), Geometry::LineString(ls)) => ls.distance_to_point(&p.coord()),
+            (Geometry::LineString(ls), Geometry::Point(p)) => ls.distance_to_point(&p.coord()),
+            (Geometry::Point(p), Geometry::Polygon(poly)) => poly.distance_to_point(&p.coord()),
+            (Geometry::Polygon(poly), Geometry::Point(p)) => poly.distance_to_point(&p.coord()),
             // For complex cases, use bounding box approximation
             _ => {
                 let bb1 = self.bbox();
                 let bb2 = other.bbox();
                 match (bb1, bb2) {
-                    (Some(b1), Some(b2)) => {
-                        b1.center().distance_euclidean(&b2.center())
-                    }
+                    (Some(b1), Some(b2)) => b1.center().distance_euclidean(&b2.center()),
                     _ => f64::MAX,
                 }
             }
@@ -243,12 +240,13 @@ impl Geometry {
     /// Check if this geometry contains another
     pub fn contains(&self, other: &Geometry) -> bool {
         match (self, other) {
-            (Geometry::Polygon(poly), Geometry::Point(p)) => {
-                poly.contains_point(&p.coord())
-            }
+            (Geometry::Polygon(poly), Geometry::Point(p)) => poly.contains_point(&p.coord()),
             (Geometry::Polygon(poly1), Geometry::Polygon(poly2)) => {
                 // Simplified: check if all vertices of poly2 are inside poly1
-                poly2.exterior.points.iter()
+                poly2
+                    .exterior
+                    .points
+                    .iter()
                     .all(|p| poly1.contains_point(p))
             }
             _ => {
@@ -275,19 +273,15 @@ impl Geometry {
 
         // More detailed check based on geometry types
         match (self, other) {
-            (Geometry::Point(p1), Geometry::Point(p2)) => {
-                p1.x == p2.x && p1.y == p2.y
-            }
-            (Geometry::Point(p), Geometry::Polygon(poly)) |
-            (Geometry::Polygon(poly), Geometry::Point(p)) => {
-                poly.contains_point(&p.coord())
-            }
+            (Geometry::Point(p1), Geometry::Point(p2)) => p1.x == p2.x && p1.y == p2.y,
+            (Geometry::Point(p), Geometry::Polygon(poly))
+            | (Geometry::Polygon(poly), Geometry::Point(p)) => poly.contains_point(&p.coord()),
             (Geometry::Polygon(p1), Geometry::Polygon(p2)) => {
                 // Check if any vertex of one is inside the other
-                p1.exterior.points.iter().any(|p| p2.contains_point(p)) ||
-                p2.exterior.points.iter().any(|p| p1.contains_point(p))
+                p1.exterior.points.iter().any(|p| p2.contains_point(p))
+                    || p2.exterior.points.iter().any(|p| p1.contains_point(p))
             }
-            _ => true // Bounding boxes intersect, assume intersection
+            _ => true, // Bounding boxes intersect, assume intersection
         }
     }
 
@@ -315,7 +309,9 @@ impl Geometry {
             Geometry::Point(p) => Some(p.clone()),
             Geometry::LineString(ls) => ls.centroid(),
             Geometry::Polygon(poly) => poly.centroid(),
-            _ => self.bbox().map(|bb| Point::new(bb.center().x, bb.center().y)),
+            _ => self
+                .bbox()
+                .map(|bb| Point::new(bb.center().x, bb.center().y)),
         }
     }
 
@@ -334,7 +330,10 @@ impl Geometry {
                 }
                 points.push(points[0]); // Close the ring
                 Geometry::Polygon(Polygon {
-                    exterior: LineString { points, srid: p.srid },
+                    exterior: LineString {
+                        points,
+                        srid: p.srid,
+                    },
                     holes: Vec::new(),
                     srid: p.srid,
                 })
@@ -408,7 +407,11 @@ impl Point {
     }
 
     pub fn new_with_srid(x: f64, y: f64, srid: Srid) -> Self {
-        Self { x, y, srid: Some(srid) }
+        Self {
+            x,
+            y,
+            srid: Some(srid),
+        }
     }
 
     pub fn coord(&self) -> Coordinate {
@@ -422,7 +425,11 @@ impl Point {
     pub fn from_wkt(wkt: &str) -> Result<Self, GeoError> {
         let content = extract_parens(wkt, "POINT")?;
         let coords = parse_coordinate(&content)?;
-        Ok(Self { x: coords.x, y: coords.y, srid: None })
+        Ok(Self {
+            x: coords.x,
+            y: coords.y,
+            srid: None,
+        })
     }
 }
 
@@ -443,8 +450,10 @@ impl LineString {
             return None;
         }
         let mut bb = BoundingBox::new(
-            self.points[0].x, self.points[0].y,
-            self.points[0].x, self.points[0].y,
+            self.points[0].x,
+            self.points[0].y,
+            self.points[0].x,
+            self.points[0].y,
         );
         for p in &self.points[1..] {
             bb.expand_to_include(p.x, p.y);
@@ -453,7 +462,8 @@ impl LineString {
     }
 
     pub fn length(&self) -> f64 {
-        self.points.windows(2)
+        self.points
+            .windows(2)
             .map(|w| w[0].distance_euclidean(&w[1]))
             .sum()
     }
@@ -473,13 +483,16 @@ impl LineString {
             return f64::MAX;
         }
 
-        self.points.windows(2)
+        self.points
+            .windows(2)
             .map(|w| point_to_segment_distance(point, &w[0], &w[1]))
             .fold(f64::MAX, |a, b| a.min(b))
     }
 
     pub fn to_wkt(&self) -> String {
-        let coords: Vec<String> = self.points.iter()
+        let coords: Vec<String> = self
+            .points
+            .iter()
             .map(|c| format!("{} {}", c.x, c.y))
             .collect();
         format!("LINESTRING({})", coords.join(", "))
@@ -523,9 +536,7 @@ impl Polygon {
 
     pub fn area(&self) -> f64 {
         let exterior_area = shoelace_area(&self.exterior.points);
-        let holes_area: f64 = self.holes.iter()
-            .map(|h| shoelace_area(&h.points))
-            .sum();
+        let holes_area: f64 = self.holes.iter().map(|h| shoelace_area(&h.points)).sum();
         (exterior_area - holes_area).abs()
     }
 
@@ -589,11 +600,16 @@ impl Polygon {
         let content = extract_parens(wkt, "POLYGON")?;
         let rings = parse_rings(&content)?;
         if rings.is_empty() {
-            return Err(GeoError::ParseError("Polygon must have at least one ring".into()));
+            return Err(GeoError::ParseError(
+                "Polygon must have at least one ring".into(),
+            ));
         }
         Ok(Self {
             exterior: LineString::new(rings[0].clone()),
-            holes: rings[1..].iter().map(|r| LineString::new(r.clone())).collect(),
+            holes: rings[1..]
+                .iter()
+                .map(|r| LineString::new(r.clone()))
+                .collect(),
             srid: None,
         })
     }
@@ -612,8 +628,10 @@ impl MultiPoint {
             return None;
         }
         let mut bb = BoundingBox::new(
-            self.points[0].x, self.points[0].y,
-            self.points[0].x, self.points[0].y,
+            self.points[0].x,
+            self.points[0].y,
+            self.points[0].x,
+            self.points[0].y,
         );
         for p in &self.points[1..] {
             bb.expand_to_include(p.x, p.y);
@@ -622,7 +640,9 @@ impl MultiPoint {
     }
 
     pub fn to_wkt(&self) -> String {
-        let coords: Vec<String> = self.points.iter()
+        let coords: Vec<String> = self
+            .points
+            .iter()
             .map(|p| format!("({} {})", p.x, p.y))
             .collect();
         format!("MULTIPOINT({})", coords.join(", "))
@@ -653,7 +673,10 @@ impl MultiLineString {
         for line in &self.lines {
             if let Some(bb) = line.bbox() {
                 result = Some(match result {
-                    Some(mut r) => { r.expand_to_include_box(&bb); r }
+                    Some(mut r) => {
+                        r.expand_to_include_box(&bb);
+                        r
+                    }
                     None => bb,
                 });
             }
@@ -662,9 +685,13 @@ impl MultiLineString {
     }
 
     pub fn to_wkt(&self) -> String {
-        let lines: Vec<String> = self.lines.iter()
+        let lines: Vec<String> = self
+            .lines
+            .iter()
             .map(|l| {
-                let coords: Vec<String> = l.points.iter()
+                let coords: Vec<String> = l
+                    .points
+                    .iter()
                     .map(|c| format!("{} {}", c.x, c.y))
                     .collect();
                 format!("({})", coords.join(", "))
@@ -696,7 +723,10 @@ impl MultiPolygon {
         for poly in &self.polygons {
             if let Some(bb) = poly.bbox() {
                 result = Some(match result {
-                    Some(mut r) => { r.expand_to_include_box(&bb); r }
+                    Some(mut r) => {
+                        r.expand_to_include_box(&bb);
+                        r
+                    }
                     None => bb,
                 });
             }
@@ -705,7 +735,9 @@ impl MultiPolygon {
     }
 
     pub fn to_wkt(&self) -> String {
-        let polys: Vec<String> = self.polygons.iter()
+        let polys: Vec<String> = self
+            .polygons
+            .iter()
             .map(|p| {
                 let mut rings = vec![ring_to_wkt(&p.exterior.points)];
                 for hole in &p.holes {
@@ -753,7 +785,10 @@ impl MultiPolygon {
             }
         }
 
-        Ok(Self { polygons, srid: None })
+        Ok(Self {
+            polygons,
+            srid: None,
+        })
     }
 }
 
@@ -770,7 +805,10 @@ impl GeometryCollection {
         for geom in &self.geometries {
             if let Some(bb) = geom.bbox() {
                 result = Some(match result {
-                    Some(mut r) => { r.expand_to_include_box(&bb); r }
+                    Some(mut r) => {
+                        r.expand_to_include_box(&bb);
+                        r
+                    }
                     None => bb,
                 });
             }
@@ -779,9 +817,7 @@ impl GeometryCollection {
     }
 
     pub fn to_wkt(&self) -> String {
-        let geoms: Vec<String> = self.geometries.iter()
-            .map(|g| g.to_wkt())
-            .collect();
+        let geoms: Vec<String> = self.geometries.iter().map(|g| g.to_wkt()).collect();
         format!("GEOMETRYCOLLECTION({})", geoms.join(", "))
     }
 }
@@ -813,19 +849,25 @@ fn extract_parens(wkt: &str, prefix: &str) -> Result<String, GeoError> {
     if !wkt.to_uppercase().starts_with(prefix) {
         return Err(GeoError::ParseError(format!("Expected {}", prefix)));
     }
-    let start = wkt.find('(').ok_or_else(|| GeoError::ParseError("Missing opening parenthesis".into()))?;
-    let end = wkt.rfind(')').ok_or_else(|| GeoError::ParseError("Missing closing parenthesis".into()))?;
+    let start = wkt
+        .find('(')
+        .ok_or_else(|| GeoError::ParseError("Missing opening parenthesis".into()))?;
+    let end = wkt
+        .rfind(')')
+        .ok_or_else(|| GeoError::ParseError("Missing closing parenthesis".into()))?;
     Ok(wkt[start + 1..end].to_string())
 }
 
 fn parse_coordinate(s: &str) -> Result<Coordinate, GeoError> {
-    let parts: Vec<&str> = s.trim().split_whitespace().collect();
+    let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() < 2 {
         return Err(GeoError::ParseError(format!("Invalid coordinate: {}", s)));
     }
-    let x = parts[0].parse::<f64>()
+    let x = parts[0]
+        .parse::<f64>()
         .map_err(|_| GeoError::ParseError(format!("Invalid x coordinate: {}", parts[0])))?;
-    let y = parts[1].parse::<f64>()
+    let y = parts[1]
+        .parse::<f64>()
         .map_err(|_| GeoError::ParseError(format!("Invalid y coordinate: {}", parts[1])))?;
     Ok(Coordinate::new(x, y))
 }
@@ -871,9 +913,7 @@ fn parse_rings(s: &str) -> Result<Vec<Vec<Coordinate>>, GeoError> {
 }
 
 fn ring_to_wkt(points: &[Coordinate]) -> String {
-    let coords: Vec<String> = points.iter()
-        .map(|c| format!("{} {}", c.x, c.y))
-        .collect();
+    let coords: Vec<String> = points.iter().map(|c| format!("{} {}", c.x, c.y)).collect();
     format!("({})", coords.join(", "))
 }
 
@@ -915,7 +955,11 @@ fn point_in_ring(point: &Coordinate, ring: &[Coordinate]) -> bool {
     inside
 }
 
-fn point_to_segment_distance(point: &Coordinate, seg_start: &Coordinate, seg_end: &Coordinate) -> f64 {
+fn point_to_segment_distance(
+    point: &Coordinate,
+    seg_start: &Coordinate,
+    seg_end: &Coordinate,
+) -> f64 {
     let dx = seg_end.x - seg_start.x;
     let dy = seg_end.y - seg_start.y;
 
@@ -926,10 +970,7 @@ fn point_to_segment_distance(point: &Coordinate, seg_start: &Coordinate, seg_end
     let t = ((point.x - seg_start.x) * dx + (point.y - seg_start.y) * dy) / (dx * dx + dy * dy);
     let t = t.clamp(0.0, 1.0);
 
-    let nearest = Coordinate::new(
-        seg_start.x + t * dx,
-        seg_start.y + t * dy,
-    );
+    let nearest = Coordinate::new(seg_start.x + t * dx, seg_start.y + t * dy);
 
     point.distance_euclidean(&nearest)
 }

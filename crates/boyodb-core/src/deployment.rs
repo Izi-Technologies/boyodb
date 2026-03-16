@@ -12,12 +12,12 @@
 //! - Rollback support
 //! - Deployment history tracking
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Deployment Slot
@@ -226,7 +226,8 @@ impl ConnectionTracker {
     pub fn start_drain(&self) -> DrainHandle<'_> {
         self.draining.store(true, Ordering::SeqCst);
         self.accepting.store(false, Ordering::SeqCst);
-        self.drain_started.store(current_timestamp(), Ordering::SeqCst);
+        self.drain_started
+            .store(current_timestamp(), Ordering::SeqCst);
 
         DrainHandle {
             tracker: self,
@@ -242,7 +243,8 @@ impl ConnectionTracker {
 
     /// Get connections in transaction
     pub fn connections_in_transaction(&self) -> Vec<u64> {
-        self.connections.read()
+        self.connections
+            .read()
             .iter()
             .filter(|(_, info)| info.in_transaction)
             .map(|(id, _)| *id)
@@ -441,30 +443,36 @@ impl DeploymentManager {
         let now = current_timestamp();
 
         let mut slots = HashMap::new();
-        slots.insert(DeploymentSlot::Blue, SlotInfo {
-            slot: DeploymentSlot::Blue,
-            status: SlotStatus::Active,
-            version: "initial".to_string(),
-            deployed_at: now,
-            active_connections: 0,
-            total_requests: 0,
-            health_check_passed: true,
-            last_health_check: now,
-            traffic_weight: 100,
-            metadata: HashMap::new(),
-        });
-        slots.insert(DeploymentSlot::Green, SlotInfo {
-            slot: DeploymentSlot::Green,
-            status: SlotStatus::Standby,
-            version: "initial".to_string(),
-            deployed_at: now,
-            active_connections: 0,
-            total_requests: 0,
-            health_check_passed: true,
-            last_health_check: now,
-            traffic_weight: 0,
-            metadata: HashMap::new(),
-        });
+        slots.insert(
+            DeploymentSlot::Blue,
+            SlotInfo {
+                slot: DeploymentSlot::Blue,
+                status: SlotStatus::Active,
+                version: "initial".to_string(),
+                deployed_at: now,
+                active_connections: 0,
+                total_requests: 0,
+                health_check_passed: true,
+                last_health_check: now,
+                traffic_weight: 100,
+                metadata: HashMap::new(),
+            },
+        );
+        slots.insert(
+            DeploymentSlot::Green,
+            SlotInfo {
+                slot: DeploymentSlot::Green,
+                status: SlotStatus::Standby,
+                version: "initial".to_string(),
+                deployed_at: now,
+                active_connections: 0,
+                total_requests: 0,
+                health_check_passed: true,
+                last_health_check: now,
+                traffic_weight: 0,
+                metadata: HashMap::new(),
+            },
+        );
 
         Self {
             config,
@@ -568,7 +576,8 @@ impl DeploymentManager {
         // Check target slot is healthy
         {
             let slots = self.slots.read();
-            let target_info = slots.get(&target_slot)
+            let target_info = slots
+                .get(&target_slot)
                 .ok_or(DeploymentError::SlotNotFound(target_slot))?;
 
             if !target_info.health_check_passed {
@@ -577,10 +586,12 @@ impl DeploymentManager {
         }
 
         let start_time = current_timestamp();
-        let current_version = self.get_slot_info(current_slot)
+        let current_version = self
+            .get_slot_info(current_slot)
             .map(|i| i.version)
             .unwrap_or_default();
-        let target_version = self.get_slot_info(target_slot)
+        let target_version = self
+            .get_slot_info(target_slot)
             .map(|i| i.version)
             .unwrap_or_default();
 
@@ -651,7 +662,10 @@ impl DeploymentManager {
     }
 
     /// Rollback to previous deployment
-    pub async fn rollback(&self, initiated_by: Option<&str>) -> Result<DeploymentRecord, DeploymentError> {
+    pub async fn rollback(
+        &self,
+        initiated_by: Option<&str>,
+    ) -> Result<DeploymentRecord, DeploymentError> {
         let current = self.active_slot();
         let target = current.other();
 
@@ -666,7 +680,11 @@ impl DeploymentManager {
     }
 
     /// Set canary weight for target slot
-    pub fn set_canary_weight(&self, slot: DeploymentSlot, weight: u8) -> Result<(), DeploymentError> {
+    pub fn set_canary_weight(
+        &self,
+        slot: DeploymentSlot,
+        weight: u8,
+    ) -> Result<(), DeploymentError> {
         if weight > 100 {
             return Err(DeploymentError::InvalidWeight(weight));
         }
@@ -691,9 +709,7 @@ impl DeploymentManager {
 
         // If canary is enabled and standby has weight, do weighted routing
         let standby = active.other();
-        let standby_weight = slots.get(&standby)
-            .map(|i| i.traffic_weight)
-            .unwrap_or(0);
+        let standby_weight = slots.get(&standby).map(|i| i.traffic_weight).unwrap_or(0);
 
         if standby_weight > 0 {
             // Simple weighted random routing
@@ -761,7 +777,7 @@ impl Default for ResourcePool {
         Self {
             name: "default".to_string(),
             max_concurrent_queries: 100,
-            max_memory_per_query: 1024 * 1024 * 1024, // 1GB
+            max_memory_per_query: 1024 * 1024 * 1024,  // 1GB
             max_total_memory: 10 * 1024 * 1024 * 1024, // 10GB
             query_timeout_secs: 300,
             priority: 50,
@@ -817,22 +833,30 @@ impl ResourcePoolManager {
 
     /// Assign user to pool
     pub fn assign_user(&self, user: &str, pool: &str) {
-        self.user_pools.write().insert(user.to_string(), pool.to_string());
+        self.user_pools
+            .write()
+            .insert(user.to_string(), pool.to_string());
     }
 
     /// Get pool for user
     pub fn get_user_pool(&self, user: &str) -> String {
-        self.user_pools.read()
+        self.user_pools
+            .read()
             .get(user)
             .cloned()
             .unwrap_or_else(|| "default".to_string())
     }
 
     /// Try to acquire resources for a query
-    pub fn acquire(&self, user: &str, estimated_memory: u64) -> Result<ResourceGrant, ResourceError> {
+    pub fn acquire(
+        &self,
+        user: &str,
+        estimated_memory: u64,
+    ) -> Result<ResourceGrant, ResourceError> {
         let pool_name = self.get_user_pool(user);
         let pools = self.pools.read();
-        let pool = pools.get(&pool_name)
+        let pool = pools
+            .get(&pool_name)
             .ok_or_else(|| ResourceError::PoolNotFound(pool_name.clone()))?;
 
         if !pool.enabled {
@@ -848,7 +872,10 @@ impl ResourcePoolManager {
         }
 
         if estimated_memory > pool.max_memory_per_query {
-            return Err(ResourceError::MemoryLimit(estimated_memory, pool.max_memory_per_query));
+            return Err(ResourceError::MemoryLimit(
+                estimated_memory,
+                pool.max_memory_per_query,
+            ));
         }
 
         if pool_usage.memory_used + estimated_memory > pool.max_total_memory {
@@ -880,18 +907,21 @@ impl ResourcePoolManager {
         let pools = self.pools.read();
         let usage = self.usage.read();
 
-        pools.values().map(|pool| {
-            let pool_usage = usage.get(&pool.name).cloned().unwrap_or_default();
-            PoolStatus {
-                name: pool.name.clone(),
-                max_concurrent_queries: pool.max_concurrent_queries,
-                active_queries: pool_usage.active_queries,
-                max_total_memory: pool.max_total_memory,
-                memory_used: pool_usage.memory_used,
-                queued_queries: pool_usage.queued_queries,
-                enabled: pool.enabled,
-            }
-        }).collect()
+        pools
+            .values()
+            .map(|pool| {
+                let pool_usage = usage.get(&pool.name).cloned().unwrap_or_default();
+                PoolStatus {
+                    name: pool.name.clone(),
+                    max_concurrent_queries: pool.max_concurrent_queries,
+                    active_queries: pool_usage.active_queries,
+                    max_total_memory: pool.max_total_memory,
+                    memory_used: pool_usage.memory_used,
+                    queued_queries: pool_usage.queued_queries,
+                    enabled: pool.enabled,
+                }
+            })
+            .collect()
     }
 }
 
@@ -968,8 +998,12 @@ impl std::fmt::Display for ResourceError {
         match self {
             ResourceError::PoolNotFound(p) => write!(f, "Pool not found: {}", p),
             ResourceError::PoolDisabled(p) => write!(f, "Pool disabled: {}", p),
-            ResourceError::ConcurrencyLimit(p) => write!(f, "Concurrency limit reached for pool: {}", p),
-            ResourceError::MemoryLimit(req, max) => write!(f, "Memory limit: requested {} exceeds max {}", req, max),
+            ResourceError::ConcurrencyLimit(p) => {
+                write!(f, "Concurrency limit reached for pool: {}", p)
+            }
+            ResourceError::MemoryLimit(req, max) => {
+                write!(f, "Memory limit: requested {} exceeds max {}", req, max)
+            }
             ResourceError::PoolMemoryExhausted(p) => write!(f, "Pool memory exhausted: {}", p),
         }
     }

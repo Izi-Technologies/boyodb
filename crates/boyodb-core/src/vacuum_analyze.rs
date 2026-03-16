@@ -6,10 +6,10 @@
 //! - Autovacuum daemon for automatic maintenance
 //! - VACUUM FULL for complete table rewrite
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -1138,11 +1138,11 @@ mod tests {
         let mut stats = TableStats::new("public", "test");
         stats.rel_pages = 100;
         stats.n_live_tup = 1000;
-        stats.column_stats.insert("id".to_string(), ColumnStats::new("id"));
+        stats
+            .column_stats
+            .insert("id".to_string(), ColumnStats::new("id"));
 
-        let result = executor
-            .analyze("test", &[], &options, &mut stats)
-            .unwrap();
+        let result = executor.analyze("test", &[], &options, &mut stats).unwrap();
         assert!(result.rows_sampled > 0);
         assert!(stats.last_analyze.is_some());
     }
@@ -1210,7 +1210,10 @@ mod tests {
     #[test]
     fn test_vacuum_phase_display() {
         assert_eq!(VacuumPhase::ScanningHeap.to_string(), "scanning heap");
-        assert_eq!(VacuumPhase::VacuumingIndexes.to_string(), "vacuuming indexes");
+        assert_eq!(
+            VacuumPhase::VacuumingIndexes.to_string(),
+            "vacuuming indexes"
+        );
     }
 
     #[test]

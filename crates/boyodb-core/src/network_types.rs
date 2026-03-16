@@ -64,7 +64,11 @@ impl InetAddr {
 
     /// Get the address family (4 or 6)
     pub fn family(&self) -> u8 {
-        if self.is_ipv4() { 4 } else { 6 }
+        if self.is_ipv4() {
+            4
+        } else {
+            6
+        }
     }
 
     /// Get the netmask as an IP address
@@ -230,18 +234,14 @@ impl InetAddr {
 
         // Then compare addresses byte by byte
         match (&self.addr, &other.addr) {
-            (IpAddr::V4(a), IpAddr::V4(b)) => {
-                match u32::from(*a).cmp(&u32::from(*b)) {
-                    Ordering::Equal => self.prefix_len.cmp(&other.prefix_len),
-                    ord => ord,
-                }
-            }
-            (IpAddr::V6(a), IpAddr::V6(b)) => {
-                match u128::from(*a).cmp(&u128::from(*b)) {
-                    Ordering::Equal => self.prefix_len.cmp(&other.prefix_len),
-                    ord => ord,
-                }
-            }
+            (IpAddr::V4(a), IpAddr::V4(b)) => match u32::from(*a).cmp(&u32::from(*b)) {
+                Ordering::Equal => self.prefix_len.cmp(&other.prefix_len),
+                ord => ord,
+            },
+            (IpAddr::V6(a), IpAddr::V6(b)) => match u128::from(*a).cmp(&u128::from(*b)) {
+                Ordering::Equal => self.prefix_len.cmp(&other.prefix_len),
+                ord => ord,
+            },
             _ => Ordering::Equal,
         }
     }
@@ -257,7 +257,7 @@ impl Eq for InetAddr {}
 
 impl PartialOrd for InetAddr {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.compare(other))
+        Some(self.cmp(other))
     }
 }
 
@@ -295,14 +295,20 @@ impl FromStr for InetAddr {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('/').collect();
 
-        let addr: IpAddr = parts[0].parse()
+        let addr: IpAddr = parts[0]
+            .parse()
             .map_err(|_| NetworkError::InvalidAddress(s.to_string()))?;
 
         let prefix_len = if parts.len() > 1 {
-            parts[1].parse()
+            parts[1]
+                .parse()
                 .map_err(|_| NetworkError::InvalidPrefixLength(0, 0))?
         } else {
-            if addr.is_ipv4() { 32 } else { 128 }
+            if addr.is_ipv4() {
+                32
+            } else {
+                128
+            }
         };
 
         InetAddr::new(addr, prefix_len)
@@ -327,7 +333,7 @@ impl Cidr {
         // Verify that host bits are zero
         if inet.network() != inet.addr {
             return Err(NetworkError::InvalidCidr(
-                "non-zero host bits in network address".to_string()
+                "non-zero host bits in network address".to_string(),
             ));
         }
 
@@ -389,7 +395,7 @@ impl Eq for Cidr {}
 
 impl PartialOrd for Cidr {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.inner.cmp(&other.inner))
+        Some(self.cmp(other))
     }
 }
 
@@ -481,8 +487,12 @@ impl fmt::Display for MacAddr {
         write!(
             f,
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.octets[0], self.octets[1], self.octets[2],
-            self.octets[3], self.octets[4], self.octets[5]
+            self.octets[0],
+            self.octets[1],
+            self.octets[2],
+            self.octets[3],
+            self.octets[4],
+            self.octets[5]
         )
     }
 }
@@ -500,7 +510,14 @@ impl FromStr for MacAddr {
             if s.len() != 12 {
                 return Err(NetworkError::InvalidMacAddress(s.to_string()));
             }
-            vec![&s[0..2], &s[2..4], &s[4..6], &s[6..8], &s[8..10], &s[10..12]]
+            vec![
+                &s[0..2],
+                &s[2..4],
+                &s[4..6],
+                &s[6..8],
+                &s[8..10],
+                &s[10..12],
+            ]
         };
 
         if parts.len() != 6 {
@@ -568,8 +585,14 @@ impl fmt::Display for MacAddr8 {
         write!(
             f,
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            self.octets[0], self.octets[1], self.octets[2], self.octets[3],
-            self.octets[4], self.octets[5], self.octets[6], self.octets[7]
+            self.octets[0],
+            self.octets[1],
+            self.octets[2],
+            self.octets[3],
+            self.octets[4],
+            self.octets[5],
+            self.octets[6],
+            self.octets[7]
         )
     }
 }
@@ -586,8 +609,14 @@ impl FromStr for MacAddr8 {
                 return Err(NetworkError::InvalidMacAddress(s.to_string()));
             }
             vec![
-                &s[0..2], &s[2..4], &s[4..6], &s[6..8],
-                &s[8..10], &s[10..12], &s[12..14], &s[14..16]
+                &s[0..2],
+                &s[2..4],
+                &s[4..6],
+                &s[6..8],
+                &s[8..10],
+                &s[10..12],
+                &s[12..14],
+                &s[14..16],
             ]
         };
 
@@ -619,9 +648,9 @@ pub fn inet_and(a: &InetAddr, b: &InetAddr) -> Option<IpAddr> {
         (IpAddr::V4(av), IpAddr::V4(bv)) => {
             Some(IpAddr::V4(Ipv4Addr::from(u32::from(*av) & u32::from(*bv))))
         }
-        (IpAddr::V6(av), IpAddr::V6(bv)) => {
-            Some(IpAddr::V6(Ipv6Addr::from(u128::from(*av) & u128::from(*bv))))
-        }
+        (IpAddr::V6(av), IpAddr::V6(bv)) => Some(IpAddr::V6(Ipv6Addr::from(
+            u128::from(*av) & u128::from(*bv),
+        ))),
         _ => None,
     }
 }
@@ -636,9 +665,9 @@ pub fn inet_or(a: &InetAddr, b: &InetAddr) -> Option<IpAddr> {
         (IpAddr::V4(av), IpAddr::V4(bv)) => {
             Some(IpAddr::V4(Ipv4Addr::from(u32::from(*av) | u32::from(*bv))))
         }
-        (IpAddr::V6(av), IpAddr::V6(bv)) => {
-            Some(IpAddr::V6(Ipv6Addr::from(u128::from(*av) | u128::from(*bv))))
-        }
+        (IpAddr::V6(av), IpAddr::V6(bv)) => Some(IpAddr::V6(Ipv6Addr::from(
+            u128::from(*av) | u128::from(*bv),
+        ))),
         _ => None,
     }
 }
@@ -688,12 +717,8 @@ pub fn inet_subtract(a: &InetAddr, b: &InetAddr) -> Option<i128> {
     }
 
     match (&a.addr, &b.addr) {
-        (IpAddr::V4(av), IpAddr::V4(bv)) => {
-            Some(u32::from(*av) as i128 - u32::from(*bv) as i128)
-        }
-        (IpAddr::V6(av), IpAddr::V6(bv)) => {
-            Some(u128::from(*av) as i128 - u128::from(*bv) as i128)
-        }
+        (IpAddr::V4(av), IpAddr::V4(bv)) => Some(u32::from(*av) as i128 - u32::from(*bv) as i128),
+        (IpAddr::V6(av), IpAddr::V6(bv)) => Some(u128::from(*av) as i128 - u128::from(*bv) as i128),
         _ => None,
     }
 }
@@ -918,7 +943,10 @@ mod tests {
         let mac: MacAddr = "aa:bb:cc:dd:ee:ff".parse().unwrap();
         let mac8 = MacAddr8::from_mac(&mac);
 
-        assert_eq!(mac8.octets(), &[0xaa, 0xbb, 0xcc, 0xff, 0xfe, 0xdd, 0xee, 0xff]);
+        assert_eq!(
+            mac8.octets(),
+            &[0xaa, 0xbb, 0xcc, 0xff, 0xfe, 0xdd, 0xee, 0xff]
+        );
     }
 
     #[test]

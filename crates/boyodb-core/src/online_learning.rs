@@ -6,9 +6,9 @@
 //! - Bandit algorithms for exploration/exploitation
 //! - Adaptive learning rate scheduling
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Online learning algorithms
@@ -40,9 +40,17 @@ pub enum LearningRateSchedule {
     /// Exponential decay: lr = initial * decay^t
     Exponential { initial: f64, decay: f64 },
     /// Step decay: lr = initial * factor^(t / step_size)
-    Step { initial: f64, factor: f64, step_size: u64 },
+    Step {
+        initial: f64,
+        factor: f64,
+        step_size: u64,
+    },
     /// Adaptive based on loss
-    Adaptive { initial: f64, factor: f64, patience: u64 },
+    Adaptive {
+        initial: f64,
+        factor: f64,
+        patience: u64,
+    },
 }
 
 impl LearningRateSchedule {
@@ -55,9 +63,11 @@ impl LearningRateSchedule {
             LearningRateSchedule::Exponential { initial, decay } => {
                 initial * decay.powi(step as i32)
             }
-            LearningRateSchedule::Step { initial, factor, step_size } => {
-                initial * factor.powi((step / step_size) as i32)
-            }
+            LearningRateSchedule::Step {
+                initial,
+                factor,
+                step_size,
+            } => initial * factor.powi((step / step_size) as i32),
             LearningRateSchedule::Adaptive { initial, .. } => {
                 // Simplified - real impl would track loss history
                 *initial
@@ -324,7 +334,11 @@ impl OnlineLinearModel {
 
             OnlineAlgorithm::Perceptron => {
                 // Only update on misclassification
-                let pred = weights.iter().zip(gradients.iter()).map(|(w, g)| w * g).sum::<f64>();
+                let pred = weights
+                    .iter()
+                    .zip(gradients.iter())
+                    .map(|(w, g)| w * g)
+                    .sum::<f64>();
                 if pred * gradients[0] <= 0.0 {
                     for (w, g) in weights.iter_mut().zip(gradients.iter()) {
                         *w -= lr * g;
@@ -353,11 +367,15 @@ impl OnlineLinearModel {
         OnlineModelStats {
             examples_seen: self.stats.examples_seen.load(Ordering::Relaxed),
             updates,
-            average_loss: if updates > 0 { total_loss / updates as f64 } else { 0.0 },
-            current_lr: self.config.lr_schedule.get_lr(
-                self.optimizer_state.read().step,
-                None,
-            ),
+            average_loss: if updates > 0 {
+                total_loss / updates as f64
+            } else {
+                0.0
+            },
+            current_lr: self
+                .config
+                .lr_schedule
+                .get_lr(self.optimizer_state.read().step, None),
         }
     }
 
@@ -470,8 +488,8 @@ impl MultiArmedBandit {
                     // Simple approximation of Beta sampling
                     let alpha = successes + 1.0;
                     let beta = failures + 1.0;
-                    let sample = alpha / (alpha + beta) +
-                        ((total as f64 * 0.31415926 + i as f64).sin() * 0.1);
+                    let sample = alpha / (alpha + beta)
+                        + ((total as f64 * 0.31415926 + i as f64).sin() * 0.1);
 
                     if sample > best_sample {
                         best_sample = sample;
@@ -690,7 +708,10 @@ impl OnlineLearningRegistry {
             .insert(name.to_string(), OnlineLinearModel::new(config));
     }
 
-    pub fn get_linear_model(&self, name: &str) -> Option<parking_lot::RwLockReadGuard<'_, HashMap<String, OnlineLinearModel>>> {
+    pub fn get_linear_model(
+        &self,
+        name: &str,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, HashMap<String, OnlineLinearModel>>> {
         let models = self.linear_models.read();
         if models.contains_key(name) {
             Some(models)

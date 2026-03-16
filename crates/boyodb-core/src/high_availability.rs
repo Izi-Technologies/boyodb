@@ -1770,11 +1770,14 @@ impl MultiRegionManager {
     pub fn add_region(&self, config: RegionConfig) {
         let region_id = config.region_id.clone();
         self.regions.write().insert(region_id.clone(), config);
-        self.status.write().insert(region_id.clone(), RegionReplicationStatus {
-            region_id,
-            state: RegionState::Initializing,
-            ..Default::default()
-        });
+        self.status.write().insert(
+            region_id.clone(),
+            RegionReplicationStatus {
+                region_id,
+                state: RegionState::Initializing,
+                ..Default::default()
+            },
+        );
     }
 
     /// Remove a region
@@ -1790,7 +1793,8 @@ impl MultiRegionManager {
 
     /// Check if region is primary
     pub fn is_primary(&self) -> bool {
-        self.regions.read()
+        self.regions
+            .read()
             .get(&self.local_region)
             .map(|r| r.is_primary)
             .unwrap_or(false)
@@ -1823,7 +1827,8 @@ impl MultiRegionManager {
 
     /// Get pending conflicts
     pub fn pending_conflicts(&self) -> Vec<ReplicationConflict> {
-        self.conflicts.read()
+        self.conflicts
+            .read()
             .iter()
             .filter(|c| !c.resolved)
             .cloned()
@@ -1896,7 +1901,8 @@ impl MultiRegionManager {
         }
 
         let status = self.status.read();
-        let active_regions: Vec<_> = status.values()
+        let active_regions: Vec<_> = status
+            .values()
             .filter(|s| matches!(s.state, RegionState::Active | RegionState::Degraded))
             .collect();
 
@@ -1917,7 +1923,8 @@ impl MultiRegionManager {
         let local = regions.get(&self.local_region);
 
         if let Some(local) = local {
-            let mut targets: Vec<_> = regions.keys()
+            let mut targets: Vec<_> = regions
+                .keys()
                 .filter(|r| *r != &self.local_region)
                 .cloned()
                 .collect();
@@ -1926,7 +1933,9 @@ impl MultiRegionManager {
             targets.sort_by(|a, b| {
                 let lat_a = local.latencies.get(a).copied().unwrap_or(f64::MAX);
                 let lat_b = local.latencies.get(b).copied().unwrap_or(f64::MAX);
-                lat_a.partial_cmp(&lat_b).unwrap_or(std::cmp::Ordering::Equal)
+                lat_a
+                    .partial_cmp(&lat_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             targets
@@ -1940,12 +1949,14 @@ impl MultiRegionManager {
         let status = self.status.read();
         let conflicts = self.conflicts.read();
 
-        let active_regions = status.values()
+        let active_regions = status
+            .values()
             .filter(|s| matches!(s.state, RegionState::Active))
             .count();
 
         let total_lag_bytes: u64 = status.values().map(|s| s.lag_bytes).sum();
-        let max_lag_seconds = status.values()
+        let max_lag_seconds = status
+            .values()
             .map(|s| s.lag_seconds)
             .fold(0.0f64, |a, b| a.max(b));
 

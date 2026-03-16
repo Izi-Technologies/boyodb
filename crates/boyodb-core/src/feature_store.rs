@@ -6,10 +6,10 @@
 //! - Online/offline feature serving
 //! - Feature lineage and metadata tracking
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Feature data types
@@ -111,24 +111,13 @@ pub struct FeatureGroup {
 #[derive(Debug, Clone)]
 pub enum FeatureSource {
     /// From a database table
-    Table {
-        database: String,
-        table: String,
-    },
+    Table { database: String, table: String },
     /// From a SQL query
-    Query {
-        sql: String,
-    },
+    Query { sql: String },
     /// From a streaming source
-    Stream {
-        topic: String,
-        format: String,
-    },
+    Stream { topic: String, format: String },
     /// From an external API
-    External {
-        endpoint: String,
-        auth_type: String,
-    },
+    External { endpoint: String, auth_type: String },
 }
 
 /// Feature view - a subset of features for a specific use case
@@ -274,7 +263,9 @@ impl OnlineStore {
             .as_millis() as i64;
 
         let mut cache = self.cache.write();
-        let entity_features = cache.entry(entity_key.to_string()).or_insert_with(HashMap::new);
+        let entity_features = cache
+            .entry(entity_key.to_string())
+            .or_insert_with(HashMap::new);
 
         for (name, value) in features {
             entity_features.insert(name, (value, now));
@@ -420,7 +411,9 @@ impl std::fmt::Display for FeatureStoreError {
             FeatureStoreError::PipelineNotFound(n) => write!(f, "Pipeline not found: {}", n),
             FeatureStoreError::DuplicateGroup(n) => write!(f, "Duplicate feature group: {}", n),
             FeatureStoreError::DuplicateView(n) => write!(f, "Duplicate feature view: {}", n),
-            FeatureStoreError::InvalidTransformation(m) => write!(f, "Invalid transformation: {}", m),
+            FeatureStoreError::InvalidTransformation(m) => {
+                write!(f, "Invalid transformation: {}", m)
+            }
             FeatureStoreError::ValidationError(m) => write!(f, "Validation error: {}", m),
         }
     }
@@ -486,7 +479,9 @@ impl FeatureStore {
             }
         }
 
-        self.pipelines.write().insert(pipeline.name.clone(), pipeline);
+        self.pipelines
+            .write()
+            .insert(pipeline.name.clone(), pipeline);
         Ok(())
     }
 
@@ -604,7 +599,10 @@ impl FeatureStore {
 
             Transformation::Bucketize { boundaries } => {
                 if let Some(v) = value.as_f64() {
-                    let bucket = boundaries.iter().position(|&b| v < b).unwrap_or(boundaries.len());
+                    let bucket = boundaries
+                        .iter()
+                        .position(|&b| v < b)
+                        .unwrap_or(boundaries.len());
                     Ok(FeatureValue::Int32(bucket as i32))
                 } else {
                     Err(FeatureStoreError::InvalidTransformation(
@@ -675,10 +673,7 @@ impl FeatureStore {
     }
 
     fn build_entity_key(&self, keys: &HashMap<String, FeatureValue>) -> String {
-        let mut parts: Vec<String> = keys
-            .iter()
-            .map(|(k, v)| format!("{}={:?}", k, v))
-            .collect();
+        let mut parts: Vec<String> = keys.iter().map(|(k, v)| format!("{}={:?}", k, v)).collect();
         parts.sort();
         parts.join("|")
     }
@@ -717,7 +712,10 @@ mod tests {
         let result = store
             .apply_transformation(
                 &FeatureValue::Float64(100.0),
-                &Transformation::StandardScaler { mean: 50.0, std: 25.0 },
+                &Transformation::StandardScaler {
+                    mean: 50.0,
+                    std: 25.0,
+                },
             )
             .unwrap();
         if let FeatureValue::Float64(v) = result {
@@ -728,7 +726,10 @@ mod tests {
         let result = store
             .apply_transformation(
                 &FeatureValue::Float64(75.0),
-                &Transformation::MinMaxScaler { min: 0.0, max: 100.0 },
+                &Transformation::MinMaxScaler {
+                    min: 0.0,
+                    max: 100.0,
+                },
             )
             .unwrap();
         if let FeatureValue::Float64(v) = result {

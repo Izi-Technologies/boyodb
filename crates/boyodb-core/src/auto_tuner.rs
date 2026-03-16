@@ -377,141 +377,174 @@ impl AutoTuner {
         let mut params = self.parameters.write();
 
         // Memory parameters
-        params.insert("buffer_pool_size".to_string(), TunableParameter {
-            name: "buffer_pool_size".to_string(),
-            current_value: ParameterValue::Bytes(1024 * 1024 * 1024), // 1GB
-            min_value: ParameterValue::Bytes(64 * 1024 * 1024),
-            max_value: ParameterValue::Bytes(64 * 1024 * 1024 * 1024),
-            default_value: ParameterValue::Bytes(1024 * 1024 * 1024),
-            category: ParameterCategory::Memory,
-            requires_restart: false,
-            description: "Size of the buffer pool for caching data".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "buffer_pool_size".to_string(),
+            TunableParameter {
+                name: "buffer_pool_size".to_string(),
+                current_value: ParameterValue::Bytes(1024 * 1024 * 1024), // 1GB
+                min_value: ParameterValue::Bytes(64 * 1024 * 1024),
+                max_value: ParameterValue::Bytes(64 * 1024 * 1024 * 1024),
+                default_value: ParameterValue::Bytes(1024 * 1024 * 1024),
+                category: ParameterCategory::Memory,
+                requires_restart: false,
+                description: "Size of the buffer pool for caching data".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("query_cache_size".to_string(), TunableParameter {
-            name: "query_cache_size".to_string(),
-            current_value: ParameterValue::Bytes(256 * 1024 * 1024),
-            min_value: ParameterValue::Bytes(0),
-            max_value: ParameterValue::Bytes(4 * 1024 * 1024 * 1024),
-            default_value: ParameterValue::Bytes(256 * 1024 * 1024),
-            category: ParameterCategory::Cache,
-            requires_restart: false,
-            description: "Size of the query result cache".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "query_cache_size".to_string(),
+            TunableParameter {
+                name: "query_cache_size".to_string(),
+                current_value: ParameterValue::Bytes(256 * 1024 * 1024),
+                min_value: ParameterValue::Bytes(0),
+                max_value: ParameterValue::Bytes(4 * 1024 * 1024 * 1024),
+                default_value: ParameterValue::Bytes(256 * 1024 * 1024),
+                category: ParameterCategory::Cache,
+                requires_restart: false,
+                description: "Size of the query result cache".to_string(),
+                last_tuned: None,
+            },
+        );
 
         // I/O parameters
-        params.insert("io_concurrency".to_string(), TunableParameter {
-            name: "io_concurrency".to_string(),
-            current_value: ParameterValue::Integer(200),
-            min_value: ParameterValue::Integer(1),
-            max_value: ParameterValue::Integer(1000),
-            default_value: ParameterValue::Integer(200),
-            category: ParameterCategory::IO,
-            requires_restart: false,
-            description: "Maximum concurrent I/O operations".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "io_concurrency".to_string(),
+            TunableParameter {
+                name: "io_concurrency".to_string(),
+                current_value: ParameterValue::Integer(200),
+                min_value: ParameterValue::Integer(1),
+                max_value: ParameterValue::Integer(1000),
+                default_value: ParameterValue::Integer(200),
+                category: ParameterCategory::IO,
+                requires_restart: false,
+                description: "Maximum concurrent I/O operations".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("read_ahead_kb".to_string(), TunableParameter {
-            name: "read_ahead_kb".to_string(),
-            current_value: ParameterValue::Integer(256),
-            min_value: ParameterValue::Integer(0),
-            max_value: ParameterValue::Integer(4096),
-            default_value: ParameterValue::Integer(256),
-            category: ParameterCategory::IO,
-            requires_restart: false,
-            description: "Read-ahead size in KB".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "read_ahead_kb".to_string(),
+            TunableParameter {
+                name: "read_ahead_kb".to_string(),
+                current_value: ParameterValue::Integer(256),
+                min_value: ParameterValue::Integer(0),
+                max_value: ParameterValue::Integer(4096),
+                default_value: ParameterValue::Integer(256),
+                category: ParameterCategory::IO,
+                requires_restart: false,
+                description: "Read-ahead size in KB".to_string(),
+                last_tuned: None,
+            },
+        );
 
         // Parallelism parameters
-        params.insert("max_parallel_workers".to_string(), TunableParameter {
-            name: "max_parallel_workers".to_string(),
-            current_value: ParameterValue::Integer(8),
-            min_value: ParameterValue::Integer(0),
-            max_value: ParameterValue::Integer(128),
-            default_value: ParameterValue::Integer(8),
-            category: ParameterCategory::Parallelism,
-            requires_restart: false,
-            description: "Maximum parallel worker threads".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "max_parallel_workers".to_string(),
+            TunableParameter {
+                name: "max_parallel_workers".to_string(),
+                current_value: ParameterValue::Integer(8),
+                min_value: ParameterValue::Integer(0),
+                max_value: ParameterValue::Integer(128),
+                default_value: ParameterValue::Integer(8),
+                category: ParameterCategory::Parallelism,
+                requires_restart: false,
+                description: "Maximum parallel worker threads".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("parallel_threshold".to_string(), TunableParameter {
-            name: "parallel_threshold".to_string(),
-            current_value: ParameterValue::Integer(10000),
-            min_value: ParameterValue::Integer(100),
-            max_value: ParameterValue::Integer(10000000),
-            default_value: ParameterValue::Integer(10000),
-            category: ParameterCategory::Parallelism,
-            requires_restart: false,
-            description: "Minimum rows for parallel execution".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "parallel_threshold".to_string(),
+            TunableParameter {
+                name: "parallel_threshold".to_string(),
+                current_value: ParameterValue::Integer(10000),
+                min_value: ParameterValue::Integer(100),
+                max_value: ParameterValue::Integer(10000000),
+                default_value: ParameterValue::Integer(10000),
+                category: ParameterCategory::Parallelism,
+                requires_restart: false,
+                description: "Minimum rows for parallel execution".to_string(),
+                last_tuned: None,
+            },
+        );
 
         // Compression parameters
-        params.insert("compression_level".to_string(), TunableParameter {
-            name: "compression_level".to_string(),
-            current_value: ParameterValue::Integer(3),
-            min_value: ParameterValue::Integer(1),
-            max_value: ParameterValue::Integer(22),
-            default_value: ParameterValue::Integer(3),
-            category: ParameterCategory::Compression,
-            requires_restart: false,
-            description: "Compression level (higher = better compression)".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "compression_level".to_string(),
+            TunableParameter {
+                name: "compression_level".to_string(),
+                current_value: ParameterValue::Integer(3),
+                min_value: ParameterValue::Integer(1),
+                max_value: ParameterValue::Integer(22),
+                default_value: ParameterValue::Integer(3),
+                category: ParameterCategory::Compression,
+                requires_restart: false,
+                description: "Compression level (higher = better compression)".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("min_compress_block_size".to_string(), TunableParameter {
-            name: "min_compress_block_size".to_string(),
-            current_value: ParameterValue::Bytes(65536),
-            min_value: ParameterValue::Bytes(1024),
-            max_value: ParameterValue::Bytes(1024 * 1024),
-            default_value: ParameterValue::Bytes(65536),
-            category: ParameterCategory::Compression,
-            requires_restart: false,
-            description: "Minimum block size for compression".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "min_compress_block_size".to_string(),
+            TunableParameter {
+                name: "min_compress_block_size".to_string(),
+                current_value: ParameterValue::Bytes(65536),
+                min_value: ParameterValue::Bytes(1024),
+                max_value: ParameterValue::Bytes(1024 * 1024),
+                default_value: ParameterValue::Bytes(65536),
+                category: ParameterCategory::Compression,
+                requires_restart: false,
+                description: "Minimum block size for compression".to_string(),
+                last_tuned: None,
+            },
+        );
 
         // Query parameters
-        params.insert("max_memory_per_query".to_string(), TunableParameter {
-            name: "max_memory_per_query".to_string(),
-            current_value: ParameterValue::Bytes(2 * 1024 * 1024 * 1024),
-            min_value: ParameterValue::Bytes(64 * 1024 * 1024),
-            max_value: ParameterValue::Bytes(64 * 1024 * 1024 * 1024),
-            default_value: ParameterValue::Bytes(2 * 1024 * 1024 * 1024),
-            category: ParameterCategory::Query,
-            requires_restart: false,
-            description: "Maximum memory per query".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "max_memory_per_query".to_string(),
+            TunableParameter {
+                name: "max_memory_per_query".to_string(),
+                current_value: ParameterValue::Bytes(2 * 1024 * 1024 * 1024),
+                min_value: ParameterValue::Bytes(64 * 1024 * 1024),
+                max_value: ParameterValue::Bytes(64 * 1024 * 1024 * 1024),
+                default_value: ParameterValue::Bytes(2 * 1024 * 1024 * 1024),
+                category: ParameterCategory::Query,
+                requires_restart: false,
+                description: "Maximum memory per query".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("join_buffer_size".to_string(), TunableParameter {
-            name: "join_buffer_size".to_string(),
-            current_value: ParameterValue::Bytes(256 * 1024 * 1024),
-            min_value: ParameterValue::Bytes(1024 * 1024),
-            max_value: ParameterValue::Bytes(4 * 1024 * 1024 * 1024),
-            default_value: ParameterValue::Bytes(256 * 1024 * 1024),
-            category: ParameterCategory::Query,
-            requires_restart: false,
-            description: "Buffer size for hash joins".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "join_buffer_size".to_string(),
+            TunableParameter {
+                name: "join_buffer_size".to_string(),
+                current_value: ParameterValue::Bytes(256 * 1024 * 1024),
+                min_value: ParameterValue::Bytes(1024 * 1024),
+                max_value: ParameterValue::Bytes(4 * 1024 * 1024 * 1024),
+                default_value: ParameterValue::Bytes(256 * 1024 * 1024),
+                category: ParameterCategory::Query,
+                requires_restart: false,
+                description: "Buffer size for hash joins".to_string(),
+                last_tuned: None,
+            },
+        );
 
-        params.insert("sort_buffer_size".to_string(), TunableParameter {
-            name: "sort_buffer_size".to_string(),
-            current_value: ParameterValue::Bytes(64 * 1024 * 1024),
-            min_value: ParameterValue::Bytes(1024 * 1024),
-            max_value: ParameterValue::Bytes(1024 * 1024 * 1024),
-            default_value: ParameterValue::Bytes(64 * 1024 * 1024),
-            category: ParameterCategory::Query,
-            requires_restart: false,
-            description: "Buffer size for sorting".to_string(),
-            last_tuned: None,
-        });
+        params.insert(
+            "sort_buffer_size".to_string(),
+            TunableParameter {
+                name: "sort_buffer_size".to_string(),
+                current_value: ParameterValue::Bytes(64 * 1024 * 1024),
+                min_value: ParameterValue::Bytes(1024 * 1024),
+                max_value: ParameterValue::Bytes(1024 * 1024 * 1024),
+                default_value: ParameterValue::Bytes(64 * 1024 * 1024),
+                category: ParameterCategory::Query,
+                requires_restart: false,
+                description: "Buffer size for sorting".to_string(),
+                last_tuned: None,
+            },
+        );
     }
 
     /// Record a metrics sample
@@ -527,11 +560,18 @@ impl AutoTuner {
     }
 
     /// Record a query execution
-    pub fn record_query(&self, fingerprint: &str, query_type: QueryType, execution_ms: f64, rows: u64) {
+    pub fn record_query(
+        &self,
+        fingerprint: &str,
+        query_type: QueryType,
+        execution_ms: f64,
+        rows: u64,
+    ) {
         let mut patterns = self.query_patterns.write();
 
-        let pattern = patterns.entry(fingerprint.to_string()).or_insert_with(|| {
-            QueryPattern {
+        let pattern = patterns
+            .entry(fingerprint.to_string())
+            .or_insert_with(|| QueryPattern {
                 fingerprint: fingerprint.to_string(),
                 query_type: query_type.clone(),
                 execution_count: 0,
@@ -541,8 +581,7 @@ impl AutoTuner {
                 has_aggregation: matches!(query_type, QueryType::Aggregation),
                 has_join: matches!(query_type, QueryType::Join),
                 table_access: TableAccessMode::Mixed,
-            }
-        });
+            });
 
         // Update moving average
         let total = pattern.execution_count as f64 * pattern.avg_execution_ms + execution_ms;
@@ -574,11 +613,17 @@ impl AutoTuner {
                     reads += pattern.execution_count;
                 }
             }
-            *query_type_counts.entry(pattern.query_type.clone()).or_insert(0) += pattern.execution_count;
+            *query_type_counts
+                .entry(pattern.query_type.clone())
+                .or_insert(0) += pattern.execution_count;
         }
 
         let total = (reads + writes) as f64;
-        let read_write_ratio = if total > 0.0 { reads as f64 / total } else { 0.5 };
+        let read_write_ratio = if total > 0.0 {
+            reads as f64 / total
+        } else {
+            0.5
+        };
 
         // OLTP vs OLAP score based on query patterns
         let mut oltp_score = 0.0;
@@ -587,7 +632,10 @@ impl AutoTuner {
         for pattern in patterns.values() {
             let weight = pattern.execution_count as f64;
             match pattern.query_type {
-                QueryType::PointLookup | QueryType::Insert | QueryType::Update | QueryType::Delete => {
+                QueryType::PointLookup
+                | QueryType::Insert
+                | QueryType::Update
+                | QueryType::Delete => {
                     oltp_score += weight;
                 }
                 QueryType::FullTableScan | QueryType::Aggregation => {
@@ -605,27 +653,48 @@ impl AutoTuner {
         }
 
         let total_score = oltp_score + olap_score;
-        let oltp_olap_score = if total_score > 0.0 { olap_score / total_score } else { 0.5 };
+        let oltp_olap_score = if total_score > 0.0 {
+            olap_score / total_score
+        } else {
+            0.5
+        };
 
         // Compute average metrics
-        let avg_cpu: f64 = metrics.iter().map(|m| m.cpu_utilization).sum::<f64>() / metrics.len() as f64;
-        let avg_io: f64 = metrics.iter().map(|m| m.io_utilization).sum::<f64>() / metrics.len() as f64;
-        let avg_connections: f64 = metrics.iter().map(|m| m.active_connections as f64).sum::<f64>() / metrics.len() as f64;
+        let avg_cpu: f64 =
+            metrics.iter().map(|m| m.cpu_utilization).sum::<f64>() / metrics.len() as f64;
+        let avg_io: f64 =
+            metrics.iter().map(|m| m.io_utilization).sum::<f64>() / metrics.len() as f64;
+        let avg_connections: f64 = metrics
+            .iter()
+            .map(|m| m.active_connections as f64)
+            .sum::<f64>()
+            / metrics.len() as f64;
 
         // Query complexity based on patterns
-        let query_complexity = patterns.values()
+        let query_complexity = patterns
+            .values()
             .map(|p| {
                 let mut complexity = 0.0;
-                if p.has_join { complexity += 0.4; }
-                if p.has_aggregation { complexity += 0.3; }
-                if matches!(p.table_access, TableAccessMode::Random) { complexity += 0.2; }
-                if p.avg_execution_ms > 100.0 { complexity += 0.1; }
+                if p.has_join {
+                    complexity += 0.4;
+                }
+                if p.has_aggregation {
+                    complexity += 0.3;
+                }
+                if matches!(p.table_access, TableAccessMode::Random) {
+                    complexity += 0.2;
+                }
+                if p.avg_execution_ms > 100.0 {
+                    complexity += 0.1;
+                }
                 complexity
             })
-            .sum::<f64>() / patterns.len().max(1) as f64;
+            .sum::<f64>()
+            / patterns.len().max(1) as f64;
 
         // Primary query types
-        let mut primary_query_types: Vec<(QueryType, f64)> = query_type_counts.into_iter()
+        let mut primary_query_types: Vec<(QueryType, f64)> = query_type_counts
+            .into_iter()
             .map(|(qt, count)| (qt, count as f64 / total.max(1.0)))
             .collect();
         primary_query_types.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -655,11 +724,16 @@ impl AutoTuner {
         }
 
         // Compute average metrics
-        let avg_cache_hit = metrics.iter().map(|m| m.cache_hit_ratio).sum::<f64>() / metrics.len() as f64;
-        let avg_buffer_hit = metrics.iter().map(|m| m.buffer_pool_hit_ratio).sum::<f64>() / metrics.len() as f64;
-        let avg_latency = metrics.iter().map(|m| m.avg_latency_ms).sum::<f64>() / metrics.len() as f64;
-        let avg_io_util = metrics.iter().map(|m| m.io_utilization).sum::<f64>() / metrics.len() as f64;
-        let avg_cpu_util = metrics.iter().map(|m| m.cpu_utilization).sum::<f64>() / metrics.len() as f64;
+        let avg_cache_hit =
+            metrics.iter().map(|m| m.cache_hit_ratio).sum::<f64>() / metrics.len() as f64;
+        let avg_buffer_hit =
+            metrics.iter().map(|m| m.buffer_pool_hit_ratio).sum::<f64>() / metrics.len() as f64;
+        let avg_latency =
+            metrics.iter().map(|m| m.avg_latency_ms).sum::<f64>() / metrics.len() as f64;
+        let avg_io_util =
+            metrics.iter().map(|m| m.io_utilization).sum::<f64>() / metrics.len() as f64;
+        let avg_cpu_util =
+            metrics.iter().map(|m| m.cpu_utilization).sum::<f64>() / metrics.len() as f64;
 
         // Memory tuning
         if self.config.tune_memory {
@@ -795,7 +869,8 @@ impl AutoTuner {
         // Compression tuning
         if self.config.tune_compression {
             if let Some(param) = params.get("compression_level") {
-                let avg_compression = metrics.iter().map(|m| m.compression_ratio).sum::<f64>() / metrics.len() as f64;
+                let avg_compression =
+                    metrics.iter().map(|m| m.compression_ratio).sum::<f64>() / metrics.len() as f64;
 
                 if avg_compression < 0.3 && avg_io_util > 0.5 {
                     // High I/O and low compression - increase compression
@@ -824,9 +899,7 @@ impl AutoTuner {
         if self.config.tune_queries {
             if let Some(param) = params.get("join_buffer_size") {
                 // Check if we have join-heavy workload
-                let has_joins = self.query_patterns.read()
-                    .values()
-                    .any(|p| p.has_join);
+                let has_joins = self.query_patterns.read().values().any(|p| p.has_join);
 
                 if has_joins && avg_latency > 100.0 {
                     let current = param.current_value.as_bytes().unwrap_or(0);
@@ -838,7 +911,9 @@ impl AutoTuner {
                         recommended_value: ParameterValue::Bytes(new_value),
                         expected_improvement: 15.0,
                         confidence: 0.7,
-                        reasoning: "Join operations detected with high latency. Larger buffer may help.".to_string(),
+                        reasoning:
+                            "Join operations detected with high latency. Larger buffer may help."
+                                .to_string(),
                         category: ParameterCategory::Query,
                         risk: RiskLevel::Low,
                         requires_restart: false,
@@ -851,7 +926,9 @@ impl AutoTuner {
         recommendations.sort_by(|a, b| {
             let score_a = a.expected_improvement * a.confidence;
             let score_b = b.expected_improvement * b.confidence;
-            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // In conservative mode, only return top recommendations
@@ -866,16 +943,16 @@ impl AutoTuner {
     pub fn apply_recommendation(&self, rec: &TuningRecommendation) -> Result<(), String> {
         let mut params = self.parameters.write();
 
-        let param = params.get_mut(&rec.parameter).ok_or_else(|| {
-            format!("parameter not found: {}", rec.parameter)
-        })?;
+        let param = params
+            .get_mut(&rec.parameter)
+            .ok_or_else(|| format!("parameter not found: {}", rec.parameter))?;
 
         param.current_value = rec.recommended_value.clone();
         param.last_tuned = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
         );
 
         self.parameters_tuned.fetch_add(1, Ordering::Relaxed);
@@ -947,16 +1024,16 @@ impl AutoTuner {
     /// Set parameter value
     pub fn set_parameter(&self, name: &str, value: ParameterValue) -> Result<(), String> {
         let mut params = self.parameters.write();
-        let param = params.get_mut(name).ok_or_else(|| {
-            format!("parameter not found: {}", name)
-        })?;
+        let param = params
+            .get_mut(name)
+            .ok_or_else(|| format!("parameter not found: {}", name))?;
 
         param.current_value = value;
         param.last_tuned = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs()
+                .as_secs(),
         );
 
         Ok(())
@@ -1039,7 +1116,9 @@ impl WorkloadClassifier {
 
         // Find peak hours
         let avg_load: f64 = hourly_stats.iter().sum::<f64>() / 24.0;
-        let peak_hours: Vec<u8> = hourly_stats.iter().enumerate()
+        let peak_hours: Vec<u8> = hourly_stats
+            .iter()
+            .enumerate()
             .filter(|(_, &load)| load > avg_load * 1.5)
             .map(|(h, _)| h as u8)
             .collect();
@@ -1059,12 +1138,16 @@ impl WorkloadClassifier {
         // Check for trending
         let recent_profiles: Vec<_> = profiles.iter().rev().take(100).collect();
         if recent_profiles.len() >= 10 {
-            let first_half_load: f64 = recent_profiles[50..].iter()
+            let first_half_load: f64 = recent_profiles[50..]
+                .iter()
                 .map(|(_, p)| p.concurrency)
-                .sum::<f64>() / 50.0;
-            let second_half_load: f64 = recent_profiles[..50].iter()
+                .sum::<f64>()
+                / 50.0;
+            let second_half_load: f64 = recent_profiles[..50]
+                .iter()
                 .map(|(_, p)| p.concurrency)
-                .sum::<f64>() / 50.0;
+                .sum::<f64>()
+                / 50.0;
 
             if second_half_load > first_half_load * 1.2 {
                 patterns.push(WorkloadPattern {
@@ -1194,7 +1277,8 @@ mod tests {
         let recommendations = tuner.generate_recommendations();
 
         // Should recommend increasing buffer pool
-        let buffer_rec = recommendations.iter()
+        let buffer_rec = recommendations
+            .iter()
             .find(|r| r.parameter == "buffer_pool_size");
         assert!(buffer_rec.is_some());
     }
@@ -1203,10 +1287,18 @@ mod tests {
     fn test_set_parameter() {
         let tuner = AutoTuner::new(AutoTunerConfig::default());
 
-        tuner.set_parameter("buffer_pool_size", ParameterValue::Bytes(2 * 1024 * 1024 * 1024)).unwrap();
+        tuner
+            .set_parameter(
+                "buffer_pool_size",
+                ParameterValue::Bytes(2 * 1024 * 1024 * 1024),
+            )
+            .unwrap();
 
         let param = tuner.get_parameter("buffer_pool_size").unwrap();
-        assert_eq!(param.current_value.as_bytes().unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(
+            param.current_value.as_bytes().unwrap(),
+            2 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]

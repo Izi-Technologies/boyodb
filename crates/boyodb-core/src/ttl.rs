@@ -18,12 +18,15 @@
 //! TTL timestamp + INTERVAL 30 DAY DELETE;
 //! ```
 
-use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use arrow_array::{RecordBatch, ArrayRef, BooleanArray};
 use arrow_array::cast::AsArray;
+use arrow_array::{ArrayRef, BooleanArray, RecordBatch};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
 use crate::EngineError;
@@ -70,7 +73,7 @@ impl TtlIntervalUnit {
             TtlIntervalUnit::Day => value * 86400,
             TtlIntervalUnit::Week => value * 604800,
             TtlIntervalUnit::Month => value * 2592000, // Approximate: 30 days
-            TtlIntervalUnit::Year => value * 31536000,  // Approximate: 365 days
+            TtlIntervalUnit::Year => value * 31536000, // Approximate: 365 days
         }
     }
 }
@@ -106,9 +109,10 @@ impl TtlExpression {
         // Split on '+' to get column and interval parts
         let parts: Vec<&str> = expr.splitn(2, '+').collect();
         if parts.len() != 2 {
-            return Err(EngineError::InvalidArgument(
-                format!("Invalid TTL expression: expected 'column + INTERVAL ...', got '{}'", expr)
-            ));
+            return Err(EngineError::InvalidArgument(format!(
+                "Invalid TTL expression: expected 'column + INTERVAL ...', got '{}'",
+                expr
+            )));
         }
 
         let column = parts[0].trim().to_string();
@@ -117,9 +121,10 @@ impl TtlExpression {
 
         // Parse INTERVAL N UNIT
         if !remainder_upper.starts_with("INTERVAL") {
-            return Err(EngineError::InvalidArgument(
-                format!("Invalid TTL expression: expected 'INTERVAL', got '{}'", remainder)
-            ));
+            return Err(EngineError::InvalidArgument(format!(
+                "Invalid TTL expression: expected 'INTERVAL', got '{}'",
+                remainder
+            )));
         }
 
         // Use original case for value extraction (for disk/volume names)
@@ -129,7 +134,7 @@ impl TtlExpression {
         let tokens_orig: Vec<&str> = after_interval_orig.split_whitespace().collect();
         if tokens.len() < 2 {
             return Err(EngineError::InvalidArgument(
-                "Invalid TTL expression: expected 'INTERVAL N UNIT'".into()
+                "Invalid TTL expression: expected 'INTERVAL N UNIT'".into(),
             ));
         }
 
@@ -146,9 +151,10 @@ impl TtlExpression {
             "MONTH" | "MONTHS" => TtlIntervalUnit::Month,
             "YEAR" | "YEARS" => TtlIntervalUnit::Year,
             other => {
-                return Err(EngineError::InvalidArgument(
-                    format!("Invalid interval unit: {}", other)
-                ));
+                return Err(EngineError::InvalidArgument(format!(
+                    "Invalid interval unit: {}",
+                    other
+                )));
             }
         };
 
@@ -159,12 +165,20 @@ impl TtlExpression {
                 "DELETE" => TtlAction::Delete,
                 "TO" if tokens.len() > 4 && tokens[3] == "DISK" => {
                     // Use original case-preserved name
-                    let disk_name = tokens_orig.get(4).unwrap_or(&"").trim_matches('\'').to_string();
+                    let disk_name = tokens_orig
+                        .get(4)
+                        .unwrap_or(&"")
+                        .trim_matches('\'')
+                        .to_string();
                     TtlAction::MoveToDisk(disk_name)
                 }
                 "TO" if tokens.len() > 4 && tokens[3] == "VOLUME" => {
                     // Use original case-preserved name
-                    let volume_name = tokens_orig.get(4).unwrap_or(&"").trim_matches('\'').to_string();
+                    let volume_name = tokens_orig
+                        .get(4)
+                        .unwrap_or(&"")
+                        .trim_matches('\'')
+                        .to_string();
                     TtlAction::MoveToVolume(volume_name)
                 }
                 "RECOMPRESS" if tokens.len() > 3 => {
@@ -295,7 +309,9 @@ fn build_ttl_mask(
     ttl: &TtlExpression,
     now: i64,
 ) -> Result<BooleanArray, EngineError> {
-    use arrow_array::{Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray};
+    use arrow_array::{
+        Int64Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampSecondArray,
+    };
 
     let expiration_threshold = now - ttl.interval.unit.to_seconds(ttl.interval.value);
 
@@ -316,18 +332,12 @@ fn build_ttl_mask(
     } else if let Some(arr) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
         // Convert milliseconds to seconds for comparison
         let threshold_ms = expiration_threshold * 1000;
-        let mask: BooleanArray = arr
-            .iter()
-            .map(|v| v.map(|ts| ts > threshold_ms))
-            .collect();
+        let mask: BooleanArray = arr.iter().map(|v| v.map(|ts| ts > threshold_ms)).collect();
         Ok(mask)
     } else if let Some(arr) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
         // Convert microseconds to seconds for comparison
         let threshold_us = expiration_threshold * 1_000_000;
-        let mask: BooleanArray = arr
-            .iter()
-            .map(|v| v.map(|ts| ts > threshold_us))
-            .collect();
+        let mask: BooleanArray = arr.iter().map(|v| v.map(|ts| ts > threshold_us)).collect();
         Ok(mask)
     } else {
         Err(EngineError::InvalidArgument(format!(
@@ -375,11 +385,9 @@ impl TtlStats {
     }
 
     pub fn start_cleanup(&self) -> bool {
-        self.cleanup_running.compare_exchange(
-            false, true,
-            Ordering::SeqCst,
-            Ordering::Relaxed
-        ).is_ok()
+        self.cleanup_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
     }
 
     pub fn finish_cleanup(&self) {
@@ -545,8 +553,9 @@ mod tests {
     #[test]
     fn test_ttl_config_multiple() {
         let config = TtlConfig::parse(
-            "timestamp + INTERVAL 7 DAY TO DISK 'cold', timestamp + INTERVAL 30 DAY DELETE"
-        ).unwrap();
+            "timestamp + INTERVAL 7 DAY TO DISK 'cold', timestamp + INTERVAL 30 DAY DELETE",
+        )
+        .unwrap();
         assert_eq!(config.expressions.len(), 2);
     }
 }

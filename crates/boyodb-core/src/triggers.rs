@@ -8,15 +8,15 @@
 //! - OLD/NEW row references
 //! - Conditional triggers (WHEN clause)
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::Instant;
 
 use crate::procedures::{
-    Block, DataType, ExecutionContext, Expression, ProcedureBody, ProcedureError,
-    SqlExecutor, Statement, Value,
+    Block, DataType, ExecutionContext, Expression, ProcedureBody, ProcedureError, SqlExecutor,
+    Statement, Value,
 };
 
 // ============================================================================
@@ -228,7 +228,10 @@ pub struct TriggerExecutor<E: SqlExecutor> {
 
 impl<E: SqlExecutor> TriggerExecutor<E> {
     pub fn new(sql_executor: Arc<E>, config: TriggerExecutorConfig) -> Self {
-        Self { sql_executor, config }
+        Self {
+            sql_executor,
+            config,
+        }
     }
 
     /// Execute a trigger
@@ -252,9 +255,7 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
 
         // Execute trigger body
         match &trigger.body {
-            TriggerBody::Block(block) => {
-                self.execute_block(block, ctx)
-            }
+            TriggerBody::Block(block) => self.execute_block(block, ctx),
             TriggerBody::Procedure { name, args: _ } => {
                 // Would call the procedure
                 let _ = name;
@@ -322,7 +323,11 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
         }
     }
 
-    fn evaluate_when_expr(&self, expr: &Expression, ctx: &WhenContext) -> Result<Value, ProcedureError> {
+    fn evaluate_when_expr(
+        &self,
+        expr: &Expression,
+        ctx: &WhenContext,
+    ) -> Result<Value, ProcedureError> {
         match expr {
             Expression::Literal(val) => Ok(val.clone()),
             Expression::FieldAccess { record, field } => {
@@ -342,7 +347,11 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
         }
     }
 
-    fn execute_block(&self, block: &Block, ctx: &TriggerContext) -> Result<TriggerResult, ProcedureError> {
+    fn execute_block(
+        &self,
+        block: &Block,
+        ctx: &TriggerContext,
+    ) -> Result<TriggerResult, ProcedureError> {
         let mut modified_row = ctx.new_row.clone();
 
         for stmt in &block.statements {
@@ -351,24 +360,31 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
                     // RETURN in trigger means skip the row
                     return Ok(TriggerResult::Skip);
                 }
-                Statement::Raise { exception, message, .. } => {
-                    let msg = format!("{}: {:?}",
+                Statement::Raise {
+                    exception, message, ..
+                } => {
+                    let msg = format!(
+                        "{}: {:?}",
                         exception.as_ref().map(|s| s.as_str()).unwrap_or("ERROR"),
                         message
                     );
                     return Ok(TriggerResult::Abort(msg));
                 }
-                Statement::Assignment { target, value } => {
+                Statement::Assignment {
+                    target: crate::procedures::AssignmentTarget::RecordField { record, field },
+                    value,
+                } => {
                     // Handle NEW.column := value assignments
-                    if let crate::procedures::AssignmentTarget::RecordField { record, field } = target {
-                        if record.to_uppercase() == "NEW" {
-                            if let Some(ref mut row) = modified_row {
-                                // Evaluate expression (simplified)
-                                let val = self.evaluate_assignment_value(value, ctx)?;
-                                row.insert(field.clone(), val);
-                            }
+                    if record.to_uppercase() == "NEW" {
+                        if let Some(ref mut row) = modified_row {
+                            // Evaluate expression (simplified)
+                            let val = self.evaluate_assignment_value(value, ctx)?;
+                            row.insert(field.clone(), val);
                         }
                     }
+                }
+                Statement::Assignment { .. } => {
+                    // Other assignment targets not handled
                 }
                 Statement::ExecuteSql { sql, .. } => {
                     let expanded = self.expand_row_references(sql, ctx);
@@ -389,7 +405,11 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
         Ok(TriggerResult::Continue)
     }
 
-    fn evaluate_assignment_value(&self, expr: &Expression, ctx: &TriggerContext) -> Result<Value, ProcedureError> {
+    fn evaluate_assignment_value(
+        &self,
+        expr: &Expression,
+        ctx: &TriggerContext,
+    ) -> Result<Value, ProcedureError> {
         match expr {
             Expression::Literal(val) => Ok(val.clone()),
             Expression::FieldAccess { record, field } => {
@@ -408,17 +428,13 @@ impl<E: SqlExecutor> TriggerExecutor<E> {
             Expression::FunctionCall { name, arguments: _ } => {
                 // Handle common trigger functions
                 match name.to_uppercase().as_str() {
-                    "NOW" | "CURRENT_TIMESTAMP" => {
-                        Ok(Value::Timestamp(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_micros() as i64
-                        ))
-                    }
-                    "CURRENT_USER" | "SESSION_USER" => {
-                        Ok(Value::String("system".to_string()))
-                    }
+                    "NOW" | "CURRENT_TIMESTAMP" => Ok(Value::Timestamp(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros() as i64,
+                    )),
+                    "CURRENT_USER" | "SESSION_USER" => Ok(Value::String("system".to_string())),
                     _ => Ok(Value::Null),
                 }
             }
@@ -518,13 +534,15 @@ impl TriggerManager {
 
         // Check for duplicate name
         if table_triggers.iter().any(|t| t.name == trigger.name) {
-            return Err(ProcedureError::InvalidParameter(
-                format!("trigger {} already exists", trigger.name)
-            ));
+            return Err(ProcedureError::InvalidParameter(format!(
+                "trigger {} already exists",
+                trigger.name
+            )));
         }
 
         // Insert in priority order
-        let pos = table_triggers.iter()
+        let pos = table_triggers
+            .iter()
             .position(|t| t.priority > trigger.priority)
             .unwrap_or(table_triggers.len());
 
@@ -568,14 +586,11 @@ impl TriggerManager {
         };
 
         let triggers = self.triggers.read();
-        triggers.get(&table_key)
+        triggers
+            .get(&table_key)
             .map(|ts| {
                 ts.iter()
-                    .filter(|t| {
-                        t.enabled &&
-                        t.timing == timing &&
-                        t.events.contains(&event)
-                    })
+                    .filter(|t| t.enabled && t.timing == timing && t.events.contains(&event))
                     .cloned()
                     .collect()
             })
@@ -583,7 +598,13 @@ impl TriggerManager {
     }
 
     /// Enable/disable a trigger
-    pub fn set_enabled(&self, schema: Option<&str>, table: &str, name: &str, enabled: bool) -> bool {
+    pub fn set_enabled(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+        name: &str,
+        enabled: bool,
+    ) -> bool {
         let table_key = if let Some(s) = schema {
             format!("{}.{}", s, table)
         } else {
@@ -872,13 +893,13 @@ impl TriggerBuilder {
     pub fn build(self) -> Result<TriggerDefinition, ProcedureError> {
         if self.events.is_empty() {
             return Err(ProcedureError::InvalidParameter(
-                "trigger must have at least one event".into()
+                "trigger must have at least one event".into(),
             ));
         }
 
-        let body = self.body.ok_or_else(|| {
-            ProcedureError::InvalidParameter("trigger must have a body".into())
-        })?;
+        let body = self
+            .body
+            .ok_or_else(|| ProcedureError::InvalidParameter("trigger must have a body".into()))?;
 
         Ok(TriggerDefinition {
             name: self.name,
@@ -940,18 +961,16 @@ pub fn create_updated_at_trigger(table: &str) -> Result<TriggerDefinition, Proce
         .execute_block(Block {
             label: None,
             declarations: vec![],
-            statements: vec![
-                Statement::Assignment {
-                    target: crate::procedures::AssignmentTarget::RecordField {
-                        record: "NEW".to_string(),
-                        field: "updated_at".to_string(),
-                    },
-                    value: Expression::FunctionCall {
-                        name: "NOW".to_string(),
-                        arguments: vec![],
-                    },
+            statements: vec![Statement::Assignment {
+                target: crate::procedures::AssignmentTarget::RecordField {
+                    record: "NEW".to_string(),
+                    field: "updated_at".to_string(),
                 },
-            ],
+                value: Expression::FunctionCall {
+                    name: "NOW".to_string(),
+                    arguments: vec![],
+                },
+            }],
             exception_handlers: vec![],
         })
         .comment(&format!("Auto-update updated_at for {}", table))
@@ -981,14 +1000,22 @@ mod tests {
     struct MockSqlExecutor;
 
     impl SqlExecutor for MockSqlExecutor {
-        fn execute(&self, _sql: &str, _params: &[Value]) -> Result<crate::procedures::SqlResult, ProcedureError> {
+        fn execute(
+            &self,
+            _sql: &str,
+            _params: &[Value],
+        ) -> Result<crate::procedures::SqlResult, ProcedureError> {
             Ok(crate::procedures::SqlResult {
                 rows_affected: 1,
                 returning: vec![],
             })
         }
 
-        fn execute_query(&self, _sql: &str, _params: &[Value]) -> Result<Vec<Vec<Value>>, ProcedureError> {
+        fn execute_query(
+            &self,
+            _sql: &str,
+            _params: &[Value],
+        ) -> Result<Vec<Vec<Value>>, ProcedureError> {
             Ok(vec![])
         }
     }
@@ -1028,11 +1055,8 @@ mod tests {
 
         manager.register(trigger).unwrap();
 
-        let triggers = manager.get_triggers(
-            None, "orders",
-            TriggerTiming::After,
-            TriggerEvent::Insert,
-        );
+        let triggers =
+            manager.get_triggers(None, "orders", TriggerTiming::After, TriggerEvent::Insert);
         assert_eq!(triggers.len(), 1);
 
         let all = manager.list_triggers(None, "orders");
@@ -1044,10 +1068,8 @@ mod tests {
 
     #[test]
     fn test_trigger_execution() {
-        let executor = TriggerExecutor::new(
-            Arc::new(MockSqlExecutor),
-            TriggerExecutorConfig::default(),
-        );
+        let executor =
+            TriggerExecutor::new(Arc::new(MockSqlExecutor), TriggerExecutorConfig::default());
 
         let trigger = TriggerBuilder::new("test", "users")
             .before()
@@ -1066,7 +1088,8 @@ mod tests {
             "users".to_string(),
             TriggerEvent::Insert,
             vec!["id".to_string(), "name".to_string()],
-        ).with_new_row(new_row);
+        )
+        .with_new_row(new_row);
 
         let result = executor.execute(&trigger, &ctx).unwrap();
         assert!(matches!(result, TriggerResult::Continue));

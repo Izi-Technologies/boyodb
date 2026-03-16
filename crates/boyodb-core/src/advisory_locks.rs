@@ -112,7 +112,14 @@ impl AdvisoryLockManager {
 
     /// Acquire exclusive session lock (blocking)
     pub fn pg_advisory_lock(&self, session_id: u64, key: LockKey) -> bool {
-        self.acquire_lock(session_id, None, key, LockMode::Exclusive, LockScope::Session, None)
+        self.acquire_lock(
+            session_id,
+            None,
+            key,
+            LockMode::Exclusive,
+            LockScope::Session,
+            None,
+        )
     }
 
     /// Acquire exclusive session lock with two keys
@@ -122,12 +129,25 @@ impl AdvisoryLockManager {
 
     /// Acquire shared session lock (blocking)
     pub fn pg_advisory_lock_shared(&self, session_id: u64, key: LockKey) -> bool {
-        self.acquire_lock(session_id, None, key, LockMode::Shared, LockScope::Session, None)
+        self.acquire_lock(
+            session_id,
+            None,
+            key,
+            LockMode::Shared,
+            LockScope::Session,
+            None,
+        )
     }
 
     /// Try to acquire exclusive session lock (non-blocking)
     pub fn pg_try_advisory_lock(&self, session_id: u64, key: LockKey) -> bool {
-        self.try_acquire_lock(session_id, None, key, LockMode::Exclusive, LockScope::Session)
+        self.try_acquire_lock(
+            session_id,
+            None,
+            key,
+            LockMode::Exclusive,
+            LockScope::Session,
+        )
     }
 
     /// Try to acquire shared session lock (non-blocking)
@@ -151,23 +171,69 @@ impl AdvisoryLockManager {
     }
 
     /// Acquire transaction-level exclusive lock
-    pub fn pg_advisory_xact_lock(&self, session_id: u64, transaction_id: u64, key: LockKey) -> bool {
-        self.acquire_lock(session_id, Some(transaction_id), key, LockMode::Exclusive, LockScope::Transaction, None)
+    pub fn pg_advisory_xact_lock(
+        &self,
+        session_id: u64,
+        transaction_id: u64,
+        key: LockKey,
+    ) -> bool {
+        self.acquire_lock(
+            session_id,
+            Some(transaction_id),
+            key,
+            LockMode::Exclusive,
+            LockScope::Transaction,
+            None,
+        )
     }
 
     /// Acquire transaction-level shared lock
-    pub fn pg_advisory_xact_lock_shared(&self, session_id: u64, transaction_id: u64, key: LockKey) -> bool {
-        self.acquire_lock(session_id, Some(transaction_id), key, LockMode::Shared, LockScope::Transaction, None)
+    pub fn pg_advisory_xact_lock_shared(
+        &self,
+        session_id: u64,
+        transaction_id: u64,
+        key: LockKey,
+    ) -> bool {
+        self.acquire_lock(
+            session_id,
+            Some(transaction_id),
+            key,
+            LockMode::Shared,
+            LockScope::Transaction,
+            None,
+        )
     }
 
     /// Try to acquire transaction-level exclusive lock
-    pub fn pg_try_advisory_xact_lock(&self, session_id: u64, transaction_id: u64, key: LockKey) -> bool {
-        self.try_acquire_lock(session_id, Some(transaction_id), key, LockMode::Exclusive, LockScope::Transaction)
+    pub fn pg_try_advisory_xact_lock(
+        &self,
+        session_id: u64,
+        transaction_id: u64,
+        key: LockKey,
+    ) -> bool {
+        self.try_acquire_lock(
+            session_id,
+            Some(transaction_id),
+            key,
+            LockMode::Exclusive,
+            LockScope::Transaction,
+        )
     }
 
     /// Try to acquire transaction-level shared lock
-    pub fn pg_try_advisory_xact_lock_shared(&self, session_id: u64, transaction_id: u64, key: LockKey) -> bool {
-        self.try_acquire_lock(session_id, Some(transaction_id), key, LockMode::Shared, LockScope::Transaction)
+    pub fn pg_try_advisory_xact_lock_shared(
+        &self,
+        session_id: u64,
+        transaction_id: u64,
+        key: LockKey,
+    ) -> bool {
+        self.try_acquire_lock(
+            session_id,
+            Some(transaction_id),
+            key,
+            LockMode::Shared,
+            LockScope::Transaction,
+        )
     }
 
     /// Release all transaction locks
@@ -181,11 +247,11 @@ impl AdvisoryLockManager {
         for (key, entries) in locks.iter_mut() {
             let before_len = entries.len();
             entries.retain(|e| {
-                !(e.session_id == session_id && 
-                  e.scope == LockScope::Transaction && 
-                  e.transaction_id == Some(transaction_id))
+                !(e.session_id == session_id
+                    && e.scope == LockScope::Transaction
+                    && e.transaction_id == Some(transaction_id))
             });
-            
+
             if entries.len() < before_len {
                 stats.locks_released += (before_len - entries.len()) as u64;
                 keys_to_check.push(*key);
@@ -198,8 +264,12 @@ impl AdvisoryLockManager {
         // Update session locks
         if let Some(session_keys) = session_locks.get_mut(&session_id) {
             for key in &keys_to_check {
-                if !locks.contains_key(key) || 
-                   locks.get(key).map(|v| v.iter().all(|e| e.session_id != session_id)).unwrap_or(true) {
+                if !locks.contains_key(key)
+                    || locks
+                        .get(key)
+                        .map(|v| v.iter().all(|e| e.session_id != session_id))
+                        .unwrap_or(true)
+                {
                     session_keys.remove(key);
                 }
             }
@@ -281,12 +351,16 @@ impl AdvisoryLockManager {
         let can_acquire = match mode {
             LockMode::Exclusive => {
                 // Exclusive: no other locks, or only our own exclusive lock (reentrant)
-                entries.is_empty() || 
-                entries.iter().all(|e| e.session_id == session_id && e.mode == LockMode::Exclusive)
+                entries.is_empty()
+                    || entries
+                        .iter()
+                        .all(|e| e.session_id == session_id && e.mode == LockMode::Exclusive)
             }
             LockMode::Shared => {
                 // Shared: no exclusive locks from others
-                entries.iter().all(|e| e.mode == LockMode::Shared || e.session_id == session_id)
+                entries
+                    .iter()
+                    .all(|e| e.mode == LockMode::Shared || e.session_id == session_id)
             }
         };
 
@@ -295,9 +369,10 @@ impl AdvisoryLockManager {
         }
 
         // Check for existing lock by this session (reentrant)
-        if let Some(existing) = entries.iter_mut().find(|e| {
-            e.session_id == session_id && e.mode == mode && e.scope == scope
-        }) {
+        if let Some(existing) = entries
+            .iter_mut()
+            .find(|e| e.session_id == session_id && e.mode == mode && e.scope == scope)
+        {
             existing.ref_count += 1;
         } else {
             entries.push(LockEntry {
@@ -384,13 +459,13 @@ mod tests {
 
         // Session 1 acquires lock
         assert!(mgr.pg_advisory_lock(1, key));
-        
+
         // Session 2 cannot acquire (non-blocking)
         assert!(!mgr.pg_try_advisory_lock(2, key));
-        
+
         // Session 1 releases
         assert!(mgr.pg_advisory_unlock(1, key));
-        
+
         // Now session 2 can acquire
         assert!(mgr.pg_try_advisory_lock(2, key));
     }
@@ -403,14 +478,14 @@ mod tests {
         // Multiple sessions can acquire shared lock
         assert!(mgr.pg_advisory_lock_shared(1, key));
         assert!(mgr.pg_advisory_lock_shared(2, key));
-        
+
         // But not exclusive
         assert!(!mgr.pg_try_advisory_lock(3, key));
-        
+
         // Release shared locks
         mgr.pg_advisory_unlock_shared(1, key);
         mgr.pg_advisory_unlock_shared(2, key);
-        
+
         // Now exclusive works
         assert!(mgr.pg_try_advisory_lock(3, key));
     }
@@ -423,7 +498,7 @@ mod tests {
         // Same session can acquire same lock multiple times
         assert!(mgr.pg_advisory_lock(1, key));
         assert!(mgr.pg_advisory_lock(1, key));
-        
+
         // Need to release multiple times
         assert!(mgr.pg_advisory_unlock(1, key));
         assert!(mgr.is_locked(key));
@@ -438,13 +513,13 @@ mod tests {
 
         // Acquire transaction lock
         assert!(mgr.pg_advisory_xact_lock(1, 100, key));
-        
+
         // Lock is held
         assert!(mgr.is_locked(key));
-        
+
         // Release on transaction end
         mgr.release_transaction_locks(1, 100);
-        
+
         // Lock is released
         assert!(!mgr.is_locked(key));
     }
@@ -452,15 +527,15 @@ mod tests {
     #[test]
     fn test_unlock_all() {
         let mgr = AdvisoryLockManager::new();
-        
+
         // Acquire multiple locks
         mgr.pg_advisory_lock(1, LockKey::Single(1));
         mgr.pg_advisory_lock(1, LockKey::Single(2));
         mgr.pg_advisory_lock(1, LockKey::Single(3));
-        
+
         // Release all
         mgr.pg_advisory_unlock_all(1);
-        
+
         // All released
         assert!(!mgr.is_locked(LockKey::Single(1)));
         assert!(!mgr.is_locked(LockKey::Single(2)));
@@ -470,10 +545,10 @@ mod tests {
     #[test]
     fn test_double_key() {
         let mgr = AdvisoryLockManager::new();
-        
+
         assert!(mgr.pg_advisory_lock_double(1, 1000, 1));
         assert!(!mgr.pg_try_advisory_lock(2, LockKey::Double(1000, 1)));
-        
+
         mgr.pg_advisory_unlock(1, LockKey::Double(1000, 1));
         assert!(mgr.pg_try_advisory_lock(2, LockKey::Double(1000, 1)));
     }

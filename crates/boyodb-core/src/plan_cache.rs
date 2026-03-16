@@ -6,12 +6,12 @@
 //! - Slow query detection and logging
 //! - Query performance analysis
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -70,7 +70,11 @@ fn normalize_sql(sql: &str) -> String {
             in_number = true;
             result.push('?');
             // Skip remaining digits
-            while chars.peek().map(|c| c.is_ascii_digit() || *c == '.').unwrap_or(false) {
+            while chars
+                .peek()
+                .map(|c| c.is_ascii_digit() || *c == '.')
+                .unwrap_or(false)
+            {
                 chars.next();
             }
             in_number = false;
@@ -279,11 +283,21 @@ impl PlanCache {
     }
 
     /// Cache a query plan
-    pub fn put(&self, fingerprint: QueryFingerprint, sql: String, plan_data: Vec<u8>, param_types: Vec<PlanParamType>, result_types: Vec<PlanColumnType>, estimated_cost: f64) {
+    pub fn put(
+        &self,
+        fingerprint: QueryFingerprint,
+        sql: String,
+        plan_data: Vec<u8>,
+        param_types: Vec<PlanParamType>,
+        result_types: Vec<PlanColumnType>,
+        estimated_cost: f64,
+    ) {
         let plan_size = plan_data.len() + sql.len() + fingerprint.template.len();
 
         // Check memory limit
-        while self.memory_usage.load(Ordering::SeqCst) + plan_size as u64 > self.config.max_memory_bytes as u64 {
+        while self.memory_usage.load(Ordering::SeqCst) + plan_size as u64
+            > self.config.max_memory_bytes as u64
+        {
             if !self.evict_one() {
                 return; // Cannot make room
             }
@@ -343,7 +357,8 @@ impl PlanCache {
             *self.tail.write() = Some(hash);
         }
 
-        self.memory_usage.fetch_add(plan_size as u64, Ordering::SeqCst);
+        self.memory_usage
+            .fetch_add(plan_size as u64, Ordering::SeqCst);
 
         // Update stats
         if self.config.enable_stats {
@@ -431,10 +446,12 @@ impl PlanCache {
 
     fn remove_entry(&self, plans: &mut HashMap<u64, CacheEntry>, hash: u64) {
         if let Some(entry) = plans.remove(&hash) {
-            let plan_size = entry.plan.plan_data.len() + entry.plan.sql.len() +
-                entry.plan.fingerprint.template.len();
+            let plan_size = entry.plan.plan_data.len()
+                + entry.plan.sql.len()
+                + entry.plan.fingerprint.template.len();
 
-            self.memory_usage.fetch_sub(plan_size as u64, Ordering::SeqCst);
+            self.memory_usage
+                .fetch_sub(plan_size as u64, Ordering::SeqCst);
 
             // Update LRU links
             if let Some(prev) = entry.prev {
@@ -650,12 +667,7 @@ impl SlowQueryLog {
     }
 
     /// Log a query execution
-    pub fn log_query(
-        &self,
-        sql: &str,
-        execution_time: Duration,
-        metadata: QueryExecutionMetadata,
-    ) {
+    pub fn log_query(&self, sql: &str, execution_time: Duration, metadata: QueryExecutionMetadata) {
         if !self.config.enabled {
             return;
         }
@@ -683,8 +695,16 @@ impl SlowQueryLog {
             rows_examined: metadata.rows_examined,
             rows_returned: metadata.rows_returned,
             bytes_sent: metadata.bytes_sent,
-            plan: if self.config.include_plan { metadata.plan } else { None },
-            params: if self.config.include_params { metadata.params } else { None },
+            plan: if self.config.include_plan {
+                metadata.plan
+            } else {
+                None
+            },
+            params: if self.config.include_params {
+                metadata.params
+            } else {
+                None
+            },
             lock_time: metadata.lock_time,
             temp_tables: metadata.temp_tables,
             full_scan: metadata.full_scan,
@@ -716,7 +736,10 @@ impl SlowQueryLog {
 
             // Track fingerprints with bounded size to prevent memory leak
             if stats.queries_by_fingerprint.contains_key(&fingerprint.hash) {
-                *stats.queries_by_fingerprint.get_mut(&fingerprint.hash).unwrap() += 1;
+                *stats
+                    .queries_by_fingerprint
+                    .get_mut(&fingerprint.hash)
+                    .unwrap() += 1;
             } else if stats.queries_by_fingerprint.len() < self.config.max_fingerprints {
                 stats.queries_by_fingerprint.insert(fingerprint.hash, 1);
             }
@@ -757,10 +780,7 @@ impl SlowQueryLog {
             alerts.push(SlowQueryAlert {
                 entry: entry.clone(),
                 alert_type: AlertType::FullTableScan,
-                message: format!(
-                    "Full table scan on {} rows",
-                    entry.rows_examined
-                ),
+                message: format!("Full table scan on {} rows", entry.rows_examined),
             });
         }
 
@@ -799,7 +819,8 @@ impl SlowQueryLog {
     /// Get slow queries by fingerprint
     pub fn get_by_fingerprint(&self, fingerprint_hash: u64) -> Vec<SlowQueryEntry> {
         let entries = self.entries.read();
-        entries.iter()
+        entries
+            .iter()
             .filter(|e| e.fingerprint_hash == fingerprint_hash)
             .cloned()
             .collect()
@@ -823,7 +844,8 @@ impl SlowQueryLog {
             *time += entry.execution_time;
         }
 
-        let mut sorted: Vec<_> = patterns.into_iter()
+        let mut sorted: Vec<_> = patterns
+            .into_iter()
             .map(|(hash, (count, time))| (hash, count, time))
             .collect();
 
@@ -999,7 +1021,8 @@ impl QueryPerformanceAnalyzer {
         }
 
         // Update plan cache
-        self.plan_cache.record_execution(&fingerprint, execution_time);
+        self.plan_cache
+            .record_execution(&fingerprint, execution_time);
 
         // Log slow queries
         self.slow_query_log.log_query(sql, execution_time, metadata);
@@ -1020,10 +1043,7 @@ impl QueryPerformanceAnalyzer {
                     fingerprint_hash: *hash,
                     sample_sql: entry.sample_sql.clone(),
                     recommendation_type: RecommendationType::RewriteQuery,
-                    description: format!(
-                        "Query has P95 latency of {:?}",
-                        entry.p95_time
-                    ),
+                    description: format!("Query has P95 latency of {:?}", entry.p95_time),
                     impact: if entry.p95_time > Duration::from_secs(1) {
                         ImpactLevel::High
                     } else {
@@ -1098,7 +1118,8 @@ impl QueryPerformanceAnalyzer {
 
     /// Get execution history for a query pattern
     pub fn get_history(&self, fingerprint_hash: u64) -> Option<QueryExecutionHistory> {
-        self.execution_history.read()
+        self.execution_history
+            .read()
             .get(&fingerprint_hash)
             .cloned()
     }
@@ -1128,14 +1149,8 @@ mod tests {
 
     #[test]
     fn test_query_fingerprint() {
-        let fp1 = QueryFingerprint::from_sql(
-            "SELECT * FROM users WHERE id = 123",
-            Some("test_db"),
-        );
-        let fp2 = QueryFingerprint::from_sql(
-            "SELECT * FROM users WHERE id = 456",
-            Some("test_db"),
-        );
+        let fp1 = QueryFingerprint::from_sql("SELECT * FROM users WHERE id = 123", Some("test_db"));
+        let fp2 = QueryFingerprint::from_sql("SELECT * FROM users WHERE id = 456", Some("test_db"));
 
         // Same template, different literals
         assert_eq!(fp1.hash, fp2.hash);
@@ -1223,9 +1238,8 @@ mod tests {
             );
         }
 
-        let history = analyzer.get_history(
-            QueryFingerprint::from_sql("SELECT * FROM users WHERE id = 1", None).hash
-        );
+        let history = analyzer
+            .get_history(QueryFingerprint::from_sql("SELECT * FROM users WHERE id = 1", None).hash);
         assert!(history.is_some());
         assert_eq!(history.unwrap().execution_count, 100);
 

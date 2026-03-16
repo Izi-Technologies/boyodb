@@ -3,9 +3,9 @@
 //! PostgreSQL-compatible extension system for loadable modules.
 //! Supports CREATE EXTENSION syntax and extension management.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Extension metadata
 #[derive(Debug, Clone)]
@@ -131,7 +131,7 @@ impl ExtensionRegistry {
             extensions: RwLock::new(HashMap::new()),
             available: RwLock::new(HashMap::new()),
         };
-        
+
         // Register built-in extensions
         registry.register_builtin_extensions();
         registry
@@ -220,7 +220,9 @@ impl ExtensionRegistry {
     }
 
     fn register_available(&mut self, metadata: ExtensionMetadata) {
-        self.available.write().insert(metadata.name.clone(), metadata);
+        self.available
+            .write()
+            .insert(metadata.name.clone(), metadata);
     }
 
     /// Create/install an extension
@@ -232,7 +234,8 @@ impl ExtensionRegistry {
         cascade: bool,
     ) -> Result<(), ExtensionError> {
         let available = self.available.read();
-        let metadata = available.get(name)
+        let metadata = available
+            .get(name)
             .ok_or_else(|| ExtensionError::NotFound(name.into()))?;
 
         // Check dependencies
@@ -262,7 +265,7 @@ impl ExtensionRegistry {
     /// Drop an extension
     pub fn drop_extension(&self, name: &str, cascade: bool) -> Result<(), ExtensionError> {
         let mut extensions = self.extensions.write();
-        
+
         if !extensions.contains_key(name) {
             return Err(ExtensionError::NotInstalled(name.into()));
         }
@@ -276,11 +279,12 @@ impl ExtensionRegistry {
             }
         } else {
             // Cascade drop dependencies
-            let dependents: Vec<String> = extensions.iter()
+            let dependents: Vec<String> = extensions
+                .iter()
                 .filter(|(_, ext)| ext.requires.contains(&name.to_string()))
                 .map(|(n, _)| n.clone())
                 .collect();
-            
+
             for dependent in dependents {
                 extensions.remove(&dependent);
             }
@@ -297,7 +301,8 @@ impl ExtensionRegistry {
         action: AlterExtensionAction,
     ) -> Result<(), ExtensionError> {
         let mut extensions = self.extensions.write();
-        let extension = extensions.get_mut(name)
+        let extension = extensions
+            .get_mut(name)
             .ok_or_else(|| ExtensionError::NotInstalled(name.into()))?;
 
         match action {
@@ -335,7 +340,12 @@ impl ExtensionRegistry {
         self.extensions.read().contains_key(name)
     }
 
-    fn build_extension(&self, name: &str, version: &str, schema: &str) -> Result<Extension, ExtensionError> {
+    fn build_extension(
+        &self,
+        name: &str,
+        version: &str,
+        schema: &str,
+    ) -> Result<Extension, ExtensionError> {
         // Build extension based on name
         match name {
             "uuid_ossp" => Ok(self.build_uuid_ossp(version, schema)),
@@ -403,8 +413,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "digest".into(),
                     args: vec![
-                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                        FunctionArg {
+                            name: "data".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "algorithm".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "bytea".into(),
                     volatility: Volatility::Immutable,
@@ -414,9 +432,21 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "hmac".into(),
                     args: vec![
-                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                        FunctionArg {
+                            name: "data".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "key".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "algorithm".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "bytea".into(),
                     volatility: Volatility::Immutable,
@@ -426,9 +456,21 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "encrypt".into(),
                     args: vec![
-                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                        FunctionArg {
+                            name: "data".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "key".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "algorithm".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "bytea".into(),
                     volatility: Volatility::Immutable,
@@ -438,9 +480,21 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "decrypt".into(),
                     args: vec![
-                        FunctionArg { name: "data".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "key".into(), data_type: "bytea".into(), default: None },
-                        FunctionArg { name: "algorithm".into(), data_type: "text".into(), default: None },
+                        FunctionArg {
+                            name: "data".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "key".into(),
+                            data_type: "bytea".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "algorithm".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "bytea".into(),
                     volatility: Volatility::Immutable,
@@ -449,9 +503,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "gen_random_bytes".into(),
-                    args: vec![
-                        FunctionArg { name: "count".into(), data_type: "integer".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "count".into(),
+                        data_type: "integer".into(),
+                        default: None,
+                    }],
                     return_type: "bytea".into(),
                     volatility: Volatility::Volatile,
                     is_aggregate: false,
@@ -476,8 +532,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "ST_Distance".into(),
                     args: vec![
-                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
-                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg {
+                            name: "geom1".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "geom2".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
@@ -487,8 +551,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "ST_Contains".into(),
                     args: vec![
-                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
-                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg {
+                            name: "geom1".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "geom2".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "boolean".into(),
                     volatility: Volatility::Immutable,
@@ -498,8 +570,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "ST_Within".into(),
                     args: vec![
-                        FunctionArg { name: "geom1".into(), data_type: "geometry".into(), default: None },
-                        FunctionArg { name: "geom2".into(), data_type: "geometry".into(), default: None },
+                        FunctionArg {
+                            name: "geom1".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "geom2".into(),
+                            data_type: "geometry".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "boolean".into(),
                     volatility: Volatility::Immutable,
@@ -508,9 +588,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "ST_Area".into(),
-                    args: vec![
-                        FunctionArg { name: "geom".into(), data_type: "geometry".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "geom".into(),
+                        data_type: "geometry".into(),
+                        default: None,
+                    }],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -546,16 +628,14 @@ impl ExtensionRegistry {
             relocatable: true,
             requires: vec![],
             state: ExtensionState::Installed,
-            functions: vec![
-                ExtensionFunction {
-                    name: "boyo_stat_statements_reset".into(),
-                    args: vec![],
-                    return_type: "void".into(),
-                    volatility: Volatility::Volatile,
-                    is_aggregate: false,
-                    description: "Reset query statistics".into(),
-                },
-            ],
+            functions: vec![ExtensionFunction {
+                name: "boyo_stat_statements_reset".into(),
+                args: vec![],
+                return_type: "void".into(),
+                volatility: Volatility::Volatile,
+                is_aggregate: false,
+                description: "Reset query statistics".into(),
+            }],
             types: vec![],
             operators: vec![],
         }
@@ -574,8 +654,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "similarity".into(),
                     args: vec![
-                        FunctionArg { name: "text1".into(), data_type: "text".into(), default: None },
-                        FunctionArg { name: "text2".into(), data_type: "text".into(), default: None },
+                        FunctionArg {
+                            name: "text1".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "text2".into(),
+                            data_type: "text".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "real".into(),
                     volatility: Volatility::Immutable,
@@ -584,9 +672,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "show_trgm".into(),
-                    args: vec![
-                        FunctionArg { name: "text".into(), data_type: "text".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "text".into(),
+                        data_type: "text".into(),
+                        default: None,
+                    }],
                     return_type: "text[]".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -594,17 +684,15 @@ impl ExtensionRegistry {
                 },
             ],
             types: vec![],
-            operators: vec![
-                ExtensionOperator {
-                    name: "%".into(),
-                    left_type: "text".into(),
-                    right_type: "text".into(),
-                    result_type: "boolean".into(),
-                    function: "similarity_op".into(),
-                    commutator: Some("%".into()),
-                    negator: None,
-                },
-            ],
+            operators: vec![ExtensionOperator {
+                name: "%".into(),
+                left_type: "text".into(),
+                right_type: "text".into(),
+                result_type: "boolean".into(),
+                function: "similarity_op".into(),
+                commutator: Some("%".into()),
+                negator: None,
+            }],
         }
     }
 
@@ -621,8 +709,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "hstore".into(),
                     args: vec![
-                        FunctionArg { name: "keys".into(), data_type: "text[]".into(), default: None },
-                        FunctionArg { name: "values".into(), data_type: "text[]".into(), default: None },
+                        FunctionArg {
+                            name: "keys".into(),
+                            data_type: "text[]".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "values".into(),
+                            data_type: "text[]".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "hstore".into(),
                     volatility: Volatility::Immutable,
@@ -631,9 +727,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "akeys".into(),
-                    args: vec![
-                        FunctionArg { name: "hs".into(), data_type: "hstore".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "hs".into(),
+                        data_type: "hstore".into(),
+                        default: None,
+                    }],
                     return_type: "text[]".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -641,24 +739,24 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "avals".into(),
-                    args: vec![
-                        FunctionArg { name: "hs".into(), data_type: "hstore".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "hs".into(),
+                        data_type: "hstore".into(),
+                        default: None,
+                    }],
                     return_type: "text[]".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
                     description: "Get all values".into(),
                 },
             ],
-            types: vec![
-                ExtensionType {
-                    name: "hstore".into(),
-                    category: TypeCategory::User,
-                    input_function: "hstore_in".into(),
-                    output_function: "hstore_out".into(),
-                    storage: "extended".into(),
-                },
-            ],
+            types: vec![ExtensionType {
+                name: "hstore".into(),
+                category: TypeCategory::User,
+                input_function: "hstore_in".into(),
+                output_function: "hstore_out".into(),
+                storage: "extended".into(),
+            }],
             operators: vec![
                 ExtensionOperator {
                     name: "->".into(),
@@ -694,9 +792,11 @@ impl ExtensionRegistry {
             functions: vec![
                 ExtensionFunction {
                     name: "vector".into(),
-                    args: vec![
-                        FunctionArg { name: "arr".into(), data_type: "real[]".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "arr".into(),
+                        data_type: "real[]".into(),
+                        default: None,
+                    }],
                     return_type: "vector".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -704,9 +804,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "vector_dims".into(),
-                    args: vec![
-                        FunctionArg { name: "vec".into(), data_type: "vector".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "vec".into(),
+                        data_type: "vector".into(),
+                        default: None,
+                    }],
                     return_type: "integer".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -714,9 +816,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "vector_norm".into(),
-                    args: vec![
-                        FunctionArg { name: "vec".into(), data_type: "vector".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "vec".into(),
+                        data_type: "vector".into(),
+                        default: None,
+                    }],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -725,8 +829,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "cosine_distance".into(),
                     args: vec![
-                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
-                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                        FunctionArg {
+                            name: "vec1".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "vec2".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
@@ -736,8 +848,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "l2_distance".into(),
                     args: vec![
-                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
-                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                        FunctionArg {
+                            name: "vec1".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "vec2".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
@@ -747,8 +867,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "inner_product".into(),
                     args: vec![
-                        FunctionArg { name: "vec1".into(), data_type: "vector".into(), default: None },
-                        FunctionArg { name: "vec2".into(), data_type: "vector".into(), default: None },
+                        FunctionArg {
+                            name: "vec1".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "vec2".into(),
+                            data_type: "vector".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
@@ -756,15 +884,13 @@ impl ExtensionRegistry {
                     description: "Calculate inner/dot product".into(),
                 },
             ],
-            types: vec![
-                ExtensionType {
-                    name: "vector".into(),
-                    category: TypeCategory::User,
-                    input_function: "vector_in".into(),
-                    output_function: "vector_out".into(),
-                    storage: "extended".into(),
-                },
-            ],
+            types: vec![ExtensionType {
+                name: "vector".into(),
+                category: TypeCategory::User,
+                input_function: "vector_in".into(),
+                output_function: "vector_out".into(),
+                storage: "extended".into(),
+            }],
             operators: vec![
                 ExtensionOperator {
                     name: "<->".into(),
@@ -810,8 +936,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "time_bucket".into(),
                     args: vec![
-                        FunctionArg { name: "bucket_width".into(), data_type: "interval".into(), default: None },
-                        FunctionArg { name: "ts".into(), data_type: "timestamp".into(), default: None },
+                        FunctionArg {
+                            name: "bucket_width".into(),
+                            data_type: "interval".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "ts".into(),
+                            data_type: "timestamp".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "timestamp".into(),
                     volatility: Volatility::Immutable,
@@ -821,8 +955,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "first".into(),
                     args: vec![
-                        FunctionArg { name: "value".into(), data_type: "anyelement".into(), default: None },
-                        FunctionArg { name: "time".into(), data_type: "timestamp".into(), default: None },
+                        FunctionArg {
+                            name: "value".into(),
+                            data_type: "anyelement".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "time".into(),
+                            data_type: "timestamp".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "anyelement".into(),
                     volatility: Volatility::Immutable,
@@ -832,8 +974,16 @@ impl ExtensionRegistry {
                 ExtensionFunction {
                     name: "last".into(),
                     args: vec![
-                        FunctionArg { name: "value".into(), data_type: "anyelement".into(), default: None },
-                        FunctionArg { name: "time".into(), data_type: "timestamp".into(), default: None },
+                        FunctionArg {
+                            name: "value".into(),
+                            data_type: "anyelement".into(),
+                            default: None,
+                        },
+                        FunctionArg {
+                            name: "time".into(),
+                            data_type: "timestamp".into(),
+                            default: None,
+                        },
                     ],
                     return_type: "anyelement".into(),
                     volatility: Volatility::Immutable,
@@ -842,9 +992,11 @@ impl ExtensionRegistry {
                 },
                 ExtensionFunction {
                     name: "interpolate".into(),
-                    args: vec![
-                        FunctionArg { name: "value".into(), data_type: "double precision".into(), default: None },
-                    ],
+                    args: vec![FunctionArg {
+                        name: "value".into(),
+                        data_type: "double precision".into(),
+                        default: None,
+                    }],
                     return_type: "double precision".into(),
                     volatility: Volatility::Immutable,
                     is_aggregate: false,
@@ -911,13 +1063,15 @@ mod tests {
     #[test]
     fn test_create_extension() {
         let registry = ExtensionRegistry::new();
-        
+
         assert!(!registry.is_installed("uuid_ossp"));
-        
-        registry.create_extension("uuid_ossp", None, None, false).unwrap();
-        
+
+        registry
+            .create_extension("uuid_ossp", None, None, false)
+            .unwrap();
+
         assert!(registry.is_installed("uuid_ossp"));
-        
+
         let ext = registry.get("uuid_ossp").unwrap();
         assert_eq!(ext.functions.len(), 3);
     }
@@ -925,10 +1079,12 @@ mod tests {
     #[test]
     fn test_drop_extension() {
         let registry = ExtensionRegistry::new();
-        
-        registry.create_extension("hstore", None, None, false).unwrap();
+
+        registry
+            .create_extension("hstore", None, None, false)
+            .unwrap();
         assert!(registry.is_installed("hstore"));
-        
+
         registry.drop_extension("hstore", false).unwrap();
         assert!(!registry.is_installed("hstore"));
     }
@@ -937,7 +1093,7 @@ mod tests {
     fn test_list_available() {
         let registry = ExtensionRegistry::new();
         let available = registry.list_available();
-        
+
         assert!(available.len() >= 8);
         assert!(available.iter().any(|e| e.name == "uuid_ossp"));
         assert!(available.iter().any(|e| e.name == "vector"));

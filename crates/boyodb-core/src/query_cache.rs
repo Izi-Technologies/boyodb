@@ -207,10 +207,10 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_size_bytes: 1024 * 1024 * 1024, // 1GB
-            default_ttl_secs: 300,               // 5 minutes
-            max_ttl_secs: 3600,                  // 1 hour
-            min_exec_time_us: 1000,              // 1ms minimum
+            max_size_bytes: 1024 * 1024 * 1024,      // 1GB
+            default_ttl_secs: 300,                   // 5 minutes
+            max_ttl_secs: 3600,                      // 1 hour
+            min_exec_time_us: 1000,                  // 1ms minimum
             max_result_size_bytes: 10 * 1024 * 1024, // 10MB max per result
             enable_event_invalidation: true,
             num_shards: 16,
@@ -591,12 +591,27 @@ pub struct CacheStatsSnapshot {
 /// Redis command for cache operations
 #[derive(Debug, Clone)]
 pub enum RedisCacheCommand {
-    Get { key: String },
-    Set { key: String, value: String, ttl: Option<u64> },
-    Del { keys: Vec<String> },
-    Exists { key: String },
-    Expire { key: String, seconds: u64 },
-    Ttl { key: String },
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: String,
+        ttl: Option<u64>,
+    },
+    Del {
+        keys: Vec<String>,
+    },
+    Exists {
+        key: String,
+    },
+    Expire {
+        key: String,
+        seconds: u64,
+    },
+    Ttl {
+        key: String,
+    },
     FlushDb,
     Info,
     Ping,
@@ -651,7 +666,7 @@ impl RedisCacheServer {
 
     /// Parse Redis RESP protocol command
     pub fn parse_command(input: &str) -> Result<RedisCacheCommand, String> {
-        let parts: Vec<&str> = input.trim().split_whitespace().collect();
+        let parts: Vec<&str> = input.split_whitespace().collect();
         if parts.is_empty() {
             return Err("Empty command".to_string());
         }
@@ -743,10 +758,9 @@ impl RedisCacheServer {
             }
             RedisCacheCommand::Set { key, value, ttl } => {
                 let ttl_duration = Duration::from_secs(ttl.unwrap_or(3600));
-                self.kv_store.write().insert(
-                    key,
-                    (value, Some(Instant::now()), ttl_duration),
-                );
+                self.kv_store
+                    .write()
+                    .insert(key, (value, Some(Instant::now()), ttl_duration));
                 RedisResponse::Ok
             }
             RedisCacheCommand::Del { keys } => {

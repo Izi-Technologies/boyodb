@@ -8,10 +8,10 @@
 //! - Cursors for row-by-row processing
 //! - CALL statement for procedure invocation
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -101,10 +101,13 @@ pub enum DataType {
 
 impl DataType {
     pub fn is_numeric(&self) -> bool {
-        matches!(self,
-            DataType::Integer | DataType::BigInt |
-            DataType::Float | DataType::Double |
-            DataType::Decimal { .. }
+        matches!(
+            self,
+            DataType::Integer
+                | DataType::BigInt
+                | DataType::Float
+                | DataType::Double
+                | DataType::Decimal { .. }
         )
     }
 
@@ -134,7 +137,7 @@ pub enum Value {
     Boolean(bool),
     String(String),
     Binary(Vec<u8>),
-    Date(i32), // Days since epoch
+    Date(i32),      // Days since epoch
     Timestamp(i64), // Microseconds since epoch
     Json(String),
     Array(Vec<Value>),
@@ -150,7 +153,10 @@ impl Value {
             Value::BigInt(_) => DataType::BigInt,
             Value::Float(_) => DataType::Float,
             Value::Double(_) => DataType::Double,
-            Value::Decimal(_) => DataType::Decimal { precision: 38, scale: 10 },
+            Value::Decimal(_) => DataType::Decimal {
+                precision: 38,
+                scale: 10,
+            },
             Value::Boolean(_) => DataType::Boolean,
             Value::String(s) => DataType::Varchar(s.len()),
             Value::Binary(_) => DataType::Binary,
@@ -473,9 +479,15 @@ pub enum Expression {
     /// Parameter reference
     Parameter(String),
     /// Array element access
-    ArrayAccess { array: Box<Expression>, index: Box<Expression> },
+    ArrayAccess {
+        array: Box<Expression>,
+        index: Box<Expression>,
+    },
     /// Record field access
-    FieldAccess { record: Box<Expression>, field: String },
+    FieldAccess {
+        record: Box<Expression>,
+        field: String,
+    },
     /// Binary operation
     BinaryOp {
         left: Box<Expression>,
@@ -516,7 +528,10 @@ pub enum Expression {
         negated: bool,
     },
     /// IS NULL / IS NOT NULL
-    IsNull { expr: Box<Expression>, negated: bool },
+    IsNull {
+        expr: Box<Expression>,
+        negated: bool,
+    },
     /// LIKE
     Like {
         expr: Box<Expression>,
@@ -525,9 +540,15 @@ pub enum Expression {
         negated: bool,
     },
     /// CAST
-    Cast { expr: Box<Expression>, target_type: DataType },
+    Cast {
+        expr: Box<Expression>,
+        target_type: DataType,
+    },
     /// Cursor attribute (%FOUND, %NOTFOUND, %ROWCOUNT, %ISOPEN)
-    CursorAttribute { cursor: String, attribute: CursorAttribute },
+    CursorAttribute {
+        cursor: String,
+        attribute: CursorAttribute,
+    },
     /// SQL attribute (SQL%ROWCOUNT, etc.)
     SqlAttribute(SqlAttribute),
     /// Row constructor
@@ -645,7 +666,9 @@ impl ExecutionContext {
     }
 
     pub fn get_variable(&self, name: &str) -> Option<&Value> {
-        self.variables.get(name).or_else(|| self.parameters.get(name))
+        self.variables
+            .get(name)
+            .or_else(|| self.parameters.get(name))
     }
 
     pub fn set_variable(&mut self, name: &str, value: Value) {
@@ -716,7 +739,8 @@ pub enum ControlFlow {
 /// SQL executor interface (to be implemented by engine)
 pub trait SqlExecutor: Send + Sync {
     fn execute(&self, sql: &str, params: &[Value]) -> Result<SqlResult, ProcedureError>;
-    fn execute_query(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>, ProcedureError>;
+    fn execute_query(&self, sql: &str, params: &[Value])
+        -> Result<Vec<Vec<Value>>, ProcedureError>;
 }
 
 /// SQL execution result
@@ -752,7 +776,10 @@ impl Default for ExecutorConfig {
 
 impl<E: SqlExecutor> ProcedureExecutor<E> {
     pub fn new(sql_executor: Arc<E>, config: ExecutorConfig) -> Self {
-        Self { sql_executor, config }
+        Self {
+            sql_executor,
+            config,
+        }
     }
 
     /// Execute a procedure
@@ -765,9 +792,10 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
 
         // Bind parameters
         for (i, param) in procedure.parameters.iter().enumerate() {
-            let value = arguments.get(i).cloned().unwrap_or_else(|| {
-                param.default_value.clone().unwrap_or(Value::Null)
-            });
+            let value = arguments
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| param.default_value.clone().unwrap_or(Value::Null));
             ctx.set_parameter(&param.name, value);
         }
 
@@ -786,7 +814,7 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
             ProcedureBody::External { .. } => {
                 return Err(ProcedureError::CompilationError(
-                    "external procedures not supported".into()
+                    "external procedures not supported".into(),
                 ));
             }
         }
@@ -799,7 +827,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     }
 
     /// Execute a block
-    fn execute_block(&self, block: &Block, ctx: &mut ExecutionContext) -> Result<ControlFlow, ProcedureError> {
+    fn execute_block(
+        &self,
+        block: &Block,
+        ctx: &mut ExecutionContext,
+    ) -> Result<ControlFlow, ProcedureError> {
         // Process declarations
         for decl in &block.declarations {
             self.process_declaration(decl, ctx)?;
@@ -837,7 +869,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     }
 
     /// Process a declaration
-    fn process_declaration(&self, decl: &Declaration, ctx: &mut ExecutionContext) -> Result<(), ProcedureError> {
+    fn process_declaration(
+        &self,
+        decl: &Declaration,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), ProcedureError> {
         match decl {
             Declaration::Variable(var) | Declaration::Constant(var) => {
                 let value = if let Some(ref expr) = var.initial_value {
@@ -853,14 +889,17 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 ctx.set_variable(&var.name, value);
             }
             Declaration::Cursor(cursor) => {
-                ctx.cursors.insert(cursor.name.clone(), CursorState {
-                    query: cursor.query.clone(),
-                    is_open: false,
-                    row_count: 0,
-                    current_row: None,
-                    rows: Vec::new(),
-                    position: 0,
-                });
+                ctx.cursors.insert(
+                    cursor.name.clone(),
+                    CursorState {
+                        query: cursor.query.clone(),
+                        is_open: false,
+                        row_count: 0,
+                        current_row: None,
+                        rows: Vec::new(),
+                        position: 0,
+                    },
+                );
             }
             Declaration::Exception(_name) => {
                 // Register exception name
@@ -876,7 +915,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     }
 
     /// Execute a list of statements
-    fn execute_statements(&self, statements: &[Statement], ctx: &mut ExecutionContext) -> Result<ControlFlow, ProcedureError> {
+    fn execute_statements(
+        &self,
+        statements: &[Statement],
+        ctx: &mut ExecutionContext,
+    ) -> Result<ControlFlow, ProcedureError> {
         for stmt in statements {
             ctx.check_timeout()?;
 
@@ -890,7 +933,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     }
 
     /// Execute a single statement
-    fn execute_statement(&self, stmt: &Statement, ctx: &mut ExecutionContext) -> Result<ControlFlow, ProcedureError> {
+    fn execute_statement(
+        &self,
+        stmt: &Statement,
+        ctx: &mut ExecutionContext,
+    ) -> Result<ControlFlow, ProcedureError> {
         match stmt {
             Statement::Assignment { target, value } => {
                 let val = self.evaluate_expression(value, ctx)?;
@@ -899,11 +946,13 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                         ctx.set_variable(name, val);
                     }
                     AssignmentTarget::ArrayElement { array, index } => {
-                        let idx = self.evaluate_expression(index, ctx)?.to_i64()
-                            .ok_or_else(|| ProcedureError::TypeMismatch {
-                                expected: "integer".into(),
-                                got: "other".into(),
-                            })? as usize;
+                        let idx =
+                            self.evaluate_expression(index, ctx)?
+                                .to_i64()
+                                .ok_or_else(|| ProcedureError::TypeMismatch {
+                                    expected: "integer".into(),
+                                    got: "other".into(),
+                                })? as usize;
 
                         if let Some(Value::Array(ref mut arr)) = ctx.variables.get_mut(array) {
                             if idx < arr.len() {
@@ -920,7 +969,12 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::If { condition, then_branch, elsif_branches, else_branch } => {
+            Statement::If {
+                condition,
+                then_branch,
+                elsif_branches,
+                else_branch,
+            } => {
                 let cond = self.evaluate_expression(condition, ctx)?;
                 if cond.to_bool().unwrap_or(false) {
                     return self.execute_statements(then_branch, ctx);
@@ -940,8 +994,13 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::Case { selector, when_branches, else_branch } => {
-                let selector_val = selector.as_ref()
+            Statement::Case {
+                selector,
+                when_branches,
+                else_branch,
+            } => {
+                let selector_val = selector
+                    .as_ref()
                     .map(|s| self.evaluate_expression(s, ctx))
                     .transpose()?;
 
@@ -1004,12 +1063,20 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::While { label, condition, statements } => {
+            Statement::While {
+                label,
+                condition,
+                statements,
+            } => {
                 if let Some(lbl) = label {
                     ctx.labels.push(lbl.clone());
                 }
 
-                while self.evaluate_expression(condition, ctx)?.to_bool().unwrap_or(false) {
+                while self
+                    .evaluate_expression(condition, ctx)?
+                    .to_bool()
+                    .unwrap_or(false)
+                {
                     ctx.check_timeout()?;
 
                     let flow = self.execute_statements(statements, ctx)?;
@@ -1042,27 +1109,38 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::ForNumeric { label, variable, start, end, step, reverse, statements } => {
-                let start_val = self.evaluate_expression(start, ctx)?.to_i64()
-                    .ok_or_else(|| ProcedureError::TypeMismatch {
-                        expected: "integer".into(),
-                        got: "other".into(),
-                    })?;
+            Statement::ForNumeric {
+                label,
+                variable,
+                start,
+                end,
+                step,
+                reverse,
+                statements,
+            } => {
+                let start_val =
+                    self.evaluate_expression(start, ctx)?
+                        .to_i64()
+                        .ok_or_else(|| ProcedureError::TypeMismatch {
+                            expected: "integer".into(),
+                            got: "other".into(),
+                        })?;
 
-                let end_val = self.evaluate_expression(end, ctx)?.to_i64()
+                let end_val = self
+                    .evaluate_expression(end, ctx)?
+                    .to_i64()
                     .ok_or_else(|| ProcedureError::TypeMismatch {
                         expected: "integer".into(),
                         got: "other".into(),
                     })?;
 
                 let step_val = match step {
-                    Some(s) => {
-                        self.evaluate_expression(s, ctx)?.to_i64()
-                            .ok_or_else(|| ProcedureError::TypeMismatch {
-                                expected: "integer".into(),
-                                got: "other".into(),
-                            })?
-                    }
+                    Some(s) => self.evaluate_expression(s, ctx)?.to_i64().ok_or_else(|| {
+                        ProcedureError::TypeMismatch {
+                            expected: "integer".into(),
+                            got: "other".into(),
+                        }
+                    })?,
                     None => 1,
                 };
 
@@ -1071,7 +1149,10 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 }
 
                 let range: Vec<i64> = if *reverse {
-                    (end_val..=start_val).rev().step_by(step_val as usize).collect()
+                    (end_val..=start_val)
+                        .rev()
+                        .step_by(step_val as usize)
+                        .collect()
                 } else {
                     (start_val..=end_val).step_by(step_val as usize).collect()
                 };
@@ -1110,16 +1191,26 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::ForCursor { label, record_variable, cursor, statements } => {
+            Statement::ForCursor {
+                label,
+                record_variable,
+                cursor,
+                statements,
+            } => {
                 let query = match cursor {
-                    CursorSource::Named(name) => {
-                        ctx.cursors.get(name)
-                            .map(|c| c.query.clone())
-                            .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", name)))?
-                    }
+                    CursorSource::Named(name) => ctx
+                        .cursors
+                        .get(name)
+                        .map(|c| c.query.clone())
+                        .ok_or_else(|| {
+                            ProcedureError::CursorError(format!("cursor not found: {}", name))
+                        })?,
                     CursorSource::Inline(sql) => sql.clone(),
                     CursorSource::RefCursor(name) => {
-                        return Err(ProcedureError::CursorError(format!("ref cursor not supported: {}", name)));
+                        return Err(ProcedureError::CursorError(format!(
+                            "ref cursor not supported: {}",
+                            name
+                        )));
                     }
                 };
 
@@ -1169,18 +1260,32 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::Exit { label, when_condition } => {
+            Statement::Exit {
+                label,
+                when_condition,
+            } => {
                 if let Some(cond) = when_condition {
-                    if !self.evaluate_expression(cond, ctx)?.to_bool().unwrap_or(false) {
+                    if !self
+                        .evaluate_expression(cond, ctx)?
+                        .to_bool()
+                        .unwrap_or(false)
+                    {
                         return Ok(ControlFlow::Continue);
                     }
                 }
                 Ok(ControlFlow::Exit(label.clone()))
             }
 
-            Statement::Continue { label, when_condition } => {
+            Statement::Continue {
+                label,
+                when_condition,
+            } => {
                 if let Some(cond) = when_condition {
-                    if !self.evaluate_expression(cond, ctx)?.to_bool().unwrap_or(false) {
+                    if !self
+                        .evaluate_expression(cond, ctx)?
+                        .to_bool()
+                        .unwrap_or(false)
+                    {
                         return Ok(ControlFlow::Continue);
                     }
                 }
@@ -1188,15 +1293,21 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
 
             Statement::Return { value } => {
-                let val = value.as_ref()
+                let val = value
+                    .as_ref()
                     .map(|v| self.evaluate_expression(v, ctx))
                     .transpose()?;
                 ctx.return_value = val.clone();
                 Ok(ControlFlow::Return(val))
             }
 
-            Statement::Raise { exception, message, using: _ } => {
-                let msg = message.as_ref()
+            Statement::Raise {
+                exception,
+                message,
+                using: _,
+            } => {
+                let msg = message
+                    .as_ref()
                     .map(|m| self.evaluate_expression(m, ctx))
                     .transpose()?
                     .map(|v| match v {
@@ -1235,13 +1346,16 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             Statement::ExecuteImmediate { sql, into, using } => {
                 let sql_str = match self.evaluate_expression(sql, ctx)? {
                     Value::String(s) => s,
-                    _ => return Err(ProcedureError::TypeMismatch {
-                        expected: "string".into(),
-                        got: "other".into(),
-                    }),
+                    _ => {
+                        return Err(ProcedureError::TypeMismatch {
+                            expected: "string".into(),
+                            got: "other".into(),
+                        })
+                    }
                 };
 
-                let params: Vec<Value> = using.iter()
+                let params: Vec<Value> = using
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
 
@@ -1266,29 +1380,36 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             Statement::OpenCursor { cursor, arguments } => {
                 // First check cursor exists and is not already open
                 {
-                    let state = ctx.cursors.get(cursor)
-                        .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+                    let state = ctx.cursors.get(cursor).ok_or_else(|| {
+                        ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                    })?;
                     if state.is_open {
                         return Err(ProcedureError::CursorError("cursor already open".into()));
                     }
                 }
 
                 // Evaluate arguments before borrowing cursor mutably
-                let params: Vec<Value> = arguments.iter()
+                let params: Vec<Value> = arguments
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
 
                 // Get query string (need to borrow, then release)
-                let query = ctx.cursors.get(cursor)
+                let query = ctx
+                    .cursors
+                    .get(cursor)
                     .map(|s| s.query.clone())
-                    .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+                    .ok_or_else(|| {
+                        ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                    })?;
 
                 // Execute query
                 let rows = self.sql_executor.execute_query(&query, &params)?;
 
                 // Now get mutable borrow to update state
-                let state = ctx.cursors.get_mut(cursor)
-                    .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+                let state = ctx.cursors.get_mut(cursor).ok_or_else(|| {
+                    ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                })?;
                 state.rows = rows;
                 state.position = 0;
                 state.is_open = true;
@@ -1297,9 +1418,15 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::FetchCursor { cursor, into, bulk_collect: _, limit: _ } => {
-                let state = ctx.cursors.get_mut(cursor)
-                    .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+            Statement::FetchCursor {
+                cursor,
+                into,
+                bulk_collect: _,
+                limit: _,
+            } => {
+                let state = ctx.cursors.get_mut(cursor).ok_or_else(|| {
+                    ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                })?;
 
                 if !state.is_open {
                     return Err(ProcedureError::CursorError("cursor not open".into()));
@@ -1317,8 +1444,9 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
 
             Statement::CloseCursor { cursor } => {
-                let state = ctx.cursors.get_mut(cursor)
-                    .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+                let state = ctx.cursors.get_mut(cursor).ok_or_else(|| {
+                    ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                })?;
 
                 state.is_open = false;
                 state.rows.clear();
@@ -1328,10 +1456,15 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::Call { procedure, arguments, into } => {
+            Statement::Call {
+                procedure,
+                arguments,
+                into,
+            } => {
                 // In a real implementation, this would look up and execute the procedure
                 // For now, we just execute the arguments and bind results
-                let _args: Vec<Value> = arguments.iter()
+                let _args: Vec<Value> = arguments
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
 
@@ -1341,9 +1474,7 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::Block(block) => {
-                self.execute_block(block, ctx)
-            }
+            Statement::Block(block) => self.execute_block(block, ctx),
 
             Statement::PipeRow { value } => {
                 let _val = self.evaluate_expression(value, ctx)?;
@@ -1351,7 +1482,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(ControlFlow::Continue)
             }
 
-            Statement::Forall { index_variable: _, bounds: _, dml: _ } => {
+            Statement::Forall {
+                index_variable: _,
+                bounds: _,
+                dml: _,
+            } => {
                 // Bulk DML not implemented
                 Ok(ControlFlow::Continue)
             }
@@ -1359,36 +1494,42 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     }
 
     /// Evaluate an expression
-    fn evaluate_expression(&self, expr: &Expression, ctx: &ExecutionContext) -> Result<Value, ProcedureError> {
+    fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        ctx: &ExecutionContext,
+    ) -> Result<Value, ProcedureError> {
         match expr {
             Expression::Literal(val) => Ok(val.clone()),
 
-            Expression::Variable(name) => {
-                ctx.get_variable(name)
-                    .cloned()
-                    .ok_or_else(|| ProcedureError::UndeclaredVariable(name.clone()))
-            }
+            Expression::Variable(name) => ctx
+                .get_variable(name)
+                .cloned()
+                .ok_or_else(|| ProcedureError::UndeclaredVariable(name.clone())),
 
-            Expression::Parameter(name) => {
-                ctx.parameters.get(name)
-                    .cloned()
-                    .ok_or_else(|| ProcedureError::UndeclaredVariable(name.clone()))
-            }
+            Expression::Parameter(name) => ctx
+                .parameters
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ProcedureError::UndeclaredVariable(name.clone())),
 
             Expression::ArrayAccess { array, index } => {
                 let arr = self.evaluate_expression(array, ctx)?;
-                let idx = self.evaluate_expression(index, ctx)?.to_i64()
+                let idx = self
+                    .evaluate_expression(index, ctx)?
+                    .to_i64()
                     .ok_or_else(|| ProcedureError::TypeMismatch {
                         expected: "integer".into(),
                         got: "other".into(),
                     })? as usize;
 
                 match arr {
-                    Value::Array(elements) => {
-                        elements.get(idx).cloned().ok_or_else(|| {
-                            ProcedureError::InvalidParameter(format!("array index out of bounds: {}", idx))
-                        })
-                    }
+                    Value::Array(elements) => elements.get(idx).cloned().ok_or_else(|| {
+                        ProcedureError::InvalidParameter(format!(
+                            "array index out of bounds: {}",
+                            idx
+                        ))
+                    }),
                     _ => Err(ProcedureError::TypeMismatch {
                         expected: "array".into(),
                         got: format!("{:?}", arr.data_type()),
@@ -1399,11 +1540,9 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             Expression::FieldAccess { record, field } => {
                 let rec = self.evaluate_expression(record, ctx)?;
                 match rec {
-                    Value::Record(fields) => {
-                        fields.get(field).cloned().ok_or_else(|| {
-                            ProcedureError::InvalidParameter(format!("field not found: {}", field))
-                        })
-                    }
+                    Value::Record(fields) => fields.get(field).cloned().ok_or_else(|| {
+                        ProcedureError::InvalidParameter(format!("field not found: {}", field))
+                    }),
                     _ => Err(ProcedureError::TypeMismatch {
                         expected: "record".into(),
                         got: format!("{:?}", rec.data_type()),
@@ -1423,14 +1562,20 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
 
             Expression::FunctionCall { name, arguments } => {
-                let args: Vec<Value> = arguments.iter()
+                let args: Vec<Value> = arguments
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
                 self.call_builtin_function(name, &args)
             }
 
-            Expression::Case { operand, when_clauses, else_clause } => {
-                let operand_val = operand.as_ref()
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => {
+                let operand_val = operand
+                    .as_ref()
                     .map(|o| self.evaluate_expression(o, ctx))
                     .transpose()?;
 
@@ -1470,7 +1615,11 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(Value::Boolean(!rows.is_empty()))
             }
 
-            Expression::InList { expr, list, negated } => {
+            Expression::InList {
+                expr,
+                list,
+                negated,
+            } => {
                 let val = self.evaluate_expression(expr, ctx)?;
                 let mut found = false;
                 for item in list {
@@ -1483,7 +1632,12 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(Value::Boolean(if *negated { !found } else { found }))
             }
 
-            Expression::Between { expr, low, high, negated } => {
+            Expression::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
                 let val = self.evaluate_expression(expr, ctx)?.to_f64();
                 let lo = self.evaluate_expression(low, ctx)?.to_f64();
                 let hi = self.evaluate_expression(high, ctx)?.to_f64();
@@ -1502,7 +1656,12 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                 Ok(Value::Boolean(if *negated { !is_null } else { is_null }))
             }
 
-            Expression::Like { expr, pattern, escape: _, negated } => {
+            Expression::Like {
+                expr,
+                pattern,
+                escape: _,
+                negated,
+            } => {
                 let val = match self.evaluate_expression(expr, ctx)? {
                     Value::String(s) => s,
                     _ => return Ok(Value::Boolean(false)),
@@ -1527,8 +1686,9 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
 
             Expression::CursorAttribute { cursor, attribute } => {
-                let state = ctx.cursors.get(cursor)
-                    .ok_or_else(|| ProcedureError::CursorError(format!("cursor not found: {}", cursor)))?;
+                let state = ctx.cursors.get(cursor).ok_or_else(|| {
+                    ProcedureError::CursorError(format!("cursor not found: {}", cursor))
+                })?;
 
                 let val = match attribute {
                     CursorAttribute::Found => Value::Boolean(state.is_found()),
@@ -1550,14 +1710,16 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
             }
 
             Expression::Row(elements) => {
-                let values: Vec<Value> = elements.iter()
+                let values: Vec<Value> = elements
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
                 Ok(Value::Array(values))
             }
 
             Expression::Array(elements) => {
-                let values: Vec<Value> = elements.iter()
+                let values: Vec<Value> = elements
+                    .iter()
                     .map(|e| self.evaluate_expression(e, ctx))
                     .collect::<Result<_, _>>()?;
                 Ok(Value::Array(values))
@@ -1567,21 +1729,24 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
         }
     }
 
-    fn apply_binary_op(&self, left: &Value, op: &BinaryOperator, right: &Value) -> Result<Value, ProcedureError> {
+    fn apply_binary_op(
+        &self,
+        left: &Value,
+        op: &BinaryOperator,
+        right: &Value,
+    ) -> Result<Value, ProcedureError> {
         match op {
-            BinaryOperator::Add => {
-                match (left, right) {
-                    (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a + b)),
-                    (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a + b)),
-                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-                    (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
-                    _ => {
-                        let a = left.to_f64().unwrap_or(0.0);
-                        let b = right.to_f64().unwrap_or(0.0);
-                        Ok(Value::Double(a + b))
-                    }
+            BinaryOperator::Add => match (left, right) {
+                (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(a + b)),
+                (Value::BigInt(a), Value::BigInt(b)) => Ok(Value::BigInt(a + b)),
+                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                (Value::Double(a), Value::Double(b)) => Ok(Value::Double(a + b)),
+                _ => {
+                    let a = left.to_f64().unwrap_or(0.0);
+                    let b = right.to_f64().unwrap_or(0.0);
+                    Ok(Value::Double(a + b))
                 }
-            }
+            },
             BinaryOperator::Subtract => {
                 let a = left.to_f64().unwrap_or(0.0);
                 let b = right.to_f64().unwrap_or(0.0);
@@ -1657,21 +1822,17 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
 
     fn apply_unary_op(&self, op: &UnaryOperator, val: &Value) -> Result<Value, ProcedureError> {
         match op {
-            UnaryOperator::Not => {
-                Ok(Value::Boolean(!val.to_bool().unwrap_or(false)))
-            }
-            UnaryOperator::Negate => {
-                match val {
-                    Value::Integer(i) => Ok(Value::Integer(-i)),
-                    Value::BigInt(i) => Ok(Value::BigInt(-i)),
-                    Value::Float(f) => Ok(Value::Float(-f)),
-                    Value::Double(d) => Ok(Value::Double(-d)),
-                    _ => Err(ProcedureError::TypeMismatch {
-                        expected: "numeric".into(),
-                        got: format!("{:?}", val.data_type()),
-                    }),
-                }
-            }
+            UnaryOperator::Not => Ok(Value::Boolean(!val.to_bool().unwrap_or(false))),
+            UnaryOperator::Negate => match val {
+                Value::Integer(i) => Ok(Value::Integer(-i)),
+                Value::BigInt(i) => Ok(Value::BigInt(-i)),
+                Value::Float(f) => Ok(Value::Float(-f)),
+                Value::Double(d) => Ok(Value::Double(-d)),
+                _ => Err(ProcedureError::TypeMismatch {
+                    expected: "numeric".into(),
+                    got: format!("{:?}", val.data_type()),
+                }),
+            },
             UnaryOperator::Plus => Ok(val.clone()),
         }
     }
@@ -1679,9 +1840,13 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
     fn compare_values(&self, left: &Value, right: &Value) -> i32 {
         match (left.to_f64(), right.to_f64()) {
             (Some(a), Some(b)) => {
-                if a < b { -1 }
-                else if a > b { 1 }
-                else { 0 }
+                if a < b {
+                    -1
+                } else if a > b {
+                    1
+                } else {
+                    0
+                }
             }
             _ => 0,
         }
@@ -1705,139 +1870,123 @@ impl<E: SqlExecutor> ProcedureExecutor<E> {
                         Ok(args[0].clone())
                     }
                 } else {
-                    Err(ProcedureError::InvalidParameter("NVL requires 2 arguments".into()))
+                    Err(ProcedureError::InvalidParameter(
+                        "NVL requires 2 arguments".into(),
+                    ))
                 }
             }
-            "UPPER" => {
-                match args.first() {
-                    Some(Value::String(s)) => Ok(Value::String(s.to_uppercase())),
-                    _ => Ok(Value::Null),
-                }
-            }
-            "LOWER" => {
-                match args.first() {
-                    Some(Value::String(s)) => Ok(Value::String(s.to_lowercase())),
-                    _ => Ok(Value::Null),
-                }
-            }
-            "LENGTH" => {
-                match args.first() {
-                    Some(Value::String(s)) => Ok(Value::BigInt(s.len() as i64)),
-                    _ => Ok(Value::Null),
-                }
-            }
-            "SUBSTR" | "SUBSTRING" => {
-                match (args.get(0), args.get(1), args.get(2)) {
-                    (Some(Value::String(s)), Some(start), len) => {
-                        let start_idx = start.to_i64().unwrap_or(1).max(1) as usize - 1;
-                        let length = len.and_then(|l| l.to_i64()).map(|l| l as usize);
+            "UPPER" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::String(s.to_uppercase())),
+                _ => Ok(Value::Null),
+            },
+            "LOWER" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::String(s.to_lowercase())),
+                _ => Ok(Value::Null),
+            },
+            "LENGTH" => match args.first() {
+                Some(Value::String(s)) => Ok(Value::BigInt(s.len() as i64)),
+                _ => Ok(Value::Null),
+            },
+            "SUBSTR" | "SUBSTRING" => match (args.get(0), args.get(1), args.get(2)) {
+                (Some(Value::String(s)), Some(start), len) => {
+                    let start_idx = start.to_i64().unwrap_or(1).max(1) as usize - 1;
+                    let length = len.and_then(|l| l.to_i64()).map(|l| l as usize);
 
-                        let result: String = if let Some(l) = length {
-                            s.chars().skip(start_idx).take(l).collect()
-                        } else {
-                            s.chars().skip(start_idx).collect()
-                        };
-                        Ok(Value::String(result))
-                    }
-                    _ => Ok(Value::Null),
+                    let result: String = if let Some(l) = length {
+                        s.chars().skip(start_idx).take(l).collect()
+                    } else {
+                        s.chars().skip(start_idx).collect()
+                    };
+                    Ok(Value::String(result))
                 }
-            }
-            "ABS" => {
-                match args.first() {
-                    Some(v) => {
-                        match v.to_f64() {
-                            Some(f) => Ok(Value::Double(f.abs())),
-                            None => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            },
+            "ABS" => match args.first() {
+                Some(v) => match v.to_f64() {
+                    Some(f) => Ok(Value::Double(f.abs())),
+                    None => Ok(Value::Null),
+                },
+                None => Ok(Value::Null),
+            },
+            "ROUND" => match (args.get(0), args.get(1)) {
+                (Some(v), precision) => {
+                    let f = v.to_f64().unwrap_or(0.0);
+                    let p = precision.and_then(|p| p.to_i64()).unwrap_or(0) as i32;
+                    let multiplier = 10f64.powi(p);
+                    Ok(Value::Double((f * multiplier).round() / multiplier))
+                }
+                _ => Ok(Value::Null),
+            },
+            "TRUNC" => match args.first() {
+                Some(v) => {
+                    let f = v.to_f64().unwrap_or(0.0);
+                    Ok(Value::BigInt(f.trunc() as i64))
+                }
+                None => Ok(Value::Null),
+            },
+            "TO_CHAR" => match args.first() {
+                Some(v) => Ok(Value::String(format!("{:?}", v))),
+                None => Ok(Value::Null),
+            },
+            "TO_NUMBER" => match args.first() {
+                Some(Value::String(s)) => {
+                    s.parse::<f64>().map(Value::Double).ok().ok_or_else(|| {
+                        ProcedureError::TypeMismatch {
+                            expected: "number".into(),
+                            got: s.clone(),
                         }
-                    }
-                    None => Ok(Value::Null),
+                    })
                 }
-            }
-            "ROUND" => {
-                match (args.get(0), args.get(1)) {
-                    (Some(v), precision) => {
-                        let f = v.to_f64().unwrap_or(0.0);
-                        let p = precision.and_then(|p| p.to_i64()).unwrap_or(0) as i32;
-                        let multiplier = 10f64.powi(p);
-                        Ok(Value::Double((f * multiplier).round() / multiplier))
-                    }
-                    _ => Ok(Value::Null),
-                }
-            }
-            "TRUNC" => {
-                match args.first() {
-                    Some(v) => {
-                        let f = v.to_f64().unwrap_or(0.0);
-                        Ok(Value::BigInt(f.trunc() as i64))
-                    }
-                    None => Ok(Value::Null),
-                }
-            }
-            "TO_CHAR" => {
-                match args.first() {
-                    Some(v) => Ok(Value::String(format!("{:?}", v))),
-                    None => Ok(Value::Null),
-                }
-            }
-            "TO_NUMBER" => {
-                match args.first() {
-                    Some(Value::String(s)) => {
-                        s.parse::<f64>()
-                            .map(Value::Double)
-                            .ok()
-                            .ok_or_else(|| ProcedureError::TypeMismatch {
-                                expected: "number".into(),
-                                got: s.clone(),
-                            })
-                    }
-                    Some(v) => Ok(Value::Double(v.to_f64().unwrap_or(0.0))),
-                    None => Ok(Value::Null),
-                }
-            }
-            _ => Err(ProcedureError::InvalidParameter(format!("unknown function: {}", name))),
+                Some(v) => Ok(Value::Double(v.to_f64().unwrap_or(0.0))),
+                None => Ok(Value::Null),
+            },
+            _ => Err(ProcedureError::InvalidParameter(format!(
+                "unknown function: {}",
+                name
+            ))),
         }
     }
 
     fn cast_value(&self, val: Value, target: &DataType) -> Result<Value, ProcedureError> {
         match target {
-            DataType::Integer => {
-                val.to_i64().map(|i| Value::Integer(i as i32))
-                    .ok_or_else(|| ProcedureError::TypeMismatch {
-                        expected: "integer".into(),
-                        got: format!("{:?}", val.data_type()),
-                    })
-            }
+            DataType::Integer => val
+                .to_i64()
+                .map(|i| Value::Integer(i as i32))
+                .ok_or_else(|| ProcedureError::TypeMismatch {
+                    expected: "integer".into(),
+                    got: format!("{:?}", val.data_type()),
+                }),
             DataType::BigInt => {
-                val.to_i64().map(Value::BigInt)
+                val.to_i64()
+                    .map(Value::BigInt)
                     .ok_or_else(|| ProcedureError::TypeMismatch {
                         expected: "bigint".into(),
                         got: format!("{:?}", val.data_type()),
                     })
             }
-            DataType::Float => {
-                val.to_f64().map(|f| Value::Float(f as f32))
-                    .ok_or_else(|| ProcedureError::TypeMismatch {
-                        expected: "float".into(),
-                        got: format!("{:?}", val.data_type()),
-                    })
-            }
+            DataType::Float => val.to_f64().map(|f| Value::Float(f as f32)).ok_or_else(|| {
+                ProcedureError::TypeMismatch {
+                    expected: "float".into(),
+                    got: format!("{:?}", val.data_type()),
+                }
+            }),
             DataType::Double => {
-                val.to_f64().map(Value::Double)
+                val.to_f64()
+                    .map(Value::Double)
                     .ok_or_else(|| ProcedureError::TypeMismatch {
                         expected: "double".into(),
                         got: format!("{:?}", val.data_type()),
                     })
             }
             DataType::Boolean => {
-                val.to_bool().map(Value::Boolean)
+                val.to_bool()
+                    .map(Value::Boolean)
                     .ok_or_else(|| ProcedureError::TypeMismatch {
                         expected: "boolean".into(),
                         got: format!("{:?}", val.data_type()),
                     })
             }
-            DataType::Varchar(_) | DataType::Text => {
-                Ok(Value::String(format!("{:?}", val)))
-            }
+            DataType::Varchar(_) | DataType::Text => Ok(Value::String(format!("{:?}", val))),
             _ => Ok(val),
         }
     }
@@ -1955,7 +2104,11 @@ mod tests {
             })
         }
 
-        fn execute_query(&self, _sql: &str, _params: &[Value]) -> Result<Vec<Vec<Value>>, ProcedureError> {
+        fn execute_query(
+            &self,
+            _sql: &str,
+            _params: &[Value],
+        ) -> Result<Vec<Vec<Value>>, ProcedureError> {
             Ok(vec![vec![Value::Integer(42)]])
         }
     }
@@ -1985,15 +2138,13 @@ mod tests {
             body: ProcedureBody::Block(Block {
                 label: None,
                 declarations: vec![],
-                statements: vec![
-                    Statement::Return {
-                        value: Some(Expression::BinaryOp {
-                            left: Box::new(Expression::Parameter("a".to_string())),
-                            op: BinaryOperator::Add,
-                            right: Box::new(Expression::Parameter("b".to_string())),
-                        }),
-                    },
-                ],
+                statements: vec![Statement::Return {
+                    value: Some(Expression::BinaryOp {
+                        left: Box::new(Expression::Parameter("a".to_string())),
+                        op: BinaryOperator::Add,
+                        right: Box::new(Expression::Parameter("b".to_string())),
+                    }),
+                }],
                 exception_handlers: vec![],
             }),
             security_definer: false,
@@ -2005,12 +2156,11 @@ mod tests {
             comment: None,
         };
 
-        let executor = ProcedureExecutor::new(
-            Arc::new(MockSqlExecutor),
-            ExecutorConfig::default(),
-        );
+        let executor = ProcedureExecutor::new(Arc::new(MockSqlExecutor), ExecutorConfig::default());
 
-        let result = executor.execute(&proc, vec![Value::Integer(5), Value::Integer(3)]).unwrap();
+        let result = executor
+            .execute(&proc, vec![Value::Integer(5), Value::Integer(3)])
+            .unwrap();
 
         assert!(result.return_value.is_some());
         // Result should be 8.0 (as Double due to binary op)
@@ -2027,15 +2177,13 @@ mod tests {
             language: ProcedureLanguage::PlSql,
             body: ProcedureBody::Block(Block {
                 label: None,
-                declarations: vec![
-                    Declaration::Variable(Variable {
-                        name: "i".to_string(),
-                        data_type: DataType::Integer,
-                        initial_value: Some(Expression::Literal(Value::Integer(0))),
-                        is_constant: false,
-                        not_null: false,
-                    }),
-                ],
+                declarations: vec![Declaration::Variable(Variable {
+                    name: "i".to_string(),
+                    data_type: DataType::Integer,
+                    initial_value: Some(Expression::Literal(Value::Integer(0))),
+                    is_constant: false,
+                    not_null: false,
+                })],
                 statements: vec![
                     Statement::Loop {
                         label: None,
@@ -2073,10 +2221,7 @@ mod tests {
             comment: None,
         };
 
-        let executor = ProcedureExecutor::new(
-            Arc::new(MockSqlExecutor),
-            ExecutorConfig::default(),
-        );
+        let executor = ProcedureExecutor::new(Arc::new(MockSqlExecutor), ExecutorConfig::default());
 
         let result = executor.execute(&proc, vec![]).unwrap();
 

@@ -87,7 +87,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            sample_rate: 0.1,  // 10%
+            sample_rate: 0.1,            // 10%
             min_execution_time_us: 1000, // 1ms
             max_query_length: 65536,
             filters: CaptureFilters::default(),
@@ -229,13 +229,21 @@ impl QueryCaptureService {
 
         let mut buffer = self.buffer.write();
         if buffer.len() < config.max_buffer_size {
-            self.stats.bytes_captured.fetch_add(sql.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_captured
+                .fetch_add(sql.len() as u64, Ordering::Relaxed);
             buffer.push(query);
             self.stats.queries_captured.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn passes_filters(&self, sql: &str, database: &str, user: &str, filters: &CaptureFilters) -> bool {
+    fn passes_filters(
+        &self,
+        sql: &str,
+        database: &str,
+        user: &str,
+        filters: &CaptureFilters,
+    ) -> bool {
         // Check database filters
         if let Some(ref dbs) = filters.databases {
             if !dbs.iter().any(|d| d == database) {
@@ -583,7 +591,9 @@ impl QueryReplayService {
 
     fn record_result(&self, result: QueryReplayResult) {
         self.stats.total_replayed.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_time_us.fetch_add(result.execution_time_us, Ordering::Relaxed);
+        self.stats
+            .total_time_us
+            .fetch_add(result.execution_time_us, Ordering::Relaxed);
 
         match result.status {
             ReplayStatus::Success => {
@@ -661,7 +671,8 @@ impl QueryReplayService {
 
         for result in results.iter() {
             if result.status == ReplayStatus::Success {
-                let diff = result.execution_time_us as i64 - result.original_execution_time_us as i64;
+                let diff =
+                    result.execution_time_us as i64 - result.original_execution_time_us as i64;
                 if diff > (result.original_execution_time_us as i64 / 10) {
                     // >10% slower
                     slower_queries += 1;

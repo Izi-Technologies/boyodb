@@ -6,9 +6,9 @@
 //! - Data profiling
 //! - Quality metrics and scoring
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 
 /// Data types for validation
 #[derive(Debug, Clone, PartialEq)]
@@ -81,7 +81,10 @@ pub enum ValidationRule {
     /// Numeric value must be in range
     Range { min: Option<f64>, max: Option<f64> },
     /// String length must be in range
-    Length { min: Option<usize>, max: Option<usize> },
+    Length {
+        min: Option<usize>,
+        max: Option<usize>,
+    },
     /// Value must match expected type
     TypeCheck(DataType),
     /// Custom SQL expression must be true
@@ -97,7 +100,10 @@ pub enum ValidationRule {
     /// Referential integrity check
     ForeignKey { table: String, column: String },
     /// Custom validation function
-    Custom { name: String, params: HashMap<String, String> },
+    Custom {
+        name: String,
+        params: HashMap<String, String>,
+    },
 }
 
 /// Validation result for a single check
@@ -183,7 +189,11 @@ pub enum AnomalyType {
     /// Value pattern is unusual
     PatternAnomaly { expected: String, actual: String },
     /// Value is outside expected range
-    RangeAnomaly { expected_min: f64, expected_max: f64, actual: f64 },
+    RangeAnomaly {
+        expected_min: f64,
+        expected_max: f64,
+        actual: f64,
+    },
     /// Sudden change in distribution
     DistributionShift { metric: String, change: f64 },
     /// Missing expected value
@@ -284,14 +294,16 @@ impl DataQualityEngine {
     /// Add validation rule
     pub fn add_rule(&self, table: &str, column: &str, rule: ValidationRule) {
         let key = format!("{}.{}", table, column);
-        self.rules.write()
-            .entry(key)
-            .or_default()
-            .push(rule);
+        self.rules.write().entry(key).or_default().push(rule);
     }
 
     /// Validate data against rules
-    pub fn validate(&self, table: &str, column: &str, values: &[CellValue]) -> Vec<ValidationResult> {
+    pub fn validate(
+        &self,
+        table: &str,
+        column: &str,
+        values: &[CellValue],
+    ) -> Vec<ValidationResult> {
         self.stats.validations_run.fetch_add(1, Ordering::Relaxed);
 
         let key = format!("{}.{}", table, column);
@@ -312,7 +324,12 @@ impl DataQualityEngine {
         results
     }
 
-    fn apply_rule(&self, rule: &ValidationRule, column: &str, values: &[CellValue]) -> ValidationResult {
+    fn apply_rule(
+        &self,
+        rule: &ValidationRule,
+        column: &str,
+        values: &[CellValue],
+    ) -> ValidationResult {
         let mut valid_count = 0u64;
         let mut invalid_count = 0u64;
         let mut invalid_samples = Vec::new();
@@ -326,15 +343,13 @@ impl DataQualityEngine {
                     true
                 }
 
-                ValidationRule::InSet(allowed) => {
-                    allowed.iter().any(|a| match (a, value) {
-                        (CellValue::String(s1), CellValue::String(s2)) => s1 == s2,
-                        (CellValue::Integer(i1), CellValue::Integer(i2)) => i1 == i2,
-                        (CellValue::Float(f1), CellValue::Float(f2)) => (f1 - f2).abs() < 1e-10,
-                        (CellValue::Boolean(b1), CellValue::Boolean(b2)) => b1 == b2,
-                        _ => false,
-                    })
-                }
+                ValidationRule::InSet(allowed) => allowed.iter().any(|a| match (a, value) {
+                    (CellValue::String(s1), CellValue::String(s2)) => s1 == s2,
+                    (CellValue::Integer(i1), CellValue::Integer(i2)) => i1 == i2,
+                    (CellValue::Float(f1), CellValue::Float(f2)) => (f1 - f2).abs() < 1e-10,
+                    (CellValue::Boolean(b1), CellValue::Boolean(b2)) => b1 == b2,
+                    _ => false,
+                }),
 
                 ValidationRule::Regex(pattern) => {
                     if let CellValue::String(s) = value {
@@ -430,7 +445,8 @@ impl DataQualityEngine {
         let null_count = values.iter().filter(|v| v.is_null()).count() as u64;
 
         // Infer data type from non-null values
-        let data_type = values.iter()
+        let data_type = values
+            .iter()
             .find(|v| !v.is_null())
             .map(|v| v.data_type())
             .unwrap_or(DataType::Null);
@@ -444,32 +460,39 @@ impl DataQualityEngine {
         let distinct_count = value_counts.len() as u64;
 
         // Numeric statistics
-        let numeric_values: Vec<f64> = values.iter()
-            .filter_map(|v| v.as_f64())
-            .collect();
+        let numeric_values: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
 
         let (min, max, mean, std_dev, median) = if !numeric_values.is_empty() {
             let min = numeric_values.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = numeric_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max = numeric_values
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             let mean = numeric_values.iter().sum::<f64>() / numeric_values.len() as f64;
-            let variance = numeric_values.iter()
+            let variance = numeric_values
+                .iter()
                 .map(|v| (v - mean).powi(2))
-                .sum::<f64>() / numeric_values.len() as f64;
+                .sum::<f64>()
+                / numeric_values.len() as f64;
             let std_dev = variance.sqrt();
 
             let mut sorted = numeric_values.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let median = sorted[sorted.len() / 2];
 
-            (Some(min), Some(max), Some(mean), Some(std_dev), Some(median))
+            (
+                Some(min),
+                Some(max),
+                Some(mean),
+                Some(std_dev),
+                Some(median),
+            )
         } else {
             (None, None, None, None, None)
         };
 
         // String statistics
-        let string_values: Vec<&str> = values.iter()
-            .filter_map(|v| v.as_string())
-            .collect();
+        let string_values: Vec<&str> = values.iter().filter_map(|v| v.as_string()).collect();
 
         let (min_length, max_length, avg_length) = if !string_values.is_empty() {
             let lengths: Vec<usize> = string_values.iter().map(|s| s.len()).collect();
@@ -482,7 +505,8 @@ impl DataQualityEngine {
         };
 
         // Top values
-        let mut top_values: Vec<_> = value_counts.into_iter()
+        let mut top_values: Vec<_> = value_counts
+            .into_iter()
             .map(|(k, v)| (CellValue::String(k), v))
             .collect();
         top_values.sort_by(|a, b| b.1.cmp(&a.1));
@@ -493,9 +517,17 @@ impl DataQualityEngine {
             data_type,
             count,
             null_count,
-            null_percentage: if count > 0 { null_count as f64 / count as f64 * 100.0 } else { 0.0 },
+            null_percentage: if count > 0 {
+                null_count as f64 / count as f64 * 100.0
+            } else {
+                0.0
+            },
             distinct_count,
-            distinct_percentage: if count > 0 { distinct_count as f64 / count as f64 * 100.0 } else { 0.0 },
+            distinct_percentage: if count > 0 {
+                distinct_count as f64 / count as f64 * 100.0
+            } else {
+                0.0
+            },
             min,
             max,
             mean,
@@ -510,11 +542,17 @@ impl DataQualityEngine {
     }
 
     /// Detect anomalies in data
-    pub fn detect_anomalies(&self, column: &str, values: &[CellValue], z_threshold: f64) -> Vec<Anomaly> {
+    pub fn detect_anomalies(
+        &self,
+        column: &str,
+        values: &[CellValue],
+        z_threshold: f64,
+    ) -> Vec<Anomaly> {
         let mut anomalies = Vec::new();
 
         // For numeric columns, detect outliers using z-score
-        let numeric_values: Vec<(usize, f64)> = values.iter()
+        let numeric_values: Vec<(usize, f64)> = values
+            .iter()
             .enumerate()
             .filter_map(|(i, v)| v.as_f64().map(|f| (i, f)))
             .collect();
@@ -522,7 +560,8 @@ impl DataQualityEngine {
         if numeric_values.len() >= 3 {
             let vals: Vec<f64> = numeric_values.iter().map(|(_, v)| *v).collect();
             let mean = vals.iter().sum::<f64>() / vals.len() as f64;
-            let std = (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64).sqrt();
+            let std =
+                (vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / vals.len() as f64).sqrt();
 
             if std > 0.0 {
                 for (i, v) in numeric_values {
@@ -545,7 +584,9 @@ impl DataQualityEngine {
                             severity,
                         });
 
-                        self.stats.anomalies_detected.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .anomalies_detected
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -555,7 +596,11 @@ impl DataQualityEngine {
     }
 
     /// Calculate overall quality score
-    pub fn calculate_quality_score(&self, profile: &DataProfile, validations: &[ValidationResult]) -> f64 {
+    pub fn calculate_quality_score(
+        &self,
+        profile: &DataProfile,
+        validations: &[ValidationResult],
+    ) -> f64 {
         let mut total_weight = 0.0;
         let mut weighted_score = 0.0;
 
@@ -568,9 +613,9 @@ impl DataQualityEngine {
 
         // Validation pass rate
         if !validations.is_empty() {
-            let pass_rate = validations.iter()
-                .filter(|v| v.passed)
-                .count() as f64 / validations.len() as f64 * 100.0;
+            let pass_rate = validations.iter().filter(|v| v.passed).count() as f64
+                / validations.len() as f64
+                * 100.0;
             weighted_score += pass_rate * 0.4;
             total_weight += 0.4;
         }
@@ -595,15 +640,15 @@ impl DataQualityEngine {
         dataset: &str,
         columns: &HashMap<String, Vec<CellValue>>,
     ) -> QualityReport {
-        self.stats.profiles_generated.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .profiles_generated
+            .fetch_add(1, Ordering::Relaxed);
 
-        let row_count = columns.values()
-            .next()
-            .map(|c| c.len())
-            .unwrap_or(0) as u64;
+        let row_count = columns.values().next().map(|c| c.len()).unwrap_or(0) as u64;
 
         // Profile columns
-        let column_profiles: Vec<ColumnProfile> = columns.iter()
+        let column_profiles: Vec<ColumnProfile> = columns
+            .iter()
             .map(|(name, values)| self.profile_column(name, values))
             .collect();
 
@@ -640,9 +685,13 @@ impl DataQualityEngine {
         let metrics = vec![
             QualityMetric {
                 name: "Completeness".to_string(),
-                score: 100.0 - profile.columns.iter()
-                    .map(|c| c.null_percentage)
-                    .sum::<f64>() / profile.columns.len().max(1) as f64,
+                score: 100.0
+                    - profile
+                        .columns
+                        .iter()
+                        .map(|c| c.null_percentage)
+                        .sum::<f64>()
+                        / profile.columns.len().max(1) as f64,
                 description: "Percentage of non-null values".to_string(),
                 weight: 0.3,
             },
@@ -652,16 +701,20 @@ impl DataQualityEngine {
                     100.0
                 } else {
                     validations.iter().filter(|v| v.passed).count() as f64
-                        / validations.len() as f64 * 100.0
+                        / validations.len() as f64
+                        * 100.0
                 },
                 description: "Percentage of values passing validation rules".to_string(),
                 weight: 0.4,
             },
             QualityMetric {
                 name: "Uniqueness".to_string(),
-                score: profile.columns.iter()
+                score: profile
+                    .columns
+                    .iter()
                     .map(|c| c.distinct_percentage)
-                    .sum::<f64>() / profile.columns.len().max(1) as f64,
+                    .sum::<f64>()
+                    / profile.columns.len().max(1) as f64,
                 description: "Average percentage of unique values".to_string(),
                 weight: 0.3,
             },
@@ -750,10 +803,14 @@ mod tests {
     #[test]
     fn test_range_validation() {
         let engine = DataQualityEngine::new();
-        engine.add_rule("test", "age", ValidationRule::Range {
-            min: Some(0.0),
-            max: Some(120.0),
-        });
+        engine.add_rule(
+            "test",
+            "age",
+            ValidationRule::Range {
+                min: Some(0.0),
+                max: Some(120.0),
+            },
+        );
 
         let values = vec![
             CellValue::Integer(25),
@@ -813,16 +870,22 @@ mod tests {
         engine.add_rule("test", "email", ValidationRule::Email);
 
         let mut columns = HashMap::new();
-        columns.insert("name".to_string(), vec![
-            CellValue::String("Alice".to_string()),
-            CellValue::String("Bob".to_string()),
-            CellValue::Null,
-        ]);
-        columns.insert("email".to_string(), vec![
-            CellValue::String("alice@example.com".to_string()),
-            CellValue::String("invalid-email".to_string()),
-            CellValue::String("bob@example.com".to_string()),
-        ]);
+        columns.insert(
+            "name".to_string(),
+            vec![
+                CellValue::String("Alice".to_string()),
+                CellValue::String("Bob".to_string()),
+                CellValue::Null,
+            ],
+        );
+        columns.insert(
+            "email".to_string(),
+            vec![
+                CellValue::String("alice@example.com".to_string()),
+                CellValue::String("invalid-email".to_string()),
+                CellValue::String("bob@example.com".to_string()),
+            ],
+        );
 
         let report = engine.generate_report("test", &columns);
 

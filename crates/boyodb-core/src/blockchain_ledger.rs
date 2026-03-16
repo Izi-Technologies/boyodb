@@ -9,12 +9,12 @@
 //! - Tamper detection
 //! - Audit trail queries
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 /// Block in the blockchain ledger
 #[derive(Debug, Clone)]
@@ -73,11 +73,7 @@ impl Block {
     pub fn calculate_hash(&self) -> String {
         let data = format!(
             "{}{}{}{}{}",
-            self.index,
-            self.timestamp,
-            self.previous_hash,
-            self.merkle_root,
-            self.nonce
+            self.index, self.timestamp, self.previous_hash, self.merkle_root, self.nonce
         );
         sha256_hash(&data)
     }
@@ -122,12 +118,7 @@ pub struct Transaction {
 
 impl Transaction {
     /// Create new transaction
-    pub fn new(
-        tx_type: TransactionType,
-        actor: String,
-        target: String,
-        details: String,
-    ) -> Self {
+    pub fn new(tx_type: TransactionType, actor: String, target: String, details: String) -> Self {
         let timestamp = current_timestamp();
         let id = generate_tx_id(&actor, timestamp);
         let hash = calculate_tx_hash(&id, timestamp, &tx_type, &actor, &target, &details);
@@ -343,7 +334,9 @@ impl BlockchainLedger {
             // Verify block hash
             if !block.verify() {
                 result.is_valid = false;
-                result.errors.push(format!("Block {} hash verification failed", i));
+                result
+                    .errors
+                    .push(format!("Block {} hash verification failed", i));
             }
 
             // Verify chain linkage (except genesis)
@@ -379,11 +372,7 @@ impl BlockchainLedger {
 
     /// Get chain statistics
     pub fn get_stats(&self) -> LedgerStats {
-        let total_transactions: usize = self
-            .blocks
-            .iter()
-            .map(|b| b.transactions.len())
-            .sum();
+        let total_transactions: usize = self.blocks.iter().map(|b| b.transactions.len()).sum();
 
         LedgerStats {
             total_blocks: self.blocks.len(),
@@ -722,7 +711,10 @@ fn calculate_tx_hash(
     target: &str,
     details: &str,
 ) -> String {
-    let data = format!("{}{}{}{}{}{}", id, timestamp, tx_type, actor, target, details);
+    let data = format!(
+        "{}{}{}{}{}{}",
+        id, timestamp, tx_type, actor, target, details
+    );
     sha256_hash(&data)
 }
 

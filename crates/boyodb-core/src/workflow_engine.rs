@@ -9,9 +9,9 @@
 //! - Scheduling and triggers
 //! - Workflow monitoring and logging
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Workflow definition
@@ -282,9 +282,17 @@ pub enum TaskType {
     /// Data validation
     Validate { table: String, rules: Vec<String> },
     /// Data export
-    Export { source: String, format: String, path: String },
+    Export {
+        source: String,
+        format: String,
+        path: String,
+    },
     /// Data import
-    Import { path: String, target: String, format: String },
+    Import {
+        path: String,
+        target: String,
+        format: String,
+    },
     /// External API call
     HttpRequest { url: String, method: String },
     /// Shell command
@@ -329,8 +337,7 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Calculate delay for given attempt
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let delay = (self.initial_delay_ms as f64)
-            * self.backoff_multiplier.powi(attempt as i32);
+        let delay = (self.initial_delay_ms as f64) * self.backoff_multiplier.powi(attempt as i32);
         let delay = delay.min(self.max_delay_ms as f64) as u64;
         Duration::from_millis(delay)
     }
@@ -738,7 +745,10 @@ impl WorkflowEngine {
 
         run.status = status;
         run.ended_at = Some(current_timestamp());
-        run.log(LogLevel::Info, &format!("Workflow run completed: {:?}", run.status));
+        run.log(
+            LogLevel::Info,
+            &format!("Workflow run completed: {:?}", run.status),
+        );
 
         // Remove from active runs
         if let Some(active) = self.active_runs.get_mut(&run.workflow_id) {
@@ -875,9 +885,7 @@ impl WorkflowRegistry {
 
     /// Register workflow
     pub fn register(&self, workflow: Workflow) -> Result<(), WorkflowError> {
-        self.engine
-            .write()
-            .register_workflow(workflow)
+        self.engine.write().register_workflow(workflow)
     }
 
     /// Start run
@@ -887,23 +895,17 @@ impl WorkflowRegistry {
         trigger: TriggerType,
         params: HashMap<String, String>,
     ) -> Result<String, WorkflowError> {
-        self.engine
-            .write()
-            .start_run(workflow_id, trigger, params)
+        self.engine.write().start_run(workflow_id, trigger, params)
     }
 
     /// Get run stats
     pub fn get_run_stats(&self, run_id: &str) -> Result<RunStats, WorkflowError> {
-        self.engine
-            .read()
-            .get_run_stats(run_id)
+        self.engine.read().get_run_stats(run_id)
     }
 
     /// List workflows
     pub fn list_workflows(&self) -> Result<Vec<String>, WorkflowError> {
-        let engine = self
-            .engine
-            .read();
+        let engine = self.engine.read();
         Ok(engine.workflows.keys().cloned().collect())
     }
 }
@@ -938,18 +940,30 @@ mod tests {
     fn test_workflow_creation() {
         let mut workflow = Workflow::new("etl_pipeline", "ETL Pipeline");
 
-        workflow.add_task(Task::new("extract", "Extract Data", TaskType::SqlQuery {
-            query: "SELECT * FROM source".to_string(),
-        }));
+        workflow.add_task(Task::new(
+            "extract",
+            "Extract Data",
+            TaskType::SqlQuery {
+                query: "SELECT * FROM source".to_string(),
+            },
+        ));
 
-        workflow.add_task(Task::new("transform", "Transform Data", TaskType::Transform {
-            source: "raw_data".to_string(),
-            target: "clean_data".to_string(),
-        }));
+        workflow.add_task(Task::new(
+            "transform",
+            "Transform Data",
+            TaskType::Transform {
+                source: "raw_data".to_string(),
+                target: "clean_data".to_string(),
+            },
+        ));
 
-        workflow.add_task(Task::new("load", "Load Data", TaskType::SqlQuery {
-            query: "INSERT INTO target SELECT * FROM clean_data".to_string(),
-        }));
+        workflow.add_task(Task::new(
+            "load",
+            "Load Data",
+            TaskType::SqlQuery {
+                query: "INSERT INTO target SELECT * FROM clean_data".to_string(),
+            },
+        ));
 
         workflow.add_dependency("transform", "extract");
         workflow.add_dependency("load", "transform");
@@ -969,7 +983,10 @@ mod tests {
         workflow.add_dependency("c", "b");
         workflow.add_dependency("a", "c"); // Creates cycle
 
-        assert!(matches!(workflow.validate(), Err(WorkflowError::CycleDetected)));
+        assert!(matches!(
+            workflow.validate(),
+            Err(WorkflowError::CycleDetected)
+        ));
     }
 
     #[test]
@@ -1021,7 +1038,9 @@ mod tests {
 
         engine.register_workflow(workflow).unwrap();
 
-        let run_id = engine.start_run("test", TriggerType::Manual, HashMap::new()).unwrap();
+        let run_id = engine
+            .start_run("test", TriggerType::Manual, HashMap::new())
+            .unwrap();
 
         let runnable = engine.get_runnable_tasks(&run_id).unwrap();
         assert!(runnable.contains(&"task1".to_string()));

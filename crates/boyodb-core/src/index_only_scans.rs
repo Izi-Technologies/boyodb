@@ -5,11 +5,11 @@
 //! and the visibility map indicates the page is all-visible, we can
 //! skip the heap fetch entirely.
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -278,7 +278,9 @@ impl CoveringIndex {
 
     /// Check if this index covers the given columns
     pub fn covers(&self, columns: &[&str]) -> bool {
-        columns.iter().all(|col| self.all_columns.contains(&col.to_string()))
+        columns
+            .iter()
+            .all(|col| self.all_columns.contains(&col.to_string()))
     }
 
     /// Check if a column is a key column (can be used for filtering)
@@ -666,51 +668,39 @@ impl IndexPredicate {
         use std::cmp::Ordering;
 
         match self {
-            IndexPredicate::Eq(col, value) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| v.compare(value) == Ordering::Equal)
-                    .unwrap_or(false)
-            }
-            IndexPredicate::Lt(col, value) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| v.compare(value) == Ordering::Less)
-                    .unwrap_or(false)
-            }
-            IndexPredicate::Le(col, value) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| matches!(v.compare(value), Ordering::Less | Ordering::Equal))
-                    .unwrap_or(false)
-            }
-            IndexPredicate::Gt(col, value) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| v.compare(value) == Ordering::Greater)
-                    .unwrap_or(false)
-            }
-            IndexPredicate::Ge(col, value) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| matches!(v.compare(value), Ordering::Greater | Ordering::Equal))
-                    .unwrap_or(false)
-            }
-            IndexPredicate::Between(col, low, high) => {
-                entry
-                    .values
-                    .get(*col)
-                    .map(|v| {
-                        matches!(v.compare(low), Ordering::Greater | Ordering::Equal)
-                            && matches!(v.compare(high), Ordering::Less | Ordering::Equal)
-                    })
-                    .unwrap_or(false)
-            }
+            IndexPredicate::Eq(col, value) => entry
+                .values
+                .get(*col)
+                .map(|v| v.compare(value) == Ordering::Equal)
+                .unwrap_or(false),
+            IndexPredicate::Lt(col, value) => entry
+                .values
+                .get(*col)
+                .map(|v| v.compare(value) == Ordering::Less)
+                .unwrap_or(false),
+            IndexPredicate::Le(col, value) => entry
+                .values
+                .get(*col)
+                .map(|v| matches!(v.compare(value), Ordering::Less | Ordering::Equal))
+                .unwrap_or(false),
+            IndexPredicate::Gt(col, value) => entry
+                .values
+                .get(*col)
+                .map(|v| v.compare(value) == Ordering::Greater)
+                .unwrap_or(false),
+            IndexPredicate::Ge(col, value) => entry
+                .values
+                .get(*col)
+                .map(|v| matches!(v.compare(value), Ordering::Greater | Ordering::Equal))
+                .unwrap_or(false),
+            IndexPredicate::Between(col, low, high) => entry
+                .values
+                .get(*col)
+                .map(|v| {
+                    matches!(v.compare(low), Ordering::Greater | Ordering::Equal)
+                        && matches!(v.compare(high), Ordering::Less | Ordering::Equal)
+                })
+                .unwrap_or(false),
             IndexPredicate::And(preds) => preds.iter().all(|p| p.matches(entry)),
             IndexPredicate::Or(preds) => preds.iter().any(|p| p.matches(entry)),
             IndexPredicate::Not(pred) => !pred.matches(entry),
@@ -741,13 +731,17 @@ impl IndexOnlyScanAnalyzer {
     }
 
     /// Analyze a query to find the best index
-    pub fn analyze(&self, needed_columns: &[&str], filter_columns: &[&str]) -> Option<IndexAnalysis> {
+    pub fn analyze(
+        &self,
+        needed_columns: &[&str],
+        filter_columns: &[&str],
+    ) -> Option<IndexAnalysis> {
         let needed_set: HashSet<_> = needed_columns.iter().cloned().collect();
         let filter_set: HashSet<_> = filter_columns.iter().cloned().collect();
 
         let mut best: Option<IndexAnalysis> = None;
 
-        for (_name, index) in &self.indexes {
+        for index in self.indexes.values() {
             // Check if index covers all needed columns
             if !index.covers(needed_columns) {
                 continue;
@@ -935,7 +929,10 @@ mod tests {
                 "idx_user",
                 1,
                 0,
-                vec![IndexValue::Int(3), IndexValue::String("Charlie".to_string())],
+                vec![
+                    IndexValue::Int(3),
+                    IndexValue::String("Charlie".to_string()),
+                ],
             )
             .unwrap();
 
@@ -966,8 +963,12 @@ mod tests {
         assert!(IndexPredicate::Gt(0, IndexValue::Int(3)).matches(&entry));
         assert!(!IndexPredicate::Gt(0, IndexValue::Int(5)).matches(&entry));
 
-        assert!(IndexPredicate::Between(0, IndexValue::Int(1), IndexValue::Int(10)).matches(&entry));
-        assert!(!IndexPredicate::Between(0, IndexValue::Int(6), IndexValue::Int(10)).matches(&entry));
+        assert!(
+            IndexPredicate::Between(0, IndexValue::Int(1), IndexValue::Int(10)).matches(&entry)
+        );
+        assert!(
+            !IndexPredicate::Between(0, IndexValue::Int(6), IndexValue::Int(10)).matches(&entry)
+        );
 
         let and_pred = IndexPredicate::And(vec![
             IndexPredicate::Ge(0, IndexValue::Int(5)),

@@ -22,10 +22,10 @@
 //! -- Asynchronous Notification: channel=order_updates, payload=order_id=12345
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
@@ -368,7 +368,9 @@ impl PubSubManager {
     /// Validate channel name
     fn validate_channel_name(&self, name: &str) -> Result<(), PubSubError> {
         if name.is_empty() {
-            return Err(PubSubError::InvalidChannel("channel name cannot be empty".into()));
+            return Err(PubSubError::InvalidChannel(
+                "channel name cannot be empty".into(),
+            ));
         }
         if name.len() > 63 {
             return Err(PubSubError::InvalidChannel(
@@ -376,7 +378,10 @@ impl PubSubManager {
             ));
         }
         // Allow alphanumeric, underscore, and * for wildcard
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '*') {
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '*')
+        {
             return Err(PubSubError::InvalidChannel(
                 "channel name must be alphanumeric with underscores".into(),
             ));
@@ -693,7 +698,10 @@ pub fn parse_notify(sql: &str) -> Option<(String, Option<String>)> {
 
     // Check for payload
     if let Some(comma_pos) = rest.find(',') {
-        let channel = rest[..comma_pos].trim().trim_matches('"').trim_matches('\'');
+        let channel = rest[..comma_pos]
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
         let payload = rest[comma_pos + 1..]
             .trim()
             .trim_matches('\'')
@@ -979,7 +987,10 @@ mod tests {
 
     #[test]
     fn test_parse_unlisten() {
-        assert_eq!(parse_unlisten("UNLISTEN orders"), Some("orders".to_string()));
+        assert_eq!(
+            parse_unlisten("UNLISTEN orders"),
+            Some("orders".to_string())
+        );
         assert_eq!(parse_unlisten("UNLISTEN *"), Some("*".to_string()));
         assert_eq!(parse_unlisten("SELECT 1"), None);
     }
@@ -1058,7 +1069,8 @@ mod tests {
 
     #[test]
     fn test_notification_format() {
-        let notification = Notification::new(1, "orders".to_string(), Some("order_123".to_string()), 1);
+        let notification =
+            Notification::new(1, "orders".to_string(), Some("order_123".to_string()), 1);
         assert_eq!(
             notification.format(),
             "Asynchronous Notification: channel=orders, payload=order_123"

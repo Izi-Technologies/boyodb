@@ -3,9 +3,9 @@
 //! Detailed query profiling with flame graphs, memory tracking, and operator statistics.
 //! Provides deep insight into query execution for performance optimization.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Query profile
@@ -60,13 +60,13 @@ impl QueryProfile {
     /// Generate flame graph data
     pub fn to_flame_graph(&self) -> String {
         let mut lines = Vec::new();
-        
+
         for op in &self.operators {
             let path = op.ancestors.join(";") + ";" + &op.name;
             let time_us = op.total_time.as_micros();
             lines.push(format!("{} {}", path, time_us));
         }
-        
+
         lines.join("\n")
     }
 
@@ -353,7 +353,13 @@ impl QueryProfiler {
     }
 
     /// Record wait event
-    pub fn record_wait(&self, query_id: &str, event_type: WaitEventType, duration: Duration, context: &str) {
+    pub fn record_wait(
+        &self,
+        query_id: &str,
+        event_type: WaitEventType,
+        duration: Duration,
+        context: &str,
+    ) {
         if let Some(profile) = self.profiles.write().get_mut(query_id) {
             profile.wait_events.push(WaitEvent {
                 event_type,
@@ -441,10 +447,12 @@ impl ProfileBuilder {
 
     pub fn end_operator(&mut self, rows_in: u64, rows_out: u64) {
         if let Some((id, name, start)) = self.operator_stack.pop() {
-            let ancestors: Vec<String> = self.operator_stack.iter()
+            let ancestors: Vec<String> = self
+                .operator_stack
+                .iter()
                 .map(|(_, n, _)| n.clone())
                 .collect();
-            
+
             let parent_id = self.operator_stack.last().map(|(id, _, _)| *id);
             let total_time = start.elapsed();
 
@@ -494,16 +502,16 @@ mod tests {
     #[test]
     fn test_query_profiler() {
         let profiler = Arc::new(QueryProfiler::new(100));
-        
+
         profiler.start("q1".into(), "SELECT * FROM test".into());
         profiler.start_phase("q1", "parse");
         profiler.end_phase("q1");
         profiler.start_phase("q1", "execute");
         profiler.update_rows("q1", 1000, 100, 900);
         profiler.end_phase("q1");
-        
+
         let profile = profiler.finish("q1").unwrap();
-        
+
         assert_eq!(profile.phases.len(), 2);
         assert_eq!(profile.rows.scanned, 1000);
         assert_eq!(profile.rows.returned, 900);
@@ -513,19 +521,19 @@ mod tests {
     fn test_profile_builder() {
         let profiler = Arc::new(QueryProfiler::new(100));
         let mut builder = ProfileBuilder::new(profiler.clone(), "q2".into(), "SELECT 1".into());
-        
+
         {
             let _phase = builder.phase("parse");
         }
-        
+
         builder.start_operator("Scan");
         builder.end_operator(1000, 500);
-        
+
         builder.start_operator("Filter");
         builder.end_operator(500, 100);
-        
+
         let profile = builder.finish().unwrap();
-        
+
         assert_eq!(profile.operators.len(), 2);
         assert_eq!(profile.phases.len(), 1);
     }
@@ -533,7 +541,7 @@ mod tests {
     #[test]
     fn test_flame_graph() {
         let mut profile = QueryProfile::new("q3".into(), "SELECT *".into());
-        
+
         profile.operators.push(OperatorProfile {
             id: 0,
             name: "Scan".into(),
@@ -541,7 +549,7 @@ mod tests {
             total_time: Duration::from_millis(100),
             ..Default::default()
         });
-        
+
         profile.operators.push(OperatorProfile {
             id: 1,
             name: "Filter".into(),
@@ -549,7 +557,7 @@ mod tests {
             total_time: Duration::from_millis(50),
             ..Default::default()
         });
-        
+
         let flame = profile.to_flame_graph();
         assert!(flame.contains("Query;Scan 100000"));
         assert!(flame.contains("Query;Scan;Filter 50000"));
@@ -558,12 +566,12 @@ mod tests {
     #[test]
     fn test_history() {
         let profiler = QueryProfiler::new(5);
-        
+
         for i in 0..10 {
             profiler.start(format!("q{}", i), "SELECT 1".into());
             profiler.finish(&format!("q{}", i));
         }
-        
+
         let history = profiler.get_history(10);
         assert_eq!(history.len(), 5);
         assert_eq!(history[0].query_id, "q9");

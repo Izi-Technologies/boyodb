@@ -567,10 +567,7 @@ fn concat_batches(batches: &[RecordBatch]) -> Result<RecordBatch, EngineError> {
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for col_idx in 0..schema.fields().len() {
-        let arrays: Vec<&dyn Array> = batches
-            .iter()
-            .map(|b| b.column(col_idx).as_ref())
-            .collect();
+        let arrays: Vec<&dyn Array> = batches.iter().map(|b| b.column(col_idx).as_ref()).collect();
 
         let concatenated = arrow_select::concat::concat(&arrays)
             .map_err(|e| EngineError::Internal(format!("failed to concat arrays: {}", e)))?;

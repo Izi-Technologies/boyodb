@@ -3,9 +3,9 @@
 //! Portable, sandboxed UDFs using WebAssembly for secure function execution.
 //! Supports WASM modules compiled from Rust, Go, AssemblyScript, etc.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// WASM value type
 #[derive(Debug, Clone, PartialEq)]
@@ -148,7 +148,7 @@ impl WasmUdfRegistry {
             default_memory_limit: 16 * 1024 * 1024,
             default_fuel_limit: 1_000_000,
         };
-        
+
         // Register built-in WASM modules
         registry.register_builtins();
         registry
@@ -262,7 +262,10 @@ impl WasmUdfRegistry {
         // Check for function name conflicts
         for func in &module.functions {
             if let Some(existing) = function_map.get(&func.name) {
-                return Err(WasmError::FunctionExists(func.name.clone(), existing.clone()));
+                return Err(WasmError::FunctionExists(
+                    func.name.clone(),
+                    existing.clone(),
+                ));
             }
         }
 
@@ -280,7 +283,8 @@ impl WasmUdfRegistry {
         let mut modules = self.modules.write();
         let mut function_map = self.function_map.write();
 
-        let module = modules.remove(name)
+        let module = modules
+            .remove(name)
             .ok_or_else(|| WasmError::ModuleNotFound(name.into()))?;
 
         for func in &module.functions {
@@ -302,7 +306,7 @@ impl WasmUdfRegistry {
 
         let module_name = function_map.get(name)?;
         let module = modules.get(module_name)?;
-        
+
         module.functions.iter().find(|f| f.name == name).cloned()
     }
 
@@ -314,14 +318,16 @@ impl WasmUdfRegistry {
     /// List all functions
     pub fn list_functions(&self) -> Vec<WasmSignature> {
         let modules = self.modules.read();
-        modules.values()
+        modules
+            .values()
             .flat_map(|m| m.functions.iter().cloned())
             .collect()
     }
 
     /// List all modules
     pub fn list_modules(&self) -> Vec<(String, String)> {
-        self.modules.read()
+        self.modules
+            .read()
             .values()
             .map(|m| (m.name.clone(), m.description.clone()))
             .collect()
@@ -333,7 +339,8 @@ impl WasmUdfRegistry {
         func_name: &str,
         args: Vec<WasmValue>,
     ) -> Result<(WasmValue, WasmContext), WasmError> {
-        let sig = self.get_function(func_name)
+        let sig = self
+            .get_function(func_name)
             .ok_or_else(|| WasmError::FunctionNotFound(func_name.into()))?;
 
         // Validate argument count
@@ -385,7 +392,7 @@ impl WasmUdfRegistry {
             }
             "wasm_base64_encode" => {
                 if let WasmValue::Bytes(data) = &args[0] {
-                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    use base64::{engine::general_purpose::STANDARD, Engine as _};
                     Ok(WasmValue::String(STANDARD.encode(data)))
                 } else {
                     Err(WasmError::TypeMismatch)
@@ -430,8 +437,12 @@ impl WasmUdfRegistry {
         let m = s1.len();
         let n = s2.len();
 
-        if m == 0 { return n; }
-        if n == 0 { return m; }
+        if m == 0 {
+            return n;
+        }
+        if n == 0 {
+            return m;
+        }
 
         let mut prev: Vec<usize> = (0..=n).collect();
         let mut curr = vec![0; n + 1];
@@ -440,9 +451,7 @@ impl WasmUdfRegistry {
             curr[0] = i;
             for j in 1..=n {
                 let cost = if s1[i - 1] == s2[j - 1] { 0 } else { 1 };
-                curr[j] = (prev[j] + 1)
-                    .min(curr[j - 1] + 1)
-                    .min(prev[j - 1] + cost);
+                curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
             }
             std::mem::swap(&mut prev, &mut curr);
         }
@@ -457,7 +466,7 @@ impl WasmUdfRegistry {
 
         let s = s.to_uppercase();
         let chars: Vec<char> = s.chars().filter(|c| c.is_alphabetic()).collect();
-        
+
         if chars.is_empty() {
             return "0000".into();
         }
@@ -523,7 +532,9 @@ impl std::fmt::Display for WasmError {
         match self {
             Self::ModuleNotFound(n) => write!(f, "WASM module '{}' not found", n),
             Self::FunctionNotFound(n) => write!(f, "WASM function '{}' not found", n),
-            Self::FunctionExists(n, m) => write!(f, "Function '{}' already exists in module '{}'", n, m),
+            Self::FunctionExists(n, m) => {
+                write!(f, "Function '{}' already exists in module '{}'", n, m)
+            }
             Self::CompilationFailed(s) => write!(f, "WASM compilation failed: {}", s),
             Self::ExecutionFailed(s) => write!(f, "WASM execution failed: {}", s),
             Self::OutOfFuel => write!(f, "WASM execution ran out of fuel"),
@@ -550,7 +561,7 @@ mod tests {
     #[test]
     fn test_wasm_registry() {
         let registry = WasmUdfRegistry::new();
-        
+
         assert!(registry.has_function("wasm_fibonacci"));
         assert!(registry.has_function("wasm_factorial"));
         assert!(registry.has_function("wasm_levenshtein"));
@@ -559,8 +570,10 @@ mod tests {
     #[test]
     fn test_fibonacci() {
         let registry = WasmUdfRegistry::new();
-        
-        let (result, ctx) = registry.execute("wasm_fibonacci", vec![WasmValue::I64(10)]).unwrap();
+
+        let (result, ctx) = registry
+            .execute("wasm_fibonacci", vec![WasmValue::I64(10)])
+            .unwrap();
         assert_eq!(result, WasmValue::I64(55));
         assert!(ctx.execution_time_us > 0);
     }
@@ -568,41 +581,46 @@ mod tests {
     #[test]
     fn test_factorial() {
         let registry = WasmUdfRegistry::new();
-        
-        let (result, _) = registry.execute("wasm_factorial", vec![WasmValue::I64(5)]).unwrap();
+
+        let (result, _) = registry
+            .execute("wasm_factorial", vec![WasmValue::I64(5)])
+            .unwrap();
         assert_eq!(result, WasmValue::I64(120));
     }
 
     #[test]
     fn test_gcd() {
         let registry = WasmUdfRegistry::new();
-        
-        let (result, _) = registry.execute(
-            "wasm_gcd",
-            vec![WasmValue::I64(48), WasmValue::I64(18)]
-        ).unwrap();
+
+        let (result, _) = registry
+            .execute("wasm_gcd", vec![WasmValue::I64(48), WasmValue::I64(18)])
+            .unwrap();
         assert_eq!(result, WasmValue::I64(6));
     }
 
     #[test]
     fn test_levenshtein() {
         let registry = WasmUdfRegistry::new();
-        
-        let (result, _) = registry.execute(
-            "wasm_levenshtein",
-            vec![WasmValue::String("kitten".into()), WasmValue::String("sitting".into())]
-        ).unwrap();
+
+        let (result, _) = registry
+            .execute(
+                "wasm_levenshtein",
+                vec![
+                    WasmValue::String("kitten".into()),
+                    WasmValue::String("sitting".into()),
+                ],
+            )
+            .unwrap();
         assert_eq!(result, WasmValue::I32(3));
     }
 
     #[test]
     fn test_soundex() {
         let registry = WasmUdfRegistry::new();
-        
-        let (result, _) = registry.execute(
-            "wasm_soundex",
-            vec![WasmValue::String("Robert".into())]
-        ).unwrap();
+
+        let (result, _) = registry
+            .execute("wasm_soundex", vec![WasmValue::String("Robert".into())])
+            .unwrap();
         assert_eq!(result, WasmValue::String("R163".into()));
     }
 
@@ -610,7 +628,7 @@ mod tests {
     fn test_list_functions() {
         let registry = WasmUdfRegistry::new();
         let functions = registry.list_functions();
-        
+
         assert!(functions.len() >= 7);
         assert!(functions.iter().any(|f| f.name == "wasm_fibonacci"));
     }

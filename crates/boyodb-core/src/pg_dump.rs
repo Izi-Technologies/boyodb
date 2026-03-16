@@ -363,30 +363,33 @@ impl SqlDumper {
     /// Generate header
     pub fn write_header(&mut self, database: &str) {
         self.output.push("--".to_string());
-        self.output.push(format!(
-            "-- BoyoDB database dump - {}",
-            chrono_now()
-        ));
+        self.output
+            .push(format!("-- BoyoDB database dump - {}", chrono_now()));
         self.output.push("--".to_string());
         self.output.push(String::new());
 
         if self.options.create_database {
             if self.options.clean {
                 if self.options.if_exists {
-                    self.output.push(format!("DROP DATABASE IF EXISTS {};", self.quote(database)));
+                    self.output
+                        .push(format!("DROP DATABASE IF EXISTS {};", self.quote(database)));
                 } else {
-                    self.output.push(format!("DROP DATABASE {};", self.quote(database)));
+                    self.output
+                        .push(format!("DROP DATABASE {};", self.quote(database)));
                 }
             }
-            self.output.push(format!("CREATE DATABASE {};", self.quote(database)));
+            self.output
+                .push(format!("CREATE DATABASE {};", self.quote(database)));
             self.output.push(format!("\\connect {}", database));
         }
 
         self.output.push(String::new());
         self.output.push("SET statement_timeout = 0;".to_string());
         self.output.push("SET lock_timeout = 0;".to_string());
-        self.output.push("SET client_encoding = 'UTF8';".to_string());
-        self.output.push("SET standard_conforming_strings = on;".to_string());
+        self.output
+            .push("SET client_encoding = 'UTF8';".to_string());
+        self.output
+            .push("SET standard_conforming_strings = on;".to_string());
         self.output.push(String::new());
     }
 
@@ -494,7 +497,9 @@ impl SqlDumper {
                     .join(", ");
 
                 let insert = if self.options.column_inserts {
-                    let cols = data.columns.iter()
+                    let cols = data
+                        .columns
+                        .iter()
                         .map(|c| self.quote(c))
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -519,7 +524,8 @@ impl SqlDumper {
             self.output.push(format!(
                 "COPY {} ({}) FROM stdin;",
                 full_name,
-                data.columns.iter()
+                data.columns
+                    .iter()
                     .map(|c| self.quote(c))
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -625,7 +631,10 @@ impl SqlDumper {
     fn escape_value(&self, value: &str) -> String {
         if value == "NULL" || value == "null" {
             "NULL".to_string()
-        } else if value.chars().all(|c| c.is_numeric() || c == '-' || c == '.') {
+        } else if value
+            .chars()
+            .all(|c| c.is_numeric() || c == '-' || c == '.')
+        {
             value.to_string()
         } else {
             format!("'{}'", value.replace('\'', "''"))
@@ -788,7 +797,10 @@ impl SqlRestorer {
             // Check if this is a COPY ... FROM stdin statement
             if !in_copy_data && !in_dollar_quote && !in_string {
                 let upper = trimmed.to_uppercase();
-                if upper.starts_with("COPY ") && upper.contains(" FROM STDIN") && trimmed.ends_with(';') {
+                if upper.starts_with("COPY ")
+                    && upper.contains(" FROM STDIN")
+                    && trimmed.ends_with(';')
+                {
                     in_copy_data = true;
                     continue; // Don't push yet, wait for data and \.
                 }
@@ -862,7 +874,9 @@ pub struct RestoreStats {
 
 /// Check if identifier needs quoting
 fn needs_quoting(name: &str) -> bool {
-    let keywords = ["user", "table", "index", "order", "group", "select", "from", "where"];
+    let keywords = [
+        "user", "table", "index", "order", "group", "select", "from", "where",
+    ];
 
     if name.is_empty() {
         return true;
@@ -956,9 +970,14 @@ mod tests {
 
     #[test]
     fn test_dump_object() {
-        let obj = DumpObject::new(ObjectType::Table, "public", "users", "CREATE TABLE users ();")
-            .with_owner("admin")
-            .with_dependency("other_table");
+        let obj = DumpObject::new(
+            ObjectType::Table,
+            "public",
+            "users",
+            "CREATE TABLE users ();",
+        )
+        .with_owner("admin")
+        .with_dependency("other_table");
 
         assert_eq!(obj.qualified_name(), "users");
         assert_eq!(obj.owner, Some("admin".to_string()));
@@ -1003,8 +1022,13 @@ mod tests {
             ..Default::default()
         });
 
-        let obj = DumpObject::new(ObjectType::Schema, "", "myschema", "CREATE SCHEMA myschema;")
-            .with_owner("admin");
+        let obj = DumpObject::new(
+            ObjectType::Schema,
+            "",
+            "myschema",
+            "CREATE SCHEMA myschema;",
+        )
+        .with_owner("admin");
 
         dumper.dump_schema(&obj);
 
@@ -1191,7 +1215,12 @@ COPY users FROM stdin;
             ..Default::default()
         });
 
-        let obj = DumpObject::new(ObjectType::Table, "public", "users", "CREATE TABLE users ();");
+        let obj = DumpObject::new(
+            ObjectType::Table,
+            "public",
+            "users",
+            "CREATE TABLE users ();",
+        );
         dumper.dump_table(&obj);
 
         // Should not output schema

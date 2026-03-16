@@ -5,9 +5,9 @@
 //! - Domain constraints (CHECK, NOT NULL, DEFAULT)
 //! - Domain inheritance and composition
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // DOMAIN DEFINITION
@@ -74,7 +74,8 @@ impl Domain {
 
     /// Add CHECK constraint
     pub fn with_check(mut self, name: &str, expression: &str) -> Self {
-        self.constraints.push(DomainConstraint::check(name, expression));
+        self.constraints
+            .push(DomainConstraint::check(name, expression));
         self
     }
 
@@ -114,7 +115,10 @@ impl Domain {
 
     /// Generate CREATE DOMAIN SQL
     pub fn to_sql(&self) -> String {
-        let mut sql = format!("CREATE DOMAIN {}.{} AS {}", self.schema, self.name, self.base_type);
+        let mut sql = format!(
+            "CREATE DOMAIN {}.{} AS {}",
+            self.schema, self.name, self.base_type
+        );
 
         if let Some(type_mod) = self.type_mod {
             sql.push_str(&format!("({})", type_mod));
@@ -133,7 +137,10 @@ impl Domain {
         }
 
         for constraint in &self.constraints {
-            sql.push_str(&format!(" CONSTRAINT {} CHECK ({})", constraint.name, constraint.expression));
+            sql.push_str(&format!(
+                " CONSTRAINT {} CHECK ({})",
+                constraint.name, constraint.expression
+            ));
         }
 
         sql
@@ -232,7 +239,8 @@ impl DomainConstraint {
 fn extract_number(expr: &str, prefix: &str) -> Option<f64> {
     if let Some(pos) = expr.find(prefix) {
         let rest = &expr[pos + prefix.len()..];
-        let num_str: String = rest.chars()
+        let num_str: String = rest
+            .chars()
             .skip_while(|c| c.is_whitespace())
             .take_while(|c| c.is_numeric() || *c == '.' || *c == '-')
             .collect();
@@ -279,21 +287,20 @@ pub struct DomainTemplates;
 impl DomainTemplates {
     /// Email address domain
     pub fn email(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "text")
-            .not_null()
-            .with_check("valid_email", "VALUE ~ '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}$'")
+        Domain::new(schema, name, "text").not_null().with_check(
+            "valid_email",
+            "VALUE ~ '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}$'",
+        )
     }
 
     /// Positive integer domain
     pub fn positive_int(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "integer")
-            .with_check("positive", "VALUE > 0")
+        Domain::new(schema, name, "integer").with_check("positive", "VALUE > 0")
     }
 
     /// Non-negative integer domain
     pub fn non_negative_int(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "integer")
-            .with_check("non_negative", "VALUE >= 0")
+        Domain::new(schema, name, "integer").with_check("non_negative", "VALUE >= 0")
     }
 
     /// Percentage domain (0-100)
@@ -304,34 +311,37 @@ impl DomainTemplates {
 
     /// URL domain
     pub fn url(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "text")
-            .with_check("valid_url", "VALUE ~ '^https?://'")
+        Domain::new(schema, name, "text").with_check("valid_url", "VALUE ~ '^https?://'")
     }
 
     /// Phone number domain
     pub fn phone(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "text")
-            .with_check("valid_phone", "VALUE ~ '^[+]?[0-9]{10,15}$'")
+        Domain::new(schema, name, "text").with_check("valid_phone", "VALUE ~ '^[+]?[0-9]{10,15}$'")
     }
 
     /// ISO country code domain
     pub fn country_code(schema: &str, name: &str) -> Domain {
         Domain::new(schema, name, "char")
             .with_type_mod(2)
-            .with_check("valid_country", "LENGTH(VALUE) = 2 AND VALUE = UPPER(VALUE)")
+            .with_check(
+                "valid_country",
+                "LENGTH(VALUE) = 2 AND VALUE = UPPER(VALUE)",
+            )
     }
 
     /// Currency code domain
     pub fn currency_code(schema: &str, name: &str) -> Domain {
         Domain::new(schema, name, "char")
             .with_type_mod(3)
-            .with_check("valid_currency", "LENGTH(VALUE) = 3 AND VALUE = UPPER(VALUE)")
+            .with_check(
+                "valid_currency",
+                "LENGTH(VALUE) = 3 AND VALUE = UPPER(VALUE)",
+            )
     }
 
     /// UUID domain
     pub fn uuid(schema: &str, name: &str) -> Domain {
-        Domain::new(schema, name, "uuid")
-            .not_null()
+        Domain::new(schema, name, "uuid").not_null()
     }
 
     /// Non-empty text domain
@@ -402,7 +412,12 @@ impl DomainManager {
     }
 
     /// Alter domain - set default
-    pub fn alter_set_default(&self, schema: &str, name: &str, default_expr: &str) -> Result<(), DomainError> {
+    pub fn alter_set_default(
+        &self,
+        schema: &str,
+        name: &str,
+        default_expr: &str,
+    ) -> Result<(), DomainError> {
         let qualified_name = format!("{}.{}", schema, name);
 
         let mut domains = self.domains.write();
@@ -501,7 +516,12 @@ impl DomainManager {
     }
 
     /// Validate value against domain
-    pub fn validate(&self, schema: &str, name: &str, value: &DomainValue) -> Result<(), DomainError> {
+    pub fn validate(
+        &self,
+        schema: &str,
+        name: &str,
+        value: &DomainValue,
+    ) -> Result<(), DomainError> {
         let domain = self
             .get_domain(schema, name)
             .ok_or_else(|| DomainError::NotFound(format!("{}.{}", schema, name)))?;
@@ -554,7 +574,10 @@ pub enum DomainError {
     /// Type mismatch
     TypeMismatch { expected: String, got: String },
     /// Domain in use (cannot drop)
-    InUse { domain: String, used_by: Vec<String> },
+    InUse {
+        domain: String,
+        used_by: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for DomainError {
@@ -582,7 +605,12 @@ impl std::fmt::Display for DomainError {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
             }
             DomainError::InUse { domain, used_by } => {
-                write!(f, "domain \"{}\" is used by: {}", domain, used_by.join(", "))
+                write!(
+                    f,
+                    "domain \"{}\" is used by: {}",
+                    domain,
+                    used_by.join(", ")
+                )
             }
         }
     }
@@ -615,8 +643,7 @@ mod tests {
 
     #[test]
     fn test_domain_validation_check() {
-        let domain = Domain::new("public", "test", "integer")
-            .with_check("positive", "VALUE > 0");
+        let domain = Domain::new("public", "test", "integer").with_check("positive", "VALUE > 0");
 
         assert!(domain.validate(&DomainValue::value("42")).is_ok());
         assert!(domain.validate(&DomainValue::value("-1")).is_err());
@@ -626,8 +653,7 @@ mod tests {
     fn test_domain_manager() {
         let manager = DomainManager::new();
 
-        let domain = Domain::new("public", "email", "text")
-            .not_null();
+        let domain = Domain::new("public", "email", "text").not_null();
 
         manager.create_domain(domain).unwrap();
 
@@ -671,12 +697,16 @@ mod tests {
         manager.create_domain(domain).unwrap();
 
         let constraint = DomainConstraint::check("positive", "VALUE > 0");
-        manager.alter_add_constraint("public", "test", constraint).unwrap();
+        manager
+            .alter_add_constraint("public", "test", constraint)
+            .unwrap();
 
         let retrieved = manager.get_domain("public", "test").unwrap();
         assert_eq!(retrieved.constraints.len(), 1);
 
-        manager.alter_drop_constraint("public", "test", "positive").unwrap();
+        manager
+            .alter_drop_constraint("public", "test", "positive")
+            .unwrap();
         let retrieved = manager.get_domain("public", "test").unwrap();
         assert_eq!(retrieved.constraints.len(), 0);
     }
@@ -721,9 +751,15 @@ mod tests {
     fn test_list_domains() {
         let manager = DomainManager::new();
 
-        manager.create_domain(Domain::new("public", "d1", "integer")).unwrap();
-        manager.create_domain(Domain::new("public", "d2", "text")).unwrap();
-        manager.create_domain(Domain::new("other", "d3", "boolean")).unwrap();
+        manager
+            .create_domain(Domain::new("public", "d1", "integer"))
+            .unwrap();
+        manager
+            .create_domain(Domain::new("public", "d2", "text"))
+            .unwrap();
+        manager
+            .create_domain(Domain::new("other", "d3", "boolean"))
+            .unwrap();
 
         let public_domains = manager.list_domains("public");
         assert_eq!(public_domains.len(), 2);

@@ -2,6 +2,7 @@ use boyodb_core::engine::{Db, QueryRequest};
 use boyodb_core::AuthManager;
 use futures::stream;
 use futures::{Sink, SinkExt};
+use parking_lot::Mutex;
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::auth::{self, DefaultServerParameterProvider};
 use pgwire::api::portal::Portal;
@@ -24,7 +25,6 @@ use pgwire::messages::{startup::Authentication, PgWireBackendMessage};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use parking_lot::Mutex;
 
 #[derive(Clone)]
 pub struct BoyodbPgAuthHandler {

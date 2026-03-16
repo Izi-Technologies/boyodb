@@ -271,11 +271,9 @@ fn compatibility_decompose(c: char) -> String {
         '¾' => "3/4".to_string(),
 
         // Full-width characters
-        c if c >= '\u{FF01}' && c <= '\u{FF5E}' => {
-            char::from_u32(c as u32 - 0xFEE0)
-                .map(|ch| ch.to_string())
-                .unwrap_or_else(|| c.to_string())
-        }
+        c if c >= '\u{FF01}' && c <= '\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0)
+            .map(|ch| ch.to_string())
+            .unwrap_or_else(|| c.to_string()),
 
         _ => c.to_string(),
     }
@@ -298,12 +296,20 @@ pub struct CollationElement {
 
 impl CollationElement {
     pub fn new(primary: u16, secondary: u16, tertiary: u16) -> Self {
-        Self { primary, secondary, tertiary }
+        Self {
+            primary,
+            secondary,
+            tertiary,
+        }
     }
 
     /// Variable weight element (ignorable at some levels)
     pub fn variable(primary: u16) -> Self {
-        Self { primary, secondary: 0, tertiary: 0 }
+        Self {
+            primary,
+            secondary: 0,
+            tertiary: 0,
+        }
     }
 }
 
@@ -441,62 +447,81 @@ impl UcaCollator {
         // Simplified DUCET - in production would load full ICU data
         // ASCII letters
         for (i, c) in ('a'..='z').enumerate() {
-            self.ce_table.insert(c, vec![CollationElement::new(
-                (0x1000 + i) as u16, // Primary
-                0x0020,              // Secondary (base)
-                0x0002,              // Tertiary (lowercase)
-            )]);
-            self.ce_table.insert(c.to_ascii_uppercase(), vec![CollationElement::new(
-                (0x1000 + i) as u16, // Same primary
-                0x0020,              // Same secondary
-                0x0008,              // Tertiary (uppercase)
-            )]);
+            self.ce_table.insert(
+                c,
+                vec![CollationElement::new(
+                    (0x1000 + i) as u16, // Primary
+                    0x0020,              // Secondary (base)
+                    0x0002,              // Tertiary (lowercase)
+                )],
+            );
+            self.ce_table.insert(
+                c.to_ascii_uppercase(),
+                vec![CollationElement::new(
+                    (0x1000 + i) as u16, // Same primary
+                    0x0020,              // Same secondary
+                    0x0008,              // Tertiary (uppercase)
+                )],
+            );
         }
 
         // Digits
         for (i, c) in ('0'..='9').enumerate() {
-            self.ce_table.insert(c, vec![CollationElement::new(
-                (0x0100 + i) as u16,
-                0x0020,
-                0x0002,
-            )]);
+            self.ce_table.insert(
+                c,
+                vec![CollationElement::new((0x0100 + i) as u16, 0x0020, 0x0002)],
+            );
         }
 
         // Common accented characters
         let accented = [
-            ('á', 'a', 0x0021), ('à', 'a', 0x0022), ('â', 'a', 0x0023),
-            ('ä', 'a', 0x0024), ('ã', 'a', 0x0025), ('å', 'a', 0x0026),
-            ('é', 'e', 0x0021), ('è', 'e', 0x0022), ('ê', 'e', 0x0023),
+            ('á', 'a', 0x0021),
+            ('à', 'a', 0x0022),
+            ('â', 'a', 0x0023),
+            ('ä', 'a', 0x0024),
+            ('ã', 'a', 0x0025),
+            ('å', 'a', 0x0026),
+            ('é', 'e', 0x0021),
+            ('è', 'e', 0x0022),
+            ('ê', 'e', 0x0023),
             ('ë', 'e', 0x0024),
-            ('í', 'i', 0x0021), ('ì', 'i', 0x0022), ('î', 'i', 0x0023),
+            ('í', 'i', 0x0021),
+            ('ì', 'i', 0x0022),
+            ('î', 'i', 0x0023),
             ('ï', 'i', 0x0024),
-            ('ó', 'o', 0x0021), ('ò', 'o', 0x0022), ('ô', 'o', 0x0023),
-            ('ö', 'o', 0x0024), ('õ', 'o', 0x0025),
-            ('ú', 'u', 0x0021), ('ù', 'u', 0x0022), ('û', 'u', 0x0023),
+            ('ó', 'o', 0x0021),
+            ('ò', 'o', 0x0022),
+            ('ô', 'o', 0x0023),
+            ('ö', 'o', 0x0024),
+            ('õ', 'o', 0x0025),
+            ('ú', 'u', 0x0021),
+            ('ù', 'u', 0x0022),
+            ('û', 'u', 0x0023),
             ('ü', 'u', 0x0024),
             ('ñ', 'n', 0x0021),
             ('ç', 'c', 0x0021),
         ];
 
         for (accented_char, base_char, secondary) in accented {
-            let base_primary = self.ce_table.get(&base_char)
+            let base_primary = self
+                .ce_table
+                .get(&base_char)
                 .map(|ces| ces[0].primary)
                 .unwrap_or(0x1000);
-            self.ce_table.insert(accented_char, vec![CollationElement::new(
-                base_primary,
-                secondary,
-                0x0002,
-            )]);
-            self.ce_table.insert(accented_char.to_ascii_uppercase(), vec![CollationElement::new(
-                base_primary,
-                secondary,
-                0x0008,
-            )]);
+            self.ce_table.insert(
+                accented_char,
+                vec![CollationElement::new(base_primary, secondary, 0x0002)],
+            );
+            self.ce_table.insert(
+                accented_char.to_ascii_uppercase(),
+                vec![CollationElement::new(base_primary, secondary, 0x0008)],
+            );
         }
 
         // Punctuation and symbols (variable weight)
         for c in [' ', ',', '.', ';', ':', '!', '?', '-', '_'] {
-            self.ce_table.insert(c, vec![CollationElement::variable(0x0001)]);
+            self.ce_table
+                .insert(c, vec![CollationElement::variable(0x0001)]);
         }
     }
 
@@ -537,16 +562,22 @@ impl UcaCollator {
         // V = W in Swedish
 
         // å after z
-        self.ce_table.insert('å', vec![CollationElement::new(0x2000, 0x0020, 0x0002)]);
-        self.ce_table.insert('Å', vec![CollationElement::new(0x2000, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('å', vec![CollationElement::new(0x2000, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Å', vec![CollationElement::new(0x2000, 0x0020, 0x0008)]);
 
         // ä after å
-        self.ce_table.insert('ä', vec![CollationElement::new(0x2001, 0x0020, 0x0002)]);
-        self.ce_table.insert('Ä', vec![CollationElement::new(0x2001, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('ä', vec![CollationElement::new(0x2001, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Ä', vec![CollationElement::new(0x2001, 0x0020, 0x0008)]);
 
         // ö after ä
-        self.ce_table.insert('ö', vec![CollationElement::new(0x2002, 0x0020, 0x0002)]);
-        self.ce_table.insert('Ö', vec![CollationElement::new(0x2002, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('ö', vec![CollationElement::new(0x2002, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Ö', vec![CollationElement::new(0x2002, 0x0020, 0x0008)]);
     }
 
     fn apply_spanish_tailorings(&mut self) {
@@ -554,29 +585,39 @@ impl UcaCollator {
         // Modern Spanish (2010): ch and ll are digraphs, not separate letters
         // ñ sorts after n
 
-        let n_primary = self.ce_table.get(&'n')
+        let n_primary = self
+            .ce_table
+            .get(&'n')
             .map(|ces| ces[0].primary)
             .unwrap_or(0x1000);
 
-        self.ce_table.insert('ñ', vec![CollationElement::new(
-            n_primary + 1, 0x0020, 0x0002
-        )]);
-        self.ce_table.insert('Ñ', vec![CollationElement::new(
-            n_primary + 1, 0x0020, 0x0008
-        )]);
+        self.ce_table.insert(
+            'ñ',
+            vec![CollationElement::new(n_primary + 1, 0x0020, 0x0002)],
+        );
+        self.ce_table.insert(
+            'Ñ',
+            vec![CollationElement::new(n_primary + 1, 0x0020, 0x0008)],
+        );
     }
 
     fn apply_danish_norwegian_tailorings(&mut self) {
         // æ, ø, å at end of alphabet
 
-        self.ce_table.insert('æ', vec![CollationElement::new(0x2000, 0x0020, 0x0002)]);
-        self.ce_table.insert('Æ', vec![CollationElement::new(0x2000, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('æ', vec![CollationElement::new(0x2000, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Æ', vec![CollationElement::new(0x2000, 0x0020, 0x0008)]);
 
-        self.ce_table.insert('ø', vec![CollationElement::new(0x2001, 0x0020, 0x0002)]);
-        self.ce_table.insert('Ø', vec![CollationElement::new(0x2001, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('ø', vec![CollationElement::new(0x2001, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Ø', vec![CollationElement::new(0x2001, 0x0020, 0x0008)]);
 
-        self.ce_table.insert('å', vec![CollationElement::new(0x2002, 0x0020, 0x0002)]);
-        self.ce_table.insert('Å', vec![CollationElement::new(0x2002, 0x0020, 0x0008)]);
+        self.ce_table
+            .insert('å', vec![CollationElement::new(0x2002, 0x0020, 0x0002)]);
+        self.ce_table
+            .insert('Å', vec![CollationElement::new(0x2002, 0x0020, 0x0008)]);
     }
 
     /// Set strength level
@@ -600,7 +641,10 @@ impl UcaCollator {
         // Fallback to built-in implementation
         // Normalize if enabled
         let (a, b) = if self.normalization {
-            (normalize(a, NormalizationForm::Nfc), normalize(b, NormalizationForm::Nfc))
+            (
+                normalize(a, NormalizationForm::Nfc),
+                normalize(b, NormalizationForm::Nfc),
+            )
         } else {
             (a.to_string(), b.to_string())
         };
@@ -624,7 +668,9 @@ impl UcaCollator {
             for elem in elements {
                 // Handle variable weighting
                 if self.variable_weighting == VariableWeighting::Blanked
-                    && elem.secondary == 0 && elem.tertiary == 0 {
+                    && elem.secondary == 0
+                    && elem.tertiary == 0
+                {
                     continue;
                 }
 
@@ -658,9 +704,13 @@ impl UcaCollator {
                 CaseFirst::Upper => {
                     // Invert case bits for uppercase first
                     sort_key.extend(tertiary_keys.iter().map(|&t| {
-                        if t == 0x0002 { 0x0008 }
-                        else if t == 0x0008 { 0x0002 }
-                        else { t }
+                        if t == 0x0002 {
+                            0x0008
+                        } else if t == 0x0008 {
+                            0x0002
+                        } else {
+                            t
+                        }
                     }));
                 }
                 CaseFirst::Lower => sort_key.extend(&tertiary_keys),
@@ -672,12 +722,10 @@ impl UcaCollator {
 
     /// Get collation elements for a character
     fn get_collation_elements(&self, c: char) -> Vec<CollationElement> {
-        self.ce_table.get(&c)
-            .cloned()
-            .unwrap_or_else(|| {
-                // Unknown character - use code point as primary weight
-                vec![CollationElement::new(c as u16, 0x0020, 0x0002)]
-            })
+        self.ce_table.get(&c).cloned().unwrap_or_else(|| {
+            // Unknown character - use code point as primary weight
+            vec![CollationElement::new(c as u16, 0x0020, 0x0002)]
+        })
     }
 
     /// Check if strings are equal at current strength
@@ -767,11 +815,11 @@ pub fn is_mark(c: char) -> bool {
     // Combining marks are in range U+0300 to U+036F (Combining Diacritical Marks)
     // and other ranges
     let code = c as u32;
-    (0x0300..=0x036F).contains(&code) ||
-    (0x1AB0..=0x1AFF).contains(&code) ||
-    (0x1DC0..=0x1DFF).contains(&code) ||
-    (0x20D0..=0x20FF).contains(&code) ||
-    (0xFE20..=0xFE2F).contains(&code)
+    (0x0300..=0x036F).contains(&code)
+        || (0x1AB0..=0x1AFF).contains(&code)
+        || (0x1DC0..=0x1DFF).contains(&code)
+        || (0x20D0..=0x20FF).contains(&code)
+        || (0xFE20..=0xFE2F).contains(&code)
 }
 
 /// Check if character is a number
@@ -911,7 +959,8 @@ impl IcuProvider {
     /// Get or create a collator for a locale
     pub fn collator(&mut self, locale: &str) -> &UcaCollator {
         if !self.collators.contains_key(locale) {
-            self.collators.insert(locale.to_string(), UcaCollator::new_with_locale(locale));
+            self.collators
+                .insert(locale.to_string(), UcaCollator::new_with_locale(locale));
         }
         self.collators.get(locale).unwrap()
     }
@@ -919,22 +968,10 @@ impl IcuProvider {
     /// List available locales
     pub fn available_locales(&self) -> Vec<&str> {
         vec![
-            "root", "en", "en_US", "en_GB",
-            "de", "de_DE", "de_AT",
-            "fr", "fr_FR", "fr_CA",
-            "es", "es_ES", "es_MX",
-            "it", "it_IT",
-            "pt", "pt_BR", "pt_PT",
-            "nl", "nl_NL",
-            "sv", "sv_SE",
-            "da", "da_DK",
-            "nb", "nb_NO",
-            "fi", "fi_FI",
-            "pl", "pl_PL",
-            "ru", "ru_RU",
-            "ja", "ja_JP",
-            "zh", "zh_CN", "zh_TW",
-            "ko", "ko_KR",
+            "root", "en", "en_US", "en_GB", "de", "de_DE", "de_AT", "fr", "fr_FR", "fr_CA", "es",
+            "es_ES", "es_MX", "it", "it_IT", "pt", "pt_BR", "pt_PT", "nl", "nl_NL", "sv", "sv_SE",
+            "da", "da_DK", "nb", "nb_NO", "fi", "fi_FI", "pl", "pl_PL", "ru", "ru_RU", "ja",
+            "ja_JP", "zh", "zh_CN", "zh_TW", "ko", "ko_KR",
         ]
     }
 }

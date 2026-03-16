@@ -23,10 +23,10 @@
 //! WHERE id = 1 AND version = 5;
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -413,7 +413,10 @@ impl WaitForGraph {
 
     /// Get all transactions waiting on a given transaction
     pub fn get_waiters(&self, blocker: TransactionId) -> Vec<TransactionId> {
-        self.reverse_edges.get(&blocker).cloned().unwrap_or_default()
+        self.reverse_edges
+            .get(&blocker)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Get all edges
@@ -670,11 +673,7 @@ impl DeadlockDetector {
 
         if let Some(entry) = entry {
             // Update transaction state
-            if let Some(state) = self
-                .transactions
-                .write()
-                .get_mut(&entry.transaction_id)
-            {
+            if let Some(state) = self.transactions.write().get_mut(&entry.transaction_id) {
                 state.held_locks.retain(|&id| id != lock_id);
             }
 
@@ -710,9 +709,7 @@ impl DeadlockDetector {
         for (lock_id, txn_id, mode) in waiting {
             // Check if conflicts still exist
             let still_conflicts = held_locks.iter().any(|(other_id, other_txn, other_mode)| {
-                *other_id != lock_id
-                    && *other_txn != txn_id
-                    && mode.conflicts_with(other_mode)
+                *other_id != lock_id && *other_txn != txn_id && mode.conflicts_with(other_mode)
             });
 
             if !still_conflicts {
@@ -762,38 +759,30 @@ impl DeadlockDetector {
         let transactions = self.transactions.read();
 
         match self.config.victim_strategy {
-            VictimStrategy::Youngest => {
-                cycle
-                    .iter()
-                    .filter_map(|&txn| transactions.get(&txn))
-                    .max_by_key(|s| s.started_at.elapsed())
-                    .map(|s| s.transaction_id)
-                    .unwrap_or(cycle[0])
-            }
-            VictimStrategy::Oldest => {
-                cycle
-                    .iter()
-                    .filter_map(|&txn| transactions.get(&txn))
-                    .min_by_key(|s| s.started_at.elapsed())
-                    .map(|s| s.transaction_id)
-                    .unwrap_or(cycle[0])
-            }
-            VictimStrategy::LeastWork => {
-                cycle
-                    .iter()
-                    .filter_map(|&txn| transactions.get(&txn))
-                    .min_by_key(|s| s.work_done)
-                    .map(|s| s.transaction_id)
-                    .unwrap_or(cycle[0])
-            }
-            VictimStrategy::LowestPriority => {
-                cycle
-                    .iter()
-                    .filter_map(|&txn| transactions.get(&txn))
-                    .min_by_key(|s| s.priority)
-                    .map(|s| s.transaction_id)
-                    .unwrap_or(cycle[0])
-            }
+            VictimStrategy::Youngest => cycle
+                .iter()
+                .filter_map(|&txn| transactions.get(&txn))
+                .max_by_key(|s| s.started_at.elapsed())
+                .map(|s| s.transaction_id)
+                .unwrap_or(cycle[0]),
+            VictimStrategy::Oldest => cycle
+                .iter()
+                .filter_map(|&txn| transactions.get(&txn))
+                .min_by_key(|s| s.started_at.elapsed())
+                .map(|s| s.transaction_id)
+                .unwrap_or(cycle[0]),
+            VictimStrategy::LeastWork => cycle
+                .iter()
+                .filter_map(|&txn| transactions.get(&txn))
+                .min_by_key(|s| s.work_done)
+                .map(|s| s.transaction_id)
+                .unwrap_or(cycle[0]),
+            VictimStrategy::LowestPriority => cycle
+                .iter()
+                .filter_map(|&txn| transactions.get(&txn))
+                .min_by_key(|s| s.priority)
+                .map(|s| s.transaction_id)
+                .unwrap_or(cycle[0]),
             VictimStrategy::Random => cycle[0],
         }
     }
@@ -823,7 +812,9 @@ impl DeadlockDetector {
                 transaction_id: s.transaction_id,
                 is_waiting: s.waiting_for.is_some(),
                 locks_held: s.held_locks.len(),
-                wait_time_ms: s.waiting_for.map(|_| s.started_at.elapsed().as_millis() as u64),
+                wait_time_ms: s
+                    .waiting_for
+                    .map(|_| s.started_at.elapsed().as_millis() as u64),
             })
             .collect();
 

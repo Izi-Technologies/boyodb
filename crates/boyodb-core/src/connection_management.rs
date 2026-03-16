@@ -21,11 +21,11 @@
 //! SELECT pg_terminate_backend(pid);
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
@@ -75,11 +75,7 @@ impl std::fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooManyConnections { current, max } => {
-                write!(
-                    f,
-                    "too many connections: {} (max {})",
-                    current, max
-                )
+                write!(f, "too many connections: {} (max {})", current, max)
             }
             Self::TooManyUserConnections { user, current, max } => {
                 write!(
@@ -101,7 +97,9 @@ impl std::fmt::Display for ConnectionError {
             }
             Self::ConnectionNotFound(id) => write!(f, "connection {} not found", id),
             Self::ConnectionTimeout(id) => write!(f, "connection {} timed out", id),
-            Self::PoolExhausted { pool_name } => write!(f, "connection pool '{}' exhausted", pool_name),
+            Self::PoolExhausted { pool_name } => {
+                write!(f, "connection pool '{}' exhausted", pool_name)
+            }
             Self::AuthenticationFailed(msg) => write!(f, "authentication failed: {}", msg),
             Self::ConnectionRefused(msg) => write!(f, "connection refused: {}", msg),
             Self::Internal(msg) => write!(f, "internal error: {}", msg),
@@ -719,7 +717,9 @@ impl ConnectionManager {
     /// Create a connection pool
     pub fn create_pool(&self, config: PoolConfig) -> Arc<ConnectionPool> {
         let pool = Arc::new(ConnectionPool::new(config.clone()));
-        self.pools.write().insert(config.name.clone(), Arc::clone(&pool));
+        self.pools
+            .write()
+            .insert(config.name.clone(), Arc::clone(&pool));
         pool
     }
 
@@ -745,7 +745,9 @@ impl ConnectionManager {
         let effective_max = if is_superuser {
             self.limits.max_connections
         } else {
-            self.limits.max_connections.saturating_sub(self.limits.superuser_reserved_connections)
+            self.limits
+                .max_connections
+                .saturating_sub(self.limits.superuser_reserved_connections)
         };
 
         if current >= effective_max {
@@ -1084,7 +1086,10 @@ mod tests {
 
         // Third should fail
         let result = manager.register_connection("db", "user", None, false);
-        assert!(matches!(result, Err(ConnectionError::TooManyConnections { .. })));
+        assert!(matches!(
+            result,
+            Err(ConnectionError::TooManyConnections { .. })
+        ));
     }
 
     #[test]

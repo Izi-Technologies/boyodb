@@ -985,8 +985,7 @@ mod tests {
     fn test_sort_output() {
         let formatter = ExplainFormatter::new(ExplainOptions::default());
 
-        let mut node = PlanNode::new(PlanNodeType::Sort)
-            .with_costs(0.0, 150.0, 1000.0, 64);
+        let mut node = PlanNode::new(PlanNodeType::Sort).with_costs(0.0, 150.0, 1000.0, 64);
         node.sort_key = vec!["name ASC".to_string(), "created_at DESC".to_string()];
 
         let child = PlanNode::new(PlanNodeType::SeqScan)

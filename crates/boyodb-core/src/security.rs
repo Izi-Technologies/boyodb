@@ -5,9 +5,9 @@
 //! - Audit Logging for compliance and forensics
 //! - Column Encryption for data protection at rest
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -249,11 +249,7 @@ impl RlsManager {
     /// Get all policies for a table
     pub fn get_policies(&self, database: &str, table: &str) -> Vec<RlsPolicy> {
         let key = format!("{}.{}", database, table);
-        self.policies
-            .read()
-            .get(&key)
-            .cloned()
-            .unwrap_or_default()
+        self.policies.read().get(&key).cloned().unwrap_or_default()
     }
 
     /// Evaluate RLS for a command

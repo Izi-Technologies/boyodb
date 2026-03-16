@@ -290,8 +290,7 @@ impl UnivariateState {
         let term1 = delta * delta_n * (n_f - 1.0);
 
         self.mean += delta_n;
-        self.m4 += term1 * delta_n2 * (n_f * n_f - 3.0 * n_f + 3.0)
-            + 6.0 * delta_n2 * self.m2
+        self.m4 += term1 * delta_n2 * (n_f * n_f - 3.0 * n_f + 3.0) + 6.0 * delta_n2 * self.m2
             - 4.0 * delta_n * self.m3;
         self.m3 += term1 * delta_n * (n_f - 2.0) - 3.0 * delta_n * self.m2;
         self.m2 += term1;
@@ -321,11 +320,13 @@ impl UnivariateState {
 
         let new_m2 = self.m2 + other.m2 + delta2 * n1 * n2 / n;
 
-        let new_m3 = self.m3 + other.m3
+        let new_m3 = self.m3
+            + other.m3
             + delta3 * n1 * n2 * (n1 - n2) / (n * n)
             + 3.0 * delta * (n1 * other.m2 - n2 * self.m2) / n;
 
-        let new_m4 = self.m4 + other.m4
+        let new_m4 = self.m4
+            + other.m4
             + delta4 * n1 * n2 * (n1 * n1 - n1 * n2 + n2 * n2) / (n * n * n)
             + 6.0 * delta2 * (n1 * n1 * other.m2 + n2 * n2 * self.m2) / (n * n)
             + 4.0 * delta * (n1 * other.m3 - n2 * self.m3) / n;
@@ -447,7 +448,8 @@ impl PercentileState {
 
     fn ensure_sorted(&mut self) {
         if !self.sorted {
-            self.values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            self.values
+                .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             self.sorted = true;
         }
     }
@@ -505,12 +507,14 @@ impl PercentileState {
         let mut counts: HashMap<u64, (f64, usize)> = HashMap::new();
         for &v in &self.values {
             let key = v.to_bits();
-            counts.entry(key)
+            counts
+                .entry(key)
                 .and_modify(|(_, count)| *count += 1)
                 .or_insert((v, 1));
         }
 
-        counts.into_values()
+        counts
+            .into_values()
             .max_by_key(|(_, count)| *count)
             .map(|(v, _)| v)
     }
@@ -574,7 +578,10 @@ pub fn t_test_one_sample(state: &UnivariateState, mu: f64) -> Option<TTestResult
 }
 
 /// Perform two-sample t-test (independent samples)
-pub fn t_test_two_sample(state1: &UnivariateState, state2: &UnivariateState) -> Option<TTestResult> {
+pub fn t_test_two_sample(
+    state1: &UnivariateState,
+    state2: &UnivariateState,
+) -> Option<TTestResult> {
     if state1.count < 2 || state2.count < 2 {
         return None;
     }
@@ -851,9 +858,7 @@ pub fn chi_square_independence(contingency: &[Vec<f64>]) -> Option<ChiSquareResu
     let cols = contingency[0].len();
 
     // Calculate row and column totals
-    let row_totals: Vec<f64> = contingency.iter()
-        .map(|row| row.iter().sum())
-        .collect();
+    let row_totals: Vec<f64> = contingency.iter().map(|row| row.iter().sum()).collect();
 
     let col_totals: Vec<f64> = (0..cols)
         .map(|j| contingency.iter().map(|row| row[j]).sum())
@@ -995,7 +1000,8 @@ pub fn anova_one_way(groups: &[&[f64]]) -> Option<AnovaResult> {
     let mut grand_sum = 0.0;
 
     // Calculate group means and sizes
-    let group_stats: Vec<(usize, f64, f64)> = groups.iter()
+    let group_stats: Vec<(usize, f64, f64)> = groups
+        .iter()
         .map(|g| {
             let n = g.len();
             let sum: f64 = g.iter().sum();
@@ -1253,9 +1259,15 @@ mod tests {
 
     #[test]
     fn test_stat_function_names() {
-        assert_eq!(StatFunction::from_name("REGR_SLOPE"), Some(StatFunction::RegrSlope));
+        assert_eq!(
+            StatFunction::from_name("REGR_SLOPE"),
+            Some(StatFunction::RegrSlope)
+        );
         assert_eq!(StatFunction::from_name("corr"), Some(StatFunction::Corr));
-        assert_eq!(StatFunction::from_name("COVAR_POP"), Some(StatFunction::CovarPop));
+        assert_eq!(
+            StatFunction::from_name("COVAR_POP"),
+            Some(StatFunction::CovarPop)
+        );
         assert_eq!(StatFunction::from_name("unknown"), None);
     }
 }

@@ -177,7 +177,9 @@ impl CardinalityModel {
 
     /// Estimate cardinality for a table scan
     pub fn estimate_scan(&self, table: &str, predicates: &[Predicate]) -> u64 {
-        let base_rows = self.table_stats.get(table)
+        let base_rows = self
+            .table_stats
+            .get(table)
             .map(|s| s.row_count)
             .unwrap_or(1000); // Default estimate
 
@@ -200,8 +202,9 @@ impl CardinalityModel {
     ) -> u64 {
         // Check history for similar joins
         for entry in &self.join_history {
-            if (entry.left_table == left_table && entry.right_table == right_table) ||
-               (entry.left_table == right_table && entry.right_table == left_table) {
+            if (entry.left_table == left_table && entry.right_table == right_table)
+                || (entry.left_table == right_table && entry.right_table == left_table)
+            {
                 return ((left_rows as f64 * right_rows as f64) * entry.actual_selectivity) as u64;
             }
         }
@@ -223,11 +226,11 @@ impl CardinalityModel {
                     // 1 / distinct_count
                     1.0 / (stats.distinct_count as f64).max(1.0)
                 }
-                PredicateOp::NotEqual => {
-                    1.0 - (1.0 / (stats.distinct_count as f64).max(1.0))
-                }
-                PredicateOp::LessThan | PredicateOp::LessEqual |
-                PredicateOp::GreaterThan | PredicateOp::GreaterEqual => {
+                PredicateOp::NotEqual => 1.0 - (1.0 / (stats.distinct_count as f64).max(1.0)),
+                PredicateOp::LessThan
+                | PredicateOp::LessEqual
+                | PredicateOp::GreaterThan
+                | PredicateOp::GreaterEqual => {
                     // Use histogram if available
                     if !stats.histogram.is_empty() {
                         // Simple: assume 30% selectivity
@@ -244,20 +247,18 @@ impl CardinalityModel {
                     // Depends on IN list size
                     0.2
                 }
-                PredicateOp::IsNull => {
-                    stats.null_fraction
-                }
-                PredicateOp::IsNotNull => {
-                    1.0 - stats.null_fraction
-                }
+                PredicateOp::IsNull => stats.null_fraction,
+                PredicateOp::IsNotNull => 1.0 - stats.null_fraction,
             }
         } else {
             // Default selectivities
             match pred.op {
                 PredicateOp::Equal => 0.01,
                 PredicateOp::NotEqual => 0.99,
-                PredicateOp::LessThan | PredicateOp::LessEqual |
-                PredicateOp::GreaterThan | PredicateOp::GreaterEqual => 0.33,
+                PredicateOp::LessThan
+                | PredicateOp::LessEqual
+                | PredicateOp::GreaterThan
+                | PredicateOp::GreaterEqual => 0.33,
                 PredicateOp::Like => 0.1,
                 PredicateOp::In => 0.2,
                 PredicateOp::IsNull => 0.01,
@@ -350,8 +351,7 @@ impl Default for CostModel {
 impl CostModel {
     /// Estimate cost of sequential scan
     pub fn seq_scan_cost(&self, pages: u64, rows: u64) -> f64 {
-        (pages as f64 * self.seq_page_cost) +
-        (rows as f64 * self.cpu_tuple_cost)
+        (pages as f64 * self.seq_page_cost) + (rows as f64 * self.cpu_tuple_cost)
     }
 
     /// Estimate cost of index scan
@@ -504,36 +504,46 @@ impl AiQueryOptimizer {
         let weights = self.weights.read();
         let history = self.history.read();
 
-        let mut scores: Vec<(u32, f64, String)> = alternatives.iter().map(|alt| {
-            let mut score = 0.0;
-            let mut reasons = Vec::new();
+        let mut scores: Vec<(u32, f64, String)> = alternatives
+            .iter()
+            .map(|alt| {
+                let mut score = 0.0;
+                let mut reasons = Vec::new();
 
-            // Cost-based score (lower is better, so invert)
-            let max_cost = alternatives.iter().map(|a| a.estimated_cost).fold(0.0, f64::max);
-            let cost_score = if max_cost > 0.0 {
-                1.0 - (alt.estimated_cost / max_cost)
-            } else {
-                1.0
-            };
-            score += cost_score * weights.cost_weight;
-            reasons.push(format!("cost_score={:.2}", cost_score));
+                // Cost-based score (lower is better, so invert)
+                let max_cost = alternatives
+                    .iter()
+                    .map(|a| a.estimated_cost)
+                    .fold(0.0, f64::max);
+                let cost_score = if max_cost > 0.0 {
+                    1.0 - (alt.estimated_cost / max_cost)
+                } else {
+                    1.0
+                };
+                score += cost_score * weights.cost_weight;
+                reasons.push(format!("cost_score={:.2}", cost_score));
 
-            // Historical performance
-            let hist_score = self.get_historical_score(&alt.description, &history);
-            score += hist_score * weights.history_weight;
-            reasons.push(format!("history_score={:.2}", hist_score));
+                // Historical performance
+                let hist_score = self.get_historical_score(&alt.description, &history);
+                score += hist_score * weights.history_weight;
+                reasons.push(format!("history_score={:.2}", hist_score));
 
-            // Parallelism potential (based on plan features)
-            let parallel_score = if alt.estimated_rows > 10000 { 0.8 } else { 0.2 };
-            score += parallel_score * weights.parallel_weight;
+                // Parallelism potential (based on plan features)
+                let parallel_score = if alt.estimated_rows > 10000 { 0.8 } else { 0.2 };
+                score += parallel_score * weights.parallel_weight;
 
-            // Index usage score
-            let index_score = if !alt.index_hints.is_empty() { 0.9 } else { 0.3 };
-            score += index_score * weights.index_weight;
-            reasons.push(format!("index_score={:.2}", index_score));
+                // Index usage score
+                let index_score = if !alt.index_hints.is_empty() {
+                    0.9
+                } else {
+                    0.3
+                };
+                score += index_score * weights.index_weight;
+                reasons.push(format!("index_score={:.2}", index_score));
 
-            (alt.id, score, reasons.join(", "))
-        }).collect();
+                (alt.id, score, reasons.join(", "))
+            })
+            .collect();
 
         // Select best scoring plan
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -554,9 +564,10 @@ impl AiQueryOptimizer {
             stats.cost_based_fallbacks += 1;
         }
         let elapsed = start.elapsed();
-        stats.avg_optimization_time_us =
-            (stats.avg_optimization_time_us * (stats.queries_optimized - 1) as f64 +
-             elapsed.as_micros() as f64) / stats.queries_optimized as f64;
+        stats.avg_optimization_time_us = (stats.avg_optimization_time_us
+            * (stats.queries_optimized - 1) as f64
+            + elapsed.as_micros() as f64)
+            / stats.queries_optimized as f64;
 
         OptimizationResult {
             selected_plan: best_id,
@@ -568,7 +579,8 @@ impl AiQueryOptimizer {
 
     /// Get historical score for a plan type
     fn get_historical_score(&self, plan_desc: &str, history: &[ExecutionHistory]) -> f64 {
-        let relevant: Vec<&ExecutionHistory> = history.iter()
+        let relevant: Vec<&ExecutionHistory> = history
+            .iter()
             .filter(|h| h.fingerprint.contains(plan_desc) || plan_desc.contains(&h.fingerprint))
             .collect();
 
@@ -577,9 +589,11 @@ impl AiQueryOptimizer {
         }
 
         // Average normalized execution time
-        let avg_time: f64 = relevant.iter()
+        let avg_time: f64 = relevant
+            .iter()
             .map(|h| h.execution_time.as_micros() as f64)
-            .sum::<f64>() / relevant.len() as f64;
+            .sum::<f64>()
+            / relevant.len() as f64;
 
         // Lower time is better, normalize to 0-1
         let max_expected_time = 1_000_000.0; // 1 second
@@ -607,7 +621,12 @@ impl AiQueryOptimizer {
     }
 
     /// Update learning weights based on feedback
-    pub fn update_weights(&self, actual_best: u32, predicted_best: u32, alternatives: &[PlanAlternative]) {
+    pub fn update_weights(
+        &self,
+        actual_best: u32,
+        predicted_best: u32,
+        alternatives: &[PlanAlternative],
+    ) {
         if actual_best == predicted_best {
             return; // Prediction was correct
         }
@@ -634,8 +653,10 @@ impl AiQueryOptimizer {
             }
 
             // Normalize weights
-            let total = weights.cost_weight + weights.history_weight +
-                       weights.parallel_weight + weights.index_weight;
+            let total = weights.cost_weight
+                + weights.history_weight
+                + weights.parallel_weight
+                + weights.index_weight;
             weights.cost_weight /= total;
             weights.history_weight /= total;
             weights.parallel_weight /= total;
@@ -655,7 +676,9 @@ impl AiQueryOptimizer {
 
     /// Add column statistics
     pub fn add_column_stats(&self, table: &str, column: &str, stats: ColumnStats) {
-        self.cardinality.write().add_column_stats(table, column, stats);
+        self.cardinality
+            .write()
+            .add_column_stats(table, column, stats);
     }
 
     /// Get optimizer statistics
@@ -716,20 +739,27 @@ mod tests {
     fn test_cardinality_estimation() {
         let mut model = CardinalityModel::new();
 
-        model.add_table_stats("users".into(), TableStats {
-            row_count: 10000,
-            size_bytes: 1000000,
-            last_analyzed: SystemTime::now(),
-        });
+        model.add_table_stats(
+            "users".into(),
+            TableStats {
+                row_count: 10000,
+                size_bytes: 1000000,
+                last_analyzed: SystemTime::now(),
+            },
+        );
 
-        model.add_column_stats("users", "status", ColumnStats {
-            distinct_count: 5,
-            null_fraction: 0.0,
-            avg_width: 10,
-            correlation: 1.0,
-            histogram: vec![],
-            most_common_values: vec![],
-        });
+        model.add_column_stats(
+            "users",
+            "status",
+            ColumnStats {
+                distinct_count: 5,
+                null_fraction: 0.0,
+                avg_width: 10,
+                correlation: 1.0,
+                histogram: vec![],
+                most_common_values: vec![],
+            },
+        );
 
         // Estimate with equality predicate
         let predicates = vec![Predicate {
@@ -844,8 +874,10 @@ mod tests {
         optimizer.update_weights(2, 1, &alternatives);
 
         let weights = optimizer.get_weights();
-        let total = weights.cost_weight + weights.history_weight +
-                   weights.parallel_weight + weights.index_weight;
+        let total = weights.cost_weight
+            + weights.history_weight
+            + weights.parallel_weight
+            + weights.index_weight;
 
         // Should be normalized to 1.0
         assert!((total - 1.0).abs() < 0.001);

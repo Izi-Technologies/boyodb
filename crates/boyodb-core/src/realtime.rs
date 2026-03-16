@@ -6,9 +6,9 @@
 //! - Change Data Capture (CDC) for database synchronization
 //! - Exactly-once ingestion with deduplication
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================

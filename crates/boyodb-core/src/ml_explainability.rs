@@ -7,9 +7,9 @@
 //! - Partial dependence plots
 //! - Counterfactual explanations
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 
 /// Explanation types
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,7 +57,10 @@ impl ShapExplanation {
     pub fn top_features(&self, n: usize) -> Vec<&FeatureContribution> {
         let mut sorted: Vec<_> = self.shap_values.iter().collect();
         sorted.sort_by(|a, b| {
-            b.contribution.abs().partial_cmp(&a.contribution.abs()).unwrap()
+            b.contribution
+                .abs()
+                .partial_cmp(&a.contribution.abs())
+                .unwrap()
         });
         sorted.truncate(n);
         sorted
@@ -230,7 +233,8 @@ impl ShapExplainer {
         let prediction = model.predict(instance);
 
         // Compute base value (expected prediction over background)
-        let base_value: f64 = self.background_data
+        let base_value: f64 = self
+            .background_data
             .iter()
             .map(|bg| model.predict(bg))
             .sum::<f64>()
@@ -248,16 +252,10 @@ impl ShapExplainer {
             for i in 0..n_features {
                 if !coalition[i] {
                     // Feature not in coalition - compute marginal contribution
-                    let with_feature = self.create_instance_with_coalition(
-                        instance,
-                        &coalition,
-                        Some(i),
-                    );
-                    let without_feature = self.create_instance_with_coalition(
-                        instance,
-                        &coalition,
-                        None,
-                    );
+                    let with_feature =
+                        self.create_instance_with_coalition(instance, &coalition, Some(i));
+                    let without_feature =
+                        self.create_instance_with_coalition(instance, &coalition, None);
 
                     let pred_with = model.predict(&with_feature);
                     let pred_without = model.predict(&without_feature);
@@ -277,7 +275,8 @@ impl ShapExplainer {
             *v *= scale;
         }
 
-        let contributions: Vec<FeatureContribution> = self.feature_names
+        let contributions: Vec<FeatureContribution> = self
+            .feature_names
             .iter()
             .zip(instance.iter())
             .zip(shap_values.iter())
@@ -317,10 +316,7 @@ impl ShapExplainer {
         // Use mean of background data for non-coalition features
         let bg_mean: Vec<f64> = (0..instance.len())
             .map(|i| {
-                self.background_data
-                    .iter()
-                    .map(|bg| bg[i])
-                    .sum::<f64>()
+                self.background_data.iter().map(|bg| bg[i]).sum::<f64>()
                     / self.background_data.len() as f64
             })
             .collect();
@@ -418,14 +414,11 @@ impl LimeExplainer {
         }
 
         // Fit weighted linear model
-        let (coefficients, intercept, r2) = self.fit_weighted_linear(
-            &perturbed_samples,
-            &predictions,
-            &weights,
-            n_features,
-        );
+        let (coefficients, intercept, r2) =
+            self.fit_weighted_linear(&perturbed_samples, &predictions, &weights, n_features);
 
-        let feature_weights: Vec<FeatureContribution> = self.feature_names
+        let feature_weights: Vec<FeatureContribution> = self
+            .feature_names
             .iter()
             .zip(instance.iter())
             .zip(coefficients.iter())
@@ -522,11 +515,12 @@ impl LimeExplainer {
         }
 
         // Compute intercept
-        let intercept = y_mean - coefficients
-            .iter()
-            .zip(x_means.iter())
-            .map(|(c, x)| c * x)
-            .sum::<f64>();
+        let intercept = y_mean
+            - coefficients
+                .iter()
+                .zip(x_means.iter())
+                .map(|(c, x)| c * x)
+                .sum::<f64>();
 
         // Compute R²
         let ss_tot: f64 = targets
@@ -545,7 +539,11 @@ impl LimeExplainer {
             })
             .sum();
 
-        let r2 = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+        let r2 = if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        };
 
         (coefficients, intercept, r2)
     }
@@ -624,7 +622,8 @@ impl CounterfactualExplainer {
         }
 
         best_cf.map(|cf| {
-            let changes: Vec<FeatureChange> = self.feature_names
+            let changes: Vec<FeatureChange> = self
+                .feature_names
                 .iter()
                 .zip(instance.iter())
                 .zip(cf.iter())

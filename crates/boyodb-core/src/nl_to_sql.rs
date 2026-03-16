@@ -6,8 +6,8 @@
 //! - Schema-aware SQL generation
 //! - Query disambiguation
 
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// Table schema for NL understanding
 #[derive(Debug, Clone)]
@@ -208,19 +208,35 @@ impl Default for IntentPatterns {
     fn default() -> Self {
         Self {
             select_keywords: vec![
-                "show", "list", "get", "find", "display", "what", "which",
-                "give me", "fetch", "retrieve", "select",
+                "show", "list", "get", "find", "display", "what", "which", "give me", "fetch",
+                "retrieve", "select",
             ],
             aggregate_keywords: vec![
-                "count", "how many", "total", "sum", "average", "avg",
-                "maximum", "max", "minimum", "min", "number of",
+                "count",
+                "how many",
+                "total",
+                "sum",
+                "average",
+                "avg",
+                "maximum",
+                "max",
+                "minimum",
+                "min",
+                "number of",
             ],
-            compare_keywords: vec![
-                "compare", "versus", "vs", "difference", "between",
-            ],
+            compare_keywords: vec!["compare", "versus", "vs", "difference", "between"],
             time_keywords: vec![
-                "yesterday", "today", "last week", "last month", "last year",
-                "this week", "this month", "this year", "since", "before", "after",
+                "yesterday",
+                "today",
+                "last week",
+                "last month",
+                "last year",
+                "this week",
+                "this month",
+                "this year",
+                "since",
+                "before",
+                "after",
             ],
             top_keywords: vec![
                 "top", "best", "highest", "lowest", "most", "least", "first", "last",
@@ -254,10 +270,7 @@ impl NLToSQL {
 
         // Add table synonyms
         for synonym in &schema.synonyms {
-            mappings.insert(
-                synonym.to_lowercase(),
-                (schema.name.clone(), String::new()),
-            );
+            mappings.insert(synonym.to_lowercase(), (schema.name.clone(), String::new()));
         }
         mappings.insert(
             schema.name.to_lowercase(),
@@ -427,8 +440,10 @@ impl NLToSQL {
             }
 
             // Look for comparison keywords
-            if ["greater", "more", "less", "equal", "above", "below", "over", "under"]
-                .contains(&clean_word)
+            if [
+                "greater", "more", "less", "equal", "above", "below", "over", "under",
+            ]
+            .contains(&clean_word)
             {
                 entities.push(Entity {
                     entity_type: EntityType::Comparison,
@@ -440,8 +455,15 @@ impl NLToSQL {
             }
 
             // Look for order direction
-            if ["ascending", "descending", "asc", "desc", "highest", "lowest"]
-                .contains(&clean_word)
+            if [
+                "ascending",
+                "descending",
+                "asc",
+                "desc",
+                "highest",
+                "lowest",
+            ]
+            .contains(&clean_word)
             {
                 entities.push(Entity {
                     entity_type: EntityType::OrderDirection,
@@ -518,7 +540,11 @@ impl NLToSQL {
     }
 
     /// Extract aggregations
-    fn extract_aggregations(&self, query: &str, columns: &[String]) -> Vec<(AggregationType, String)> {
+    fn extract_aggregations(
+        &self,
+        query: &str,
+        columns: &[String],
+    ) -> Vec<(AggregationType, String)> {
         let mut aggregations = Vec::new();
 
         if query.contains("count") || query.contains("how many") || query.contains("number of") {
@@ -554,7 +580,12 @@ impl NLToSQL {
     }
 
     /// Extract filter conditions
-    fn extract_conditions(&self, query: &str, words: &[&str], table: &Option<String>) -> Vec<Condition> {
+    fn extract_conditions(
+        &self,
+        query: &str,
+        words: &[&str],
+        table: &Option<String>,
+    ) -> Vec<Condition> {
         let mut conditions = Vec::new();
 
         // Look for comparison patterns
@@ -755,8 +786,8 @@ impl NLToSQL {
 
         // Entity confidence
         if !entities.is_empty() {
-            let avg_entity_conf: f64 = entities.iter().map(|e| e.confidence).sum::<f64>()
-                / entities.len() as f64;
+            let avg_entity_conf: f64 =
+                entities.iter().map(|e| e.confidence).sum::<f64>() / entities.len() as f64;
             confidence += avg_entity_conf * 0.1;
         }
 
@@ -773,7 +804,8 @@ impl NLToSQL {
         sql.push_str("SELECT ");
 
         if !parsed.aggregations.is_empty() {
-            let agg_strs: Vec<String> = parsed.aggregations
+            let agg_strs: Vec<String> = parsed
+                .aggregations
                 .iter()
                 .map(|(agg, col)| {
                     if matches!(agg, AggregationType::CountDistinct) {
@@ -804,7 +836,8 @@ impl NLToSQL {
         // WHERE clause
         if !parsed.conditions.is_empty() {
             sql.push_str(" WHERE ");
-            let cond_strs: Vec<String> = parsed.conditions
+            let cond_strs: Vec<String> = parsed
+                .conditions
                 .iter()
                 .map(|c| {
                     let val = if c.value.parse::<f64>().is_ok() {

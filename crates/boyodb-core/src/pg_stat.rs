@@ -26,10 +26,10 @@
 //! SELECT pg_stat_statements_reset();
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 // ============================================================================
@@ -78,7 +78,9 @@ pub fn normalize_query(sql: &str) -> String {
             continue;
         }
 
-        if c.is_ascii_digit() || (c == '-' && chars.peek().map(|p| p.is_ascii_digit()).unwrap_or(false)) {
+        if c.is_ascii_digit()
+            || (c == '-' && chars.peek().map(|p| p.is_ascii_digit()).unwrap_or(false))
+        {
             if !in_number {
                 in_number = true;
                 result.push('?');
@@ -359,10 +361,7 @@ impl StatStatementsManager {
         // Check if we need to evict
         if !statements.contains_key(&queryid) && statements.len() >= self.config.max_statements {
             // Evict least used statement
-            if let Some((&evict_id, _)) = statements
-                .iter()
-                .min_by_key(|(_, s)| s.calls)
-            {
+            if let Some((&evict_id, _)) = statements.iter().min_by_key(|(_, s)| s.calls) {
                 statements.remove(&evict_id);
                 self.dealloc_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -742,7 +741,9 @@ impl StatActivityManager {
             .values()
             .filter(|e| {
                 e.state == ActivityState::Active
-                    && e.query_duration_ms().map(|d| d >= threshold_ms).unwrap_or(false)
+                    && e.query_duration_ms()
+                        .map(|d| d >= threshold_ms)
+                        .unwrap_or(false)
             })
             .cloned()
             .collect()
@@ -1049,7 +1050,15 @@ mod tests {
         assert_eq!(log.total_count(), 0);
 
         // Above threshold - should log
-        log.log("db", "user", None, 200.0, "SELECT * FROM big_table", 1000, 10.0);
+        log.log(
+            "db",
+            "user",
+            None,
+            200.0,
+            "SELECT * FROM big_table",
+            1000,
+            10.0,
+        );
         assert_eq!(log.total_count(), 1);
 
         let recent = log.get_recent(10);
@@ -1072,18 +1081,33 @@ mod tests {
         let manager = StatStatementsManager::new(StatStatementsConfig::default());
 
         // Use different queries (not just different numbers) since numbers get normalized
-        manager.record(1, 1, "SELECT * FROM users", ExecutionRecord {
-            execution_time_ms: 100.0,
-            ..Default::default()
-        });
-        manager.record(1, 1, "SELECT * FROM orders", ExecutionRecord {
-            execution_time_ms: 200.0,
-            ..Default::default()
-        });
-        manager.record(1, 1, "SELECT * FROM products", ExecutionRecord {
-            execution_time_ms: 50.0,
-            ..Default::default()
-        });
+        manager.record(
+            1,
+            1,
+            "SELECT * FROM users",
+            ExecutionRecord {
+                execution_time_ms: 100.0,
+                ..Default::default()
+            },
+        );
+        manager.record(
+            1,
+            1,
+            "SELECT * FROM orders",
+            ExecutionRecord {
+                execution_time_ms: 200.0,
+                ..Default::default()
+            },
+        );
+        manager.record(
+            1,
+            1,
+            "SELECT * FROM products",
+            ExecutionRecord {
+                execution_time_ms: 50.0,
+                ..Default::default()
+            },
+        );
 
         let top = manager.get_top_by_time(2);
         assert_eq!(top.len(), 2);

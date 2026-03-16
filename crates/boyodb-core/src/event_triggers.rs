@@ -6,9 +6,9 @@
 //! - table_rewrite - When table is rewritten
 //! - sql_drop - When objects are dropped
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::Instant;
 
 // ============================================================================
@@ -395,10 +395,7 @@ impl EventTrigger {
 
     /// Generate CREATE EVENT TRIGGER SQL
     pub fn to_sql(&self) -> String {
-        let mut sql = format!(
-            "CREATE EVENT TRIGGER {} ON {}",
-            self.name, self.event
-        );
+        let mut sql = format!("CREATE EVENT TRIGGER {} ON {}", self.name, self.event);
 
         if let Some(ref tags) = self.tags {
             sql.push_str(&format!(
@@ -461,7 +458,8 @@ impl EventTriggerManager {
 
     /// Enable/disable all event triggers
     pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, std::sync::atomic::Ordering::SeqCst);
+        self.enabled
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Check if enabled
@@ -493,7 +491,11 @@ impl EventTriggerManager {
     }
 
     /// Alter trigger enabled state
-    pub fn alter_trigger(&self, name: &str, enabled: EventTriggerEnabled) -> Result<(), EventTriggerError> {
+    pub fn alter_trigger(
+        &self,
+        name: &str,
+        enabled: EventTriggerEnabled,
+    ) -> Result<(), EventTriggerError> {
         let mut triggers = self.triggers.write();
 
         let trigger = triggers
@@ -548,12 +550,16 @@ impl EventTriggerManager {
                 EventTriggerResult {
                     trigger_name: trigger.name.clone(),
                     success: false,
-                    error: Some(format!("handler function '{}' not found", trigger.function_name)),
+                    error: Some(format!(
+                        "handler function '{}' not found",
+                        trigger.function_name
+                    )),
                     execution_time: start.elapsed(),
                 }
             };
 
-            self.triggers_fired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.triggers_fired
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             results.push(result);
         }
 
@@ -587,8 +593,13 @@ impl EventTriggerManager {
         let triggers = self.triggers.read();
         EventTriggerStats {
             total_triggers: triggers.len(),
-            enabled_triggers: triggers.values().filter(|t| t.enabled != EventTriggerEnabled::Disabled).count(),
-            triggers_fired: self.triggers_fired.load(std::sync::atomic::Ordering::Relaxed),
+            enabled_triggers: triggers
+                .values()
+                .filter(|t| t.enabled != EventTriggerEnabled::Disabled)
+                .count(),
+            triggers_fired: self
+                .triggers_fired
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
@@ -630,9 +641,13 @@ impl std::fmt::Display for EventTriggerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventTriggerError::NotFound(n) => write!(f, "event trigger \"{}\" does not exist", n),
-            EventTriggerError::AlreadyExists(n) => write!(f, "event trigger \"{}\" already exists", n),
+            EventTriggerError::AlreadyExists(n) => {
+                write!(f, "event trigger \"{}\" already exists", n)
+            }
             EventTriggerError::InvalidEvent(e) => write!(f, "invalid event type: {}", e),
-            EventTriggerError::HandlerNotFound(h) => write!(f, "handler function \"{}\" not found", h),
+            EventTriggerError::HandlerNotFound(h) => {
+                write!(f, "handler function \"{}\" not found", h)
+            }
             EventTriggerError::ExecutionFailed { trigger, error } => {
                 write!(f, "trigger \"{}\" failed: {}", trigger, error)
             }
@@ -654,15 +669,30 @@ mod tests {
 
     #[test]
     fn test_event_type_parse() {
-        assert_eq!("ddl_command_start".parse::<EventType>().unwrap(), EventType::DdlCommandStart);
-        assert_eq!("table_rewrite".parse::<EventType>().unwrap(), EventType::TableRewrite);
+        assert_eq!(
+            "ddl_command_start".parse::<EventType>().unwrap(),
+            EventType::DdlCommandStart
+        );
+        assert_eq!(
+            "table_rewrite".parse::<EventType>().unwrap(),
+            EventType::TableRewrite
+        );
     }
 
     #[test]
     fn test_ddl_command_parse() {
-        assert!(matches!(DdlCommand::from_tag("CREATE TABLE"), DdlCommand::CreateTable));
-        assert!(matches!(DdlCommand::from_tag("DROP INDEX"), DdlCommand::DropIndex));
-        assert!(matches!(DdlCommand::from_tag("UNKNOWN"), DdlCommand::Other(_)));
+        assert!(matches!(
+            DdlCommand::from_tag("CREATE TABLE"),
+            DdlCommand::CreateTable
+        ));
+        assert!(matches!(
+            DdlCommand::from_tag("DROP INDEX"),
+            DdlCommand::DropIndex
+        ));
+        assert!(matches!(
+            DdlCommand::from_tag("UNKNOWN"),
+            DdlCommand::Other(_)
+        ));
     }
 
     #[test]
@@ -764,11 +794,15 @@ mod tests {
     fn test_event_trigger_stats() {
         let manager = EventTriggerManager::new();
 
-        manager.create_trigger(EventTrigger::new("t1", EventType::DdlCommandEnd, "h1")).unwrap();
-        manager.create_trigger(
-            EventTrigger::new("t2", EventType::DdlCommandEnd, "h2")
-                .set_enabled(EventTriggerEnabled::Disabled)
-        ).unwrap();
+        manager
+            .create_trigger(EventTrigger::new("t1", EventType::DdlCommandEnd, "h1"))
+            .unwrap();
+        manager
+            .create_trigger(
+                EventTrigger::new("t2", EventType::DdlCommandEnd, "h2")
+                    .set_enabled(EventTriggerEnabled::Disabled),
+            )
+            .unwrap();
 
         let stats = manager.stats();
         assert_eq!(stats.total_triggers, 2);

@@ -13,11 +13,11 @@
 //! When the `jit-cranelift` feature is enabled, expressions are compiled to
 //! native machine code using the Cranelift code generator.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 #[cfg(feature = "jit-cranelift")]
 use cranelift::prelude::*;
@@ -87,7 +87,10 @@ impl JitType {
     }
 
     pub fn is_signed(&self) -> bool {
-        matches!(self, JitType::I8 | JitType::I16 | JitType::I32 | JitType::I64)
+        matches!(
+            self,
+            JitType::I8 | JitType::I16 | JitType::I32 | JitType::I64
+        )
     }
 }
 
@@ -158,20 +161,44 @@ impl JitOp {
     /// Calculate the complexity of an expression (number of operations)
     pub fn complexity(&self) -> usize {
         match self {
-            JitOp::ConstBool(_) | JitOp::ConstI64(_) | JitOp::ConstF64(_) | JitOp::Column(_, _) => 0,
-
-            JitOp::Neg(a) | JitOp::Abs(a) | JitOp::Not(a) | JitOp::IsNull(a) |
-            JitOp::IsNotNull(a) | JitOp::Cast(a, _) | JitOp::Sqrt(a) | JitOp::Log(a) |
-            JitOp::Ln(a) | JitOp::Exp(a) | JitOp::Floor(a) | JitOp::Ceil(a) |
-            JitOp::Round(a) | JitOp::BitNot(a) => 1 + a.complexity(),
-
-            JitOp::Add(a, b) | JitOp::Sub(a, b) | JitOp::Mul(a, b) | JitOp::Div(a, b) |
-            JitOp::Mod(a, b) | JitOp::Eq(a, b) | JitOp::Ne(a, b) | JitOp::Lt(a, b) |
-            JitOp::Le(a, b) | JitOp::Gt(a, b) | JitOp::Ge(a, b) | JitOp::And(a, b) |
-            JitOp::Or(a, b) | JitOp::Pow(a, b) | JitOp::BitAnd(a, b) | JitOp::BitOr(a, b) |
-            JitOp::BitXor(a, b) | JitOp::ShiftLeft(a, b) | JitOp::ShiftRight(a, b) => {
-                1 + a.complexity() + b.complexity()
+            JitOp::ConstBool(_) | JitOp::ConstI64(_) | JitOp::ConstF64(_) | JitOp::Column(_, _) => {
+                0
             }
+
+            JitOp::Neg(a)
+            | JitOp::Abs(a)
+            | JitOp::Not(a)
+            | JitOp::IsNull(a)
+            | JitOp::IsNotNull(a)
+            | JitOp::Cast(a, _)
+            | JitOp::Sqrt(a)
+            | JitOp::Log(a)
+            | JitOp::Ln(a)
+            | JitOp::Exp(a)
+            | JitOp::Floor(a)
+            | JitOp::Ceil(a)
+            | JitOp::Round(a)
+            | JitOp::BitNot(a) => 1 + a.complexity(),
+
+            JitOp::Add(a, b)
+            | JitOp::Sub(a, b)
+            | JitOp::Mul(a, b)
+            | JitOp::Div(a, b)
+            | JitOp::Mod(a, b)
+            | JitOp::Eq(a, b)
+            | JitOp::Ne(a, b)
+            | JitOp::Lt(a, b)
+            | JitOp::Le(a, b)
+            | JitOp::Gt(a, b)
+            | JitOp::Ge(a, b)
+            | JitOp::And(a, b)
+            | JitOp::Or(a, b)
+            | JitOp::Pow(a, b)
+            | JitOp::BitAnd(a, b)
+            | JitOp::BitOr(a, b)
+            | JitOp::BitXor(a, b)
+            | JitOp::ShiftLeft(a, b)
+            | JitOp::ShiftRight(a, b) => 1 + a.complexity() + b.complexity(),
 
             JitOp::If(cond, then_val, else_val) => {
                 1 + cond.complexity() + then_val.complexity() + else_val.complexity()
@@ -189,25 +216,43 @@ impl JitOp {
             JitOp::ConstF64(_) => JitType::F64,
             JitOp::Column(_, t) => *t,
 
-            JitOp::Add(a, _) | JitOp::Sub(a, _) | JitOp::Mul(a, _) |
-            JitOp::Div(a, _) | JitOp::Mod(a, _) | JitOp::Neg(a) | JitOp::Abs(a) => a.result_type(),
+            JitOp::Add(a, _)
+            | JitOp::Sub(a, _)
+            | JitOp::Mul(a, _)
+            | JitOp::Div(a, _)
+            | JitOp::Mod(a, _)
+            | JitOp::Neg(a)
+            | JitOp::Abs(a) => a.result_type(),
 
-            JitOp::Eq(_, _) | JitOp::Ne(_, _) | JitOp::Lt(_, _) | JitOp::Le(_, _) |
-            JitOp::Gt(_, _) | JitOp::Ge(_, _) | JitOp::And(_, _) | JitOp::Or(_, _) |
-            JitOp::Not(_) | JitOp::IsNull(_) | JitOp::IsNotNull(_) => JitType::Bool,
+            JitOp::Eq(_, _)
+            | JitOp::Ne(_, _)
+            | JitOp::Lt(_, _)
+            | JitOp::Le(_, _)
+            | JitOp::Gt(_, _)
+            | JitOp::Ge(_, _)
+            | JitOp::And(_, _)
+            | JitOp::Or(_, _)
+            | JitOp::Not(_)
+            | JitOp::IsNull(_)
+            | JitOp::IsNotNull(_) => JitType::Bool,
 
             JitOp::If(_, then_val, _) => then_val.result_type(),
             JitOp::Coalesce(ops) => ops.first().map(|o| o.result_type()).unwrap_or(JitType::I64),
 
             JitOp::Cast(_, t) => *t,
 
-            JitOp::Sqrt(_) | JitOp::Pow(_, _) | JitOp::Log(_) | JitOp::Ln(_) |
-            JitOp::Exp(_) => JitType::F64,
+            JitOp::Sqrt(_) | JitOp::Pow(_, _) | JitOp::Log(_) | JitOp::Ln(_) | JitOp::Exp(_) => {
+                JitType::F64
+            }
 
             JitOp::Floor(a) | JitOp::Ceil(a) | JitOp::Round(a) => a.result_type(),
 
-            JitOp::BitAnd(a, _) | JitOp::BitOr(a, _) | JitOp::BitXor(a, _) |
-            JitOp::BitNot(a) | JitOp::ShiftLeft(a, _) | JitOp::ShiftRight(a, _) => a.result_type(),
+            JitOp::BitAnd(a, _)
+            | JitOp::BitOr(a, _)
+            | JitOp::BitXor(a, _)
+            | JitOp::BitNot(a)
+            | JitOp::ShiftLeft(a, _)
+            | JitOp::ShiftRight(a, _) => a.result_type(),
         }
     }
 }
@@ -259,19 +304,39 @@ impl CompiledFunction {
         match op {
             JitOp::ConstI64(v) => *v,
             JitOp::ConstF64(v) => *v as i64,
-            JitOp::ConstBool(v) => if *v { 1 } else { 0 },
+            JitOp::ConstBool(v) => {
+                if *v {
+                    1
+                } else {
+                    0
+                }
+            }
             JitOp::Column(idx, _) => inputs.get(*idx).copied().unwrap_or(0),
 
-            JitOp::Add(a, b) => self.interpret_i64(a, inputs).wrapping_add(self.interpret_i64(b, inputs)),
-            JitOp::Sub(a, b) => self.interpret_i64(a, inputs).wrapping_sub(self.interpret_i64(b, inputs)),
-            JitOp::Mul(a, b) => self.interpret_i64(a, inputs).wrapping_mul(self.interpret_i64(b, inputs)),
+            JitOp::Add(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_add(self.interpret_i64(b, inputs)),
+            JitOp::Sub(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_sub(self.interpret_i64(b, inputs)),
+            JitOp::Mul(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_mul(self.interpret_i64(b, inputs)),
             JitOp::Div(a, b) => {
                 let divisor = self.interpret_i64(b, inputs);
-                if divisor == 0 { 0 } else { self.interpret_i64(a, inputs) / divisor }
+                if divisor == 0 {
+                    0
+                } else {
+                    self.interpret_i64(a, inputs) / divisor
+                }
             }
             JitOp::Mod(a, b) => {
                 let divisor = self.interpret_i64(b, inputs);
-                if divisor == 0 { 0 } else { self.interpret_i64(a, inputs) % divisor }
+                if divisor == 0 {
+                    0
+                } else {
+                    self.interpret_i64(a, inputs) % divisor
+                }
             }
             JitOp::Neg(a) => -self.interpret_i64(a, inputs),
             JitOp::Abs(a) => self.interpret_i64(a, inputs).abs(),
@@ -280,8 +345,12 @@ impl CompiledFunction {
             JitOp::BitOr(a, b) => self.interpret_i64(a, inputs) | self.interpret_i64(b, inputs),
             JitOp::BitXor(a, b) => self.interpret_i64(a, inputs) ^ self.interpret_i64(b, inputs),
             JitOp::BitNot(a) => !self.interpret_i64(a, inputs),
-            JitOp::ShiftLeft(a, b) => self.interpret_i64(a, inputs) << (self.interpret_i64(b, inputs) as u32),
-            JitOp::ShiftRight(a, b) => self.interpret_i64(a, inputs) >> (self.interpret_i64(b, inputs) as u32),
+            JitOp::ShiftLeft(a, b) => {
+                self.interpret_i64(a, inputs) << (self.interpret_i64(b, inputs) as u32)
+            }
+            JitOp::ShiftRight(a, b) => {
+                self.interpret_i64(a, inputs) >> (self.interpret_i64(b, inputs) as u32)
+            }
 
             JitOp::If(cond, then_val, else_val) => {
                 if self.interpret_bool(cond, inputs) {
@@ -302,7 +371,13 @@ impl CompiledFunction {
         match op {
             JitOp::ConstF64(v) => *v,
             JitOp::ConstI64(v) => *v as f64,
-            JitOp::ConstBool(v) => if *v { 1.0 } else { 0.0 },
+            JitOp::ConstBool(v) => {
+                if *v {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             JitOp::Column(idx, _) => inputs.get(*idx).copied().unwrap_or(0.0),
 
             JitOp::Add(a, b) => self.interpret_f64(a, inputs) + self.interpret_f64(b, inputs),
@@ -310,14 +385,20 @@ impl CompiledFunction {
             JitOp::Mul(a, b) => self.interpret_f64(a, inputs) * self.interpret_f64(b, inputs),
             JitOp::Div(a, b) => {
                 let divisor = self.interpret_f64(b, inputs);
-                if divisor == 0.0 { 0.0 } else { self.interpret_f64(a, inputs) / divisor }
+                if divisor == 0.0 {
+                    0.0
+                } else {
+                    self.interpret_f64(a, inputs) / divisor
+                }
             }
             JitOp::Mod(a, b) => self.interpret_f64(a, inputs) % self.interpret_f64(b, inputs),
             JitOp::Neg(a) => -self.interpret_f64(a, inputs),
             JitOp::Abs(a) => self.interpret_f64(a, inputs).abs(),
 
             JitOp::Sqrt(a) => self.interpret_f64(a, inputs).sqrt(),
-            JitOp::Pow(a, b) => self.interpret_f64(a, inputs).powf(self.interpret_f64(b, inputs)),
+            JitOp::Pow(a, b) => self
+                .interpret_f64(a, inputs)
+                .powf(self.interpret_f64(b, inputs)),
             JitOp::Log(a) => self.interpret_f64(a, inputs).log10(),
             JitOp::Ln(a) => self.interpret_f64(a, inputs).ln(),
             JitOp::Exp(a) => self.interpret_f64(a, inputs).exp(),
@@ -394,7 +475,11 @@ pub struct JitStats {
 impl JitStats {
     pub fn cache_hit_rate(&self) -> f64 {
         let total = self.cache_hits + self.cache_misses;
-        if total == 0 { 0.0 } else { self.cache_hits as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / total as f64
+        }
     }
 }
 
@@ -555,12 +640,17 @@ impl JitCompiler {
 
         // Create JIT module
         let mut flag_builder = settings::builder();
-        flag_builder.set("opt_level", match self.config.opt_level {
-            0 => "none",
-            1 => "speed",
-            2 => "speed",
-            _ => "speed_and_size",
-        }).map_err(|e| JitError::InternalError(e.to_string()))?;
+        flag_builder
+            .set(
+                "opt_level",
+                match self.config.opt_level {
+                    0 => "none",
+                    1 => "speed",
+                    2 => "speed",
+                    _ => "speed_and_size",
+                },
+            )
+            .map_err(|e| JitError::InternalError(e.to_string()))?;
 
         let isa_builder = cranelift_codegen::isa::lookup(Triple::host())
             .map_err(|e| JitError::InternalError(format!("ISA lookup failed: {}", e)))?;
@@ -628,14 +718,13 @@ impl JitCompiler {
             .map_err(|e| JitError::InternalError(e.to_string()))?;
 
         module.clear_context(&mut ctx);
-        module.finalize_definitions()
+        module
+            .finalize_definitions()
             .map_err(|e| JitError::InternalError(e.to_string()))?;
 
         // Get compiled code
         let code = module.get_finalized_function(func_id);
-        let code_bytes = unsafe {
-            std::slice::from_raw_parts(code as *const u8, 256)
-        };
+        let code_bytes = unsafe { std::slice::from_raw_parts(code as *const u8, 256) };
 
         Ok(code_bytes.to_vec())
     }
@@ -653,10 +742,10 @@ impl JitCompiler {
             JitOp::ConstF64(v) => Ok(builder.ins().f64const(*v)),
             JitOp::ConstBool(v) => Ok(builder.ins().iconst(types::I8, if *v { 1 } else { 0 })),
 
-            JitOp::Column(idx, _) => {
-                params.get(*idx).copied()
-                    .ok_or_else(|| JitError::InternalError(format!("Column {} out of bounds", idx)))
-            }
+            JitOp::Column(idx, _) => params
+                .get(*idx)
+                .copied()
+                .ok_or_else(|| JitError::InternalError(format!("Column {} out of bounds", idx))),
 
             JitOp::Add(a, b) => {
                 let va = self.compile_expr_to_ir(builder, a, params)?;
@@ -786,18 +875,42 @@ impl JitCompiler {
             JitOp::Column(idx, t) => {
                 types.insert(*idx, *t);
             }
-            JitOp::Add(a, b) | JitOp::Sub(a, b) | JitOp::Mul(a, b) | JitOp::Div(a, b) |
-            JitOp::Mod(a, b) | JitOp::Eq(a, b) | JitOp::Ne(a, b) | JitOp::Lt(a, b) |
-            JitOp::Le(a, b) | JitOp::Gt(a, b) | JitOp::Ge(a, b) | JitOp::And(a, b) |
-            JitOp::Or(a, b) | JitOp::Pow(a, b) | JitOp::BitAnd(a, b) | JitOp::BitOr(a, b) |
-            JitOp::BitXor(a, b) | JitOp::ShiftLeft(a, b) | JitOp::ShiftRight(a, b) => {
+            JitOp::Add(a, b)
+            | JitOp::Sub(a, b)
+            | JitOp::Mul(a, b)
+            | JitOp::Div(a, b)
+            | JitOp::Mod(a, b)
+            | JitOp::Eq(a, b)
+            | JitOp::Ne(a, b)
+            | JitOp::Lt(a, b)
+            | JitOp::Le(a, b)
+            | JitOp::Gt(a, b)
+            | JitOp::Ge(a, b)
+            | JitOp::And(a, b)
+            | JitOp::Or(a, b)
+            | JitOp::Pow(a, b)
+            | JitOp::BitAnd(a, b)
+            | JitOp::BitOr(a, b)
+            | JitOp::BitXor(a, b)
+            | JitOp::ShiftLeft(a, b)
+            | JitOp::ShiftRight(a, b) => {
                 self.collect_column_types(a, types);
                 self.collect_column_types(b, types);
             }
-            JitOp::Neg(a) | JitOp::Abs(a) | JitOp::Not(a) | JitOp::IsNull(a) |
-            JitOp::IsNotNull(a) | JitOp::Cast(a, _) | JitOp::Sqrt(a) | JitOp::Log(a) |
-            JitOp::Ln(a) | JitOp::Exp(a) | JitOp::Floor(a) | JitOp::Ceil(a) |
-            JitOp::Round(a) | JitOp::BitNot(a) => {
+            JitOp::Neg(a)
+            | JitOp::Abs(a)
+            | JitOp::Not(a)
+            | JitOp::IsNull(a)
+            | JitOp::IsNotNull(a)
+            | JitOp::Cast(a, _)
+            | JitOp::Sqrt(a)
+            | JitOp::Log(a)
+            | JitOp::Ln(a)
+            | JitOp::Exp(a)
+            | JitOp::Floor(a)
+            | JitOp::Ceil(a)
+            | JitOp::Round(a)
+            | JitOp::BitNot(a) => {
                 self.collect_column_types(a, types);
             }
             JitOp::If(cond, then_val, else_val) => {
@@ -841,18 +954,41 @@ impl JitCompiler {
                 idx.hash(hasher);
                 (*t as u8).hash(hasher);
             }
-            JitOp::Add(a, b) | JitOp::Sub(a, b) | JitOp::Mul(a, b) | JitOp::Div(a, b) |
-            JitOp::Mod(a, b) | JitOp::Eq(a, b) | JitOp::Ne(a, b) | JitOp::Lt(a, b) |
-            JitOp::Le(a, b) | JitOp::Gt(a, b) | JitOp::Ge(a, b) | JitOp::And(a, b) |
-            JitOp::Or(a, b) | JitOp::Pow(a, b) | JitOp::BitAnd(a, b) | JitOp::BitOr(a, b) |
-            JitOp::BitXor(a, b) | JitOp::ShiftLeft(a, b) | JitOp::ShiftRight(a, b) => {
+            JitOp::Add(a, b)
+            | JitOp::Sub(a, b)
+            | JitOp::Mul(a, b)
+            | JitOp::Div(a, b)
+            | JitOp::Mod(a, b)
+            | JitOp::Eq(a, b)
+            | JitOp::Ne(a, b)
+            | JitOp::Lt(a, b)
+            | JitOp::Le(a, b)
+            | JitOp::Gt(a, b)
+            | JitOp::Ge(a, b)
+            | JitOp::And(a, b)
+            | JitOp::Or(a, b)
+            | JitOp::Pow(a, b)
+            | JitOp::BitAnd(a, b)
+            | JitOp::BitOr(a, b)
+            | JitOp::BitXor(a, b)
+            | JitOp::ShiftLeft(a, b)
+            | JitOp::ShiftRight(a, b) => {
                 self.hash_expr_impl(a, hasher);
                 self.hash_expr_impl(b, hasher);
             }
-            JitOp::Neg(a) | JitOp::Abs(a) | JitOp::Not(a) | JitOp::IsNull(a) |
-            JitOp::IsNotNull(a) | JitOp::Sqrt(a) | JitOp::Log(a) | JitOp::Ln(a) |
-            JitOp::Exp(a) | JitOp::Floor(a) | JitOp::Ceil(a) | JitOp::Round(a) |
-            JitOp::BitNot(a) => {
+            JitOp::Neg(a)
+            | JitOp::Abs(a)
+            | JitOp::Not(a)
+            | JitOp::IsNull(a)
+            | JitOp::IsNotNull(a)
+            | JitOp::Sqrt(a)
+            | JitOp::Log(a)
+            | JitOp::Ln(a)
+            | JitOp::Exp(a)
+            | JitOp::Floor(a)
+            | JitOp::Ceil(a)
+            | JitOp::Round(a)
+            | JitOp::BitNot(a) => {
                 self.hash_expr_impl(a, hasher);
             }
             JitOp::Cast(a, t) => {
@@ -998,12 +1134,22 @@ impl VectorizedJit {
         match op {
             JitOp::ConstI64(v) => *v,
             JitOp::Column(idx, _) => inputs.get(*idx).copied().unwrap_or(0),
-            JitOp::Add(a, b) => self.interpret_i64(a, inputs).wrapping_add(self.interpret_i64(b, inputs)),
-            JitOp::Sub(a, b) => self.interpret_i64(a, inputs).wrapping_sub(self.interpret_i64(b, inputs)),
-            JitOp::Mul(a, b) => self.interpret_i64(a, inputs).wrapping_mul(self.interpret_i64(b, inputs)),
+            JitOp::Add(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_add(self.interpret_i64(b, inputs)),
+            JitOp::Sub(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_sub(self.interpret_i64(b, inputs)),
+            JitOp::Mul(a, b) => self
+                .interpret_i64(a, inputs)
+                .wrapping_mul(self.interpret_i64(b, inputs)),
             JitOp::Div(a, b) => {
                 let d = self.interpret_i64(b, inputs);
-                if d == 0 { 0 } else { self.interpret_i64(a, inputs) / d }
+                if d == 0 {
+                    0
+                } else {
+                    self.interpret_i64(a, inputs) / d
+                }
             }
             _ => 0,
         }

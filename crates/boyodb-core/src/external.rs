@@ -6,11 +6,11 @@
 //! - Dictionary tables for efficient dimension lookups
 //! - External tables for querying external data sources
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -288,9 +288,7 @@ impl ObjectStore for InMemoryObjectStore {
             content_type: None,
             metadata: HashMap::new(),
         };
-        self.objects
-            .write()
-            .insert(key, (data.to_vec(), meta));
+        self.objects.write().insert(key, (data.to_vec(), meta));
         Ok(())
     }
 
@@ -1394,9 +1392,7 @@ impl DictionaryManager {
 
     /// Register a dictionary
     pub fn register(&self, dict: DictionaryTable) {
-        self.dictionaries
-            .write()
-            .insert(dict.name.clone(), dict);
+        self.dictionaries.write().insert(dict.name.clone(), dict);
     }
 
     /// Unregister a dictionary

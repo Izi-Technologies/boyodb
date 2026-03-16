@@ -8,7 +8,6 @@ use arrow_schema::{DataType, Field, Schema};
 use boyodb_core::engine::{Db, EngineConfig, IngestBatch, QueryRequest};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio;
 
 fn create_test_batch(id: i64, name: &str) -> Vec<u8> {
     let schema = Schema::new(vec![
@@ -320,5 +319,8 @@ async fn test_hash_index_on_string_column() {
 
     assert!(!batches.is_empty());
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 1, "Should find exactly one row with username='bob'");
+    assert_eq!(
+        total_rows, 1,
+        "Should find exactly one row with username='bob'"
+    );
 }

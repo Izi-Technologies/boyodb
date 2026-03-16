@@ -42,7 +42,7 @@ impl Default for IndexAdvisorConfig {
             slow_query_threshold_ms: 100,
             max_recommendations_per_table: 5,
             analysis_window_secs: 3600, // 1 hour
-            min_selectivity: 0.1, // 10% selectivity
+            min_selectivity: 0.1,       // 10% selectivity
             suggest_covering_indexes: true,
         }
     }
@@ -273,9 +273,9 @@ impl IndexAdvisor {
 
             pattern.execution_count += 1;
             pattern.total_duration_ms += duration_ms;
-            pattern.avg_rows_scanned =
-                (pattern.avg_rows_scanned * (pattern.execution_count - 1) + rows_scanned)
-                    / pattern.execution_count;
+            pattern.avg_rows_scanned = (pattern.avg_rows_scanned * (pattern.execution_count - 1)
+                + rows_scanned)
+                / pattern.execution_count;
             pattern.last_seen = now;
         }
 
@@ -284,10 +284,12 @@ impl IndexAdvisor {
             let mut stats = self.table_stats.write();
 
             for table in &tables {
-                let table_stat = stats.entry(table.clone()).or_insert_with(|| TableAccessStats {
-                    table: table.clone(),
-                    ..Default::default()
-                });
+                let table_stat = stats
+                    .entry(table.clone())
+                    .or_insert_with(|| TableAccessStats {
+                        table: table.clone(),
+                        ..Default::default()
+                    });
 
                 table_stat.query_count += 1;
                 table_stat.rows_scanned += rows_scanned;
@@ -296,13 +298,12 @@ impl IndexAdvisor {
                 // Update column patterns
                 for (t, col, filter_type) in &filter_columns {
                     if t == table {
-                        let col_stat = table_stat
-                            .columns
-                            .entry(col.clone())
-                            .or_insert_with(|| ColumnAccessPattern {
+                        let col_stat = table_stat.columns.entry(col.clone()).or_insert_with(|| {
+                            ColumnAccessPattern {
                                 column: col.clone(),
                                 ..Default::default()
-                            });
+                            }
+                        });
 
                         match filter_type {
                             FilterType::Equality | FilterType::In => col_stat.equality_count += 1,
@@ -315,10 +316,7 @@ impl IndexAdvisor {
 
                 for (t, col) in &order_columns {
                     if t == table {
-                        let col_stat = table_stat
-                            .columns
-                            .entry(col.clone())
-                            .or_default();
+                        let col_stat = table_stat.columns.entry(col.clone()).or_default();
                         col_stat.column = col.clone();
                         col_stat.order_by_count += 1;
                     }
@@ -326,10 +324,7 @@ impl IndexAdvisor {
 
                 for (t, col) in &group_columns {
                     if t == table {
-                        let col_stat = table_stat
-                            .columns
-                            .entry(col.clone())
-                            .or_default();
+                        let col_stat = table_stat.columns.entry(col.clone()).or_default();
                         col_stat.column = col.clone();
                         col_stat.group_by_count += 1;
                     }
@@ -337,10 +332,7 @@ impl IndexAdvisor {
 
                 for (t, col) in &select_columns {
                     if t == table {
-                        let col_stat = table_stat
-                            .columns
-                            .entry(col.clone())
-                            .or_default();
+                        let col_stat = table_stat.columns.entry(col.clone()).or_default();
                         col_stat.column = col.clone();
                         col_stat.select_count += 1;
                     }
@@ -364,10 +356,7 @@ impl IndexAdvisor {
             for (t1, c1, t2, c2) in &join_columns {
                 for (table, col) in [(t1, c1), (t2, c2)] {
                     if let Some(table_stat) = stats.get_mut(table) {
-                        let col_stat = table_stat
-                            .columns
-                            .entry(col.clone())
-                            .or_default();
+                        let col_stat = table_stat.columns.entry(col.clone()).or_default();
                         col_stat.column = col.clone();
                         col_stat.join_count += 1;
                     }
@@ -403,7 +392,10 @@ impl IndexAdvisor {
 
             column_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-            for (col, score) in column_scores.iter().take(self.config.max_recommendations_per_table) {
+            for (col, score) in column_scores
+                .iter()
+                .take(self.config.max_recommendations_per_table)
+            {
                 if table_stat.existing_indexes.contains(*col) {
                     continue;
                 }
@@ -424,7 +416,8 @@ impl IndexAdvisor {
                     index_type,
                     benefit_score: *score,
                     speedup_estimate: speedup,
-                    affected_queries: pattern.equality_count as usize + pattern.range_count as usize,
+                    affected_queries: pattern.equality_count as usize
+                        + pattern.range_count as usize,
                     estimated_size_bytes: self.estimate_index_size(table_stat.rows_scanned, 1),
                     reason: format!(
                         "Column '{}' used in {} equality and {} range filters",
@@ -467,10 +460,8 @@ impl IndexAdvisor {
                         benefit_score: combined_score * 1.5, // Boost composite indexes
                         speedup_estimate: 2.0 + (columns.len() as f64 * 0.5),
                         affected_queries: *count as usize,
-                        estimated_size_bytes: self.estimate_index_size(
-                            table_stat.rows_scanned,
-                            columns.len(),
-                        ),
+                        estimated_size_bytes: self
+                            .estimate_index_size(table_stat.rows_scanned, columns.len()),
                         reason: format!(
                             "Columns ({}) frequently used together in {} queries",
                             columns.join(", "),
@@ -505,7 +496,11 @@ impl IndexAdvisor {
     }
 
     /// Get recommendations for a specific table
-    pub fn get_table_recommendations(&self, database: &str, table: &str) -> Vec<IndexRecommendation> {
+    pub fn get_table_recommendations(
+        &self,
+        database: &str,
+        table: &str,
+    ) -> Vec<IndexRecommendation> {
         self.recommendations
             .read()
             .iter()
@@ -626,7 +621,11 @@ mod tests {
             advisor.record_query(
                 "SELECT * FROM users WHERE email = 'test@example.com'",
                 vec!["users".to_string()],
-                vec![("users".to_string(), "email".to_string(), FilterType::Equality)],
+                vec![(
+                    "users".to_string(),
+                    "email".to_string(),
+                    FilterType::Equality,
+                )],
                 vec![],
                 vec![],
                 vec![("users".to_string(), "email".to_string())],
@@ -655,8 +654,16 @@ mod tests {
                 "SELECT * FROM orders WHERE customer_id = 1 AND status = 'pending'",
                 vec!["orders".to_string()],
                 vec![
-                    ("orders".to_string(), "customer_id".to_string(), FilterType::Equality),
-                    ("orders".to_string(), "status".to_string(), FilterType::Equality),
+                    (
+                        "orders".to_string(),
+                        "customer_id".to_string(),
+                        FilterType::Equality,
+                    ),
+                    (
+                        "orders".to_string(),
+                        "status".to_string(),
+                        FilterType::Equality,
+                    ),
                 ],
                 vec![],
                 vec![],

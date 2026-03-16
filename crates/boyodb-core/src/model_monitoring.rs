@@ -6,10 +6,10 @@
 //! - Model performance metrics over time
 //! - Alerting on degradation
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Statistical test types for drift detection
@@ -180,7 +180,7 @@ pub enum MonitoredMetric {
     R2Score,
     LatencyP95,
     LatencyP99,
-    DriftPsi(String),      // Feature name
+    DriftPsi(String), // Feature name
     PredictionRate,
     ErrorRate,
 }
@@ -361,7 +361,8 @@ impl ModelMonitor {
         let reference = refs.get(feature)?;
 
         let current_stats = self.compute_stats(current_values);
-        let (_, current_proportions) = self.compute_histogram_with_bins(current_values, &reference.bins);
+        let (_, current_proportions) =
+            self.compute_histogram_with_bins(current_values, &reference.bins);
 
         // Calculate PSI
         let psi = self.calculate_psi(&reference.proportions, &current_proportions);
@@ -498,9 +499,7 @@ impl ModelMonitor {
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let bin_width = (max - min) / num_bins as f64;
 
-        let bins: Vec<f64> = (0..=num_bins)
-            .map(|i| min + i as f64 * bin_width)
-            .collect();
+        let bins: Vec<f64> = (0..=num_bins).map(|i| min + i as f64 * bin_width).collect();
 
         self.compute_histogram_with_bins(values, &bins)
     }
@@ -556,7 +555,10 @@ impl ModelMonitor {
 
         // Calculate regression metrics
         let predictions_vec: Vec<f64> = window_preds.iter().map(|p| p.prediction).collect();
-        let actuals: Vec<f64> = window_preds.iter().map(|p| p.ground_truth.unwrap()).collect();
+        let actuals: Vec<f64> = window_preds
+            .iter()
+            .map(|p| p.ground_truth.unwrap())
+            .collect();
 
         let mae = predictions_vec
             .iter()
@@ -581,7 +583,11 @@ impl ModelMonitor {
             .zip(actuals.iter())
             .map(|(p, a)| (a - p).powi(2))
             .sum();
-        let r2 = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+        let r2 = if ss_tot > 0.0 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        };
 
         Some(PerformanceMetrics {
             model_name: self.model_name.clone(),
@@ -642,8 +648,8 @@ impl ModelMonitor {
                         value: val,
                         threshold: config.threshold,
                         message: format!(
-                            "Alert '{}': {} is {} (threshold: {})",
-                            config.name, format!("{:?}", config.metric), val, config.threshold
+                            "Alert '{}': {:?} is {} (threshold: {})",
+                            config.name, config.metric, val, config.threshold
                         ),
                         severity: AlertSeverity::Warning,
                         timestamp: SystemTime::now()
@@ -678,7 +684,11 @@ impl ModelMonitor {
     pub fn get_alerts(&self, acknowledged: Option<bool>) -> Vec<Alert> {
         let alerts = self.triggered_alerts.read();
         match acknowledged {
-            Some(ack) => alerts.iter().filter(|a| a.acknowledged == ack).cloned().collect(),
+            Some(ack) => alerts
+                .iter()
+                .filter(|a| a.acknowledged == ack)
+                .cloned()
+                .collect(),
             None => alerts.clone(),
         }
     }

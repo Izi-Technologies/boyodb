@@ -11,9 +11,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use arrow_array::{
-    Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array,
-};
+use arrow_array::{Array, ArrayRef, Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Schema, SchemaRef};
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
@@ -227,8 +225,8 @@ pub struct BloomFilter {
 impl BloomFilter {
     pub fn new(expected_items: usize, fpp: f64) -> Self {
         // Calculate optimal size and hash functions
-        let num_bits = ((-1.0 * expected_items as f64 * fpp.ln()) / (2.0_f64.ln().powi(2)))
-            .ceil() as usize;
+        let num_bits =
+            ((-(expected_items as f64) * fpp.ln()) / (2.0_f64.ln().powi(2))).ceil() as usize;
         let num_bits = num_bits.max(64).next_power_of_two();
         let num_hash_funcs =
             ((num_bits as f64 / expected_items as f64) * 2.0_f64.ln()).ceil() as usize;
@@ -405,7 +403,9 @@ impl VectorizedHashJoin {
                 if combine {
                     for (i, hash) in hashes.iter_mut().enumerate() {
                         if !arr.is_null(i) {
-                            *hash = hash.wrapping_mul(31).wrapping_add(self.hash_u64(arr.value(i)));
+                            *hash = hash
+                                .wrapping_mul(31)
+                                .wrapping_add(self.hash_u64(arr.value(i)));
                         }
                     }
                 } else {
@@ -633,7 +633,11 @@ impl PartitionedHashJoin {
     }
 
     /// Partition a batch by key hash
-    fn partition_batch(&self, batch: &RecordBatch, key_indices: &[usize]) -> Vec<(usize, RecordBatch)> {
+    fn partition_batch(
+        &self,
+        batch: &RecordBatch,
+        key_indices: &[usize],
+    ) -> Vec<(usize, RecordBatch)> {
         let num_rows = batch.num_rows();
         let num_partitions = self.partitions.len();
 
@@ -673,7 +677,11 @@ impl PartitionedHashJoin {
                             let values: Vec<Option<i64>> = indices
                                 .iter()
                                 .map(|&i| {
-                                    if arr.is_null(i) { None } else { Some(arr.value(i)) }
+                                    if arr.is_null(i) {
+                                        None
+                                    } else {
+                                        Some(arr.value(i))
+                                    }
                                 })
                                 .collect();
                             Arc::new(Int64Array::from(values)) as ArrayRef
@@ -696,12 +704,18 @@ impl PartitionedHashJoin {
         let partitioned = self.partition_batch(&batch, &self.build_key_indices);
 
         if self.config.parallel_build {
-            partitioned.into_par_iter().for_each(|(partition_idx, sub_batch)| {
-                self.partitions[partition_idx].lock().add_build_batch(sub_batch);
-            });
+            partitioned
+                .into_par_iter()
+                .for_each(|(partition_idx, sub_batch)| {
+                    self.partitions[partition_idx]
+                        .lock()
+                        .add_build_batch(sub_batch);
+                });
         } else {
             for (partition_idx, sub_batch) in partitioned {
-                self.partitions[partition_idx].lock().add_build_batch(sub_batch);
+                self.partitions[partition_idx]
+                    .lock()
+                    .add_build_batch(sub_batch);
             }
         }
     }
@@ -793,10 +807,12 @@ impl VectorizedMergeJoin {
     ) -> Option<RecordBatch> {
         let start = std::time::Instant::now();
 
-        let left_keys = left.column(left_key_idx)
+        let left_keys = left
+            .column(left_key_idx)
             .as_any()
             .downcast_ref::<Int64Array>()?;
-        let right_keys = right.column(right_key_idx)
+        let right_keys = right
+            .column(right_key_idx)
             .as_any()
             .downcast_ref::<Int64Array>()?;
 
@@ -891,7 +907,11 @@ impl VectorizedMergeJoin {
                 let values: Vec<Option<i64>> = left_indices
                     .iter()
                     .map(|&i| {
-                        if arr.is_null(i) { None } else { Some(arr.value(i)) }
+                        if arr.is_null(i) {
+                            None
+                        } else {
+                            Some(arr.value(i))
+                        }
                     })
                     .collect();
                 columns.push(Arc::new(Int64Array::from(values)) as ArrayRef);
@@ -904,7 +924,11 @@ impl VectorizedMergeJoin {
                 let values: Vec<Option<i64>> = right_indices
                     .iter()
                     .map(|&i| {
-                        if arr.is_null(i) { None } else { Some(arr.value(i)) }
+                        if arr.is_null(i) {
+                            None
+                        } else {
+                            Some(arr.value(i))
+                        }
                     })
                     .collect();
                 columns.push(Arc::new(Int64Array::from(values)) as ArrayRef);
@@ -928,9 +952,8 @@ impl VectorizedMergeJoin {
         }
 
         let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema.clone(), columns).unwrap_or_else(|_| {
-            RecordBatch::new_empty(schema)
-        })
+        RecordBatch::try_new(schema.clone(), columns)
+            .unwrap_or_else(|_| RecordBatch::new_empty(schema))
     }
 
     pub fn stats(&self) -> &JoinStats {
@@ -987,7 +1010,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])) as ArrayRef,
                 Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])) as ArrayRef,
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         join.add_build_batch(build_batch);
         join.finalize_build();
@@ -999,7 +1023,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![2, 4, 6])) as ArrayRef,
                 Arc::new(Int64Array::from(vec![100, 200, 300])) as ArrayRef,
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = join.probe(&probe_batch);
         assert!(result.is_some());

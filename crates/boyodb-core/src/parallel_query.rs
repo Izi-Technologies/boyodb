@@ -375,9 +375,7 @@ impl PartialAggValue {
             (PartialAggValue::Count(a), PartialAggValue::Count(b)) => {
                 Some(PartialAggValue::Count(a + b))
             }
-            (PartialAggValue::Sum(a), PartialAggValue::Sum(b)) => {
-                Some(PartialAggValue::Sum(a + b))
-            }
+            (PartialAggValue::Sum(a), PartialAggValue::Sum(b)) => Some(PartialAggValue::Sum(a + b)),
             (PartialAggValue::SumCount(s1, c1), PartialAggValue::SumCount(s2, c2)) => {
                 Some(PartialAggValue::SumCount(s1 + s2, c1 + c2))
             }
@@ -635,15 +633,13 @@ impl GatherNode {
 
     /// Get statistics
     pub fn stats(&self) -> GatherStats {
-        let queued: usize = self.result_queues
-            .iter()
-            .map(|q| q.lock().len())
-            .sum();
+        let queued: usize = self.result_queues.iter().map(|q| q.lock().len()).sum();
 
         GatherStats {
             gather_type: self.gather_type,
             num_workers: self.num_workers,
-            workers_complete: self.worker_complete
+            workers_complete: self
+                .worker_complete
                 .iter()
                 .filter(|c| c.load(Ordering::SeqCst))
                 .count(),
@@ -704,19 +700,22 @@ impl ParallelWorker {
 
     /// Start the worker
     pub fn start(&self) {
-        self.state.store(WorkerState::Running as usize, Ordering::SeqCst);
+        self.state
+            .store(WorkerState::Running as usize, Ordering::SeqCst);
         *self.start_time.write() = Some(Instant::now());
     }
 
     /// Finish the worker
     pub fn finish(&self) {
-        self.state.store(WorkerState::Finished as usize, Ordering::SeqCst);
+        self.state
+            .store(WorkerState::Finished as usize, Ordering::SeqCst);
         *self.end_time.write() = Some(Instant::now());
     }
 
     /// Mark worker as error
     pub fn error(&self) {
-        self.state.store(WorkerState::Error as usize, Ordering::SeqCst);
+        self.state
+            .store(WorkerState::Error as usize, Ordering::SeqCst);
         *self.end_time.write() = Some(Instant::now());
     }
 
@@ -1032,17 +1031,23 @@ mod tests {
     fn test_gather_node() {
         let gather = GatherNode::new(GatherType::Gather, 2);
 
-        gather.push_result(0, ResultTuple {
-            worker_id: 0,
-            data: vec![Some("row1".to_string())],
-            sort_key: None,
-        });
+        gather.push_result(
+            0,
+            ResultTuple {
+                worker_id: 0,
+                data: vec![Some("row1".to_string())],
+                sort_key: None,
+            },
+        );
 
-        gather.push_result(1, ResultTuple {
-            worker_id: 1,
-            data: vec![Some("row2".to_string())],
-            sort_key: None,
-        });
+        gather.push_result(
+            1,
+            ResultTuple {
+                worker_id: 1,
+                data: vec![Some("row2".to_string())],
+                sort_key: None,
+            },
+        );
 
         gather.complete_worker(0);
         gather.complete_worker(1);

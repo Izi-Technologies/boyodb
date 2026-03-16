@@ -295,8 +295,16 @@ impl BackupManifest {
         writeln!(writer, "  \"end_time\": {},", self.end_time)?;
         writeln!(writer, "  \"start_lsn\": \"{:X}\",", self.start_lsn)?;
         writeln!(writer, "  \"end_lsn\": \"{:X}\",", self.end_lsn)?;
-        writeln!(writer, "  \"system_identifier\": {},", self.system_identifier)?;
-        writeln!(writer, "  \"checksum_algorithm\": \"{}\",", self.checksum_algorithm)?;
+        writeln!(
+            writer,
+            "  \"system_identifier\": {},",
+            self.system_identifier
+        )?;
+        writeln!(
+            writer,
+            "  \"checksum_algorithm\": \"{}\",",
+            self.checksum_algorithm
+        )?;
         writeln!(writer, "  \"files\": [")?;
 
         for (i, file_entry) in self.files.iter().enumerate() {
@@ -312,8 +320,12 @@ impl BackupManifest {
         writeln!(writer, "  \"wal_files\": [")?;
 
         for (i, wal_file) in self.wal_files.iter().enumerate() {
-            let comma = if i < self.wal_files.len() - 1 { "," } else { "" };
-            writeln!(writer, "    \"{}\"{}",wal_file, comma)?;
+            let comma = if i < self.wal_files.len() - 1 {
+                ","
+            } else {
+                ""
+            };
+            writeln!(writer, "    \"{}\"{}", wal_file, comma)?;
         }
 
         writeln!(writer, "  ]")?;
@@ -477,7 +489,8 @@ impl BackupExecutor {
             BackupFormat::Plain => {
                 if target.exists() {
                     // Check if empty
-                    let is_empty = target.read_dir()
+                    let is_empty = target
+                        .read_dir()
                         .map(|mut i| i.next().is_none())
                         .unwrap_or(false);
 
@@ -486,10 +499,7 @@ impl BackupExecutor {
                     }
                 } else {
                     fs::create_dir_all(target).map_err(|e| {
-                        BackupError::IoError(format!(
-                            "Failed to create target directory: {}",
-                            e
-                        ))
+                        BackupError::IoError(format!("Failed to create target directory: {}", e))
                     })?;
                 }
             }
@@ -497,10 +507,7 @@ impl BackupExecutor {
                 // For archive formats, ensure parent directory exists
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent).map_err(|e| {
-                        BackupError::IoError(format!(
-                            "Failed to create parent directory: {}",
-                            e
-                        ))
+                        BackupError::IoError(format!("Failed to create parent directory: {}", e))
                     })?;
                 }
             }
@@ -595,9 +602,8 @@ impl BackupExecutor {
         })?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                BackupError::IoError(format!("Failed to read entry: {}", e))
-            })?;
+            let entry =
+                entry.map_err(|e| BackupError::IoError(format!("Failed to read entry: {}", e)))?;
 
             let source_path = entry.path();
             let relative_path = source_path
@@ -615,9 +621,9 @@ impl BackupExecutor {
                 continue;
             }
 
-            let metadata = entry.metadata().map_err(|e| {
-                BackupError::IoError(format!("Failed to get metadata: {}", e))
-            })?;
+            let metadata = entry
+                .metadata()
+                .map_err(|e| BackupError::IoError(format!("Failed to get metadata: {}", e)))?;
 
             if metadata.is_dir() {
                 fs::create_dir_all(&target_path).map_err(|e| {
@@ -627,13 +633,7 @@ impl BackupExecutor {
                     ))
                 })?;
 
-                self.backup_directory_recursive(
-                    &source_path,
-                    target,
-                    base,
-                    config,
-                    manifest,
-                )?;
+                self.backup_directory_recursive(&source_path, target, base, config, manifest)?;
             } else {
                 // Rate limiting
                 if config.max_rate > 0 {
@@ -676,7 +676,7 @@ impl BackupExecutor {
                 | "backup_manifest"
                 | "tablespace_map"
         ) || name.ends_with(".pid")
-          || name.starts_with("pgsql_tmp")
+            || name.starts_with("pgsql_tmp")
     }
 
     /// Copy a file and compute its checksum
@@ -688,9 +688,8 @@ impl BackupExecutor {
     ) -> Result<String, BackupError> {
         // Ensure parent directory exists
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                BackupError::IoError(format!("Failed to create parent dir: {}", e))
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|e| BackupError::IoError(format!("Failed to create parent dir: {}", e)))?;
         }
 
         let source_file = File::open(source).map_err(|e| {
@@ -708,9 +707,9 @@ impl BackupExecutor {
         let mut buffer = [0u8; 8192];
 
         loop {
-            let bytes_read = reader.read(&mut buffer).map_err(|e| {
-                BackupError::IoError(format!("Read error: {}", e))
-            })?;
+            let bytes_read = reader
+                .read(&mut buffer)
+                .map_err(|e| BackupError::IoError(format!("Read error: {}", e)))?;
 
             if bytes_read == 0 {
                 break;
@@ -722,14 +721,14 @@ impl BackupExecutor {
                 checksum = checksum.rotate_left(1);
             }
 
-            writer.write_all(&buffer[..bytes_read]).map_err(|e| {
-                BackupError::IoError(format!("Write error: {}", e))
-            })?;
+            writer
+                .write_all(&buffer[..bytes_read])
+                .map_err(|e| BackupError::IoError(format!("Write error: {}", e)))?;
         }
 
-        writer.flush().map_err(|e| {
-            BackupError::IoError(format!("Flush error: {}", e))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| BackupError::IoError(format!("Flush error: {}", e)))?;
 
         Ok(format!("{:08X}", checksum))
     }
@@ -741,26 +740,23 @@ impl BackupExecutor {
         manifest: &mut BackupManifest,
     ) -> Result<(), BackupError> {
         let wal_target = target.join("pg_wal");
-        fs::create_dir_all(&wal_target).map_err(|e| {
-            BackupError::IoError(format!("Failed to create WAL directory: {}", e))
-        })?;
+        fs::create_dir_all(&wal_target)
+            .map_err(|e| BackupError::IoError(format!("Failed to create WAL directory: {}", e)))?;
 
         if !self.wal_directory.exists() {
             return Ok(()); // No WAL directory
         }
 
-        let entries = fs::read_dir(&self.wal_directory).map_err(|e| {
-            BackupError::IoError(format!("Failed to read WAL directory: {}", e))
-        })?;
+        let entries = fs::read_dir(&self.wal_directory)
+            .map_err(|e| BackupError::IoError(format!("Failed to read WAL directory: {}", e)))?;
 
         for entry in entries {
             if self.state.is_cancelled() {
                 return Err(BackupError::Cancelled);
             }
 
-            let entry = entry.map_err(|e| {
-                BackupError::IoError(format!("Failed to read WAL entry: {}", e))
-            })?;
+            let entry = entry
+                .map_err(|e| BackupError::IoError(format!("Failed to read WAL entry: {}", e)))?;
 
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
@@ -770,9 +766,8 @@ impl BackupExecutor {
                 let source_path = entry.path();
                 let target_path = wal_target.join(&*name);
 
-                fs::copy(&source_path, &target_path).map_err(|e| {
-                    BackupError::IoError(format!("Failed to copy WAL file: {}", e))
-                })?;
+                fs::copy(&source_path, &target_path)
+                    .map_err(|e| BackupError::IoError(format!("Failed to copy WAL file: {}", e)))?;
 
                 manifest.wal_files.push(name.to_string());
             }
@@ -897,13 +892,11 @@ impl RestoreExecutor {
 
         // Prepare target
         if config.clear_target && config.target.exists() {
-            fs::remove_dir_all(&config.target).map_err(|e| {
-                BackupError::IoError(format!("Failed to clear target: {}", e))
-            })?;
+            fs::remove_dir_all(&config.target)
+                .map_err(|e| BackupError::IoError(format!("Failed to clear target: {}", e)))?;
         }
-        fs::create_dir_all(&config.target).map_err(|e| {
-            BackupError::IoError(format!("Failed to create target: {}", e))
-        })?;
+        fs::create_dir_all(&config.target)
+            .map_err(|e| BackupError::IoError(format!("Failed to create target: {}", e)))?;
 
         // Restore files
         *self.phase.write() = RestorePhase::RestoringFiles;
@@ -969,27 +962,28 @@ impl RestoreExecutor {
         let wal_target = target.join("pg_wal");
 
         if wal_source.exists() {
-            fs::create_dir_all(&wal_target).map_err(|e| {
-                BackupError::IoError(format!("Failed to create WAL dir: {}", e))
-            })?;
+            fs::create_dir_all(&wal_target)
+                .map_err(|e| BackupError::IoError(format!("Failed to create WAL dir: {}", e)))?;
 
-            for entry in fs::read_dir(&wal_source).map_err(|e| {
-                BackupError::IoError(format!("Failed to read WAL source: {}", e))
-            })? {
-                let entry = entry.map_err(|e| {
-                    BackupError::IoError(format!("WAL entry error: {}", e))
-                })?;
+            for entry in fs::read_dir(&wal_source)
+                .map_err(|e| BackupError::IoError(format!("Failed to read WAL source: {}", e)))?
+            {
+                let entry =
+                    entry.map_err(|e| BackupError::IoError(format!("WAL entry error: {}", e)))?;
 
-                fs::copy(entry.path(), wal_target.join(entry.file_name())).map_err(|e| {
-                    BackupError::IoError(format!("WAL copy failed: {}", e))
-                })?;
+                fs::copy(entry.path(), wal_target.join(entry.file_name()))
+                    .map_err(|e| BackupError::IoError(format!("WAL copy failed: {}", e)))?;
             }
         }
 
         Ok(())
     }
 
-    fn create_recovery_conf(&self, target: &Path, config: &RestoreConfig) -> Result<(), BackupError> {
+    fn create_recovery_conf(
+        &self,
+        target: &Path,
+        config: &RestoreConfig,
+    ) -> Result<(), BackupError> {
         let signal_path = target.join("recovery.signal");
         File::create(&signal_path).map_err(|e| {
             BackupError::IoError(format!("Failed to create recovery.signal: {}", e))
@@ -1004,7 +998,11 @@ impl RestoreExecutor {
         }
 
         if let Some(lsn) = config.recovery_target_lsn {
-            conf.push_str(&format!("recovery_target_lsn = '{:X}/{:08X}'\n", lsn >> 32, lsn & 0xFFFFFFFF));
+            conf.push_str(&format!(
+                "recovery_target_lsn = '{:X}/{:08X}'\n",
+                lsn >> 32,
+                lsn & 0xFFFFFFFF
+            ));
         }
 
         if !conf.is_empty() {
@@ -1038,7 +1036,11 @@ pub enum BackupError {
     IoError(String),
     TargetNotEmpty(String),
     InvalidBackup(String),
-    ChecksumMismatch { file: String, expected: String, actual: String },
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
     WalMissing(String),
     Cancelled,
     InProgress,
@@ -1051,8 +1053,16 @@ impl std::fmt::Display for BackupError {
             Self::IoError(msg) => write!(f, "I/O error: {}", msg),
             Self::TargetNotEmpty(path) => write!(f, "Target directory not empty: {}", path),
             Self::InvalidBackup(msg) => write!(f, "Invalid backup: {}", msg),
-            Self::ChecksumMismatch { file, expected, actual } => {
-                write!(f, "Checksum mismatch for {}: expected {}, got {}", file, expected, actual)
+            Self::ChecksumMismatch {
+                file,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "Checksum mismatch for {}: expected {}, got {}",
+                    file, expected, actual
+                )
             }
             Self::WalMissing(name) => write!(f, "Required WAL file missing: {}", name),
             Self::Cancelled => write!(f, "Backup cancelled"),
@@ -1246,8 +1256,9 @@ mod tests {
 
         let result = restore_executor.execute_restore(&restore_config).unwrap();
         // Note: total_size comes from manifest which may be 0 with our simple parser
-        assert!(result.files_restored >= 0);
+        // files_restored is a usize and we just verify the restore succeeded
         assert!(restore_dir.exists());
+        let _ = result.files_restored; // Verify field exists
     }
 
     #[test]
@@ -1312,11 +1323,7 @@ mod tests {
 
     #[test]
     fn test_wal_methods() {
-        let methods = [
-            WalMethod::None,
-            WalMethod::Fetch,
-            WalMethod::Stream,
-        ];
+        let methods = [WalMethod::None, WalMethod::Fetch, WalMethod::Stream];
 
         for method in methods {
             let config = BackupConfig {

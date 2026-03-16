@@ -26,13 +26,13 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
 
 // ============================================================================
 // Audit Event Types
@@ -465,12 +465,10 @@ impl AuditLogger {
         let mut last_hash = "genesis".to_string();
         let mut last_id = 0u64;
 
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                if let Ok(event) = serde_json::from_str::<AuditEvent>(&line) {
-                    last_hash = event.hash.clone();
-                    last_id = event.event_id;
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(event) = serde_json::from_str::<AuditEvent>(&line) {
+                last_hash = event.hash.clone();
+                last_id = event.event_id;
             }
         }
 
@@ -514,14 +512,25 @@ impl AuditLogger {
     }
 
     /// Log a quick authentication event
-    pub fn log_auth(&self, user_id: &str, action: AuditAction, outcome: AuditOutcome, client_ip: Option<&str>) {
+    pub fn log_auth(
+        &self,
+        user_id: &str,
+        action: AuditAction,
+        outcome: AuditOutcome,
+        client_ip: Option<&str>,
+    ) {
         let mut event = AuditEvent::new(
             0, // Will be assigned
             AuditCategory::Authentication,
-            if outcome == AuditOutcome::Success { AuditSeverity::Info } else { AuditSeverity::Warning },
+            if outcome == AuditOutcome::Success {
+                AuditSeverity::Info
+            } else {
+                AuditSeverity::Warning
+            },
             action,
             outcome,
-        ).with_user(user_id);
+        )
+        .with_user(user_id);
 
         if let Some(ip) = client_ip {
             event = event.with_client_ip(ip);
@@ -544,19 +553,29 @@ impl AuditLogger {
         let action = Self::infer_action_from_sql(sql);
         let category = match &action {
             AuditAction::Select | AuditAction::Export => AuditCategory::DataAccess,
-            AuditAction::Insert | AuditAction::Update | AuditAction::Delete |
-            AuditAction::Truncate | AuditAction::Merge => AuditCategory::DataManipulation,
-            AuditAction::CreateDatabase | AuditAction::DropDatabase |
-            AuditAction::CreateTable | AuditAction::DropTable |
-            AuditAction::AlterTable | AuditAction::CreateIndex |
-            AuditAction::DropIndex => AuditCategory::DataDefinition,
+            AuditAction::Insert
+            | AuditAction::Update
+            | AuditAction::Delete
+            | AuditAction::Truncate
+            | AuditAction::Merge => AuditCategory::DataManipulation,
+            AuditAction::CreateDatabase
+            | AuditAction::DropDatabase
+            | AuditAction::CreateTable
+            | AuditAction::DropTable
+            | AuditAction::AlterTable
+            | AuditAction::CreateIndex
+            | AuditAction::DropIndex => AuditCategory::DataDefinition,
             _ => AuditCategory::DataAccess,
         };
 
         let mut event = AuditEvent::new(
             0,
             category,
-            if outcome == AuditOutcome::Success { AuditSeverity::Info } else { AuditSeverity::Error },
+            if outcome == AuditOutcome::Success {
+                AuditSeverity::Info
+            } else {
+                AuditSeverity::Error
+            },
             action,
             outcome,
         )
@@ -587,7 +606,8 @@ impl AuditLogger {
             AuditSeverity::Warning,
             action,
             AuditOutcome::Success,
-        ).with_metadata("description", description);
+        )
+        .with_metadata("description", description);
 
         if let Some(user) = user_id {
             event = event.with_user(user);
@@ -600,21 +620,53 @@ impl AuditLogger {
     fn infer_action_from_sql(sql: &str) -> AuditAction {
         let upper = sql.trim().to_uppercase();
 
-        if upper.starts_with("SELECT") { return AuditAction::Select; }
-        if upper.starts_with("INSERT") { return AuditAction::Insert; }
-        if upper.starts_with("UPDATE") { return AuditAction::Update; }
-        if upper.starts_with("DELETE") { return AuditAction::Delete; }
-        if upper.starts_with("TRUNCATE") { return AuditAction::Truncate; }
-        if upper.starts_with("MERGE") { return AuditAction::Merge; }
-        if upper.starts_with("CREATE DATABASE") { return AuditAction::CreateDatabase; }
-        if upper.starts_with("DROP DATABASE") { return AuditAction::DropDatabase; }
-        if upper.starts_with("CREATE TABLE") { return AuditAction::CreateTable; }
-        if upper.starts_with("DROP TABLE") { return AuditAction::DropTable; }
-        if upper.starts_with("ALTER TABLE") { return AuditAction::AlterTable; }
-        if upper.starts_with("CREATE INDEX") { return AuditAction::CreateIndex; }
-        if upper.starts_with("DROP INDEX") { return AuditAction::DropIndex; }
+        if upper.starts_with("SELECT") {
+            return AuditAction::Select;
+        }
+        if upper.starts_with("INSERT") {
+            return AuditAction::Insert;
+        }
+        if upper.starts_with("UPDATE") {
+            return AuditAction::Update;
+        }
+        if upper.starts_with("DELETE") {
+            return AuditAction::Delete;
+        }
+        if upper.starts_with("TRUNCATE") {
+            return AuditAction::Truncate;
+        }
+        if upper.starts_with("MERGE") {
+            return AuditAction::Merge;
+        }
+        if upper.starts_with("CREATE DATABASE") {
+            return AuditAction::CreateDatabase;
+        }
+        if upper.starts_with("DROP DATABASE") {
+            return AuditAction::DropDatabase;
+        }
+        if upper.starts_with("CREATE TABLE") {
+            return AuditAction::CreateTable;
+        }
+        if upper.starts_with("DROP TABLE") {
+            return AuditAction::DropTable;
+        }
+        if upper.starts_with("ALTER TABLE") {
+            return AuditAction::AlterTable;
+        }
+        if upper.starts_with("CREATE INDEX") {
+            return AuditAction::CreateIndex;
+        }
+        if upper.starts_with("DROP INDEX") {
+            return AuditAction::DropIndex;
+        }
 
-        AuditAction::Custom(upper.split_whitespace().next().unwrap_or("UNKNOWN").to_string())
+        AuditAction::Custom(
+            upper
+                .split_whitespace()
+                .next()
+                .unwrap_or("UNKNOWN")
+                .to_string(),
+        )
     }
 
     /// Flush buffered events to disk
@@ -649,7 +701,8 @@ impl AuditLogger {
                 file.sync_all()?;
             }
 
-            self.current_size.fetch_add(bytes_written, Ordering::Relaxed);
+            self.current_size
+                .fetch_add(bytes_written, Ordering::Relaxed);
         }
 
         Ok(())
@@ -665,7 +718,10 @@ impl AuditLogger {
         // Rotate existing files
         for i in (1..self.config.max_files).rev() {
             let old_path = self.config.log_path.with_extension(format!("log.{}", i));
-            let new_path = self.config.log_path.with_extension(format!("log.{}", i + 1));
+            let new_path = self
+                .config
+                .log_path
+                .with_extension(format!("log.{}", i + 1));
 
             if old_path.exists() {
                 if i + 1 >= self.config.max_files {
@@ -721,7 +777,8 @@ impl AuditLogger {
                 Ok(l) => l,
                 Err(e) => {
                     result.valid = false;
-                    result.error_message = Some(format!("Read error at line {}: {}", line_num + 1, e));
+                    result.error_message =
+                        Some(format!("Read error at line {}: {}", line_num + 1, e));
                     return result;
                 }
             };
@@ -730,7 +787,8 @@ impl AuditLogger {
                 Ok(e) => e,
                 Err(e) => {
                     result.valid = false;
-                    result.error_message = Some(format!("Parse error at line {}: {}", line_num + 1, e));
+                    result.error_message =
+                        Some(format!("Parse error at line {}: {}", line_num + 1, e));
                     return result;
                 }
             };
@@ -1022,8 +1080,21 @@ mod tests {
         let logger = AuditLogger::new(config).unwrap();
 
         // Log some events
-        logger.log_auth("alice", AuditAction::Login, AuditOutcome::Success, Some("127.0.0.1"));
-        logger.log_query("alice", "SELECT * FROM users", Some("mydb"), Some("users"), 10, 1000, AuditOutcome::Success);
+        logger.log_auth(
+            "alice",
+            AuditAction::Login,
+            AuditOutcome::Success,
+            Some("127.0.0.1"),
+        );
+        logger.log_query(
+            "alice",
+            "SELECT * FROM users",
+            Some("mydb"),
+            Some("users"),
+            10,
+            1000,
+            AuditOutcome::Success,
+        );
 
         // Flush
         logger.flush().unwrap();
@@ -1058,10 +1129,25 @@ mod tests {
 
     #[test]
     fn test_action_inference() {
-        assert!(matches!(AuditLogger::infer_action_from_sql("SELECT * FROM t"), AuditAction::Select));
-        assert!(matches!(AuditLogger::infer_action_from_sql("INSERT INTO t VALUES (1)"), AuditAction::Insert));
-        assert!(matches!(AuditLogger::infer_action_from_sql("UPDATE t SET x = 1"), AuditAction::Update));
-        assert!(matches!(AuditLogger::infer_action_from_sql("DELETE FROM t"), AuditAction::Delete));
-        assert!(matches!(AuditLogger::infer_action_from_sql("CREATE TABLE t (id INT)"), AuditAction::CreateTable));
+        assert!(matches!(
+            AuditLogger::infer_action_from_sql("SELECT * FROM t"),
+            AuditAction::Select
+        ));
+        assert!(matches!(
+            AuditLogger::infer_action_from_sql("INSERT INTO t VALUES (1)"),
+            AuditAction::Insert
+        ));
+        assert!(matches!(
+            AuditLogger::infer_action_from_sql("UPDATE t SET x = 1"),
+            AuditAction::Update
+        ));
+        assert!(matches!(
+            AuditLogger::infer_action_from_sql("DELETE FROM t"),
+            AuditAction::Delete
+        ));
+        assert!(matches!(
+            AuditLogger::infer_action_from_sql("CREATE TABLE t (id INT)"),
+            AuditAction::CreateTable
+        ));
     }
 }

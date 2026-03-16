@@ -5,11 +5,11 @@
 //! part of any index, the new tuple can be placed on the same page as the old tuple
 //! without requiring index updates.
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Error Types
@@ -928,11 +928,8 @@ mod tests {
 
     #[test]
     fn test_indexed_columns() {
-        let manager = HotUpdateManager::new(
-            "test_table",
-            vec!["a".to_string(), "b".to_string()],
-            8192,
-        );
+        let manager =
+            HotUpdateManager::new("test_table", vec!["a".to_string(), "b".to_string()], 8192);
 
         manager.add_indexed_column("a");
         manager.add_indexed_column("b");

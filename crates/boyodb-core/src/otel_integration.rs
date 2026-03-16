@@ -3,10 +3,10 @@
 //! Provides distributed tracing, metrics, and logging integration with OpenTelemetry.
 //! Supports exporting to various backends: Jaeger, Zipkin, OTLP, Prometheus.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// OpenTelemetry configuration
@@ -338,7 +338,9 @@ impl Tracer {
     /// Start a child span
     pub fn start_child_span(&self, name: &str, kind: SpanKind, parent_span_id: u64) -> u64 {
         let parent = self.active_spans.read().get(&parent_span_id).cloned();
-        let trace_id = parent.map(|p| p.trace_id).unwrap_or_else(|| self.id_gen.next_trace_id());
+        let trace_id = parent
+            .map(|p| p.trace_id)
+            .unwrap_or_else(|| self.id_gen.next_trace_id());
         self.start_span_with_context(name, kind, trace_id, parent_span_id)
     }
 
@@ -585,7 +587,8 @@ impl Meter {
 
         // Collect histograms
         for (name, data) in self.histograms.read().iter() {
-            let buckets: Vec<(f64, u64)> = data.buckets
+            let buckets: Vec<(f64, u64)> = data
+                .buckets
                 .iter()
                 .zip(data.counts.iter())
                 .map(|(&b, c)| (b, c.load(Ordering::Relaxed)))
@@ -630,13 +633,21 @@ impl BoyoDbInstrumentation {
     /// Start a query span
     pub fn start_query(&self, sql: &str, database: &str) -> u64 {
         let span_id = self.tracer.start_span("db.query", SpanKind::Server);
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_SYSTEM, "boyodb");
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_NAME, database);
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_STATEMENT, sql);
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_SYSTEM, "boyodb");
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_NAME, database);
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_STATEMENT, sql);
 
         // Extract operation from SQL
-        let op = sql.trim().split_whitespace().next().unwrap_or("UNKNOWN").to_uppercase();
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_OPERATION, op);
+        let op = sql
+            .split_whitespace()
+            .next()
+            .unwrap_or("UNKNOWN")
+            .to_uppercase();
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_OPERATION, op);
 
         self.meter.counter_add("queries.total", 1);
         span_id
@@ -644,7 +655,11 @@ impl BoyoDbInstrumentation {
 
     /// End a query span with results
     pub fn end_query(&self, span_id: u64, rows_affected: i64, success: bool) {
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_ROWS_AFFECTED, rows_affected);
+        self.tracer.set_attribute(
+            span_id,
+            semantic_conventions::DB_ROWS_AFFECTED,
+            rows_affected,
+        );
 
         if success {
             self.tracer.set_status(span_id, SpanStatus::Ok, None);
@@ -659,17 +674,24 @@ impl BoyoDbInstrumentation {
 
     /// Record query duration
     pub fn record_query_duration(&self, duration_ms: f64) {
-        let buckets = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0];
-        self.meter.histogram_record("query.duration_ms", duration_ms, &buckets);
+        let buckets = [
+            1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0,
+        ];
+        self.meter
+            .histogram_record("query.duration_ms", duration_ms, &buckets);
     }
 
     /// Start an ingest span
     pub fn start_ingest(&self, table: &str, batch_size: usize) -> u64 {
         let span_id = self.tracer.start_span("db.ingest", SpanKind::Server);
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_SYSTEM, "boyodb");
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_OPERATION, "INSERT");
-        self.tracer.set_attribute(span_id, semantic_conventions::DB_SQL_TABLE, table);
-        self.tracer.set_attribute(span_id, "db.batch_size", batch_size as i64);
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_SYSTEM, "boyodb");
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_OPERATION, "INSERT");
+        self.tracer
+            .set_attribute(span_id, semantic_conventions::DB_SQL_TABLE, table);
+        self.tracer
+            .set_attribute(span_id, "db.batch_size", batch_size as i64);
 
         self.meter.counter_add("ingest.batches", 1);
         self.meter.counter_add("ingest.rows", batch_size as u64);
@@ -691,11 +713,14 @@ impl BoyoDbInstrumentation {
     /// Record compaction metrics
     pub fn record_compaction(&self, duration_ms: f64, segments_merged: u64, bytes_written: u64) {
         self.meter.counter_add("compaction.runs", 1);
-        self.meter.counter_add("compaction.segments_merged", segments_merged);
-        self.meter.counter_add("compaction.bytes_written", bytes_written);
+        self.meter
+            .counter_add("compaction.segments_merged", segments_merged);
+        self.meter
+            .counter_add("compaction.bytes_written", bytes_written);
 
         let buckets = [100.0, 500.0, 1000.0, 5000.0, 10000.0, 30000.0, 60000.0];
-        self.meter.histogram_record("compaction.duration_ms", duration_ms, &buckets);
+        self.meter
+            .histogram_record("compaction.duration_ms", duration_ms, &buckets);
     }
 
     /// Get tracer reference
@@ -789,9 +814,11 @@ impl PrometheusExporter {
                     }
                 }
                 MetricKind::Histogram => {
-                    if let (Some(buckets), Some(sum), Some(count)) =
-                        (&metric.histogram_buckets, metric.histogram_sum, metric.histogram_count)
-                    {
+                    if let (Some(buckets), Some(sum), Some(count)) = (
+                        &metric.histogram_buckets,
+                        metric.histogram_sum,
+                        metric.histogram_count,
+                    ) {
                         let mut cumulative = 0u64;
                         for (boundary, cnt) in buckets {
                             cumulative += cnt;
@@ -837,7 +864,10 @@ mod tests {
         };
 
         let header = ctx.to_traceparent();
-        assert_eq!(header, "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+        assert_eq!(
+            header,
+            "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+        );
     }
 
     #[test]

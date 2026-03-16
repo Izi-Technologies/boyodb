@@ -3,10 +3,10 @@
 //! This module implements the HNSW algorithm for efficient similarity search on high-dimensional vectors.
 //! HNSW provides logarithmic time complexity for search operations while maintaining high recall.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::Arc;
 use parking_lot::RwLock;
 use rand::Rng;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// HNSW index configuration
 #[derive(Debug, Clone)]
@@ -56,13 +56,12 @@ impl DistanceMetric {
     /// Calculate distance between two vectors
     pub fn distance(&self, a: &[f32], b: &[f32]) -> f32 {
         match self {
-            DistanceMetric::Euclidean => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).powi(2))
-                    .sum::<f32>()
-                    .sqrt()
-            }
+            DistanceMetric::Euclidean => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt(),
             DistanceMetric::Cosine => {
                 let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                 let norm_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
@@ -77,12 +76,7 @@ impl DistanceMetric {
                 // Negative dot product (so lower is better)
                 -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
             }
-            DistanceMetric::Manhattan => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).abs())
-                    .sum()
-            }
+            DistanceMetric::Manhattan => a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum(),
         }
     }
 }
@@ -124,7 +118,10 @@ impl PartialOrd for Candidate {
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reverse order for min-heap behavior
-        other.distance.partial_cmp(&self.distance).unwrap_or(std::cmp::Ordering::Equal)
+        other
+            .distance
+            .partial_cmp(&self.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -193,10 +190,15 @@ impl HnswIndex {
         // Insert at each layer from node's max layer down to 0
         for layer in (0..=node_layer.min(self.max_layer)).rev() {
             // Find ef_construction nearest neighbors at this layer
-            let neighbors = self.search_layer(&vector, current_id, self.config.ef_construction, layer);
+            let neighbors =
+                self.search_layer(&vector, current_id, self.config.ef_construction, layer);
 
             // Select M best neighbors
-            let m = if layer == 0 { self.config.m0 } else { self.config.m };
+            let m = if layer == 0 {
+                self.config.m0
+            } else {
+                self.config.m
+            };
             let selected: Vec<u64> = neighbors.iter().take(m).map(|c| c.id).collect();
 
             // Add bidirectional connections
@@ -208,7 +210,11 @@ impl HnswIndex {
                         neighbor.neighbors[layer].push(id);
 
                         // Prune if too many connections
-                        let max_conn = if layer == 0 { self.config.m0 } else { self.config.m };
+                        let max_conn = if layer == 0 {
+                            self.config.m0
+                        } else {
+                            self.config.m
+                        };
                         if neighbor.neighbors[layer].len() > max_conn {
                             self.prune_connections(neighbor_id, layer, max_conn, &vector);
                         }
@@ -251,10 +257,7 @@ impl HnswIndex {
         // Update entry point if necessary
         if self.entry_point == Some(id) {
             self.entry_point = self.nodes.keys().next().copied();
-            self.max_layer = self.nodes.values()
-                .map(|n| n.max_layer)
-                .max()
-                .unwrap_or(0);
+            self.max_layer = self.nodes.values().map(|n| n.max_layer).max().unwrap_or(0);
         }
 
         true
@@ -346,15 +349,27 @@ impl HnswIndex {
     }
 
     /// Search layer with ef candidates
-    fn search_layer(&self, query: &[f32], start_id: u64, ef: usize, layer: usize) -> Vec<Candidate> {
+    fn search_layer(
+        &self,
+        query: &[f32],
+        start_id: u64,
+        ef: usize,
+        layer: usize,
+    ) -> Vec<Candidate> {
         let start_dist = self.distance(query, start_id);
 
         let mut candidates = BinaryHeap::new();
         let mut results = BinaryHeap::new();
         let mut visited = HashSet::new();
 
-        candidates.push(Candidate { id: start_id, distance: start_dist });
-        results.push(Candidate { id: start_id, distance: -start_dist }); // Max-heap for results
+        candidates.push(Candidate {
+            id: start_id,
+            distance: start_dist,
+        });
+        results.push(Candidate {
+            id: start_id,
+            distance: -start_dist,
+        }); // Max-heap for results
         visited.insert(start_id);
 
         while let Some(current) = candidates.pop() {
@@ -381,8 +396,14 @@ impl HnswIndex {
                             };
 
                             if should_add {
-                                candidates.push(Candidate { id: neighbor_id, distance: dist });
-                                results.push(Candidate { id: neighbor_id, distance: -dist });
+                                candidates.push(Candidate {
+                                    id: neighbor_id,
+                                    distance: dist,
+                                });
+                                results.push(Candidate {
+                                    id: neighbor_id,
+                                    distance: -dist,
+                                });
 
                                 if results.len() > ef {
                                     results.pop();
@@ -397,14 +418,23 @@ impl HnswIndex {
         // Convert to sorted vec
         let mut result_vec: Vec<Candidate> = results
             .into_iter()
-            .map(|c| Candidate { id: c.id, distance: -c.distance })
+            .map(|c| Candidate {
+                id: c.id,
+                distance: -c.distance,
+            })
             .collect();
         result_vec.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
         result_vec
     }
 
     /// Prune connections to keep only the best ones
-    fn prune_connections(&mut self, node_id: u64, layer: usize, max_conn: usize, _reference: &[f32]) {
+    fn prune_connections(
+        &mut self,
+        node_id: u64,
+        layer: usize,
+        max_conn: usize,
+        _reference: &[f32],
+    ) {
         if let Some(node) = self.nodes.get(&node_id) {
             let vector = node.vector.clone();
             let neighbors: Vec<u64> = node.neighbors.get(layer).cloned().unwrap_or_default();
@@ -424,7 +454,8 @@ impl HnswIndex {
 
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 if layer < node.neighbors.len() {
-                    node.neighbors[layer] = candidates.iter().take(max_conn).map(|c| c.id).collect();
+                    node.neighbors[layer] =
+                        candidates.iter().take(max_conn).map(|c| c.id).collect();
                 }
             }
         }

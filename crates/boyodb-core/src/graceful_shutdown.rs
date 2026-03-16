@@ -21,10 +21,10 @@
 //! SELECT * FROM cron.job;
 //! ```
 
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::RwLock;
@@ -52,7 +52,9 @@ impl std::fmt::Display for OperationalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ShutdownInProgress => write!(f, "server shutdown in progress"),
-            Self::ShutdownTimeout { remaining_connections } => {
+            Self::ShutdownTimeout {
+                remaining_connections,
+            } => {
                 write!(
                     f,
                     "shutdown timeout with {} connections remaining",
@@ -238,9 +240,7 @@ impl ShutdownManager {
 
     /// Register a shutdown hook
     pub fn register_hook(&self, name: &str, hook: ShutdownHook) {
-        self.hooks
-            .write()
-            .push((name.to_string(), hook));
+        self.hooks.write().push((name.to_string(), hook));
     }
 
     /// Get active connection count
@@ -284,7 +284,8 @@ impl ShutdownManager {
             }
 
             let mut guard = self.shutdown_mutex.lock();
-            self.shutdown_cv.wait_for(&mut guard, Duration::from_millis(100));
+            self.shutdown_cv
+                .wait_for(&mut guard, Duration::from_millis(100));
         }
 
         // Phase 3: Wait for background tasks
@@ -301,7 +302,8 @@ impl ShutdownManager {
             }
 
             let mut guard = self.shutdown_mutex.lock();
-            self.shutdown_cv.wait_for(&mut guard, Duration::from_millis(100));
+            self.shutdown_cv
+                .wait_for(&mut guard, Duration::from_millis(100));
         }
 
         // Phase 4: Run shutdown hooks
@@ -446,9 +448,7 @@ impl ConfigManager {
 
     /// Register a configuration parameter
     pub fn register_param(&self, param: ConfigParam) {
-        self.params
-            .write()
-            .insert(param.name.clone(), param);
+        self.params.write().insert(param.name.clone(), param);
     }
 
     /// Get a parameter value
@@ -480,9 +480,7 @@ impl ConfigManager {
 
         if param.requires_restart {
             // Queue for restart
-            self.pending_changes
-                .write()
-                .insert(name.to_string(), value);
+            self.pending_changes.write().insert(name.to_string(), value);
             return Ok(());
         }
 
@@ -916,7 +914,9 @@ mod tests {
 
         assert_eq!(config.get("max_connections"), Some(ConfigValue::Int(100)));
 
-        config.set("max_connections", ConfigValue::Int(200)).unwrap();
+        config
+            .set("max_connections", ConfigValue::Int(200))
+            .unwrap();
         assert_eq!(config.get("max_connections"), Some(ConfigValue::Int(200)));
     }
 
@@ -1016,6 +1016,9 @@ mod tests {
     #[test]
     fn test_shutdown_phase_display() {
         assert_eq!(format!("{}", ShutdownPhase::Running), "running");
-        assert_eq!(format!("{}", ShutdownPhase::Draining), "draining connections");
+        assert_eq!(
+            format!("{}", ShutdownPhase::Draining),
+            "draining connections"
+        );
     }
 }

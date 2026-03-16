@@ -8,9 +8,9 @@
 // - Highlighting (ts_headline)
 // - GIN index support
 
-use std::collections::{HashMap, HashSet, BTreeMap};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 // ============================================================================
 // Basic Types
@@ -147,7 +147,7 @@ impl TsVector {
             // Extract position number and optional weight
             let (num_str, weight_char) = if let Some(c) = pos_str.chars().last() {
                 if c.is_ascii_alphabetic() {
-                    (&pos_str[..pos_str.len()-1], Some(c))
+                    (&pos_str[..pos_str.len() - 1], Some(c))
                 } else {
                     (pos_str, None)
                 }
@@ -155,12 +155,11 @@ impl TsVector {
                 (pos_str, None)
             };
 
-            let position: Position = num_str.parse()
+            let position: Position = num_str
+                .parse()
                 .map_err(|_| FtsError::ParseError(format!("Invalid position: {}", num_str)))?;
 
-            let weight = weight_char
-                .and_then(Weight::from_char)
-                .unwrap_or(Weight::D);
+            let weight = weight_char.and_then(Weight::from_char).unwrap_or(Weight::D);
 
             positions.push(WeightedPosition::new(position, weight));
         }
@@ -220,9 +219,12 @@ impl TsVector {
 
     /// Set weight for all lexemes
     pub fn setweight(&self, weight: Weight) -> TsVector {
-        let lexemes = self.lexemes.iter()
+        let lexemes = self
+            .lexemes
+            .iter()
             .map(|(l, positions)| {
-                let new_pos: Vec<_> = positions.iter()
+                let new_pos: Vec<_> = positions
+                    .iter()
                     .map(|p| WeightedPosition::new(p.position, weight))
                     .collect();
                 (l.clone(), new_pos)
@@ -233,7 +235,9 @@ impl TsVector {
 
     /// Remove positions/weights, keeping only lexemes
     pub fn strip(&self) -> TsVector {
-        let lexemes = self.lexemes.keys()
+        let lexemes = self
+            .lexemes
+            .keys()
             .map(|l| (l.clone(), Vec::new()))
             .collect();
         TsVector { lexemes }
@@ -241,12 +245,15 @@ impl TsVector {
 
     /// Convert to PostgreSQL string format
     pub fn to_string(&self) -> String {
-        let parts: Vec<String> = self.lexemes.iter()
+        let parts: Vec<String> = self
+            .lexemes
+            .iter()
             .map(|(lexeme, positions)| {
                 if positions.is_empty() {
                     format!("'{}'", lexeme)
                 } else {
-                    let pos_str: Vec<String> = positions.iter()
+                    let pos_str: Vec<String> = positions
+                        .iter()
                         .map(|wp| {
                             if wp.weight == Weight::D {
                                 format!("{}", wp.position)
@@ -255,7 +262,7 @@ impl TsVector {
                             }
                         })
                         .collect();
-                    format!("'{}':{}",lexeme, pos_str.join(","))
+                    format!("'{}':{}", lexeme, pos_str.join(","))
                 }
             })
             .collect();
@@ -457,7 +464,7 @@ impl TsQuery {
                 }
                 s if s.starts_with('<') && s.ends_with('>') => {
                     // Phrase operator <-> or <N>
-                    let dist_str = &s[1..s.len()-1];
+                    let dist_str = &s[1..s.len() - 1];
                     let distance = if dist_str == "-" {
                         1
                     } else {
@@ -498,7 +505,7 @@ impl TsQuery {
             }
             word => {
                 let (word, prefix) = if word.ends_with(":*") {
-                    (&word[..word.len()-2], true)
+                    (&word[..word.len() - 2], true)
                 } else {
                     (word, false)
                 };
@@ -506,7 +513,8 @@ impl TsQuery {
                 // Parse optional weight filter :ABC
                 let (word, weights) = if let Some(colon_pos) = word.rfind(':') {
                     let (w, weight_str) = word.split_at(colon_pos);
-                    let weights: Vec<Weight> = weight_str[1..].chars()
+                    let weights: Vec<Weight> = weight_str[1..]
+                        .chars()
                         .filter_map(Weight::from_char)
                         .collect();
                     if weights.is_empty() {
@@ -519,7 +527,11 @@ impl TsQuery {
                 };
 
                 Ok((
-                    TsQueryNode::Lexeme { word, prefix, weights },
+                    TsQueryNode::Lexeme {
+                        word,
+                        prefix,
+                        weights,
+                    },
                     pos + 1,
                 ))
             }
@@ -536,7 +548,11 @@ impl TsQuery {
 
     fn node_matches(node: &TsQueryNode, ts: &TsVector) -> bool {
         match node {
-            TsQueryNode::Lexeme { word, prefix, weights } => {
+            TsQueryNode::Lexeme {
+                word,
+                prefix,
+                weights,
+            } => {
                 if *prefix {
                     // Prefix match
                     ts.lexemes.keys().any(|l| {
@@ -555,22 +571,12 @@ impl TsQuery {
                     }
                 }
             }
-            TsQueryNode::Binary { op, left, right } => {
-                match op {
-                    QueryOp::And => {
-                        Self::node_matches(left, ts) && Self::node_matches(right, ts)
-                    }
-                    QueryOp::Or => {
-                        Self::node_matches(left, ts) || Self::node_matches(right, ts)
-                    }
-                    QueryOp::Phrase(distance) => {
-                        Self::phrase_matches(left, right, *distance, ts)
-                    }
-                    QueryOp::Not => {
-                        Self::node_matches(left, ts) && !Self::node_matches(right, ts)
-                    }
-                }
-            }
+            TsQueryNode::Binary { op, left, right } => match op {
+                QueryOp::And => Self::node_matches(left, ts) && Self::node_matches(right, ts),
+                QueryOp::Or => Self::node_matches(left, ts) || Self::node_matches(right, ts),
+                QueryOp::Phrase(distance) => Self::phrase_matches(left, right, *distance, ts),
+                QueryOp::Not => Self::node_matches(left, ts) && !Self::node_matches(right, ts),
+            },
             TsQueryNode::Not(inner) => !Self::node_matches(inner, ts),
         }
     }
@@ -617,9 +623,11 @@ impl TsQuery {
 
     fn get_positions(node: &TsQueryNode, ts: &TsVector) -> Vec<WeightedPosition> {
         match node {
-            TsQueryNode::Lexeme { word, prefix: _, weights: _ } => {
-                ts.positions(word).cloned().unwrap_or_default()
-            }
+            TsQueryNode::Lexeme {
+                word,
+                prefix: _,
+                weights: _,
+            } => ts.positions(word).cloned().unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -634,7 +642,11 @@ impl TsQuery {
 
     fn node_to_string(node: &TsQueryNode) -> String {
         match node {
-            TsQueryNode::Lexeme { word, prefix, weights } => {
+            TsQueryNode::Lexeme {
+                word,
+                prefix,
+                weights,
+            } => {
                 let mut s = format!("'{}'", word);
                 if let Some(w) = weights {
                     s.push(':');
@@ -733,10 +745,9 @@ impl TsConfig {
 
     fn english_stop_words() -> HashSet<String> {
         [
-            "a", "an", "and", "are", "as", "at", "be", "but", "by", "for",
-            "if", "in", "into", "is", "it", "no", "not", "of", "on", "or",
-            "such", "that", "the", "their", "then", "there", "these", "they",
-            "this", "to", "was", "will", "with",
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
+            "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+            "there", "these", "they", "this", "to", "was", "will", "with",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -772,7 +783,8 @@ impl TsConfig {
 
     /// Parse text to tsquery
     pub fn to_tsquery(&self, text: &str) -> TsQuery {
-        let words: Vec<String> = self.tokenize(text)
+        let words: Vec<String> = self
+            .tokenize(text)
             .into_iter()
             .filter(|w| !self.is_stop_word(w))
             .map(|w| self.normalize(&w))
@@ -811,7 +823,8 @@ impl TsConfig {
 
     /// Phraseto_tsquery (phrase query from plain text)
     pub fn phraseto_tsquery(&self, text: &str) -> TsQuery {
-        let words: Vec<String> = self.tokenize(text)
+        let words: Vec<String> = self
+            .tokenize(text)
             .into_iter()
             .filter(|w| !self.is_stop_word(w))
             .map(|w| self.normalize(&w))
@@ -858,13 +871,13 @@ impl TsConfig {
                 current_phrase = word[1..].to_string();
                 if word.ends_with('"') && word.len() > 1 {
                     in_quotes = false;
-                    current_phrase = current_phrase[..current_phrase.len()-1].to_string();
+                    current_phrase = current_phrase[..current_phrase.len() - 1].to_string();
                     required.push(current_phrase.clone());
                 }
             } else if in_quotes {
                 if word.ends_with('"') {
                     current_phrase.push(' ');
-                    current_phrase.push_str(&word[..word.len()-1]);
+                    current_phrase.push_str(&word[..word.len() - 1]);
                     in_quotes = false;
                     required.push(current_phrase.clone());
                 } else {
@@ -993,14 +1006,17 @@ pub fn ts_rank(ts: &TsVector, query: &TsQuery, weights: Option<[f32; 4]>) -> f32
 
 fn rank_node(node: &TsQueryNode, ts: &TsVector, weights: &[f32; 4]) -> f32 {
     match node {
-        TsQueryNode::Lexeme { word, prefix, weights: required_weights } => {
+        TsQueryNode::Lexeme {
+            word,
+            prefix,
+            weights: required_weights,
+        } => {
             if *prefix {
                 // Sum ranks for all matching prefixes
-                ts.lexemes.iter()
+                ts.lexemes
+                    .iter()
                     .filter(|(l, _)| l.starts_with(word))
-                    .map(|(_, positions)| {
-                        rank_positions(positions, weights, required_weights)
-                    })
+                    .map(|(_, positions)| rank_positions(positions, weights, required_weights))
                     .sum()
             } else {
                 ts.positions(word)
@@ -1028,9 +1044,11 @@ fn rank_positions(
     weights: &[f32; 4],
     required_weights: &Option<Vec<Weight>>,
 ) -> f32 {
-    positions.iter()
+    positions
+        .iter()
         .filter(|p| {
-            required_weights.as_ref()
+            required_weights
+                .as_ref()
                 .map(|rw| rw.contains(&p.weight))
                 .unwrap_or(true)
         })
@@ -1184,9 +1202,7 @@ impl GinIndex {
         let mut postings = self.postings.write();
 
         for lexeme in ts.lexemes() {
-            postings.entry(lexeme.clone())
-                .or_default()
-                .push(doc_id);
+            postings.entry(lexeme.clone()).or_default().push(doc_id);
         }
 
         *self.doc_count.write() += 1;
@@ -1235,19 +1251,17 @@ impl GinIndex {
                 }
             }
             TsQueryNode::Binary { op, left, right } => {
-                let left_docs: HashSet<u64> = self.search_node(left, postings).into_iter().collect();
-                let right_docs: HashSet<u64> = self.search_node(right, postings).into_iter().collect();
+                let left_docs: HashSet<u64> =
+                    self.search_node(left, postings).into_iter().collect();
+                let right_docs: HashSet<u64> =
+                    self.search_node(right, postings).into_iter().collect();
 
                 match op {
                     QueryOp::And | QueryOp::Phrase(_) => {
                         left_docs.intersection(&right_docs).copied().collect()
                     }
-                    QueryOp::Or => {
-                        left_docs.union(&right_docs).copied().collect()
-                    }
-                    QueryOp::Not => {
-                        left_docs.difference(&right_docs).copied().collect()
-                    }
+                    QueryOp::Or => left_docs.union(&right_docs).copied().collect(),
+                    QueryOp::Not => left_docs.difference(&right_docs).copied().collect(),
                 }
             }
             TsQueryNode::Not(_) => {

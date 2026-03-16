@@ -6,10 +6,10 @@
 //! - Hold cursors that survive transaction commit
 //! - WITH HOLD and WITHOUT HOLD semantics
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -294,7 +294,11 @@ impl Cursor {
     }
 
     /// Fetch rows in given direction
-    pub fn fetch(&mut self, direction: FetchDirection, count: Option<u64>) -> Result<Vec<CursorRow>, CursorError> {
+    pub fn fetch(
+        &mut self,
+        direction: FetchDirection,
+        count: Option<u64>,
+    ) -> Result<Vec<CursorRow>, CursorError> {
         if self.state == CursorState::Closed {
             return Err(CursorError::CursorClosed(self.options.name.clone()));
         }
@@ -419,7 +423,11 @@ impl Cursor {
     }
 
     /// Move cursor without fetching
-    pub fn move_cursor(&mut self, direction: FetchDirection, count: Option<u64>) -> Result<u64, CursorError> {
+    pub fn move_cursor(
+        &mut self,
+        direction: FetchDirection,
+        count: Option<u64>,
+    ) -> Result<u64, CursorError> {
         if self.state == CursorState::Closed {
             return Err(CursorError::CursorClosed(self.options.name.clone()));
         }

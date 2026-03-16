@@ -7,11 +7,11 @@
 //! - Query Profiler for performance debugging
 //! - Online Schema Changes for zero-downtime DDL
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -293,9 +293,7 @@ impl BackupManager {
         manifest.files = sample_files;
         manifest.complete();
 
-        self.backups
-            .write()
-            .insert(backup_id.clone(), manifest);
+        self.backups.write().insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
         Ok(backup_id)
@@ -336,9 +334,7 @@ impl BackupManager {
         // In real implementation, would only backup changed files since base
         manifest.complete();
 
-        self.backups
-            .write()
-            .insert(backup_id.clone(), manifest);
+        self.backups.write().insert(backup_id.clone(), manifest);
         self.backup_running.store(false, Ordering::SeqCst);
 
         Ok(backup_id)
@@ -563,11 +559,7 @@ impl TtlManager {
 
     /// Get all rules for a table
     pub fn get_rules(&self, table: &str) -> Vec<TtlRule> {
-        self.rules
-            .read()
-            .get(table)
-            .cloned()
-            .unwrap_or_default()
+        self.rules.read().get(table).cloned().unwrap_or_default()
     }
 
     /// Check if a table needs TTL scanning
@@ -596,9 +588,7 @@ impl TtlManager {
             .as_secs();
 
         // Update last scan time
-        self.last_scan
-            .write()
-            .insert(table.to_string(), now);
+        self.last_scan.write().insert(table.to_string(), now);
 
         let rules = self.get_rules(table);
         let start = Instant::now();
@@ -915,11 +905,7 @@ impl QuotaManager {
 
     /// Get current usage for a user
     pub fn get_usage(&self, user: &str) -> ResourceUsage {
-        self.usage
-            .read()
-            .get(user)
-            .cloned()
-            .unwrap_or_default()
+        self.usage.read().get(user).cloned().unwrap_or_default()
     }
 
     /// Start tracking a query
@@ -1664,11 +1650,7 @@ impl OnlineSchemaChangeManager {
 
     /// List active changes
     pub fn list_active(&self) -> Vec<SchemaChange> {
-        self.active_changes
-            .read()
-            .values()
-            .cloned()
-            .collect()
+        self.active_changes.read().values().cloned().collect()
     }
 
     /// List recent changes

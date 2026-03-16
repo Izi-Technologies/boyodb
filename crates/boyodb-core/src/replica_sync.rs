@@ -74,7 +74,8 @@ impl ReplicaSyncMetrics {
         self.syncs_completed.fetch_add(1, Ordering::Relaxed);
         self.bytes_synced.fetch_add(bytes, Ordering::Relaxed);
         self.segments_synced.fetch_add(segments, Ordering::Relaxed);
-        self.manifest_version.store(manifest_version, Ordering::Relaxed);
+        self.manifest_version
+            .store(manifest_version, Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -221,9 +222,11 @@ impl ReplicaSyncWorker {
     /// Note: HTTP sync requires the `tokio` and standard library networking.
     /// For production use, consider using a proper HTTP client crate.
     async fn sync_from_primary(&self) -> Result<(u64, u64, u64), EngineError> {
-        let primary_addr = self.cfg.primary_addr.as_ref().ok_or_else(|| {
-            EngineError::Configuration("primary_addr not configured".into())
-        })?;
+        let primary_addr = self
+            .cfg
+            .primary_addr
+            .as_ref()
+            .ok_or_else(|| EngineError::Configuration("primary_addr not configured".into()))?;
 
         // Get current manifest version to request only new entries
         let current_version = self.db.manifest_version();
@@ -249,13 +252,10 @@ impl ReplicaSyncWorker {
         let connect_timeout = Duration::from_millis(self.cfg.connect_timeout_ms);
         let read_timeout = Duration::from_millis(self.cfg.read_timeout_ms);
 
-        let stream = tokio::time::timeout(
-            connect_timeout,
-            tokio::net::TcpStream::connect(url),
-        )
-        .await
-        .map_err(|_| EngineError::Remote("connection timeout".into()))?
-        .map_err(|e| EngineError::Remote(format!("connection failed: {}", e)))?;
+        let stream = tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(url))
+            .await
+            .map_err(|_| EngineError::Remote("connection timeout".into()))?
+            .map_err(|e| EngineError::Remote(format!("connection failed: {}", e)))?;
 
         // Simple HTTP/1.1 request
         let request_body = serde_json::to_string(&request)
@@ -269,12 +269,16 @@ impl ReplicaSyncWorker {
              Connection: close\r\n\
              \r\n\
              {}",
-            url, request_body.len(), request_body
+            url,
+            request_body.len(),
+            request_body
         );
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = stream;
-        stream.write_all(http_request.as_bytes()).await
+        stream
+            .write_all(http_request.as_bytes())
+            .await
             .map_err(|e| EngineError::Remote(format!("write failed: {}", e)))?;
 
         // Read response with timeout
@@ -289,7 +293,9 @@ impl ReplicaSyncWorker {
         let response_str = String::from_utf8_lossy(&response_buf);
 
         // Parse HTTP response (simple parsing)
-        let body_start = response_str.find("\r\n\r\n").map(|i| i + 4)
+        let body_start = response_str
+            .find("\r\n\r\n")
+            .map(|i| i + 4)
             .ok_or_else(|| EngineError::Remote("invalid HTTP response".into()))?;
         let body_str = &response_str[body_start..];
 
@@ -297,7 +303,11 @@ impl ReplicaSyncWorker {
             .map_err(|e| EngineError::Remote(format!("failed to parse response: {}", e)))?;
 
         // Check for errors
-        if body.get("status").and_then(|v: &serde_json::Value| v.as_str()) == Some("error") {
+        if body
+            .get("status")
+            .and_then(|v: &serde_json::Value| v.as_str())
+            == Some("error")
+        {
             let msg = body
                 .get("message")
                 .and_then(|v: &serde_json::Value| v.as_str())

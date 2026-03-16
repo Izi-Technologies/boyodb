@@ -29,7 +29,9 @@ impl TieredStorage {
         let runtime = if has_s3_config {
             // S3 operations require a Tokio runtime
             Some(Handle::try_current().map_err(|_| {
-                EngineError::Internal("TieredStorage with S3 must be initialized within a Tokio runtime".into())
+                EngineError::Internal(
+                    "TieredStorage with S3 must be initialized within a Tokio runtime".into(),
+                )
             })?)
         } else {
             // Local-only storage doesn't need a runtime
@@ -146,25 +148,22 @@ impl TieredStorage {
             remote: None,
             runtime: None,
             local_root,
-            mmap_enabled: true,  // Default to enabled for local-only
-            mmap_min_bytes: 4 * 1024 * 1024,  // 4MB default threshold
+            mmap_enabled: true,              // Default to enabled for local-only
+            mmap_min_bytes: 4 * 1024 * 1024, // 4MB default threshold
         }
     }
 
     /// Load segment using memory-mapped file access for large local files
     /// Returns the raw (potentially compressed) segment data
     fn load_segment_mmap(&self, path: &std::path::Path) -> Result<Vec<u8>, EngineError> {
-        let file = File::open(path).map_err(|e| {
-            EngineError::Io(format!("open segment for mmap failed: {}", e))
-        })?;
+        let file = File::open(path)
+            .map_err(|e| EngineError::Io(format!("open segment for mmap failed: {}", e)))?;
 
         // SAFETY: We're reading the file contents and immediately copying to Vec.
         // The mmap is dropped after the copy, so there's no concern about
         // concurrent modification.
         let mmap = unsafe {
-            Mmap::map(&file).map_err(|e| {
-                EngineError::Io(format!("mmap segment failed: {}", e))
-            })?
+            Mmap::map(&file).map_err(|e| EngineError::Io(format!("mmap segment failed: {}", e)))?
         };
 
         // Copy to Vec - the benefit is that mmap uses the OS page cache
@@ -246,9 +245,10 @@ impl TieredStorage {
         let remote = self.remote.as_ref().ok_or_else(|| {
             EngineError::Configuration("Cold tier accessed but no S3 configured".into())
         })?;
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            EngineError::Configuration("Cold tier requires tokio runtime".into())
-        })?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| EngineError::Configuration("Cold tier requires tokio runtime".into()))?;
         let path = ObjPath::from(format!("{}.ipc", segment_id));
         let expected_checksum = crate::engine::compute_checksum(data);
         let data_vec = data.to_vec();
@@ -513,7 +513,10 @@ impl TieredStorage {
             })
         } else {
             // Sequential loading for mixed tiers or single segment
-            entries.iter().map(|entry| self.load_segment(entry)).collect()
+            entries
+                .iter()
+                .map(|entry| self.load_segment(entry))
+                .collect()
         }
     }
 }

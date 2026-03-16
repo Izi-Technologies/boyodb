@@ -98,11 +98,14 @@ impl XmlDocument {
     /// Get text content of all matching elements
     pub fn xpath_text(&self, query: &str) -> Result<Vec<String>, XmlError> {
         let results = self.xpath(query)?;
-        Ok(results.into_iter().filter_map(|r| match r {
-            XPathResult::Node(n) => Some(n.text_content()),
-            XPathResult::Text(t) => Some(t),
-            _ => None,
-        }).collect())
+        Ok(results
+            .into_iter()
+            .filter_map(|r| match r {
+                XPathResult::Node(n) => Some(n.text_content()),
+                XPathResult::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect())
     }
 }
 
@@ -249,14 +252,16 @@ impl XmlNode {
 
     /// Find child elements by name
     pub fn find_children(&self, name: &str) -> Vec<&XmlNode> {
-        self.children.iter()
+        self.children
+            .iter()
             .filter(|c| c.name.as_deref() == Some(name))
             .collect()
     }
 
     /// Find first child element by name
     pub fn find_child(&self, name: &str) -> Option<&XmlNode> {
-        self.children.iter()
+        self.children
+            .iter()
             .find(|c| c.name.as_deref() == Some(name))
     }
 
@@ -396,7 +401,10 @@ impl<'a> XmlParser<'a> {
         self.skip_whitespace();
 
         // Parse root element
-        if self.peek_char() == Some('<') && self.peek_char_at(1) != Some('!') && self.peek_char_at(1) != Some('?') {
+        if self.peek_char() == Some('<')
+            && self.peek_char_at(1) != Some('!')
+            && self.peek_char_at(1) != Some('?')
+        {
             doc.root = Some(self.parse_element()?);
         }
 
@@ -536,7 +544,8 @@ impl<'a> XmlParser<'a> {
     }
 
     fn parse_quoted_string(&mut self) -> Result<String, XmlError> {
-        let quote = self.peek_char()
+        let quote = self
+            .peek_char()
             .ok_or_else(|| XmlError::ParseError("Expected quote".to_string()))?;
         if quote != '"' && quote != '\'' {
             return Err(XmlError::ParseError("Expected quoted string".to_string()));
@@ -696,7 +705,9 @@ impl XPath {
                 } else if let Some(eq_pos) = predicate_str.find('=') {
                     let attr = predicate_str[1..eq_pos].to_string();
                     let value = predicate_str[eq_pos + 2..predicate_str.len() - 1].to_string();
-                    steps.push(XPathStep::Predicate(XPathPredicate::AttributeEquals(attr, value)));
+                    steps.push(XPathStep::Predicate(XPathPredicate::AttributeEquals(
+                        attr, value,
+                    )));
                 }
             } else {
                 steps.push(XPathStep::Element(part.to_string()));
@@ -756,7 +767,8 @@ impl XPath {
             }
         }
 
-        results.into_iter()
+        results
+            .into_iter()
             .map(|n| XPathResult::Node(n.clone()))
             .collect()
     }
@@ -799,36 +811,39 @@ impl XPath {
                         }
                     }
                 }
-                XPathStep::Predicate(pred) => {
-                    match pred {
-                        XPathPredicate::Position(n) => {
-                            if *n > 0 && *n <= results.len() {
-                                let item = results[*n - 1];
-                                results.clear();
-                                results.push(item);
-                            } else {
-                                results.clear();
-                            }
-                        }
-                        XPathPredicate::Last => {
-                            if let Some(last) = results.last() {
-                                let item = *last;
-                                results.clear();
-                                results.push(item);
-                            }
-                        }
-                        XPathPredicate::AttributeEquals(attr, value) => {
-                            results.retain(|n| n.get_attribute(attr) == Some(value));
+                XPathStep::Predicate(pred) => match pred {
+                    XPathPredicate::Position(n) => {
+                        if *n > 0 && *n <= results.len() {
+                            let item = results[*n - 1];
+                            results.clear();
+                            results.push(item);
+                        } else {
+                            results.clear();
                         }
                     }
-                }
+                    XPathPredicate::Last => {
+                        if let Some(last) = results.last() {
+                            let item = *last;
+                            results.clear();
+                            results.push(item);
+                        }
+                    }
+                    XPathPredicate::AttributeEquals(attr, value) => {
+                        results.retain(|n| n.get_attribute(attr) == Some(value));
+                    }
+                },
             }
         }
 
         results
     }
 
-    fn collect_descendants_by_name<'a>(&self, node: &'a XmlNode, name: &str, results: &mut Vec<&'a XmlNode>) {
+    fn collect_descendants_by_name<'a>(
+        &self,
+        node: &'a XmlNode,
+        name: &str,
+        results: &mut Vec<&'a XmlNode>,
+    ) {
         for child in &node.children {
             if child.name.as_deref() == Some(name) {
                 results.push(child);
@@ -865,10 +880,9 @@ pub fn xmlelement(name: &str, content: Option<&str>, attributes: &[(&str, &str)]
 
 /// Create an XML forest (multiple root elements)
 pub fn xmlforest(elements: &[(&str, &str)]) -> Vec<XmlNode> {
-    elements.iter()
-        .map(|(name, value)| {
-            XmlNode::element(name).with_text(value)
-        })
+    elements
+        .iter()
+        .map(|(name, value)| XmlNode::element(name).with_text(value))
         .collect()
 }
 
@@ -885,7 +899,11 @@ pub fn xml_is_well_formed(s: &str) -> bool {
 }
 
 /// Convert XML to table rows
-pub fn xmltable(doc: &XmlDocument, row_xpath: &str, columns: &[(&str, &str)]) -> Result<Vec<Vec<String>>, XmlError> {
+pub fn xmltable(
+    doc: &XmlDocument,
+    row_xpath: &str,
+    columns: &[(&str, &str)],
+) -> Result<Vec<Vec<String>>, XmlError> {
     let xpath = XPath::parse(row_xpath)?;
     let rows = xpath.evaluate(doc);
 
@@ -896,13 +914,8 @@ pub fn xmltable(doc: &XmlDocument, row_xpath: &str, columns: &[(&str, &str)]) ->
             let mut row_data = Vec::new();
             for (_, col_xpath) in columns {
                 let col_query = XPath::parse(col_xpath)?;
-                let nodes = col_query.apply_step(
-                    &XPathStep::Root,
-                    &[node],
-                );
-                let value = nodes.first()
-                    .map(|n| n.text_content())
-                    .unwrap_or_default();
+                let nodes = col_query.apply_step(&XPathStep::Root, &[node]);
+                let value = nodes.first().map(|n| n.text_content()).unwrap_or_default();
                 row_data.push(value);
             }
             result.push(row_data);
@@ -1098,7 +1111,7 @@ mod tests {
         let doc = XmlDocument::with_root(
             XmlNode::element("root")
                 .with_attribute("version", "1.0")
-                .with_child(XmlNode::element("child").with_text("Hello"))
+                .with_child(XmlNode::element("child").with_text("Hello")),
         );
 
         let output = doc.to_string();

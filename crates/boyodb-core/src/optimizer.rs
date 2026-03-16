@@ -231,7 +231,7 @@ impl Default for CostModelParams {
             network_bandwidth_factor: 0.001,
             page_size: 8192,
             effective_cache_size: 4 * 1024 * 1024 * 1024, // 4GB
-            work_mem: 256 * 1024 * 1024, // 256MB
+            work_mem: 256 * 1024 * 1024,                  // 256MB
             parallel_setup_cost: 1000.0,
             parallel_tuple_cost: 0.1,
         }
@@ -862,7 +862,11 @@ impl SelectivityEstimator {
         predicate: &Predicate,
         table_stats: &TableStats,
     ) -> f64 {
-        self.estimate_with_correlations_impl(predicate, &table_stats.columns, &table_stats.correlations)
+        self.estimate_with_correlations_impl(
+            predicate,
+            &table_stats.columns,
+            &table_stats.correlations,
+        )
     }
 
     fn estimate_with_correlations_impl(
@@ -993,7 +997,8 @@ impl SelectivityEstimator {
             // Adjust P(A AND B) based on correlation
             let and_independent = result * s_i;
             let and_dependent = result.min(s_i);
-            let and_estimate = and_independent * (1.0 - max_correlation) + and_dependent * max_correlation;
+            let and_estimate =
+                and_independent * (1.0 - max_correlation) + and_dependent * max_correlation;
 
             // P(A OR B) = P(A) + P(B) - P(A AND B)
             result = result + s_i - and_estimate;
@@ -1022,7 +1027,11 @@ fn extract_predicate_column(predicate: &Predicate) -> Option<String> {
 fn lookup_correlation(correlations: &HashMap<String, f64>, col1: &str, col2: &str) -> Option<f64> {
     // Keys are stored as "smaller:larger" alphabetically
     // Build key in stack buffer to avoid heap allocation
-    let (first, second) = if col1 < col2 { (col1, col2) } else { (col2, col1) };
+    let (first, second) = if col1 < col2 {
+        (col1, col2)
+    } else {
+        (col2, col1)
+    };
 
     // Use a stack-allocated buffer for small keys (most column names < 64 chars)
     let key_len = first.len() + 1 + second.len();
@@ -1891,7 +1900,11 @@ impl CostBasedOptimizer {
             }
 
             // IndexScan may produce sorted output if using a B-tree index
-            PhysicalPlan::IndexScan { index, columns: scan_cols, .. } => {
+            PhysicalPlan::IndexScan {
+                index,
+                columns: scan_cols,
+                ..
+            } => {
                 // Check if index provides the required sort order
                 // For simplicity, assume index name contains column name for sorted access
                 if columns.len() == 1 && index.contains(&columns[0]) {
@@ -2480,8 +2493,8 @@ mod tests {
 // Index Advisor - Automatic Index Recommendations
 // ============================================================================
 
-use std::collections::HashSet;
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Types of index recommendations
@@ -2597,8 +2610,8 @@ impl Default for IndexAdvisorConfig {
             min_query_count: 10,
             min_improvement_pct: 5.0,
             max_recommendations_per_table: 5,
-            high_cardinality_threshold: 0.9,  // >90% unique values
-            low_cardinality_threshold: 0.01,  // <1% unique values
+            high_cardinality_threshold: 0.9, // >90% unique values
+            low_cardinality_threshold: 0.01, // <1% unique values
             pattern_retention: Duration::from_secs(24 * 3600), // 24 hours
         }
     }
@@ -2653,7 +2666,9 @@ impl IndexAdvisor {
         let key = format!("{}.{}", database, table);
         let mut patterns = self.patterns.write();
 
-        let pattern = patterns.entry(key).or_insert_with(TableAccessPattern::default);
+        let pattern = patterns
+            .entry(key)
+            .or_insert_with(TableAccessPattern::default);
         pattern.total_queries += 1;
         pattern.total_execution_time_ms += execution_time_ms;
 
@@ -2670,7 +2685,9 @@ impl IndexAdvisor {
 
         // Track filter column patterns
         for (col, filter_type) in filter_columns {
-            let col_pattern = pattern.columns.entry(col.clone())
+            let col_pattern = pattern
+                .columns
+                .entry(col.clone())
                 .or_insert_with(ColumnAccessPattern::default);
             col_pattern.total_queries += 1;
 
@@ -2692,14 +2709,19 @@ impl IndexAdvisor {
             // Track co-occurring columns
             for (other_col, _) in filter_columns {
                 if other_col != col {
-                    *col_pattern.co_occurring_columns.entry(other_col.clone()).or_insert(0) += 1;
+                    *col_pattern
+                        .co_occurring_columns
+                        .entry(other_col.clone())
+                        .or_insert(0) += 1;
                 }
             }
         }
 
         // Track join columns
         for col in join_columns {
-            let col_pattern = pattern.columns.entry(col.clone())
+            let col_pattern = pattern
+                .columns
+                .entry(col.clone())
                 .or_insert_with(ColumnAccessPattern::default);
             col_pattern.join_count += 1;
             col_pattern.total_queries += 1;
@@ -2707,14 +2729,18 @@ impl IndexAdvisor {
 
         // Track ORDER BY columns
         for col in order_by_columns {
-            let col_pattern = pattern.columns.entry(col.clone())
+            let col_pattern = pattern
+                .columns
+                .entry(col.clone())
                 .or_insert_with(ColumnAccessPattern::default);
             col_pattern.order_by_count += 1;
         }
 
         // Track GROUP BY columns
         for col in group_by_columns {
-            let col_pattern = pattern.columns.entry(col.clone())
+            let col_pattern = pattern
+                .columns
+                .entry(col.clone())
                 .or_insert_with(ColumnAccessPattern::default);
             col_pattern.group_by_count += 1;
         }
@@ -2729,7 +2755,8 @@ impl IndexAdvisor {
     /// Register an existing index
     pub fn register_index(&self, database: &str, table: &str, index: ExistingIndex) {
         let key = format!("{}.{}", database, table);
-        self.existing_indexes.write()
+        self.existing_indexes
+            .write()
             .entry(key)
             .or_insert_with(Vec::new)
             .push(index);
@@ -2757,9 +2784,8 @@ impl IndexAdvisor {
             let table_stats = stats.get(table_key);
             let table_indexes = existing.get(table_key);
 
-            let mut table_recs = self.analyze_table(
-                database, table, pattern, table_stats, table_indexes
-            );
+            let mut table_recs =
+                self.analyze_table(database, table, pattern, table_stats, table_indexes);
 
             // Sort by priority and take top N
             table_recs.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
@@ -2810,16 +2836,21 @@ impl IndexAdvisor {
 
             // Analyze and generate recommendations
             if let Some(rec) = self.recommend_for_column(
-                database, table, col, col_pattern, cardinality_ratio, pattern
+                database,
+                table,
+                col,
+                col_pattern,
+                cardinality_ratio,
+                pattern,
             ) {
                 recs.push(rec);
             }
         }
 
         // Check for composite index opportunities
-        if let Some(composite_rec) = self.recommend_composite_index(
-            database, table, pattern, &existing_cols
-        ) {
+        if let Some(composite_rec) =
+            self.recommend_composite_index(database, table, pattern, &existing_cols)
+        {
             recs.push(composite_rec);
         }
 
@@ -2835,8 +2866,10 @@ impl IndexAdvisor {
         cardinality_ratio: f64,
         table_pattern: &TableAccessPattern,
     ) -> Option<IndexRecommendation> {
-        let total = pattern.equality_count + pattern.range_count +
-                    pattern.in_clause_count + pattern.join_count;
+        let total = pattern.equality_count
+            + pattern.range_count
+            + pattern.in_clause_count
+            + pattern.join_count;
 
         if total == 0 {
             return None;
@@ -2845,37 +2878,56 @@ impl IndexAdvisor {
         // Determine best index type
         let (index_type, reason) = if cardinality_ratio < self.config.low_cardinality_threshold {
             // Low cardinality -> bitmap
-            (RecommendedIndexType::Bitmap,
-             format!("Low cardinality column ({:.1}% unique) with {} filter operations",
-                     cardinality_ratio * 100.0, total))
+            (
+                RecommendedIndexType::Bitmap,
+                format!(
+                    "Low cardinality column ({:.1}% unique) with {} filter operations",
+                    cardinality_ratio * 100.0,
+                    total
+                ),
+            )
         } else if pattern.equality_count > pattern.range_count * 2
-                  && cardinality_ratio > self.config.high_cardinality_threshold {
+            && cardinality_ratio > self.config.high_cardinality_threshold
+        {
             // High cardinality with mostly equality -> hash
-            (RecommendedIndexType::Hash,
-             format!("High cardinality ({:.1}% unique) with {} equality lookups",
-                     cardinality_ratio * 100.0, pattern.equality_count))
+            (
+                RecommendedIndexType::Hash,
+                format!(
+                    "High cardinality ({:.1}% unique) with {} equality lookups",
+                    cardinality_ratio * 100.0,
+                    pattern.equality_count
+                ),
+            )
         } else if pattern.in_clause_count > pattern.equality_count {
             // Many IN clauses -> bloom filter
-            (RecommendedIndexType::BloomFilter,
-             format!("{} IN clause operations benefit from bloom filter",
-                     pattern.in_clause_count))
+            (
+                RecommendedIndexType::BloomFilter,
+                format!(
+                    "{} IN clause operations benefit from bloom filter",
+                    pattern.in_clause_count
+                ),
+            )
         } else {
             // Default to B-tree (works for range and equality)
-            (RecommendedIndexType::BTree,
-             format!("{} equality + {} range queries, {} ORDER BY uses",
-                     pattern.equality_count, pattern.range_count, pattern.order_by_count))
+            (
+                RecommendedIndexType::BTree,
+                format!(
+                    "{} equality + {} range queries, {} ORDER BY uses",
+                    pattern.equality_count, pattern.range_count, pattern.order_by_count
+                ),
+            )
         };
 
         // Estimate improvement based on full scan ratio
-        let full_scan_ratio = table_pattern.full_scans as f64 /
-            table_pattern.total_queries.max(1) as f64;
-        let column_query_ratio = pattern.total_queries as f64 /
-            table_pattern.total_queries.max(1) as f64;
+        let full_scan_ratio =
+            table_pattern.full_scans as f64 / table_pattern.total_queries.max(1) as f64;
+        let column_query_ratio =
+            pattern.total_queries as f64 / table_pattern.total_queries.max(1) as f64;
 
         // Estimated improvement: assumes index can eliminate ~90% of scan time
         // for queries on this column
-        let estimated_improvement = full_scan_ratio * column_query_ratio * 90.0
-            * (1.0 - pattern.avg_selectivity.min(1.0));
+        let estimated_improvement =
+            full_scan_ratio * column_query_ratio * 90.0 * (1.0 - pattern.avg_selectivity.min(1.0));
 
         if estimated_improvement < self.config.min_improvement_pct {
             return None;
@@ -2916,13 +2968,16 @@ impl IndexAdvisor {
         for (col, col_pattern) in &pattern.columns {
             for (other_col, count) in &col_pattern.co_occurring_columns {
                 if col < other_col {
-                    *co_occurrence_scores.entry((col.clone(), other_col.clone())).or_insert(0) += count;
+                    *co_occurrence_scores
+                        .entry((col.clone(), other_col.clone()))
+                        .or_insert(0) += count;
                 }
             }
         }
 
         // Find best pair
-        let best_pair = co_occurrence_scores.iter()
+        let best_pair = co_occurrence_scores
+            .iter()
             .filter(|(_, count)| **count >= self.config.min_query_count)
             .max_by_key(|(_, count)| *count)?;
 
@@ -3168,10 +3223,20 @@ impl StoredQuery {
         }
 
         let mid = self.recent_times.len() / 2;
-        let first_half: f64 = self.recent_times.iter().take(mid)
-            .map(|(_, t)| *t as f64).sum::<f64>() / mid as f64;
-        let second_half: f64 = self.recent_times.iter().skip(mid)
-            .map(|(_, t)| *t as f64).sum::<f64>() / (self.recent_times.len() - mid) as f64;
+        let first_half: f64 = self
+            .recent_times
+            .iter()
+            .take(mid)
+            .map(|(_, t)| *t as f64)
+            .sum::<f64>()
+            / mid as f64;
+        let second_half: f64 = self
+            .recent_times
+            .iter()
+            .skip(mid)
+            .map(|(_, t)| *t as f64)
+            .sum::<f64>()
+            / (self.recent_times.len() - mid) as f64;
 
         if first_half > 0.0 {
             let change_pct = ((second_half - first_half) / first_half) * 100.0;
@@ -3203,8 +3268,8 @@ impl Default for QueryStoreConfig {
         Self {
             max_queries: 10_000,
             max_plans_per_query: 10,
-            retention_secs: 7 * 24 * 3600, // 7 days
-            capture_threshold_us: 1000, // 1ms
+            retention_secs: 7 * 24 * 3600,  // 7 days
+            capture_threshold_us: 1000,     // 1ms
             regression_threshold_pct: 50.0, // 50% slower
         }
     }
@@ -3266,7 +3331,11 @@ impl QueryStore {
         }
 
         // Normalize whitespace
-        result.split_whitespace().collect::<Vec<_>>().join(" ").to_uppercase()
+        result
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_uppercase()
     }
 
     /// Record a query execution
@@ -3301,7 +3370,8 @@ impl QueryStore {
         // Enforce size limit
         if queries.len() >= self.config.max_queries && !queries.contains_key(&fingerprint) {
             // Remove oldest query
-            if let Some(oldest) = queries.values()
+            if let Some(oldest) = queries
+                .values()
                 .min_by_key(|q| q.stats.last_execution)
                 .map(|q| q.fingerprint.clone())
             {
@@ -3309,7 +3379,8 @@ impl QueryStore {
             }
         }
 
-        let query = queries.entry(fingerprint.clone())
+        let query = queries
+            .entry(fingerprint.clone())
             .or_insert_with(|| StoredQuery::new(fingerprint.clone(), now));
 
         query.record_execution(time_us, rows, rows_scanned, used_index, memory_bytes, now);
@@ -3347,7 +3418,9 @@ impl QueryStore {
         let queries = self.queries.read();
         let mut sorted: Vec<_> = queries.values().cloned().collect();
         sorted.sort_by(|a, b| {
-            b.stats.avg_time_us().partial_cmp(&a.stats.avg_time_us())
+            b.stats
+                .avg_time_us()
+                .partial_cmp(&a.stats.avg_time_us())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         sorted.truncate(limit);
@@ -3357,7 +3430,8 @@ impl QueryStore {
     /// Get queries with detected regressions
     pub fn detect_regressions(&self) -> Vec<(StoredQuery, f64)> {
         let queries = self.queries.read();
-        queries.values()
+        queries
+            .values()
             .filter_map(|q| {
                 q.detect_regression(self.config.regression_threshold_pct)
                     .map(|pct| (q.clone(), pct))
@@ -3458,12 +3532,24 @@ impl QueryComplexity {
         score += self.aggregation_count as f64 * 5.0;
 
         // Modifiers
-        if self.has_distinct { score += 10.0; }
-        if self.has_order_by { score += 5.0; }
-        if self.has_group_by { score += 10.0; }
-        if self.has_window_functions { score += 20.0; }
-        if self.has_set_operations { score += 15.0; }
-        if self.has_ctes { score += 10.0; }
+        if self.has_distinct {
+            score += 10.0;
+        }
+        if self.has_order_by {
+            score += 5.0;
+        }
+        if self.has_group_by {
+            score += 10.0;
+        }
+        if self.has_window_functions {
+            score += 20.0;
+        }
+        if self.has_set_operations {
+            score += 15.0;
+        }
+        if self.has_ctes {
+            score += 10.0;
+        }
 
         // Data volume factor
         let row_factor = (self.estimated_rows as f64).log10().max(0.0) * 5.0;
@@ -3478,8 +3564,9 @@ impl QueryComplexity {
 
         QueryResourceCost {
             cpu_weight: 1.0 + score / 20.0,
-            memory_weight: 1.0 + (self.has_group_by as u32 + self.has_distinct as u32
-                                  + self.join_count) as f64 * 0.5,
+            memory_weight: 1.0
+                + (self.has_group_by as u32 + self.has_distinct as u32 + self.join_count) as f64
+                    * 0.5,
             io_weight: 1.0 + (self.estimated_rows as f64).log10().max(0.0) * 0.3,
             overall_weight: 1.0 + score / 25.0,
         }
@@ -3519,14 +3606,18 @@ impl ComplexityBasedAdmission {
         let score = complexity.score();
         let score_bits = (score * 100.0) as u64; // Store as fixed point
 
-        let current = self.current_complexity.load(std::sync::atomic::Ordering::SeqCst);
+        let current = self
+            .current_complexity
+            .load(std::sync::atomic::Ordering::SeqCst);
         let current_score = current as f64 / 100.0;
 
         if current_score + score <= self.max_concurrent_complexity {
-            self.current_complexity.fetch_add(score_bits, std::sync::atomic::Ordering::SeqCst);
+            self.current_complexity
+                .fetch_add(score_bits, std::sync::atomic::Ordering::SeqCst);
             true
         } else {
-            self.waiting_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.waiting_queries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             false
         }
     }
@@ -3534,13 +3625,19 @@ impl ComplexityBasedAdmission {
     /// Release admission for a completed query
     pub fn release(&self, complexity: &QueryComplexity) {
         let score_bits = (complexity.score() * 100.0) as u64;
-        self.current_complexity.fetch_sub(score_bits, std::sync::atomic::Ordering::SeqCst);
+        self.current_complexity
+            .fetch_sub(score_bits, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Get current stats
     pub fn stats(&self) -> (f64, u64) {
-        let current = self.current_complexity.load(std::sync::atomic::Ordering::SeqCst) as f64 / 100.0;
-        let waiting = self.waiting_queries.load(std::sync::atomic::Ordering::SeqCst);
+        let current = self
+            .current_complexity
+            .load(std::sync::atomic::Ordering::SeqCst) as f64
+            / 100.0;
+        let waiting = self
+            .waiting_queries
+            .load(std::sync::atomic::Ordering::SeqCst);
         (current, waiting)
     }
 }
@@ -3810,7 +3907,9 @@ impl AdaptiveExecutor {
             return AdaptiveDecision::Continue;
         }
 
-        let count = self.adaptation_count.load(std::sync::atomic::Ordering::SeqCst);
+        let count = self
+            .adaptation_count
+            .load(std::sync::atomic::Ordering::SeqCst);
         if count >= self.config.max_adaptations {
             self.checkpoints.write().push(checkpoint);
             return AdaptiveDecision::Continue;
@@ -3824,8 +3923,11 @@ impl AdaptiveExecutor {
         let decision = self.evaluate(&checkpoint);
 
         if decision != AdaptiveDecision::Continue {
-            self.adaptation_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.decisions.write().push((checkpoint.clone(), decision.clone()));
+            self.adaptation_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.decisions
+                .write()
+                .push((checkpoint.clone(), decision.clone()));
         }
 
         self.checkpoints.write().push(checkpoint);
@@ -3848,7 +3950,9 @@ impl AdaptiveExecutor {
         // Cardinality check
         let error = stats.estimation_error();
         if error > self.config.cardinality_error_threshold {
-            if checkpoint.operator_type.contains("Join") && stats.build_side_rows > stats.estimated_rows * 10 {
+            if checkpoint.operator_type.contains("Join")
+                && stats.build_side_rows > stats.estimated_rows * 10
+            {
                 return AdaptiveDecision::SwitchJoinStrategy(JoinStrategy::HashJoin);
             }
             if checkpoint.operator_type.contains("Aggregate") {
@@ -3857,7 +3961,10 @@ impl AdaptiveExecutor {
         }
 
         // Skew check
-        if stats.has_significant_skew() && stats.parallelism > 1 && checkpoint.operator_type.contains("Join") {
+        if stats.has_significant_skew()
+            && stats.parallelism > 1
+            && checkpoint.operator_type.contains("Join")
+        {
             return AdaptiveDecision::SwitchJoinStrategy(JoinStrategy::BroadcastHashJoin);
         }
 
@@ -3877,7 +3984,8 @@ impl AdaptiveExecutor {
     pub fn reset(&self) {
         self.checkpoints.write().clear();
         self.decisions.write().clear();
-        self.adaptation_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.adaptation_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -3957,7 +4065,8 @@ impl TenantResourceManager {
     }
 
     pub fn get_quota(&self, tenant_id: &str) -> TenantQuota {
-        self.quotas.read()
+        self.quotas
+            .read()
             .get(tenant_id)
             .cloned()
             .unwrap_or_else(|| {
@@ -3967,7 +4076,11 @@ impl TenantResourceManager {
             })
     }
 
-    pub fn try_acquire(&self, tenant_id: &str, memory_estimate: u64) -> Result<TenantQueryToken, TenantQuotaError> {
+    pub fn try_acquire(
+        &self,
+        tenant_id: &str,
+        memory_estimate: u64,
+    ) -> Result<TenantQueryToken, TenantQuotaError> {
         let quota = self.get_quota(tenant_id);
 
         if !quota.enabled {
@@ -4009,23 +4122,32 @@ impl TenantResourceManager {
         let mut usage = self.usage.write();
         if let Some(tenant_usage) = usage.get_mut(&token.tenant_id) {
             tenant_usage.concurrent_queries = tenant_usage.concurrent_queries.saturating_sub(1);
-            tenant_usage.memory_used = tenant_usage.memory_used.saturating_sub(token.memory_reserved);
+            tenant_usage.memory_used = tenant_usage
+                .memory_used
+                .saturating_sub(token.memory_reserved);
             tenant_usage.total_cpu_time_us += cpu_time_us;
             tenant_usage.total_rows += rows_processed;
         }
     }
 
     pub fn get_usage(&self, tenant_id: &str) -> TenantUsage {
-        self.usage.read().get(tenant_id).cloned().unwrap_or_default()
+        self.usage
+            .read()
+            .get(tenant_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn all_stats(&self) -> Vec<(String, TenantQuota, TenantUsage)> {
         let quotas = self.quotas.read();
         let usage = self.usage.read();
-        quotas.iter().map(|(id, quota)| {
-            let u = usage.get(id).cloned().unwrap_or_default();
-            (id.clone(), quota.clone(), u)
-        }).collect()
+        quotas
+            .iter()
+            .map(|(id, quota)| {
+                let u = usage.get(id).cloned().unwrap_or_default();
+                (id.clone(), quota.clone(), u)
+            })
+            .collect()
     }
 }
 
@@ -4039,8 +4161,15 @@ pub struct TenantQueryToken {
 #[derive(Debug, Clone)]
 pub enum TenantQuotaError {
     TenantDisabled,
-    ConcurrencyLimitExceeded { current: u32, limit: u32 },
-    MemoryLimitExceeded { current: u64, requested: u64, limit: u64 },
+    ConcurrencyLimitExceeded {
+        current: u32,
+        limit: u32,
+    },
+    MemoryLimitExceeded {
+        current: u64,
+        requested: u64,
+        limit: u64,
+    },
 }
 
 impl std::fmt::Display for TenantQuotaError {
@@ -4050,7 +4179,11 @@ impl std::fmt::Display for TenantQuotaError {
             Self::ConcurrencyLimitExceeded { current, limit } => {
                 write!(f, "Concurrency limit: {} / {}", current, limit)
             }
-            Self::MemoryLimitExceeded { current, requested, limit } => {
+            Self::MemoryLimitExceeded {
+                current,
+                requested,
+                limit,
+            } => {
                 write!(f, "Memory limit: {} + {} > {}", current, requested, limit)
             }
         }

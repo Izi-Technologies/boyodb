@@ -3,7 +3,7 @@ use boyodb_core::types::{BoyodbStatus, OwnedBuffer};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::CString;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::slice;
 
 mod shell;
@@ -769,8 +769,12 @@ fn main() -> Result<()> {
                         batch_count += 1;
                         if *progress {
                             let processed = batch_count * batch_size.min(&chunk.len());
-                            eprint!("\rImported {} / {} rows ({} batches)...",
-                                processed.min(total_rows), total_rows, batch_count);
+                            eprint!(
+                                "\rImported {} / {} rows ({} batches)...",
+                                processed.min(total_rows),
+                                total_rows,
+                                batch_count
+                            );
                         }
                     }
                 }
@@ -785,23 +789,28 @@ fn main() -> Result<()> {
                     }
 
                     // Get column names from first row
-                    let first_obj = rows[0].as_object()
+                    let first_obj = rows[0]
+                        .as_object()
                         .ok_or_else(|| anyhow!("JSON must be an array of objects"))?;
                     let columns: Vec<&str> = first_obj.keys().map(|s| s.as_str()).collect();
                     let col_list = columns.join(", ");
 
                     // Process in batches
                     for chunk in rows.chunks(*batch_size) {
-                        let values_list: Vec<String> = chunk.iter()
+                        let values_list: Vec<String> = chunk
+                            .iter()
                             .filter_map(|row| {
                                 row.as_object().map(|obj| {
-                                    let vals: Vec<String> = columns.iter()
-                                        .map(|col| {
-                                            match obj.get(*col) {
-                                                Some(serde_json::Value::String(s)) => format!("'{}'", s.replace('\'', "''")),
-                                                Some(serde_json::Value::Null) | None => "NULL".to_string(),
-                                                Some(other) => other.to_string(),
+                                    let vals: Vec<String> = columns
+                                        .iter()
+                                        .map(|col| match obj.get(*col) {
+                                            Some(serde_json::Value::String(s)) => {
+                                                format!("'{}'", s.replace('\'', "''"))
                                             }
+                                            Some(serde_json::Value::Null) | None => {
+                                                "NULL".to_string()
+                                            }
+                                            Some(other) => other.to_string(),
                                         })
                                         .collect();
                                     format!("({})", vals.join(", "))
@@ -812,7 +821,10 @@ fn main() -> Result<()> {
                         if !values_list.is_empty() {
                             let sql = format!(
                                 "INSERT INTO {}.{} ({}) VALUES {}",
-                                db, tbl, col_list, values_list.join(", ")
+                                db,
+                                tbl,
+                                col_list,
+                                values_list.join(", ")
                             );
                             shell::execute_sql_command(
                                 server.host.as_deref(),
@@ -824,8 +836,12 @@ fn main() -> Result<()> {
                             batch_count += 1;
                             if *progress {
                                 let processed = batch_count * batch_size;
-                                eprint!("\rImported {} / {} rows ({} batches)...",
-                                    processed.min(total_rows), total_rows, batch_count);
+                                eprint!(
+                                    "\rImported {} / {} rows ({} batches)...",
+                                    processed.min(total_rows),
+                                    total_rows,
+                                    batch_count
+                                );
                             }
                         }
                     }
@@ -844,7 +860,10 @@ fn main() -> Result<()> {
             };
             println!(
                 "Import completed: {} rows in {:.2}s ({:.0} rows/sec, {} batches)",
-                total_rows, elapsed.as_secs_f64(), rows_per_sec, batch_count
+                total_rows,
+                elapsed.as_secs_f64(),
+                rows_per_sec,
+                batch_count
             );
         }
         Commands::Metrics { server, format } => {
@@ -1296,7 +1315,7 @@ impl Drop for BufferGuard {
 
 /// Run repair operations on a database
 fn run_repair(
-    data_dir: &PathBuf,
+    data_dir: &Path,
     verify_only: bool,
     remove_orphaned: bool,
     remove_missing: bool,
@@ -1313,7 +1332,7 @@ fn run_repair(
     println!();
 
     // Build engine config
-    let mut cfg = EngineConfig::new(data_dir.clone(), 1);
+    let mut cfg = EngineConfig::new(data_dir, 1);
     cfg.skip_damaged_segments = true; // Don't fail on damaged segments during repair
     if let Some(ref warm) = engine.tier_warm_compression {
         cfg = cfg.with_tier_warm_compression(Some(warm.clone()));
@@ -1410,7 +1429,12 @@ fn run_repair(
             match db.repair_segments(Some(database.as_str()), Some(table.as_str())) {
                 Ok(removed) => {
                     if !removed.is_empty() {
-                        println!("  Removed {} segments from {}.{}", removed.len(), database, table);
+                        println!(
+                            "  Removed {} segments from {}.{}",
+                            removed.len(),
+                            database,
+                            table
+                        );
                         repairs_made += removed.len();
                     }
                 }

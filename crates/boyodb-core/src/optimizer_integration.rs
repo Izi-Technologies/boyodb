@@ -16,8 +16,8 @@ use crate::sql::{
     AggPlan, JoinClause, JoinType, NumericValue, OrderByClause, ParsedQuery, QueryFilter,
     SelectColumn, SelectExpr,
 };
-use arrow::compute::kernels::boolean as arrow_boolean;
 use arrow::compute::is_null as arrow_is_null;
+use arrow::compute::kernels::boolean as arrow_boolean;
 use arrow_array::RecordBatch;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -133,7 +133,10 @@ pub fn parsed_query_to_logical_plan(query: &ParsedQuery) -> Result<LogicalPlan, 
 
     // Add projection
     if let Some(ref cols) = query.projection {
-        let columns: Vec<ProjectExpr> = cols.iter().map(|c| ProjectExpr::Column(c.clone())).collect();
+        let columns: Vec<ProjectExpr> = cols
+            .iter()
+            .map(|c| ProjectExpr::Column(c.clone()))
+            .collect();
         plan = LogicalPlan::Project {
             input: Box::new(plan),
             columns,
@@ -320,9 +323,8 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
         .iter()
         .map(|agg_expr| {
             // Use the alias from the SQL expression if provided, otherwise use default
-            let get_alias = |default: String| -> Option<String> {
-                agg_expr.alias.clone().or(Some(default))
-            };
+            let get_alias =
+                |default: String| -> Option<String> { agg_expr.alias.clone().or(Some(default)) };
 
             match &agg_expr.kind {
                 AggKind::CountStar => AggregateExpr {
@@ -395,7 +397,11 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
                     function: AggFunction::Avg, // Use Avg as placeholder - actual impl in engine
                     column: Some(column.clone()),
                     distinct: false,
-                    alias: get_alias(format!("approx_percentile_{}_{}", (percentile * 100.0) as i32, column)),
+                    alias: get_alias(format!(
+                        "approx_percentile_{}_{}",
+                        (percentile * 100.0) as i32,
+                        column
+                    )),
                 },
                 AggKind::ApproxMedian { column } => AggregateExpr {
                     function: AggFunction::Avg, // Use Avg as placeholder - actual impl in engine
@@ -413,13 +419,21 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
                     function: AggFunction::Avg, // Placeholder
                     column: Some(column.clone()),
                     distinct: false,
-                    alias: get_alias(format!("percentile_cont_{}_{}", (*percentile * 100.0) as i32, column)),
+                    alias: get_alias(format!(
+                        "percentile_cont_{}_{}",
+                        (*percentile * 100.0) as i32,
+                        column
+                    )),
                 },
                 AggKind::PercentileDisc { column, percentile } => AggregateExpr {
                     function: AggFunction::Avg, // Placeholder
                     column: Some(column.clone()),
                     distinct: false,
-                    alias: get_alias(format!("percentile_disc_{}_{}", (*percentile * 100.0) as i32, column)),
+                    alias: get_alias(format!(
+                        "percentile_disc_{}_{}",
+                        (*percentile * 100.0) as i32,
+                        column
+                    )),
                 },
                 AggKind::ArrayAgg { column, distinct } => AggregateExpr {
                     function: AggFunction::Sum, // Placeholder
@@ -427,7 +441,9 @@ fn agg_plan_to_aggregate_exprs(agg: &AggPlan) -> Vec<AggregateExpr> {
                     distinct: *distinct,
                     alias: get_alias(format!("array_agg_{}", column)),
                 },
-                AggKind::StringAgg { column, distinct, .. } => AggregateExpr {
+                AggKind::StringAgg {
+                    column, distinct, ..
+                } => AggregateExpr {
                     function: AggFunction::Sum, // Placeholder
                     column: Some(column.clone()),
                     distinct: *distinct,
@@ -541,7 +557,11 @@ fn select_expr_to_project_expr(expr: &SelectExpr) -> ProjectExpr {
                         format!("ARRAY_AGG({})", column)
                     }
                 }
-                crate::sql::AggKind::StringAgg { column, delimiter, distinct } => {
+                crate::sql::AggKind::StringAgg {
+                    column,
+                    delimiter,
+                    distinct,
+                } => {
                     if *distinct {
                         format!("STRING_AGG(DISTINCT {}, '{}')", column, delimiter)
                     } else {
@@ -549,11 +569,23 @@ fn select_expr_to_project_expr(expr: &SelectExpr) -> ProjectExpr {
                     }
                 }
                 crate::sql::AggKind::Mode { column } => format!("MODE({})", column),
-                crate::sql::AggKind::StringAggOrdered { column, delimiter, order_by, order_desc } => {
+                crate::sql::AggKind::StringAggOrdered {
+                    column,
+                    delimiter,
+                    order_by,
+                    order_desc,
+                } => {
                     let order = if *order_desc { "DESC" } else { "ASC" };
-                    format!("STRING_AGG({}, '{}' ORDER BY {} {})", column, delimiter, order_by, order)
+                    format!(
+                        "STRING_AGG({}, '{}' ORDER BY {} {})",
+                        column, delimiter, order_by, order
+                    )
                 }
-                crate::sql::AggKind::ArrayAggOrdered { column, order_by, order_desc } => {
+                crate::sql::AggKind::ArrayAggOrdered {
+                    column,
+                    order_by,
+                    order_desc,
+                } => {
                     let order = if *order_desc { "DESC" } else { "ASC" };
                     format!("ARRAY_AGG({} ORDER BY {} {})", column, order_by, order)
                 }
@@ -1162,7 +1194,10 @@ impl OptimizationContext {
     pub fn optimize_query(&self, query: &ParsedQuery) -> Result<PhysicalPlan, EngineError> {
         if !self.enabled {
             // Return a simple sequential scan plan
-            let database = query.database.clone().unwrap_or_else(|| "default".to_string());
+            let database = query
+                .database
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
             let table = query
                 .table
                 .clone()
@@ -1210,7 +1245,9 @@ mod tests {
             LogicalPlan::Project { input, columns } => {
                 assert_eq!(columns.len(), 2);
                 match *input {
-                    LogicalPlan::Scan { database, table, .. } => {
+                    LogicalPlan::Scan {
+                        database, table, ..
+                    } => {
                         assert_eq!(database, "test");
                         assert_eq!(table, "users");
                     }
@@ -1277,6 +1314,9 @@ mod tests {
 
         let plan = ctx.optimize_query(&query).unwrap();
         // Should produce a physical plan
-        assert!(matches!(plan, PhysicalPlan::SeqScan { .. } | PhysicalPlan::Project { .. }));
+        assert!(matches!(
+            plan,
+            PhysicalPlan::SeqScan { .. } | PhysicalPlan::Project { .. }
+        ));
     }
 }

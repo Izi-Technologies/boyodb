@@ -7,10 +7,10 @@
 //! - Multi-factor authentication (MFA)
 //! - Session management and token handling
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -332,7 +332,11 @@ impl Default for OAuth2Config {
             token_url: String::new(),
             userinfo_url: None,
             jwks_uri: None,
-            scopes: vec!["openid".to_string(), "profile".to_string(), "email".to_string()],
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
             redirect_uri: String::new(),
             response_type: "code".to_string(),
             use_pkce: true,
@@ -353,14 +357,23 @@ impl OAuth2Config {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             userinfo_url: Some("https://www.googleapis.com/oauth2/v3/userinfo".to_string()),
             jwks_uri: Some("https://www.googleapis.com/oauth2/v3/certs".to_string()),
-            scopes: vec!["openid".to_string(), "profile".to_string(), "email".to_string()],
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
             redirect_uri: redirect_uri.to_string(),
             ..Default::default()
         }
     }
 
     /// Microsoft Azure AD configuration
-    pub fn azure_ad(tenant_id: &str, client_id: &str, client_secret: &str, redirect_uri: &str) -> Self {
+    pub fn azure_ad(
+        tenant_id: &str,
+        client_id: &str,
+        client_secret: &str,
+        redirect_uri: &str,
+    ) -> Self {
         let base_url = format!("https://login.microsoftonline.com/{}", tenant_id);
         Self {
             provider_name: "azure_ad".to_string(),
@@ -370,7 +383,11 @@ impl OAuth2Config {
             token_url: format!("{}/oauth2/v2.0/token", base_url),
             userinfo_url: Some("https://graph.microsoft.com/oidc/userinfo".to_string()),
             jwks_uri: Some(format!("{}/discovery/v2.0/keys", base_url)),
-            scopes: vec!["openid".to_string(), "profile".to_string(), "email".to_string()],
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
             redirect_uri: redirect_uri.to_string(),
             ..Default::default()
         }
@@ -404,7 +421,12 @@ impl OAuth2Config {
             token_url: format!("{}/oauth2/v1/token", base_url),
             userinfo_url: Some(format!("{}/oauth2/v1/userinfo", base_url)),
             jwks_uri: Some(format!("{}/oauth2/v1/keys", base_url)),
-            scopes: vec!["openid".to_string(), "profile".to_string(), "email".to_string(), "groups".to_string()],
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "groups".to_string(),
+            ],
             redirect_uri: redirect_uri.to_string(),
             ..Default::default()
         }
@@ -489,7 +511,8 @@ impl OAuth2Provider {
         }
 
         // Build URL
-        let query = params.iter()
+        let query = params
+            .iter()
             .map(|(k, v)| format!("{}={}", k, urlencoding_encode(v)))
             .collect::<Vec<_>>()
             .join("&");
@@ -518,7 +541,10 @@ impl OAuth2Provider {
     /// Exchange authorization code for tokens
     pub fn exchange_code(&self, code: &str, state: &str) -> Result<AuthResult, AuthError> {
         // Verify state
-        let pending = self.pending_states.write().remove(state)
+        let pending = self
+            .pending_states
+            .write()
+            .remove(state)
             .ok_or_else(|| AuthError::TokenInvalid("invalid state".into()))?;
 
         // Check expiry (states expire after 10 minutes)
@@ -574,7 +600,7 @@ impl OAuth2Provider {
         let _ = token;
 
         Ok(Identity {
-            user_id: format!("oauth2:user-123"),
+            user_id: "oauth2:user-123".to_string(),
             username: "oauth_user".to_string(),
             email: Some("oauth_user@example.com".to_string()),
             display_name: Some("OAuth User".to_string()),
@@ -593,7 +619,8 @@ impl OAuth2Provider {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() + e
+                    .as_secs()
+                    + e
             }),
         })
     }
@@ -611,7 +638,9 @@ impl OAuth2Provider {
         now.hash(&mut hasher);
         length.hash(&mut hasher);
 
-        let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".chars().collect();
+        let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+            .chars()
+            .collect();
         let hash = hasher.finish();
 
         (0..length)
@@ -763,7 +792,10 @@ impl SamlProvider {
     }
 
     /// Generate SAML authentication request
-    pub fn create_auth_request(&self, relay_state: Option<String>) -> Result<SamlAuthRequest, AuthError> {
+    pub fn create_auth_request(
+        &self,
+        relay_state: Option<String>,
+    ) -> Result<SamlAuthRequest, AuthError> {
         let request_id = format!("_id{}", self.generate_id());
 
         // Build SAML AuthnRequest XML
@@ -773,7 +805,11 @@ impl SamlProvider {
         let encoded = self.encode_request(&authn_request)?;
 
         // Build redirect URL
-        let mut url = format!("{}?SAMLRequest={}", self.config.idp_sso_url, urlencoding_encode(&encoded));
+        let mut url = format!(
+            "{}?SAMLRequest={}",
+            self.config.idp_sso_url,
+            urlencoding_encode(&encoded)
+        );
 
         if let Some(ref rs) = relay_state {
             url.push_str(&format!("&RelayState={}", urlencoding_encode(rs)));
@@ -797,7 +833,11 @@ impl SamlProvider {
     }
 
     /// Process SAML response
-    pub fn process_response(&self, saml_response: &str, relay_state: Option<&str>) -> Result<AuthResult, AuthError> {
+    pub fn process_response(
+        &self,
+        saml_response: &str,
+        relay_state: Option<&str>,
+    ) -> Result<AuthResult, AuthError> {
         // In a real implementation:
         // 1. Base64 decode response
         // 2. Parse XML
@@ -816,14 +856,18 @@ impl SamlProvider {
                 attrs.insert("email".to_string(), vec!["user@example.com".to_string()]);
                 attrs.insert("firstName".to_string(), vec!["SAML".to_string()]);
                 attrs.insert("lastName".to_string(), vec!["User".to_string()]);
-                attrs.insert("groups".to_string(), vec!["users".to_string(), "admins".to_string()]);
+                attrs.insert(
+                    "groups".to_string(),
+                    vec!["users".to_string(), "admins".to_string()],
+                );
                 attrs
             },
             valid_until: Some(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs() + 3600
+                    .as_secs()
+                    + 3600,
             ),
         };
 
@@ -840,7 +884,8 @@ impl SamlProvider {
 
     /// Generate SP metadata XML
     pub fn generate_metadata(&self) -> String {
-        format!(r#"<?xml version="1.0"?>
+        format!(
+            r#"<?xml version="1.0"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"
                      entityID="{}">
     <md:SPSSODescriptor AuthnRequestsSigned="{}"
@@ -863,7 +908,8 @@ impl SamlProvider {
     fn build_authn_request(&self, request_id: &str) -> Result<String, AuthError> {
         let now = chrono_now_iso();
 
-        Ok(format!(r#"<?xml version="1.0"?>
+        Ok(format!(
+            r#"<?xml version="1.0"?>
 <samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
                     xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
                     ID="{}"
@@ -894,21 +940,29 @@ impl SamlProvider {
     fn extract_identity(&self, response: &SamlAuthResponse) -> Result<Identity, AuthError> {
         let mappings = &self.config.attribute_mappings;
 
-        let email = mappings.email.as_ref()
+        let email = mappings
+            .email
+            .as_ref()
             .and_then(|attr| response.attributes.get(attr))
             .and_then(|v| v.first())
             .cloned()
             .or_else(|| Some(response.name_id.clone()));
 
-        let display_name = mappings.display_name.as_ref()
+        let display_name = mappings
+            .display_name
+            .as_ref()
             .and_then(|attr| response.attributes.get(attr))
             .and_then(|v| v.first())
             .cloned()
             .or_else(|| {
-                let first = mappings.first_name.as_ref()
+                let first = mappings
+                    .first_name
+                    .as_ref()
                     .and_then(|attr| response.attributes.get(attr))
                     .and_then(|v| v.first());
-                let last = mappings.last_name.as_ref()
+                let last = mappings
+                    .last_name
+                    .as_ref()
                     .and_then(|attr| response.attributes.get(attr))
                     .and_then(|v| v.first());
                 match (first, last) {
@@ -919,7 +973,9 @@ impl SamlProvider {
                 }
             });
 
-        let groups = mappings.groups.as_ref()
+        let groups = mappings
+            .groups
+            .as_ref()
             .and_then(|attr| response.attributes.get(attr))
             .cloned()
             .unwrap_or_default();
@@ -931,7 +987,9 @@ impl SamlProvider {
             display_name,
             groups,
             provider: AuthProviderType::Saml,
-            attributes: response.attributes.iter()
+            attributes: response
+                .attributes
+                .iter()
                 .map(|(k, v)| (k.clone(), v.join(",")))
                 .collect(),
             authenticated_at: SystemTime::now()
@@ -1133,7 +1191,8 @@ impl MfaManager {
             enrolled_at: None,
         };
 
-        self.enrollments.write()
+        self.enrollments
+            .write()
             .entry(user_id.to_string())
             .or_insert_with(Vec::new)
             .push(enrollment);
@@ -1148,14 +1207,18 @@ impl MfaManager {
     /// Verify TOTP code and complete enrollment
     pub fn verify_totp_enrollment(&self, user_id: &str, code: &str) -> Result<(), AuthError> {
         let mut enrollments = self.enrollments.write();
-        let user_enrollments = enrollments.get_mut(user_id)
+        let user_enrollments = enrollments
+            .get_mut(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
-        let enrollment = user_enrollments.iter_mut()
+        let enrollment = user_enrollments
+            .iter_mut()
             .find(|e| e.method == MfaMethod::Totp && !e.verified)
             .ok_or_else(|| AuthError::ConfigError("no pending TOTP enrollment".into()))?;
 
-        let secret = enrollment.secret.as_ref()
+        let secret = enrollment
+            .secret
+            .as_ref()
             .ok_or_else(|| AuthError::ConfigError("no secret".into()))?;
 
         if self.verify_totp_code(secret, code) {
@@ -1164,7 +1227,7 @@ impl MfaManager {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs()
+                    .as_secs(),
             );
             Ok(())
         } else {
@@ -1175,14 +1238,18 @@ impl MfaManager {
     /// Verify TOTP code
     pub fn verify_totp(&self, user_id: &str, code: &str) -> Result<bool, AuthError> {
         let enrollments = self.enrollments.read();
-        let user_enrollments = enrollments.get(user_id)
+        let user_enrollments = enrollments
+            .get(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
-        let enrollment = user_enrollments.iter()
+        let enrollment = user_enrollments
+            .iter()
             .find(|e| e.method == MfaMethod::Totp && e.verified)
             .ok_or_else(|| AuthError::MfaRequired)?;
 
-        let secret = enrollment.secret.as_ref()
+        let secret = enrollment
+            .secret
+            .as_ref()
             .ok_or_else(|| AuthError::ConfigError("no secret".into()))?;
 
         Ok(self.verify_totp_code(secret, code))
@@ -1204,11 +1271,12 @@ impl MfaManager {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_secs()
+                    .as_secs(),
             ),
         };
 
-        self.enrollments.write()
+        self.enrollments
+            .write()
             .entry(user_id.to_string())
             .or_insert_with(Vec::new)
             .push(enrollment);
@@ -1219,7 +1287,8 @@ impl MfaManager {
     /// Verify backup code
     pub fn verify_backup_code(&self, user_id: &str, code: &str) -> Result<bool, AuthError> {
         let mut enrollments = self.enrollments.write();
-        let user_enrollments = enrollments.get_mut(user_id)
+        let user_enrollments = enrollments
+            .get_mut(user_id)
             .ok_or_else(|| AuthError::UserNotFound(user_id.to_string()))?;
 
         for enrollment in user_enrollments.iter_mut() {
@@ -1407,27 +1476,36 @@ impl EnterpriseAuthManager {
 
     /// Register LDAP provider
     pub fn register_ldap(&self, name: &str, config: LdapConfig) {
-        self.ldap_providers.write()
+        self.ldap_providers
+            .write()
             .insert(name.to_string(), Arc::new(LdapProvider::new(config)));
     }
 
     /// Register OAuth 2.0 provider
     pub fn register_oauth(&self, name: &str, config: OAuth2Config) {
-        self.oauth_providers.write()
+        self.oauth_providers
+            .write()
             .insert(name.to_string(), Arc::new(OAuth2Provider::new(config)));
     }
 
     /// Register SAML provider
     pub fn register_saml(&self, name: &str, config: SamlConfig) {
-        self.saml_providers.write()
+        self.saml_providers
+            .write()
             .insert(name.to_string(), Arc::new(SamlProvider::new(config)));
     }
 
     /// Authenticate with LDAP
-    pub fn authenticate_ldap(&self, provider: &str, username: &str, password: &str) -> Result<AuthResult, AuthError> {
+    pub fn authenticate_ldap(
+        &self,
+        provider: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<AuthResult, AuthError> {
         let providers = self.ldap_providers.read();
-        let provider = providers.get(provider)
-            .ok_or_else(|| AuthError::ConfigError(format!("LDAP provider not found: {}", provider)))?;
+        let provider = providers.get(provider).ok_or_else(|| {
+            AuthError::ConfigError(format!("LDAP provider not found: {}", provider))
+        })?;
 
         let identity = provider.authenticate(username, password)?;
         let mfa_required = self.mfa_manager.is_required(&identity);
@@ -1448,47 +1526,67 @@ impl EnterpriseAuthManager {
     /// Start OAuth authorization
     pub fn start_oauth(&self, provider: &str) -> Result<AuthorizationRequest, AuthError> {
         let providers = self.oauth_providers.read();
-        let provider = providers.get(provider)
-            .ok_or_else(|| AuthError::ConfigError(format!("OAuth provider not found: {}", provider)))?;
+        let provider = providers.get(provider).ok_or_else(|| {
+            AuthError::ConfigError(format!("OAuth provider not found: {}", provider))
+        })?;
 
         provider.authorize()
     }
 
     /// Complete OAuth authentication
-    pub fn complete_oauth(&self, provider: &str, code: &str, state: &str) -> Result<AuthResult, AuthError> {
+    pub fn complete_oauth(
+        &self,
+        provider: &str,
+        code: &str,
+        state: &str,
+    ) -> Result<AuthResult, AuthError> {
         let providers = self.oauth_providers.read();
-        let provider = providers.get(provider)
-            .ok_or_else(|| AuthError::ConfigError(format!("OAuth provider not found: {}", provider)))?;
+        let provider = providers.get(provider).ok_or_else(|| {
+            AuthError::ConfigError(format!("OAuth provider not found: {}", provider))
+        })?;
 
         provider.exchange_code(code, state)
     }
 
     /// Start SAML authentication
-    pub fn start_saml(&self, provider: &str, relay_state: Option<String>) -> Result<SamlAuthRequest, AuthError> {
+    pub fn start_saml(
+        &self,
+        provider: &str,
+        relay_state: Option<String>,
+    ) -> Result<SamlAuthRequest, AuthError> {
         let providers = self.saml_providers.read();
-        let provider = providers.get(provider)
-            .ok_or_else(|| AuthError::ConfigError(format!("SAML provider not found: {}", provider)))?;
+        let provider = providers.get(provider).ok_or_else(|| {
+            AuthError::ConfigError(format!("SAML provider not found: {}", provider))
+        })?;
 
         provider.create_auth_request(relay_state)
     }
 
     /// Complete SAML authentication
-    pub fn complete_saml(&self, provider: &str, response: &str, relay_state: Option<&str>) -> Result<AuthResult, AuthError> {
+    pub fn complete_saml(
+        &self,
+        provider: &str,
+        response: &str,
+        relay_state: Option<&str>,
+    ) -> Result<AuthResult, AuthError> {
         let providers = self.saml_providers.read();
-        let provider = providers.get(provider)
-            .ok_or_else(|| AuthError::ConfigError(format!("SAML provider not found: {}", provider)))?;
+        let provider = providers.get(provider).ok_or_else(|| {
+            AuthError::ConfigError(format!("SAML provider not found: {}", provider))
+        })?;
 
         provider.process_response(response, relay_state)
     }
 
     /// Create session after successful authentication
-    pub fn create_session(&self, auth_result: &AuthResult, session_duration: Duration) -> Result<String, AuthError> {
+    pub fn create_session(
+        &self,
+        auth_result: &AuthResult,
+        session_duration: Duration,
+    ) -> Result<String, AuthError> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 
         let mut hasher = DefaultHasher::new();
         now.as_nanos().hash(&mut hasher);
@@ -1515,7 +1613,8 @@ impl EnterpriseAuthManager {
     /// Validate session
     pub fn validate_session(&self, session_id: &str) -> Result<Identity, AuthError> {
         let mut sessions = self.sessions.write();
-        let session = sessions.get_mut(session_id)
+        let session = sessions
+            .get_mut(session_id)
             .ok_or(AuthError::SessionExpired)?;
 
         let now = SystemTime::now()
@@ -1549,7 +1648,8 @@ impl EnterpriseAuthManager {
     /// List active sessions for user
     pub fn list_user_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
         let sessions = self.sessions.read();
-        sessions.values()
+        sessions
+            .values()
             .filter(|s| s.identity.user_id == user_id)
             .cloned()
             .collect()
@@ -1562,8 +1662,7 @@ impl EnterpriseAuthManager {
             .unwrap()
             .as_secs();
 
-        self.sessions.write()
-            .retain(|_, s| s.expires_at > now);
+        self.sessions.write().retain(|_, s| s.expires_at > now);
     }
 }
 
@@ -1586,11 +1685,8 @@ mod tests {
 
     #[test]
     fn test_oauth2_authorization() {
-        let config = OAuth2Config::google(
-            "client_id",
-            "client_secret",
-            "http://localhost/callback",
-        );
+        let config =
+            OAuth2Config::google("client_id", "client_secret", "http://localhost/callback");
 
         let provider = OAuth2Provider::new(config);
         let auth_req = provider.authorize().unwrap();
@@ -1667,14 +1763,19 @@ mod tests {
 
         // Register providers
         manager.register_ldap("corp", LdapConfig::default());
-        manager.register_oauth("google", OAuth2Config::google("id", "secret", "http://localhost/callback"));
+        manager.register_oauth(
+            "google",
+            OAuth2Config::google("id", "secret", "http://localhost/callback"),
+        );
 
         // Authenticate
         let result = manager.authenticate_ldap("corp", "user", "pass").unwrap();
         assert_eq!(result.identity.provider, AuthProviderType::Ldap);
 
         // Create session
-        let session_id = manager.create_session(&result, Duration::from_secs(3600)).unwrap();
+        let session_id = manager
+            .create_session(&result, Duration::from_secs(3600))
+            .unwrap();
         assert!(!session_id.is_empty());
 
         // Validate session

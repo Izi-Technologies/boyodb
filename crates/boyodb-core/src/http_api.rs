@@ -288,7 +288,8 @@ impl HttpResponse {
 
     pub fn json<T: Serialize>(data: &T) -> Result<Self, ApiError> {
         let mut resp = Self::ok();
-        resp.body = serde_json::to_vec(data).map_err(|e| ApiError::SerializationError(e.to_string()))?;
+        resp.body =
+            serde_json::to_vec(data).map_err(|e| ApiError::SerializationError(e.to_string()))?;
         Ok(resp)
     }
 
@@ -298,9 +299,18 @@ impl HttpResponse {
     }
 
     pub fn with_cors(mut self, origin: &str) -> Self {
-        self.headers.insert("access-control-allow-origin".to_string(), origin.to_string());
-        self.headers.insert("access-control-allow-methods".to_string(), "GET, POST, PUT, DELETE, OPTIONS".to_string());
-        self.headers.insert("access-control-allow-headers".to_string(), "Content-Type, Authorization, X-API-Key".to_string());
+        self.headers.insert(
+            "access-control-allow-origin".to_string(),
+            origin.to_string(),
+        );
+        self.headers.insert(
+            "access-control-allow-methods".to_string(),
+            "GET, POST, PUT, DELETE, OPTIONS".to_string(),
+        );
+        self.headers.insert(
+            "access-control-allow-headers".to_string(),
+            "Content-Type, Authorization, X-API-Key".to_string(),
+        );
         self
     }
 }
@@ -344,7 +354,9 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::InvalidJson(msg) => write!(f, "Invalid JSON: {}", msg),
             ApiError::MissingParameter(param) => write!(f, "Missing parameter: {}", param),
-            ApiError::InvalidParameter(param, msg) => write!(f, "Invalid parameter '{}': {}", param, msg),
+            ApiError::InvalidParameter(param, msg) => {
+                write!(f, "Invalid parameter '{}': {}", param, msg)
+            }
             ApiError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
             ApiError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             ApiError::NotFound(msg) => write!(f, "Not found: {}", msg),
@@ -362,14 +374,18 @@ impl std::error::Error for ApiError {}
 impl ApiError {
     pub fn to_response(&self) -> HttpResponse {
         match self {
-            ApiError::InvalidJson(_) | ApiError::MissingParameter(_) | ApiError::InvalidParameter(_, _) => {
-                HttpResponse::bad_request(&self.to_string())
-            }
+            ApiError::InvalidJson(_)
+            | ApiError::MissingParameter(_)
+            | ApiError::InvalidParameter(_, _) => HttpResponse::bad_request(&self.to_string()),
             ApiError::Unauthorized(_) => HttpResponse::unauthorized(&self.to_string()),
             ApiError::Forbidden(_) => HttpResponse::error(HttpStatus::Forbidden, &self.to_string()),
             ApiError::NotFound(_) => HttpResponse::not_found(&self.to_string()),
-            ApiError::RateLimitExceeded => HttpResponse::error(HttpStatus::TooManyRequests, &self.to_string()),
-            ApiError::Timeout => HttpResponse::error(HttpStatus::ServiceUnavailable, &self.to_string()),
+            ApiError::RateLimitExceeded => {
+                HttpResponse::error(HttpStatus::TooManyRequests, &self.to_string())
+            }
+            ApiError::Timeout => {
+                HttpResponse::error(HttpStatus::ServiceUnavailable, &self.to_string())
+            }
             _ => HttpResponse::internal_error(&self.to_string()),
         }
     }
@@ -597,20 +613,16 @@ impl Router {
 
     /// Match a request to a route
     pub fn match_route(&self, req: &HttpRequest) -> Option<&Route> {
-        for route in &self.routes {
-            if route.method == req.method && self.path_matches(&route.path, &req.path) {
-                return Some(route);
-            }
-        }
-        None
+        self.routes
+            .iter()
+            .find(|route| route.method == req.method && self.path_matches(&route.path, &req.path))
     }
 
     /// Handle a request
     pub fn handle(&self, req: &HttpRequest) -> HttpResponse {
         // Handle OPTIONS for CORS preflight
         if req.method == HttpMethod::Options {
-            return HttpResponse::no_content()
-                .with_cors("*");
+            return HttpResponse::no_content().with_cors("*");
         }
 
         match self.match_route(req) {
@@ -992,7 +1004,10 @@ mod tests {
     #[test]
     fn test_path_params() {
         let router = Router::new();
-        let params = router.extract_params("/databases/:name/tables/:table", "/databases/mydb/tables/users");
+        let params = router.extract_params(
+            "/databases/:name/tables/:table",
+            "/databases/mydb/tables/users",
+        );
 
         assert_eq!(params.get("name"), Some(&"mydb".to_string()));
         assert_eq!(params.get("table"), Some(&"users".to_string()));

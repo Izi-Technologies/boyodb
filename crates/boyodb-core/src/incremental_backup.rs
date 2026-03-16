@@ -214,7 +214,11 @@ impl DeduplicationIndex {
     }
 
     /// Load index from backup chain
-    pub fn load_from_chain(&self, backup_dir: &Path, chain: &[BackupMetadata]) -> std::io::Result<()> {
+    pub fn load_from_chain(
+        &self,
+        backup_dir: &Path,
+        chain: &[BackupMetadata],
+    ) -> std::io::Result<()> {
         let mut blocks = self.blocks.write();
 
         for backup in chain {
@@ -288,7 +292,13 @@ impl BackupManager {
         manifest_version: u64,
         label: Option<String>,
     ) -> std::io::Result<BackupMetadata> {
-        self.create_backup(segments_dir, manifest_version, BackupType::Full, None, label)
+        self.create_backup(
+            segments_dir,
+            manifest_version,
+            BackupType::Full,
+            None,
+            label,
+        )
     }
 
     /// Create an incremental backup
@@ -323,11 +333,7 @@ impl BackupManager {
             .as_millis() as u64;
 
         // Generate backup ID
-        let backup_id = format!(
-            "{}-{:x}",
-            chrono_format_now(),
-            start_time
-        );
+        let backup_id = format!("{}-{:x}", chrono_format_now(), start_time);
 
         // Create backup directory
         let backup_path = self.config.backup_dir.join(&backup_id);
@@ -336,7 +342,8 @@ impl BackupManager {
         // Load parent backup chain for deduplication
         let chain_position = if let Some(ref parent) = parent_id {
             let chain = self.get_backup_chain(parent)?;
-            self.dedup_index.load_from_chain(&self.config.backup_dir, &chain)?;
+            self.dedup_index
+                .load_from_chain(&self.config.backup_dir, &chain)?;
             chain.len()
         } else {
             0
@@ -449,7 +456,8 @@ impl BackupManager {
         let mut hasher = crc32fast::Hasher::new();
 
         while offset < file_size {
-            let bytes_to_read = std::cmp::min(self.config.block_size as u64, file_size - offset) as usize;
+            let bytes_to_read =
+                std::cmp::min(self.config.block_size as u64, file_size - offset) as usize;
             let bytes_read = file.read(&mut buffer[..bytes_to_read])?;
 
             if bytes_read == 0 {
@@ -462,7 +470,9 @@ impl BackupManager {
             let block_hash = self.hash_block(&buffer[..bytes_read]);
 
             // Check if block already exists (deduplication)
-            let stored = if let Some((existing_backup, _existing_offset)) = self.dedup_index.lookup(&block_hash) {
+            let stored = if let Some((existing_backup, _existing_offset)) =
+                self.dedup_index.lookup(&block_hash)
+            {
                 // Block exists in previous backup, just reference it
                 let mut s = stats.lock();
                 s.blocks_deduplicated += 1;
@@ -472,7 +482,8 @@ impl BackupManager {
                 // New block, write it
                 let compressed = self.compress_block(&buffer[..bytes_read])?;
 
-                let current_offset = write_offset.fetch_add(compressed.len() as u64, Ordering::SeqCst);
+                let current_offset =
+                    write_offset.fetch_add(compressed.len() as u64, Ordering::SeqCst);
 
                 {
                     let mut writer = data_writer.lock();
@@ -480,8 +491,11 @@ impl BackupManager {
                 }
 
                 // Add to deduplication index
-                self.dedup_index.insert(block_hash.clone(), backup_id.to_string(), current_offset);
-                block_index.lock().insert(block_hash.clone(), current_offset);
+                self.dedup_index
+                    .insert(block_hash.clone(), backup_id.to_string(), current_offset);
+                block_index
+                    .lock()
+                    .insert(block_hash.clone(), current_offset);
 
                 let mut s = stats.lock();
                 s.bytes_written += compressed.len() as u64;
@@ -606,7 +620,11 @@ impl BackupManager {
     }
 
     /// Read a block from the backup chain
-    fn read_block_from_chain(&self, hash: &str, chain: &[BackupMetadata]) -> std::io::Result<Vec<u8>> {
+    fn read_block_from_chain(
+        &self,
+        hash: &str,
+        chain: &[BackupMetadata],
+    ) -> std::io::Result<Vec<u8>> {
         for backup in chain.iter().rev() {
             let backup_path = self.config.backup_dir.join(&backup.id);
             let manifest_path = backup_path.join("manifest.json");
@@ -712,7 +730,9 @@ impl BackupManager {
                 let manifest_path = entry.path().join("manifest.json");
                 if manifest_path.exists() {
                     let file = File::open(&manifest_path)?;
-                    if let Ok(manifest) = serde_json::from_reader::<_, BackupManifest>(BufReader::new(file)) {
+                    if let Ok(manifest) =
+                        serde_json::from_reader::<_, BackupManifest>(BufReader::new(file))
+                    {
                         backups.push(manifest.metadata);
                     }
                 }
@@ -781,7 +801,11 @@ impl BackupManager {
         Ok(segments)
     }
 
-    fn collect_segments_recursive(&self, dir: &Path, segments: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    fn collect_segments_recursive(
+        &self,
+        dir: &Path,
+        segments: &mut Vec<PathBuf>,
+    ) -> std::io::Result<()> {
         if !dir.exists() {
             return Ok(());
         }
@@ -792,7 +816,10 @@ impl BackupManager {
 
             if path.is_dir() {
                 self.collect_segments_recursive(&path, segments)?;
-            } else if path.extension().map_or(false, |e| e == "segment" || e == "ipc") {
+            } else if path
+                .extension()
+                .map_or(false, |e| e == "segment" || e == "ipc")
+            {
                 segments.push(path);
             }
         }
@@ -841,13 +868,9 @@ impl BackupManager {
 
     fn compress_block(&self, data: &[u8]) -> std::io::Result<Vec<u8>> {
         let compressed = match self.config.compression.as_str() {
-            "zstd" => {
-                zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-            }
-            "lz4" => {
-                lz4_flex::compress_prepend_size(data)
-            }
+            "zstd" => zstd::encode_all(std::io::Cursor::new(data), self.config.compression_level)
+                .map_err(std::io::Error::other)?,
+            "lz4" => lz4_flex::compress_prepend_size(data),
             _ => data.to_vec(),
         };
 
@@ -861,14 +884,9 @@ impl BackupManager {
 
     fn decompress_block(&self, data: &[u8]) -> std::io::Result<Vec<u8>> {
         match self.config.compression.as_str() {
-            "zstd" => {
-                zstd::decode_all(std::io::Cursor::new(data))
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-            }
-            "lz4" => {
-                lz4_flex::decompress_size_prepended(data)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-            }
+            "zstd" => zstd::decode_all(std::io::Cursor::new(data)).map_err(std::io::Error::other),
+            "lz4" => lz4_flex::decompress_size_prepended(data)
+                .map_err(|e| std::io::Error::other(e.to_string())),
             _ => Ok(data.to_vec()),
         }
     }
@@ -937,7 +955,9 @@ mod tests {
         };
 
         let manager = BackupManager::new(config);
-        let metadata = manager.create_full_backup(&segments_dir, 1, Some("test".to_string())).unwrap();
+        let metadata = manager
+            .create_full_backup(&segments_dir, 1, Some("test".to_string()))
+            .unwrap();
 
         assert_eq!(metadata.backup_type, BackupType::Full);
         assert_eq!(metadata.segment_count, 1);

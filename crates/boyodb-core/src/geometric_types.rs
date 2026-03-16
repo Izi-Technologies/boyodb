@@ -55,10 +55,7 @@ impl Point {
 
     /// Midpoint between two points
     pub fn midpoint(&self, other: &Point) -> Point {
-        Point::new(
-            (self.x + other.x) / 2.0,
-            (self.y + other.y) / 2.0,
-        )
+        Point::new((self.x + other.x) / 2.0, (self.y + other.y) / 2.0)
     }
 
     /// Translate by dx, dy
@@ -113,11 +110,17 @@ impl FromStr for Point {
         let s = s.trim().trim_start_matches('(').trim_end_matches(')');
         let parts: Vec<&str> = s.split(',').collect();
         if parts.len() != 2 {
-            return Err(GeometricError::ParseError("Invalid point format".to_string()));
+            return Err(GeometricError::ParseError(
+                "Invalid point format".to_string(),
+            ));
         }
-        let x = parts[0].trim().parse()
+        let x = parts[0]
+            .trim()
+            .parse()
             .map_err(|_| GeometricError::ParseError("Invalid x coordinate".to_string()))?;
-        let y = parts[1].trim().parse()
+        let y = parts[1]
+            .trim()
+            .parse()
             .map_err(|_| GeometricError::ParseError("Invalid y coordinate".to_string()))?;
         Ok(Point::new(x, y))
     }
@@ -151,12 +154,20 @@ impl Line {
 
     /// Create a horizontal line at y = k
     pub fn horizontal(y: f64) -> Self {
-        Self { a: 0.0, b: 1.0, c: -y }
+        Self {
+            a: 0.0,
+            b: 1.0,
+            c: -y,
+        }
     }
 
     /// Create a vertical line at x = k
     pub fn vertical(x: f64) -> Self {
-        Self { a: 1.0, b: 0.0, c: -x }
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: -x,
+        }
     }
 
     /// Check if a point is on the line
@@ -213,7 +224,11 @@ impl Line {
     /// Parallel line through a point
     pub fn parallel_through(&self, p: &Point) -> Line {
         let c = -(self.a * p.x + self.b * p.y);
-        Line { a: self.a, b: self.b, c }
+        Line {
+            a: self.a,
+            b: self.b,
+            c,
+        }
     }
 }
 
@@ -298,10 +313,7 @@ impl LineSegment {
         let t = ((p.x - self.start.x) * dx + (p.y - self.start.y) * dy) / len_sq;
         let t = t.clamp(0.0, 1.0);
 
-        let proj = Point::new(
-            self.start.x + t * dx,
-            self.start.y + t * dy,
-        );
+        let proj = Point::new(self.start.x + t * dx, self.start.y + t * dy);
 
         p.distance(&proj)
     }
@@ -385,8 +397,7 @@ impl Box {
 
     /// Check if point is inside
     pub fn contains_point(&self, p: &Point) -> bool {
-        p.x >= self.low.x && p.x <= self.high.x &&
-        p.y >= self.low.y && p.y <= self.high.y
+        p.x >= self.low.x && p.x <= self.high.x && p.y >= self.low.y && p.y <= self.high.y
     }
 
     /// Check if box contains another box
@@ -396,8 +407,10 @@ impl Box {
 
     /// Check if boxes overlap
     pub fn overlaps(&self, other: &Box) -> bool {
-        self.low.x <= other.high.x && self.high.x >= other.low.x &&
-        self.low.y <= other.high.y && self.high.y >= other.low.y
+        self.low.x <= other.high.x
+            && self.high.x >= other.low.x
+            && self.low.y <= other.high.y
+            && self.high.y >= other.low.y
     }
 
     /// Intersection of two boxes
@@ -406,28 +419,16 @@ impl Box {
             return None;
         }
         Some(Box {
-            low: Point::new(
-                self.low.x.max(other.low.x),
-                self.low.y.max(other.low.y),
-            ),
-            high: Point::new(
-                self.high.x.min(other.high.x),
-                self.high.y.min(other.high.y),
-            ),
+            low: Point::new(self.low.x.max(other.low.x), self.low.y.max(other.low.y)),
+            high: Point::new(self.high.x.min(other.high.x), self.high.y.min(other.high.y)),
         })
     }
 
     /// Bounding box of two boxes
     pub fn bounding_box(&self, other: &Box) -> Box {
         Box {
-            low: Point::new(
-                self.low.x.min(other.low.x),
-                self.low.y.min(other.low.y),
-            ),
-            high: Point::new(
-                self.high.x.max(other.high.x),
-                self.high.y.max(other.high.y),
-            ),
+            low: Point::new(self.low.x.min(other.low.x), self.low.y.min(other.low.y)),
+            high: Point::new(self.high.x.max(other.high.x), self.high.y.max(other.high.y)),
         }
     }
 
@@ -453,7 +454,11 @@ impl Box {
 
 impl fmt::Display for Box {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(({},{}),({},{}))", self.low.x, self.low.y, self.high.x, self.high.y)
+        write!(
+            f,
+            "(({},{}),({},{}))",
+            self.low.x, self.low.y, self.high.x, self.high.y
+        )
     }
 }
 
@@ -471,12 +476,18 @@ pub struct Path {
 impl Path {
     /// Create a new open path
     pub fn new(points: Vec<Point>) -> Self {
-        Self { points, closed: false }
+        Self {
+            points,
+            closed: false,
+        }
     }
 
     /// Create a closed path
     pub fn closed(points: Vec<Point>) -> Self {
-        Self { points, closed: true }
+        Self {
+            points,
+            closed: true,
+        }
     }
 
     /// Number of points
@@ -581,7 +592,9 @@ impl Polygon {
     /// Create a new polygon
     pub fn new(points: Vec<Point>) -> Result<Self, GeometricError> {
         if points.len() < 3 {
-            return Err(GeometricError::InvalidPolygon("Need at least 3 points".to_string()));
+            return Err(GeometricError::InvalidPolygon(
+                "Need at least 3 points".to_string(),
+            ));
         }
         Ok(Self { points })
     }
@@ -589,7 +602,9 @@ impl Polygon {
     /// Create a regular polygon with n sides
     pub fn regular(n: usize, center: Point, radius: f64) -> Result<Self, GeometricError> {
         if n < 3 {
-            return Err(GeometricError::InvalidPolygon("Need at least 3 sides".to_string()));
+            return Err(GeometricError::InvalidPolygon(
+                "Need at least 3 sides".to_string(),
+            ));
         }
 
         let mut points = Vec::with_capacity(n);
@@ -668,8 +683,8 @@ impl Polygon {
             let pi = &self.points[i];
             let pj = &self.points[j];
 
-            if ((pi.y > p.y) != (pj.y > p.y)) &&
-               (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x)
+            if ((pi.y > p.y) != (pj.y > p.y))
+                && (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x)
             {
                 inside = !inside;
             }
@@ -765,7 +780,9 @@ impl Circle {
     /// Create a new circle
     pub fn new(center: Point, radius: f64) -> Result<Self, GeometricError> {
         if radius < 0.0 {
-            return Err(GeometricError::InvalidCircle("Radius must be non-negative".to_string()));
+            return Err(GeometricError::InvalidCircle(
+                "Radius must be non-negative".to_string(),
+            ));
         }
         Ok(Self { center, radius })
     }
@@ -1020,7 +1037,8 @@ mod tests {
             Point::new(2.0, 0.0),
             Point::new(2.0, 2.0),
             Point::new(0.0, 2.0),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         assert!((polygon.area() - 4.0).abs() < f64::EPSILON);
     }
@@ -1032,7 +1050,8 @@ mod tests {
             Point::new(4.0, 0.0),
             Point::new(4.0, 4.0),
             Point::new(0.0, 4.0),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         assert!(polygon.contains_point(&Point::new(2.0, 2.0)));
         assert!(!polygon.contains_point(&Point::new(5.0, 5.0)));
@@ -1046,7 +1065,8 @@ mod tests {
             Point::new(2.0, 0.0),
             Point::new(2.0, 2.0),
             Point::new(0.0, 2.0),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(square.is_convex());
 
         // Concave polygon
@@ -1056,7 +1076,8 @@ mod tests {
             Point::new(1.0, 1.0), // Inward point
             Point::new(2.0, 2.0),
             Point::new(0.0, 2.0),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(!concave.is_convex());
     }
 

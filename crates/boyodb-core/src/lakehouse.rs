@@ -407,7 +407,8 @@ impl DeltaLog {
         let files_before = self.active_files().len();
 
         // Collect small files
-        let small_files: Vec<_> = self.active_files()
+        let small_files: Vec<_> = self
+            .active_files()
             .iter()
             .filter(|f| (f.size as u64) < self.config.target_file_size / 4)
             .map(|f| f.path.clone())
@@ -823,11 +824,18 @@ pub struct IcebergTable {
 
 impl IcebergTable {
     /// Create a new Iceberg table
-    pub fn create(config: IcebergConfig, schema: Schema, partition_spec: Option<PartitionSpec>) -> Self {
-        let table_uuid = format!("{:x}", std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos());
+    pub fn create(
+        config: IcebergConfig,
+        schema: Schema,
+        partition_spec: Option<PartitionSpec>,
+    ) -> Self {
+        let table_uuid = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
 
         let default_spec = partition_spec.unwrap_or(PartitionSpec {
             spec_id: 0,
@@ -867,14 +875,17 @@ impl IcebergTable {
 
     /// Get current schema
     pub fn schema(&self) -> Option<&Schema> {
-        self.metadata.schemas.iter().find(|s| s.schema_id == self.metadata.current_schema_id)
+        self.metadata
+            .schemas
+            .iter()
+            .find(|s| s.schema_id == self.metadata.current_schema_id)
     }
 
     /// Get current snapshot
     pub fn current_snapshot(&self) -> Option<&IcebergSnapshot> {
-        self.metadata.current_snapshot_id.and_then(|id| {
-            self.metadata.snapshots.iter().find(|s| s.snapshot_id == id)
-        })
+        self.metadata
+            .current_snapshot_id
+            .and_then(|id| self.metadata.snapshots.iter().find(|s| s.snapshot_id == id))
     }
 
     /// Start a new transaction
@@ -891,7 +902,10 @@ impl IcebergTable {
 
     /// Get snapshot by ID
     pub fn snapshot(&self, snapshot_id: i64) -> Option<&IcebergSnapshot> {
-        self.metadata.snapshots.iter().find(|s| s.snapshot_id == snapshot_id)
+        self.metadata
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_id == snapshot_id)
     }
 
     /// Get snapshot history
@@ -900,49 +914,67 @@ impl IcebergTable {
     }
 
     /// Create a branch
-    pub fn create_branch(&mut self, name: &str, snapshot_id: Option<i64>) -> Result<(), LakehouseError> {
+    pub fn create_branch(
+        &mut self,
+        name: &str,
+        snapshot_id: Option<i64>,
+    ) -> Result<(), LakehouseError> {
         let snap_id = snapshot_id
             .or(self.metadata.current_snapshot_id)
             .ok_or_else(|| LakehouseError::SnapshotNotFound(0))?;
 
-        self.metadata.refs.insert(name.to_string(), SnapshotRef {
-            snapshot_id: snap_id,
-            ref_type: RefType::Branch,
-            min_snapshots_to_keep: None,
-            max_snapshot_age_ms: None,
-            max_ref_age_ms: None,
-        });
+        self.metadata.refs.insert(
+            name.to_string(),
+            SnapshotRef {
+                snapshot_id: snap_id,
+                ref_type: RefType::Branch,
+                min_snapshots_to_keep: None,
+                max_snapshot_age_ms: None,
+                max_ref_age_ms: None,
+            },
+        );
 
         Ok(())
     }
 
     /// Create a tag
     pub fn create_tag(&mut self, name: &str, snapshot_id: i64) -> Result<(), LakehouseError> {
-        if !self.metadata.snapshots.iter().any(|s| s.snapshot_id == snapshot_id) {
+        if !self
+            .metadata
+            .snapshots
+            .iter()
+            .any(|s| s.snapshot_id == snapshot_id)
+        {
             return Err(LakehouseError::SnapshotNotFound(snapshot_id));
         }
 
-        self.metadata.refs.insert(name.to_string(), SnapshotRef {
-            snapshot_id,
-            ref_type: RefType::Tag,
-            min_snapshots_to_keep: None,
-            max_snapshot_age_ms: None,
-            max_ref_age_ms: None,
-        });
+        self.metadata.refs.insert(
+            name.to_string(),
+            SnapshotRef {
+                snapshot_id,
+                ref_type: RefType::Tag,
+                min_snapshots_to_keep: None,
+                max_snapshot_age_ms: None,
+                max_ref_age_ms: None,
+            },
+        );
 
         Ok(())
     }
 
     /// Evolve schema (add column)
     pub fn add_column(&mut self, column: Column) -> Result<(), LakehouseError> {
-        let current_schema = self.metadata.schemas
+        let current_schema = self
+            .metadata
+            .schemas
             .iter_mut()
             .find(|s| s.schema_id == self.metadata.current_schema_id)
             .ok_or_else(|| LakehouseError::SchemaMismatch("current schema not found".into()))?;
 
         if current_schema.columns.iter().any(|c| c.name == column.name) {
             return Err(LakehouseError::SchemaMismatch(format!(
-                "column {} already exists", column.name
+                "column {} already exists",
+                column.name
             )));
         }
 
@@ -958,7 +990,9 @@ impl IcebergTable {
 
     /// Cherry-pick snapshot
     pub fn cherry_pick(&mut self, snapshot_id: i64) -> Result<i64, LakehouseError> {
-        let _source = self.metadata.snapshots
+        let _source = self
+            .metadata
+            .snapshots
             .iter()
             .find(|s| s.snapshot_id == snapshot_id)
             .ok_or(LakehouseError::SnapshotNotFound(snapshot_id))?
@@ -982,7 +1016,10 @@ impl IcebergTable {
             summary: {
                 let mut s = _source.summary.clone();
                 s.insert("operation".to_string(), "cherry-pick".to_string());
-                s.insert("cherry-picked-snapshot-id".to_string(), snapshot_id.to_string());
+                s.insert(
+                    "cherry-picked-snapshot-id".to_string(),
+                    snapshot_id.to_string(),
+                );
                 s
             },
             schema_id: _source.schema_id,
@@ -1000,9 +1037,9 @@ impl IcebergTable {
         let current_id = self.metadata.current_snapshot_id;
         let before_count = self.metadata.snapshots.len();
 
-        self.metadata.snapshots.retain(|s| {
-            Some(s.snapshot_id) == current_id || s.timestamp_ms >= older_than_ms
-        });
+        self.metadata
+            .snapshots
+            .retain(|s| Some(s.snapshot_id) == current_id || s.timestamp_ms >= older_than_ms);
 
         before_count - self.metadata.snapshots.len()
     }
@@ -1041,18 +1078,37 @@ impl<'a> IcebergTransaction<'a> {
 
     /// Set table property
     pub fn set_property(&mut self, key: &str, value: &str) {
-        self.properties_update.insert(key.to_string(), value.to_string());
+        self.properties_update
+            .insert(key.to_string(), value.to_string());
     }
 
     /// Get summary of pending changes
     pub fn summary(&self) -> HashMap<String, String> {
         let mut s = HashMap::new();
-        s.insert("added-data-files".to_string(), self.data_files.len().to_string());
-        s.insert("added-delete-files".to_string(), self.delete_files.len().to_string());
-        s.insert("added-records".to_string(),
-            self.data_files.iter().map(|f| f.record_count).sum::<i64>().to_string());
-        s.insert("added-files-size".to_string(),
-            self.data_files.iter().map(|f| f.file_size_in_bytes).sum::<i64>().to_string());
+        s.insert(
+            "added-data-files".to_string(),
+            self.data_files.len().to_string(),
+        );
+        s.insert(
+            "added-delete-files".to_string(),
+            self.delete_files.len().to_string(),
+        );
+        s.insert(
+            "added-records".to_string(),
+            self.data_files
+                .iter()
+                .map(|f| f.record_count)
+                .sum::<i64>()
+                .to_string(),
+        );
+        s.insert(
+            "added-files-size".to_string(),
+            self.data_files
+                .iter()
+                .map(|f| f.file_size_in_bytes)
+                .sum::<i64>()
+                .to_string(),
+        );
         s
     }
 }
@@ -1078,7 +1134,8 @@ impl LakehouseManager {
 
     /// Register a Delta Lake table
     pub fn register_delta(&mut self, name: &str, config: DeltaConfig) {
-        self.delta_tables.insert(name.to_string(), DeltaLog::new(config));
+        self.delta_tables
+            .insert(name.to_string(), DeltaLog::new(config));
     }
 
     /// Register an Iceberg table
@@ -1167,7 +1224,8 @@ mod tests {
         let bucket = PartitionTransform::Bucket(10).apply(&PartitionValue::String("hello".into()));
         assert!(matches!(bucket, PartitionValue::Int(i) if i < 10));
 
-        let truncate = PartitionTransform::Truncate(3).apply(&PartitionValue::String("hello".into()));
+        let truncate =
+            PartitionTransform::Truncate(3).apply(&PartitionValue::String("hello".into()));
         assert_eq!(truncate, PartitionValue::String("hel".into()));
     }
 
@@ -1178,15 +1236,13 @@ mod tests {
             ..Default::default()
         };
 
-        let schema = Schema::new(vec![
-            Column {
-                id: 1,
-                name: "id".to_string(),
-                data_type: ColumnType::Int64,
-                required: true,
-                doc: None,
-            }
-        ]);
+        let schema = Schema::new(vec![Column {
+            id: 1,
+            name: "id".to_string(),
+            data_type: ColumnType::Int64,
+            required: true,
+            doc: None,
+        }]);
 
         let mut table = IcebergTable::create(config, schema, None);
 

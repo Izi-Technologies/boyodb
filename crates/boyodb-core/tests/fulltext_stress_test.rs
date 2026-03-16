@@ -13,7 +13,6 @@ use boyodb_core::engine::{Db, EngineConfig, IngestBatch, QueryRequest};
 use std::sync::Arc;
 use std::thread;
 use tempfile::tempdir;
-use tokio;
 
 fn create_phone_batch(start_id: i64, count: usize) -> Vec<u8> {
     let schema = Schema::new(vec![
@@ -176,7 +175,7 @@ async fn test_fulltext_index_repeated_build_drop() {
 
 #[test]
 fn test_fulltext_builder_memory_stress() {
-    use boyodb_core::fts::{FulltextConfig, FulltextIndexBuilder, load_fulltext_index};
+    use boyodb_core::fts::{load_fulltext_index, FulltextConfig, FulltextIndexBuilder};
 
     // Build large index and verify it loads correctly
     for _ in 0..3 {
@@ -206,7 +205,7 @@ fn test_fulltext_builder_memory_stress() {
 
 #[test]
 fn test_fulltext_concurrent_index_access() {
-    use boyodb_core::fts::{FulltextConfig, FulltextIndexBuilder, load_fulltext_index};
+    use boyodb_core::fts::{load_fulltext_index, FulltextConfig, FulltextIndexBuilder};
 
     // Build index
     let mut builder = FulltextIndexBuilder::new(FulltextConfig::default());
@@ -237,7 +236,7 @@ fn test_fulltext_concurrent_index_access() {
 
 #[test]
 fn test_fulltext_builder_concurrent_serialization() {
-    use boyodb_core::fts::{FulltextConfig, FulltextIndexBuilder, load_fulltext_index};
+    use boyodb_core::fts::{load_fulltext_index, FulltextConfig, FulltextIndexBuilder};
 
     // Build multiple indexes concurrently and verify correctness
     let mut handles = vec![];

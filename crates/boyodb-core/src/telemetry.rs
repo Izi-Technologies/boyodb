@@ -216,7 +216,10 @@ impl TraceContext {
 
     /// Format as W3C traceparent header
     pub fn to_traceparent(&self) -> String {
-        format!("00-{}-{}-{:02x}", self.trace_id, self.span_id, self.trace_flags)
+        format!(
+            "00-{}-{}-{:02x}",
+            self.trace_id, self.span_id, self.trace_flags
+        )
     }
 
     /// Check if sampled
@@ -669,10 +672,7 @@ impl MetricsRegistry {
                 }
                 MetricValue::Summary(ref s) => {
                     for (q, v) in &s.quantiles {
-                        output.push_str(&format!(
-                            "{}{{quantile=\"{}\"}} {}\n",
-                            metric.name, q, v
-                        ));
+                        output.push_str(&format!("{}{{quantile=\"{}\"}} {}\n", metric.name, q, v));
                     }
                     output.push_str(&format!("{}_sum {}\n", metric.name, s.sum));
                     output.push_str(&format!("{}_count {}\n", metric.name, s.count));
@@ -699,7 +699,11 @@ impl Telemetry {
         // Register default metrics
         metrics.register_counter("boyodb_queries_total", "Total number of queries", "queries");
         metrics.register_counter("boyodb_errors_total", "Total number of errors", "errors");
-        metrics.register_gauge("boyodb_active_connections", "Active connections", "connections");
+        metrics.register_gauge(
+            "boyodb_active_connections",
+            "Active connections",
+            "connections",
+        );
         metrics.register_gauge("boyodb_memory_bytes", "Memory usage in bytes", "bytes");
         metrics.register_counter("boyodb_rows_read", "Total rows read", "rows");
         metrics.register_counter("boyodb_rows_written", "Total rows written", "rows");
@@ -738,7 +742,8 @@ impl Telemetry {
 
     /// Update active connections gauge
     pub fn set_active_connections(&self, count: u64) {
-        self.metrics.set_gauge("boyodb_active_connections", count as f64);
+        self.metrics
+            .set_gauge("boyodb_active_connections", count as f64);
     }
 
     /// Update memory usage gauge
@@ -814,7 +819,10 @@ mod tests {
         assert_eq!(spans.len(), 2);
 
         let child_span = spans.iter().find(|s| s.name == "child").unwrap();
-        assert_eq!(child_span.parent_span_id.as_deref(), Some(parent_ctx.span_id.as_str()));
+        assert_eq!(
+            child_span.parent_span_id.as_deref(),
+            Some(parent_ctx.span_id.as_str())
+        );
         assert_eq!(child_span.trace_id, parent_ctx.trace_id);
     }
 

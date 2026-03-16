@@ -8,10 +8,10 @@
 //! - Feature extraction from columns
 //! - Model versioning and A/B testing
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// ML inference error types
@@ -213,7 +213,10 @@ pub enum Preprocessing {
     /// Label encoding
     LabelEncode { mapping: HashMap<String, i64> },
     /// Text tokenization
-    Tokenize { max_length: usize, vocab_size: usize },
+    Tokenize {
+        max_length: usize,
+        vocab_size: usize,
+    },
     /// Embedding lookup
     EmbeddingLookup { embedding_dim: usize },
     /// Custom SQL expression
@@ -234,7 +237,9 @@ pub enum OutputType {
     /// Embedding vector
     Embedding { dimension: usize },
     /// Multiple outputs
-    MultiOutput { outputs: Vec<(String, Box<OutputType>)> },
+    MultiOutput {
+        outputs: Vec<(String, Box<OutputType>)>,
+    },
     /// JSON structured output
     JSON,
 }

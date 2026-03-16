@@ -21,12 +21,12 @@
 //! SELECT * FROM pg_verify_backup('/backups/backup_2025_01_01');
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -325,7 +325,11 @@ impl std::fmt::Display for VerificationStatus {
 }
 
 /// Verify file integrity
-pub fn verify_file(path: &str, expected_checksum: &str, algorithm: ChecksumAlgorithm) -> Result<bool, IntegrityError> {
+pub fn verify_file(
+    path: &str,
+    expected_checksum: &str,
+    algorithm: ChecksumAlgorithm,
+) -> Result<bool, IntegrityError> {
     let data = std::fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             IntegrityError::FileNotFound(path.to_string())
@@ -803,7 +807,10 @@ impl BackupVerifier {
     }
 
     /// Verify a backup
-    pub fn verify_backup(&self, backup_path: &Path) -> Result<BackupVerificationResult, IntegrityError> {
+    pub fn verify_backup(
+        &self,
+        backup_path: &Path,
+    ) -> Result<BackupVerificationResult, IntegrityError> {
         let mut result = BackupVerificationResult {
             backup_path: backup_path.to_string_lossy().to_string(),
             manifest_valid: false,
@@ -835,14 +842,14 @@ impl BackupVerifier {
         // 4. Verify WAL files if present
 
         // Simulate verification
-        let entries = std::fs::read_dir(backup_path)
-            .map_err(|e| IntegrityError::IoError(e.to_string()))?;
+        let entries =
+            std::fs::read_dir(backup_path).map_err(|e| IntegrityError::IoError(e.to_string()))?;
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_file() {
-                let metadata = std::fs::metadata(&path)
-                    .map_err(|e| IntegrityError::IoError(e.to_string()))?;
+                let metadata =
+                    std::fs::metadata(&path).map_err(|e| IntegrityError::IoError(e.to_string()))?;
                 result.files_verified += 1;
                 result.total_size += metadata.len();
             }
@@ -861,7 +868,9 @@ impl BackupVerifier {
         Ok(RestoreTestResult {
             backup_valid: verify_result.passed,
             can_restore: verify_result.passed && verify_result.manifest_valid,
-            estimated_restore_time: Duration::from_secs(verify_result.total_size / (100 * 1024 * 1024)), // 100MB/s estimate
+            estimated_restore_time: Duration::from_secs(
+                verify_result.total_size / (100 * 1024 * 1024),
+            ), // 100MB/s estimate
             required_space: verify_result.total_size,
             errors: verify_result.errors,
         })

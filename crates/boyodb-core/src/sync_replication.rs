@@ -33,7 +33,10 @@ impl fmt::Display for SyncReplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SyncReplicationError::Timeout => write!(f, "Timeout waiting for acknowledgment"),
-            SyncReplicationError::NotEnoughReplicas { required, available } => {
+            SyncReplicationError::NotEnoughReplicas {
+                required,
+                available,
+            } => {
                 write!(
                     f,
                     "Not enough replicas: required {}, available {}",
@@ -481,11 +484,7 @@ impl SyncReplicationManager {
     }
 
     /// Wait for synchronous commit
-    pub fn wait_for_sync(
-        &self,
-        xid: u64,
-        lsn: u64,
-    ) -> Result<Duration, SyncReplicationError> {
+    pub fn wait_for_sync(&self, xid: u64, lsn: u64) -> Result<Duration, SyncReplicationError> {
         let level = self.commit_level();
 
         // No waiting needed for off or local
@@ -662,7 +661,9 @@ impl SyncReplicationManager {
             }
         }
 
-        self.stats.sync_replicas.store(sync_count, Ordering::Relaxed);
+        self.stats
+            .sync_replicas
+            .store(sync_count, Ordering::Relaxed);
     }
 
     fn get_sync_replica_count(&self) -> usize {
@@ -732,8 +733,14 @@ mod tests {
 
     #[test]
     fn test_sync_commit_levels() {
-        assert!(SynchronousCommit::RemoteApply.durability_level() > SynchronousCommit::RemoteFlush.durability_level());
-        assert!(SynchronousCommit::RemoteFlush.durability_level() > SynchronousCommit::Local.durability_level());
+        assert!(
+            SynchronousCommit::RemoteApply.durability_level()
+                > SynchronousCommit::RemoteFlush.durability_level()
+        );
+        assert!(
+            SynchronousCommit::RemoteFlush.durability_level()
+                > SynchronousCommit::Local.durability_level()
+        );
     }
 
     #[test]
@@ -742,7 +749,10 @@ mod tests {
 
         assert_eq!(replica.name, "replica1");
         assert_eq!(replica.priority, 1);
-        assert_eq!(replica.connection_state, ReplicaConnectionState::Disconnected);
+        assert_eq!(
+            replica.connection_state,
+            ReplicaConnectionState::Disconnected
+        );
 
         replica.write_lsn = 100;
         replica.flush_lsn = 90;
@@ -766,7 +776,10 @@ mod tests {
 
     #[test]
     fn test_sync_standby_names() {
-        let names = SyncStandbyNames::First(2, vec!["r1".to_string(), "r2".to_string(), "r3".to_string()]);
+        let names = SyncStandbyNames::First(
+            2,
+            vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
+        );
 
         assert_eq!(names.required_acks(), 2);
         assert!(names.contains("r1"));
@@ -815,10 +828,7 @@ mod tests {
 
         // Configure FIRST 1 standby
         manager.set_standby_config(SyncStandbyConfig {
-            names: SyncStandbyNames::First(
-                1,
-                vec!["replica1".to_string(), "replica2".to_string()],
-            ),
+            names: SyncStandbyNames::First(1, vec!["replica1".to_string(), "replica2".to_string()]),
             timeout: Duration::from_secs(30),
             wait_for_all: false,
         });

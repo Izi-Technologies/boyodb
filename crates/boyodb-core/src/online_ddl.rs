@@ -5,11 +5,11 @@
 //! - ALTER TABLE ADD COLUMN (online)
 //! - Online schema migrations with progress tracking
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Online DDL error types
@@ -94,9 +94,7 @@ pub enum OnlineOperation {
         method: IndexMethod,
     },
     /// Drop index concurrently
-    DropIndexConcurrently {
-        index_name: String,
-    },
+    DropIndexConcurrently { index_name: String },
     /// Online table rebuild
     RebuildTable {
         table_name: String,
@@ -300,10 +298,7 @@ impl OnlineDdlManager {
     }
 
     /// Start an online operation
-    pub fn start_operation(
-        &self,
-        operation: OnlineOperation,
-    ) -> Result<String, OnlineDdlError> {
+    pub fn start_operation(&self, operation: OnlineOperation) -> Result<String, OnlineDdlError> {
         let operations = self.operations.read();
         if operations.len() >= self.config.max_concurrent_operations {
             return Err(OnlineDdlError::OperationInProgress(
@@ -362,10 +357,7 @@ impl OnlineDdlManager {
     }
 
     /// Execute REINDEX CONCURRENTLY
-    pub fn reindex_concurrently(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn reindex_concurrently(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         // Phase 1: Prepare
@@ -384,7 +376,11 @@ impl OnlineDdlManager {
         self.simulate_row_processing(&context, 100000)?;
 
         // Phase 3: Catch up
-        self.update_state(&context, OperationState::CatchingUp, "Processing concurrent changes")?;
+        self.update_state(
+            &context,
+            OperationState::CatchingUp,
+            "Processing concurrent changes",
+        )?;
         self.check_cancelled(&context)?;
 
         // Apply any changes that happened during build
@@ -426,10 +422,7 @@ impl OnlineDdlManager {
     }
 
     /// Execute CREATE INDEX CONCURRENTLY
-    pub fn create_index_concurrently(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn create_index_concurrently(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         // Phase 1: Prepare
@@ -446,7 +439,11 @@ impl OnlineDdlManager {
         self.simulate_row_processing(&context, 500000)?;
 
         // Phase 3: Catch up with concurrent changes
-        self.update_state(&context, OperationState::CatchingUp, "Processing concurrent changes")?;
+        self.update_state(
+            &context,
+            OperationState::CatchingUp,
+            "Processing concurrent changes",
+        )?;
 
         for iteration in 0..self.config.max_catchup_iterations {
             self.check_cancelled(&context)?;
@@ -476,10 +473,7 @@ impl OnlineDdlManager {
     }
 
     /// Execute ADD COLUMN online
-    pub fn add_column_online(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn add_column_online(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         let (column, default_value) = match &context.operation {
@@ -488,11 +482,19 @@ impl OnlineDdlManager {
                 default_value,
                 ..
             } => (column.clone(), default_value.clone()),
-            _ => return Err(OnlineDdlError::OperationFailed("wrong operation type".into())),
+            _ => {
+                return Err(OnlineDdlError::OperationFailed(
+                    "wrong operation type".into(),
+                ))
+            }
         };
 
         // Phase 1: Add column metadata
-        self.update_state(&context, OperationState::Preparing, "Adding column metadata")?;
+        self.update_state(
+            &context,
+            OperationState::Preparing,
+            "Adding column metadata",
+        )?;
         self.check_cancelled(&context)?;
 
         // Add column to catalog with NULL or default
@@ -500,7 +502,11 @@ impl OnlineDdlManager {
 
         // Phase 2: Backfill (if needed)
         if default_value.is_some() && !column.nullable {
-            self.update_state(&context, OperationState::Building, "Backfilling default values")?;
+            self.update_state(
+                &context,
+                OperationState::Building,
+                "Backfilling default values",
+            )?;
             self.check_cancelled(&context)?;
 
             // Update existing rows in batches
@@ -509,7 +515,11 @@ impl OnlineDdlManager {
 
         // Phase 3: Add constraint (if NOT NULL)
         if !column.nullable {
-            self.update_state(&context, OperationState::Validating, "Adding NOT NULL constraint")?;
+            self.update_state(
+                &context,
+                OperationState::Validating,
+                "Adding NOT NULL constraint",
+            )?;
             self.check_cancelled(&context)?;
 
             // Validate all rows have values
@@ -526,14 +536,15 @@ impl OnlineDdlManager {
     }
 
     /// Execute DROP COLUMN online
-    pub fn drop_column_online(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn drop_column_online(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         // Phase 1: Mark column as dropped
-        self.update_state(&context, OperationState::Preparing, "Marking column dropped")?;
+        self.update_state(
+            &context,
+            OperationState::Preparing,
+            "Marking column dropped",
+        )?;
         self.check_cancelled(&context)?;
 
         // Column is now invisible to queries but data remains
@@ -552,25 +563,34 @@ impl OnlineDdlManager {
     }
 
     /// Execute ADD CONSTRAINT online
-    pub fn add_constraint_online(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn add_constraint_online(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         let constraint = match &context.operation {
             OnlineOperation::AddConstraintOnline { constraint, .. } => constraint.clone(),
-            _ => return Err(OnlineDdlError::OperationFailed("wrong operation type".into())),
+            _ => {
+                return Err(OnlineDdlError::OperationFailed(
+                    "wrong operation type".into(),
+                ))
+            }
         };
 
         // Phase 1: Add constraint as "not valid"
-        self.update_state(&context, OperationState::Preparing, "Adding constraint metadata")?;
+        self.update_state(
+            &context,
+            OperationState::Preparing,
+            "Adding constraint metadata",
+        )?;
         self.check_cancelled(&context)?;
 
         // Constraint exists but not enforced on existing rows
 
         // Phase 2: Validate existing data
-        self.update_state(&context, OperationState::Validating, "Validating existing rows")?;
+        self.update_state(
+            &context,
+            OperationState::Validating,
+            "Validating existing rows",
+        )?;
         self.check_cancelled(&context)?;
 
         let row_count = self.estimate_row_count(&context)?;
@@ -582,7 +602,11 @@ impl OnlineDdlManager {
         // If any violations found, report them
 
         // Phase 4: Mark constraint valid
-        self.update_state(&context, OperationState::Swapping, "Marking constraint valid")?;
+        self.update_state(
+            &context,
+            OperationState::Swapping,
+            "Marking constraint valid",
+        )?;
 
         match &constraint {
             OnlineConstraint::NotNull { column } => {
@@ -609,10 +633,7 @@ impl OnlineDdlManager {
     }
 
     /// Execute table rebuild online
-    pub fn rebuild_table_online(
-        &self,
-        operation_id: &str,
-    ) -> Result<(), OnlineDdlError> {
+    pub fn rebuild_table_online(&self, operation_id: &str) -> Result<(), OnlineDdlError> {
         let context = self.get_operation(operation_id)?;
 
         // Phase 1: Create new table structure
@@ -631,7 +652,11 @@ impl OnlineDdlManager {
         self.check_cancelled(&context)?;
 
         // Phase 4: Catch up with changes
-        self.update_state(&context, OperationState::CatchingUp, "Processing concurrent changes")?;
+        self.update_state(
+            &context,
+            OperationState::CatchingUp,
+            "Processing concurrent changes",
+        )?;
 
         for iteration in 0..self.config.max_catchup_iterations {
             self.check_cancelled(&context)?;
@@ -697,7 +722,11 @@ impl OnlineDdlManager {
         Ok(())
     }
 
-    fn update_progress<F>(&self, context: &OnlineOperationContext, f: F) -> Result<(), OnlineDdlError>
+    fn update_progress<F>(
+        &self,
+        context: &OnlineOperationContext,
+        f: F,
+    ) -> Result<(), OnlineDdlError>
     where
         F: FnOnce(&mut OperationProgress),
     {
@@ -876,11 +905,7 @@ impl OnlineOperationBuilder {
     }
 
     /// Create REINDEX CONCURRENTLY operation
-    pub fn reindex_concurrently(
-        &self,
-        table: &str,
-        index: &str,
-    ) -> Result<String, OnlineDdlError> {
+    pub fn reindex_concurrently(&self, table: &str, index: &str) -> Result<String, OnlineDdlError> {
         let op = OnlineOperation::ReindexConcurrently {
             index_name: index.to_string(),
             table_name: table.to_string(),

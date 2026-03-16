@@ -8,10 +8,10 @@
 //! - Filtered vector search
 //! - Quantization for memory efficiency
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::cmp::Ordering;
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 /// Vector with ID
 #[derive(Debug, Clone)]
@@ -73,22 +73,14 @@ impl DistanceMetric {
                     1.0 - (dot / (norm_a * norm_b))
                 }
             }
-            DistanceMetric::Euclidean => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).powi(2))
-                    .sum::<f32>()
-                    .sqrt()
-            }
-            DistanceMetric::DotProduct => {
-                -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
-            }
-            DistanceMetric::Manhattan => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y).abs())
-                    .sum()
-            }
+            DistanceMetric::Euclidean => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).powi(2))
+                .sum::<f32>()
+                .sqrt(),
+            DistanceMetric::DotProduct => -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>(),
+            DistanceMetric::Manhattan => a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum(),
         }
     }
 }
@@ -123,7 +115,10 @@ impl PartialOrd for SearchResult {
 impl Ord for SearchResult {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse order for min-heap behavior
-        other.distance.partial_cmp(&self.distance).unwrap_or(Ordering::Equal)
+        other
+            .distance
+            .partial_cmp(&self.distance)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -237,7 +232,8 @@ impl HnswIndex {
 
         // Insert at each level
         for l in (0..=level.min(self.max_level)).rev() {
-            let neighbors = self.search_layer(&vector.data, &current, self.config.ef_construction, l);
+            let neighbors =
+                self.search_layer(&vector.data, &current, self.config.ef_construction, l);
 
             // Get next current node for navigation
             let next_current = neighbors.first().map(|r| r.id.clone());
@@ -403,9 +399,9 @@ impl HnswIndex {
         let mut scored: Vec<(String, f32)> = connections
             .iter()
             .filter_map(|id| {
-                self.nodes.get(id).map(|n| {
-                    (id.clone(), self.config.metric.distance(vector, &n.vector))
-                })
+                self.nodes
+                    .get(id)
+                    .map(|n| (id.clone(), self.config.metric.distance(vector, &n.vector)))
             })
             .collect();
 
@@ -470,7 +466,8 @@ impl HnswIndex {
 
     /// Get index statistics
     pub fn stats(&self) -> HnswStats {
-        let total_connections: usize = self.nodes
+        let total_connections: usize = self
+            .nodes
             .values()
             .flat_map(|n| n.connections.iter())
             .map(|c| c.len())
@@ -506,11 +503,7 @@ impl HnswIndex {
             // Update entry point if needed
             if self.entry_point.as_ref() == Some(&id.to_string()) {
                 self.entry_point = self.nodes.keys().next().cloned();
-                self.max_level = self.nodes
-                    .values()
-                    .map(|n| n.level)
-                    .max()
-                    .unwrap_or(0);
+                self.max_level = self.nodes.values().map(|n| n.level).max().unwrap_or(0);
             }
 
             true
@@ -559,7 +552,10 @@ pub struct ProductQuantizer {
 impl ProductQuantizer {
     /// Create new product quantizer
     pub fn new(dimension: usize, num_subspaces: usize, bits_per_subspace: usize) -> Self {
-        assert!(dimension % num_subspaces == 0, "Dimension must be divisible by num_subspaces");
+        assert!(
+            dimension % num_subspaces == 0,
+            "Dimension must be divisible by num_subspaces"
+        );
 
         ProductQuantizer {
             num_subspaces,
@@ -581,10 +577,8 @@ impl ProductQuantizer {
             let end = start + subspace_dim;
 
             // Extract subvectors
-            let subvectors: Vec<Vec<f32>> = vectors
-                .iter()
-                .map(|v| v[start..end].to_vec())
-                .collect();
+            let subvectors: Vec<Vec<f32>> =
+                vectors.iter().map(|v| v[start..end].to_vec()).collect();
 
             // K-means clustering
             let centroids = self.kmeans(&subvectors, num_centroids, iterations);
@@ -601,11 +595,8 @@ impl ProductQuantizer {
         let dim = vectors[0].len();
 
         // Initialize centroids randomly
-        let mut centroids: Vec<Vec<f32>> = vectors
-            .iter()
-            .take(k.min(vectors.len()))
-            .cloned()
-            .collect();
+        let mut centroids: Vec<Vec<f32>> =
+            vectors.iter().take(k.min(vectors.len())).cloned().collect();
 
         // Pad if needed
         while centroids.len() < k {
@@ -621,10 +612,7 @@ impl ProductQuantizer {
                 let mut best_dist = f32::MAX;
 
                 for (j, c) in centroids.iter().enumerate() {
-                    let dist: f32 = v.iter()
-                        .zip(c.iter())
-                        .map(|(a, b)| (a - b).powi(2))
-                        .sum();
+                    let dist: f32 = v.iter().zip(c.iter()).map(|(a, b)| (a - b).powi(2)).sum();
                     if dist < best_dist {
                         best_dist = dist;
                         best_cluster = j;
@@ -765,7 +753,12 @@ impl VectorIndexRegistry {
     }
 
     /// Search index
-    pub fn search(&self, index_name: &str, query: &[f32], k: usize) -> Result<Vec<SearchResult>, String> {
+    pub fn search(
+        &self,
+        index_name: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<SearchResult>, String> {
         let indexes = self.indexes.read();
         let index = indexes
             .get(index_name)
@@ -837,27 +830,31 @@ mod tests {
     fn test_hnsw_with_metadata() {
         let mut index = HnswIndex::new(HnswConfig::default());
 
-        index.insert(Vector::new("v1", vec![1.0, 0.0]).with_metadata("type", "a")).unwrap();
-        index.insert(Vector::new("v2", vec![2.0, 0.0]).with_metadata("type", "b")).unwrap();
-        index.insert(Vector::new("v3", vec![3.0, 0.0]).with_metadata("type", "a")).unwrap();
+        index
+            .insert(Vector::new("v1", vec![1.0, 0.0]).with_metadata("type", "a"))
+            .unwrap();
+        index
+            .insert(Vector::new("v2", vec![2.0, 0.0]).with_metadata("type", "b"))
+            .unwrap();
+        index
+            .insert(Vector::new("v3", vec![3.0, 0.0]).with_metadata("type", "a"))
+            .unwrap();
 
         // Filter search
         let results = index.search_with_filter(&[2.0, 0.0], 10, |m| {
             m.get("type").map(|t| t == "a").unwrap_or(false)
         });
 
-        assert!(results.iter().all(|r| {
-            r.metadata.get("type").map(|t| t == "a").unwrap_or(false)
-        }));
+        assert!(results
+            .iter()
+            .all(|r| { r.metadata.get("type").map(|t| t == "a").unwrap_or(false) }));
     }
 
     #[test]
     fn test_product_quantizer() {
         let mut pq = ProductQuantizer::new(8, 2, 4);
 
-        let vectors: Vec<Vec<f32>> = (0..100)
-            .map(|i| vec![i as f32; 8])
-            .collect();
+        let vectors: Vec<Vec<f32>> = (0..100).map(|i| vec![i as f32; 8]).collect();
 
         pq.train(&vectors, 10);
 
@@ -866,7 +863,8 @@ mod tests {
         let decoded = pq.decode(&codes);
 
         // Decoded should be close to original
-        let error: f32 = original.iter()
+        let error: f32 = original
+            .iter()
             .zip(decoded.iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
@@ -878,8 +876,12 @@ mod tests {
     fn test_registry() {
         let registry = VectorIndexRegistry::new();
 
-        registry.create_index("test", HnswConfig::default()).unwrap();
-        registry.insert("test", Vector::new("v1", vec![1.0, 2.0, 3.0])).unwrap();
+        registry
+            .create_index("test", HnswConfig::default())
+            .unwrap();
+        registry
+            .insert("test", Vector::new("v1", vec![1.0, 2.0, 3.0]))
+            .unwrap();
 
         let stats = registry.stats("test").unwrap();
         assert_eq!(stats.num_vectors, 1);

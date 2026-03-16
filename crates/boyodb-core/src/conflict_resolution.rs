@@ -4,11 +4,11 @@
 //! for multi-master replication scenarios. When the same row is modified
 //! on multiple nodes, conflicts need to be detected and resolved.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -254,7 +254,10 @@ pub enum ResolutionAction {
     /// Notified administrator
     NotifyAdmin,
     /// Kept both versions with suffix
-    KeepBoth { local_suffix: String, remote_suffix: String },
+    KeepBoth {
+        local_suffix: String,
+        remote_suffix: String,
+    },
 }
 
 // ============================================================================
@@ -361,7 +364,8 @@ pub struct ConflictResolver {
     /// Next conflict ID
     next_id: AtomicU64,
     /// Custom resolver callback
-    custom_resolver: RwLock<Option<Arc<dyn Fn(&Conflict) -> Option<ConflictResolution> + Send + Sync>>>,
+    custom_resolver:
+        RwLock<Option<Arc<dyn Fn(&Conflict) -> Option<ConflictResolution> + Send + Sync>>>,
 }
 
 impl ConflictResolver {
@@ -437,7 +441,9 @@ impl ConflictResolver {
                 conflict = conflict.with_remote(row);
             }
 
-            self.stats.conflicts_detected.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .conflicts_detected
+                .fetch_add(1, Ordering::Relaxed);
             self.stats.record_conflict_type(ct);
 
             conflict
@@ -519,7 +525,10 @@ impl ConflictResolver {
         }
     }
 
-    fn resolve_last_write_wins(&self, conflict: &Conflict) -> Result<ConflictResolution, ConflictError> {
+    fn resolve_last_write_wins(
+        &self,
+        conflict: &Conflict,
+    ) -> Result<ConflictResolution, ConflictError> {
         let local_time = conflict.local_row.as_ref().map(|r| r.origin.commit_time);
         let remote_time = conflict.remote_row.as_ref().map(|r| r.origin.commit_time);
 
@@ -530,14 +539,21 @@ impl ConflictResolver {
             (Some(_), Some(_)) => (conflict.remote_row.clone(), "Remote has later timestamp"),
             (Some(_), None) => (conflict.local_row.clone(), "Only local exists"),
             (None, Some(_)) => (conflict.remote_row.clone(), "Only remote exists"),
-            (None, None) => return Err(ConflictError::ResolutionFailed("No rows to compare".to_string())),
+            (None, None) => {
+                return Err(ConflictError::ResolutionFailed(
+                    "No rows to compare".to_string(),
+                ))
+            }
         };
 
         Ok(ConflictResolution {
             strategy: ResolutionStrategy::LastWriteWins,
             winner: winner.clone(),
             actions: if winner.is_some() {
-                vec![ResolutionAction::Apply(winner.unwrap()), ResolutionAction::LogConflict]
+                vec![
+                    ResolutionAction::Apply(winner.unwrap()),
+                    ResolutionAction::LogConflict,
+                ]
             } else {
                 vec![ResolutionAction::LogConflict]
             },
@@ -546,7 +562,10 @@ impl ConflictResolver {
         })
     }
 
-    fn resolve_first_write_wins(&self, conflict: &Conflict) -> Result<ConflictResolution, ConflictError> {
+    fn resolve_first_write_wins(
+        &self,
+        conflict: &Conflict,
+    ) -> Result<ConflictResolution, ConflictError> {
         let local_time = conflict.local_row.as_ref().map(|r| r.origin.commit_time);
         let remote_time = conflict.remote_row.as_ref().map(|r| r.origin.commit_time);
 
@@ -557,14 +576,21 @@ impl ConflictResolver {
             (Some(_), Some(_)) => (conflict.remote_row.clone(), "Remote has earlier timestamp"),
             (Some(_), None) => (conflict.local_row.clone(), "Only local exists"),
             (None, Some(_)) => (conflict.remote_row.clone(), "Only remote exists"),
-            (None, None) => return Err(ConflictError::ResolutionFailed("No rows to compare".to_string())),
+            (None, None) => {
+                return Err(ConflictError::ResolutionFailed(
+                    "No rows to compare".to_string(),
+                ))
+            }
         };
 
         Ok(ConflictResolution {
             strategy: ResolutionStrategy::FirstWriteWins,
             winner: winner.clone(),
             actions: if winner.is_some() {
-                vec![ResolutionAction::Apply(winner.unwrap()), ResolutionAction::LogConflict]
+                vec![
+                    ResolutionAction::Apply(winner.unwrap()),
+                    ResolutionAction::LogConflict,
+                ]
             } else {
                 vec![ResolutionAction::LogConflict]
             },
@@ -583,13 +609,19 @@ impl ConflictResolver {
         })
     }
 
-    fn resolve_remote_wins(&self, conflict: &Conflict) -> Result<ConflictResolution, ConflictError> {
+    fn resolve_remote_wins(
+        &self,
+        conflict: &Conflict,
+    ) -> Result<ConflictResolution, ConflictError> {
         let winner = conflict.remote_row.clone();
         Ok(ConflictResolution {
             strategy: ResolutionStrategy::RemoteWins,
             winner: winner.clone(),
             actions: if winner.is_some() {
-                vec![ResolutionAction::Apply(winner.unwrap()), ResolutionAction::LogConflict]
+                vec![
+                    ResolutionAction::Apply(winner.unwrap()),
+                    ResolutionAction::LogConflict,
+                ]
             } else {
                 vec![ResolutionAction::Delete, ResolutionAction::LogConflict]
             },
@@ -598,23 +630,41 @@ impl ConflictResolver {
         })
     }
 
-    fn resolve_higher_node_wins(&self, conflict: &Conflict) -> Result<ConflictResolution, ConflictError> {
-        let local_node = conflict.local_row.as_ref().map(|r| r.origin.node_id.clone());
-        let remote_node = conflict.remote_row.as_ref().map(|r| r.origin.node_id.clone());
+    fn resolve_higher_node_wins(
+        &self,
+        conflict: &Conflict,
+    ) -> Result<ConflictResolution, ConflictError> {
+        let local_node = conflict
+            .local_row
+            .as_ref()
+            .map(|r| r.origin.node_id.clone());
+        let remote_node = conflict
+            .remote_row
+            .as_ref()
+            .map(|r| r.origin.node_id.clone());
 
         let (winner, reason) = match (local_node, remote_node) {
-            (Some(ln), Some(rn)) if ln >= rn => (conflict.local_row.clone(), "Local node ID is higher"),
+            (Some(ln), Some(rn)) if ln >= rn => {
+                (conflict.local_row.clone(), "Local node ID is higher")
+            }
             (Some(_), Some(_)) => (conflict.remote_row.clone(), "Remote node ID is higher"),
             (Some(_), None) => (conflict.local_row.clone(), "Only local exists"),
             (None, Some(_)) => (conflict.remote_row.clone(), "Only remote exists"),
-            (None, None) => return Err(ConflictError::ResolutionFailed("No rows to compare".to_string())),
+            (None, None) => {
+                return Err(ConflictError::ResolutionFailed(
+                    "No rows to compare".to_string(),
+                ))
+            }
         };
 
         Ok(ConflictResolution {
             strategy: ResolutionStrategy::HigherNodeWins,
             winner: winner.clone(),
             actions: if winner.is_some() {
-                vec![ResolutionAction::Apply(winner.unwrap()), ResolutionAction::LogConflict]
+                vec![
+                    ResolutionAction::Apply(winner.unwrap()),
+                    ResolutionAction::LogConflict,
+                ]
             } else {
                 vec![ResolutionAction::LogConflict]
             },
@@ -623,23 +673,41 @@ impl ConflictResolver {
         })
     }
 
-    fn resolve_lower_node_wins(&self, conflict: &Conflict) -> Result<ConflictResolution, ConflictError> {
-        let local_node = conflict.local_row.as_ref().map(|r| r.origin.node_id.clone());
-        let remote_node = conflict.remote_row.as_ref().map(|r| r.origin.node_id.clone());
+    fn resolve_lower_node_wins(
+        &self,
+        conflict: &Conflict,
+    ) -> Result<ConflictResolution, ConflictError> {
+        let local_node = conflict
+            .local_row
+            .as_ref()
+            .map(|r| r.origin.node_id.clone());
+        let remote_node = conflict
+            .remote_row
+            .as_ref()
+            .map(|r| r.origin.node_id.clone());
 
         let (winner, reason) = match (local_node, remote_node) {
-            (Some(ln), Some(rn)) if ln <= rn => (conflict.local_row.clone(), "Local node ID is lower"),
+            (Some(ln), Some(rn)) if ln <= rn => {
+                (conflict.local_row.clone(), "Local node ID is lower")
+            }
             (Some(_), Some(_)) => (conflict.remote_row.clone(), "Remote node ID is lower"),
             (Some(_), None) => (conflict.local_row.clone(), "Only local exists"),
             (None, Some(_)) => (conflict.remote_row.clone(), "Only remote exists"),
-            (None, None) => return Err(ConflictError::ResolutionFailed("No rows to compare".to_string())),
+            (None, None) => {
+                return Err(ConflictError::ResolutionFailed(
+                    "No rows to compare".to_string(),
+                ))
+            }
         };
 
         Ok(ConflictResolution {
             strategy: ResolutionStrategy::LowerNodeWins,
             winner: winner.clone(),
             actions: if winner.is_some() {
-                vec![ResolutionAction::Apply(winner.unwrap()), ResolutionAction::LogConflict]
+                vec![
+                    ResolutionAction::Apply(winner.unwrap()),
+                    ResolutionAction::LogConflict,
+                ]
             } else {
                 vec![ResolutionAction::LogConflict]
             },
@@ -866,7 +934,11 @@ mod tests {
         let resolver = ConflictResolver::new("node1");
 
         // Normal delete - no conflict
-        let conflict = resolver.detect_conflict(Some(make_row("public", "users", "node1", 100)), None, RemoteOperation::Delete);
+        let conflict = resolver.detect_conflict(
+            Some(make_row("public", "users", "node1", 100)),
+            None,
+            RemoteOperation::Delete,
+        );
 
         assert!(conflict.is_none());
     }
@@ -882,7 +954,9 @@ mod tests {
         let local = make_row("public", "users", "node1", 100);
         let remote = make_row("public", "users", "node2", 200);
 
-        let conflict = resolver.detect_conflict(Some(local), Some(remote), RemoteOperation::Update).unwrap();
+        let conflict = resolver
+            .detect_conflict(Some(local), Some(remote), RemoteOperation::Update)
+            .unwrap();
         let resolution = resolver.resolve(conflict).unwrap();
 
         assert_eq!(resolution.strategy, ResolutionStrategy::LastWriteWins);
@@ -902,7 +976,9 @@ mod tests {
         let local = make_row("public", "users", "node1", 100);
         let remote = make_row("public", "users", "node2", 200);
 
-        let conflict = resolver.detect_conflict(Some(local), Some(remote), RemoteOperation::Update).unwrap();
+        let conflict = resolver
+            .detect_conflict(Some(local), Some(remote), RemoteOperation::Update)
+            .unwrap();
         let resolution = resolver.resolve(conflict).unwrap();
 
         // Local wins (time 100 < 200)
@@ -920,7 +996,9 @@ mod tests {
         let local = make_row("public", "users", "node1", 100);
         let remote = make_row("public", "users", "node2", 200);
 
-        let conflict = resolver.detect_conflict(Some(local), Some(remote), RemoteOperation::Update).unwrap();
+        let conflict = resolver
+            .detect_conflict(Some(local), Some(remote), RemoteOperation::Update)
+            .unwrap();
         let resolution = resolver.resolve(conflict).unwrap();
 
         assert_eq!(resolution.strategy, ResolutionStrategy::LocalWins);
@@ -939,7 +1017,9 @@ mod tests {
         let local = make_row("public", "users", "node1", 100);
         let remote = make_row("public", "users", "node2", 200);
 
-        let conflict = resolver.detect_conflict(Some(local), Some(remote), RemoteOperation::Update).unwrap();
+        let conflict = resolver
+            .detect_conflict(Some(local), Some(remote), RemoteOperation::Update)
+            .unwrap();
         let resolution = resolver.resolve(conflict).unwrap();
 
         assert_eq!(resolution.strategy, ResolutionStrategy::RemoteWins);
@@ -962,7 +1042,9 @@ mod tests {
         let local = make_row("public", "users", "node1", 100);
         let remote = make_row("public", "users", "node2", 200);
 
-        let conflict = resolver.detect_conflict(Some(local), Some(remote), RemoteOperation::Update).unwrap();
+        let conflict = resolver
+            .detect_conflict(Some(local), Some(remote), RemoteOperation::Update)
+            .unwrap();
         let resolution = resolver.resolve(conflict).unwrap();
 
         // Table-specific strategy should override default
@@ -977,11 +1059,13 @@ mod tests {
             ..Default::default()
         });
 
-        let conflict = resolver.detect_conflict(
-            Some(make_row("public", "users", "node1", 100)),
-            Some(make_row("public", "users", "node2", 200)),
-            RemoteOperation::Update,
-        ).unwrap();
+        let conflict = resolver
+            .detect_conflict(
+                Some(make_row("public", "users", "node1", 100)),
+                Some(make_row("public", "users", "node2", 200)),
+                RemoteOperation::Update,
+            )
+            .unwrap();
 
         let resolution = resolver.resolve(conflict).unwrap();
         assert_eq!(resolution.strategy, ResolutionStrategy::Skip);
@@ -993,11 +1077,13 @@ mod tests {
         let resolver = ConflictResolver::new("node1");
 
         for _ in 0..5 {
-            let conflict = resolver.detect_conflict(
-                Some(make_row("public", "users", "node1", 100)),
-                Some(make_row("public", "users", "node2", 200)),
-                RemoteOperation::Update,
-            ).unwrap();
+            let conflict = resolver
+                .detect_conflict(
+                    Some(make_row("public", "users", "node1", 100)),
+                    Some(make_row("public", "users", "node2", 200)),
+                    RemoteOperation::Update,
+                )
+                .unwrap();
             resolver.resolve(conflict).unwrap();
         }
 
@@ -1052,11 +1138,13 @@ mod tests {
             })
         });
 
-        let conflict = resolver.detect_conflict(
-            Some(make_row("public", "users", "node1", 100)),
-            Some(make_row("public", "users", "node2", 200)),
-            RemoteOperation::Update,
-        ).unwrap();
+        let conflict = resolver
+            .detect_conflict(
+                Some(make_row("public", "users", "node1", 100)),
+                Some(make_row("public", "users", "node2", 200)),
+                RemoteOperation::Update,
+            )
+            .unwrap();
 
         let resolution = resolver.resolve(conflict).unwrap();
         assert_eq!(resolution.reason, "Custom resolution");
@@ -1084,11 +1172,13 @@ mod tests {
     fn test_history() {
         let resolver = ConflictResolver::new("node1");
 
-        let conflict = resolver.detect_conflict(
-            Some(make_row("public", "users", "node1", 100)),
-            Some(make_row("public", "users", "node2", 200)),
-            RemoteOperation::Update,
-        ).unwrap();
+        let conflict = resolver
+            .detect_conflict(
+                Some(make_row("public", "users", "node1", 100)),
+                Some(make_row("public", "users", "node2", 200)),
+                RemoteOperation::Update,
+            )
+            .unwrap();
 
         resolver.resolve(conflict).unwrap();
 

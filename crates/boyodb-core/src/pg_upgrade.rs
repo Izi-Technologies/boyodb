@@ -3,13 +3,13 @@
 //! This module provides functionality for upgrading BoyoDB data directories
 //! between major versions, similar to PostgreSQL's pg_upgrade utility.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Version information
@@ -243,36 +243,21 @@ pub enum UpgradeError {
     /// Data directory already exists
     DataDirExists(PathBuf),
     /// Version mismatch
-    VersionMismatch {
-        expected: String,
-        found: String,
-    },
+    VersionMismatch { expected: String, found: String },
     /// Incompatible versions
-    IncompatibleVersions {
-        old: String,
-        new: String,
-    },
+    IncompatibleVersions { old: String, new: String },
     /// Server is running
     ServerRunning(PathBuf),
     /// File operation failed
-    FileError {
-        path: PathBuf,
-        message: String,
-    },
+    FileError { path: PathBuf, message: String },
     /// Catalog upgrade failed
     CatalogUpgradeFailed(String),
     /// Verification failed
     VerificationFailed(String),
     /// User-defined type incompatibility
-    TypeIncompatibility {
-        type_name: String,
-        message: String,
-    },
+    TypeIncompatibility { type_name: String, message: String },
     /// Extension incompatibility
-    ExtensionIncompatibility {
-        extension: String,
-        message: String,
-    },
+    ExtensionIncompatibility { extension: String, message: String },
     /// Configuration error
     ConfigError(String),
     /// Upgrade cancelled
@@ -285,10 +270,18 @@ impl std::fmt::Display for UpgradeError {
             Self::DataDirNotFound(p) => write!(f, "data directory not found: {}", p.display()),
             Self::DataDirExists(p) => write!(f, "data directory already exists: {}", p.display()),
             Self::VersionMismatch { expected, found } => {
-                write!(f, "version mismatch: expected {}, found {}", expected, found)
+                write!(
+                    f,
+                    "version mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
             Self::IncompatibleVersions { old, new } => {
-                write!(f, "incompatible versions: cannot upgrade from {} to {}", old, new)
+                write!(
+                    f,
+                    "incompatible versions: cannot upgrade from {} to {}",
+                    old, new
+                )
             }
             Self::ServerRunning(p) => write!(f, "server is still running: {}", p.display()),
             Self::FileError { path, message } => {
@@ -474,14 +467,16 @@ impl UpgradeManager {
     fn pre_check(&self) -> Result<(), UpgradeError> {
         // Check old data directory exists
         if !self.config.old_datadir.exists() {
-            return Err(UpgradeError::DataDirNotFound(self.config.old_datadir.clone()));
+            return Err(UpgradeError::DataDirNotFound(
+                self.config.old_datadir.clone(),
+            ));
         }
 
         // Check new data directory doesn't exist (unless we're resuming)
         if self.config.new_datadir.exists() {
             // Check if it's empty
-            let entries = fs::read_dir(&self.config.new_datadir)
-                .map_err(|e| UpgradeError::FileError {
+            let entries =
+                fs::read_dir(&self.config.new_datadir).map_err(|e| UpgradeError::FileError {
                     path: self.config.new_datadir.clone(),
                     message: e.to_string(),
                 })?;
@@ -491,7 +486,11 @@ impl UpgradeManager {
         }
 
         // Check versions are compatible
-        if !self.config.new_version.is_compatible_with(&self.config.old_version) {
+        if !self
+            .config
+            .new_version
+            .is_compatible_with(&self.config.old_version)
+        {
             return Err(UpgradeError::IncompatibleVersions {
                 old: self.config.old_version.to_string(),
                 new: self.config.new_version.to_string(),
@@ -522,7 +521,8 @@ impl UpgradeManager {
 
     /// Analyze old cluster
     fn analyze_old_cluster(&mut self) -> Result<(), UpgradeError> {
-        self.progress.set_current_item("Reading old cluster catalog");
+        self.progress
+            .set_current_item("Reading old cluster catalog");
 
         let mut schema = SchemaInfo {
             databases: Vec::new(),
@@ -556,7 +556,8 @@ impl UpgradeManager {
                             owner: "postgres".to_string(),
                             encoding: "UTF8".to_string(),
                             collation: "en_US.UTF-8".to_string(),
-                            data_path: path.strip_prefix(&self.config.old_datadir)
+                            data_path: path
+                                .strip_prefix(&self.config.old_datadir)
                                 .unwrap_or(&path)
                                 .to_path_buf(),
                             size_bytes: size,
@@ -564,7 +565,9 @@ impl UpgradeManager {
                         });
 
                         self.progress.total_bytes.fetch_add(size, Ordering::Relaxed);
-                        self.progress.total_tables.fetch_add(table_count as u64, Ordering::Relaxed);
+                        self.progress
+                            .total_tables
+                            .fetch_add(table_count as u64, Ordering::Relaxed);
                     }
                 }
             }
@@ -633,7 +636,8 @@ impl UpgradeManager {
 
     /// Create new cluster structure
     fn create_new_cluster(&self) -> Result<(), UpgradeError> {
-        self.progress.set_current_item("Creating new data directory");
+        self.progress
+            .set_current_item("Creating new data directory");
 
         // Create new data directory
         fs::create_dir_all(&self.config.new_datadir).map_err(|e| UpgradeError::FileError {
@@ -666,7 +670,9 @@ impl UpgradeManager {
 
     /// Transfer data files
     fn transfer_files(&self) -> Result<(), UpgradeError> {
-        let schema = self.old_schema.as_ref()
+        let schema = self
+            .old_schema
+            .as_ref()
             .ok_or_else(|| UpgradeError::ConfigError("schema not analyzed".into()))?;
 
         // Transfer each database
@@ -675,7 +681,8 @@ impl UpgradeManager {
                 return Err(UpgradeError::Cancelled);
             }
 
-            self.progress.set_current_item(&format!("Transferring database: {}", db.name));
+            self.progress
+                .set_current_item(&format!("Transferring database: {}", db.name));
 
             let old_db_path = self.config.old_datadir.join(&db.data_path);
             let new_db_path = self.config.new_datadir.join(&db.data_path);
@@ -684,7 +691,8 @@ impl UpgradeManager {
         }
 
         // Transfer global directory
-        self.progress.set_current_item("Transferring global directory");
+        self.progress
+            .set_current_item("Transferring global directory");
         let old_global = self.config.old_datadir.join("global");
         let new_global = self.config.new_datadir.join("global");
         if old_global.exists() {
@@ -695,7 +703,8 @@ impl UpgradeManager {
         for wal_dir in &["pg_wal", "pg_xlog"] {
             let old_wal = self.config.old_datadir.join(wal_dir);
             if old_wal.exists() {
-                self.progress.set_current_item(&format!("Transferring {}", wal_dir));
+                self.progress
+                    .set_current_item(&format!("Transferring {}", wal_dir));
                 let new_wal = self.config.new_datadir.join("pg_wal");
                 self.transfer_directory(&old_wal, &new_wal)?;
                 break; // Only copy from first existing
@@ -748,9 +757,7 @@ impl UpgradeManager {
 
     /// Transfer a single file based on mode
     fn transfer_file(&self, old_path: &Path, new_path: &Path) -> Result<(), UpgradeError> {
-        let size = old_path.metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = old_path.metadata().map(|m| m.len()).unwrap_or(0);
 
         match self.config.mode {
             UpgradeMode::Copy => {
@@ -769,8 +776,12 @@ impl UpgradeManager {
             }
         }
 
-        self.progress.bytes_transferred.fetch_add(size, Ordering::Relaxed);
-        self.progress.tables_processed.fetch_add(1, Ordering::Relaxed);
+        self.progress
+            .bytes_transferred
+            .fetch_add(size, Ordering::Relaxed);
+        self.progress
+            .tables_processed
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -802,18 +813,20 @@ impl UpgradeManager {
             path: marker_path.clone(),
             message: e.to_string(),
         })?;
-        writeln!(f, "upgraded_from={}", self.config.old_version.to_string())
-            .map_err(|e| UpgradeError::FileError {
+        writeln!(f, "upgraded_from={}", self.config.old_version.to_string()).map_err(|e| {
+            UpgradeError::FileError {
                 path: marker_path,
                 message: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
 
     /// Post-upgrade optimizations
     fn post_upgrade(&self) -> Result<(), UpgradeError> {
-        self.progress.set_current_item("Running post-upgrade optimizations");
+        self.progress
+            .set_current_item("Running post-upgrade optimizations");
 
         // Generate script for running ANALYZE
         let script_path = self.config.new_datadir.join("analyze_new_cluster.sh");
@@ -825,7 +838,7 @@ impl UpgradeManager {
         writeln!(f, "#!/bin/bash").ok();
         writeln!(f, "# Post-upgrade script generated by pg_upgrade").ok();
         writeln!(f, "# Run this after starting the new cluster").ok();
-        writeln!(f, "").ok();
+        writeln!(f).ok();
         writeln!(f, "vacuumdb --all --analyze-only").ok();
 
         // Generate script for deleting old cluster
@@ -852,7 +865,7 @@ impl UpgradeManager {
         let version_path = self.config.new_datadir.join("PG_VERSION");
         if !version_path.exists() {
             return Err(UpgradeError::VerificationFailed(
-                "PG_VERSION file missing".into()
+                "PG_VERSION file missing".into(),
             ));
         }
 
@@ -861,9 +874,10 @@ impl UpgradeManager {
             for db in &schema.databases {
                 let db_path = self.config.new_datadir.join(&db.data_path);
                 if !db_path.exists() {
-                    return Err(UpgradeError::VerificationFailed(
-                        format!("database directory missing: {}", db.name)
-                    ));
+                    return Err(UpgradeError::VerificationFailed(format!(
+                        "database directory missing: {}",
+                        db.name
+                    )));
                 }
             }
         }
@@ -872,7 +886,7 @@ impl UpgradeManager {
         let marker_path = self.config.new_datadir.join(".upgrade_complete");
         if !marker_path.exists() {
             return Err(UpgradeError::VerificationFailed(
-                "upgrade marker missing".into()
+                "upgrade marker missing".into(),
             ));
         }
 
@@ -938,12 +952,13 @@ pub fn read_version_from_datadir(datadir: &Path) -> Result<VersionInfo, UpgradeE
         message: e.to_string(),
     })?;
 
-    let major: u32 = content.trim().parse().map_err(|_| {
-        UpgradeError::VersionMismatch {
+    let major: u32 = content
+        .trim()
+        .parse()
+        .map_err(|_| UpgradeError::VersionMismatch {
             expected: "numeric version".into(),
             found: content.clone(),
-        }
-    })?;
+        })?;
 
     Ok(VersionInfo::new(major, 0, 0, 0))
 }
@@ -1024,7 +1039,10 @@ mod tests {
 
     #[test]
     fn test_upgrade_phase_description() {
-        assert_eq!(UpgradePhase::PreCheck.description(), "Performing pre-upgrade checks");
+        assert_eq!(
+            UpgradePhase::PreCheck.description(),
+            "Performing pre-upgrade checks"
+        );
         assert_eq!(UpgradePhase::Complete.description(), "Upgrade complete");
     }
 
@@ -1137,7 +1155,10 @@ mod tests {
         let mut manager = UpgradeManager::new(config);
         let result = manager.run();
 
-        assert!(matches!(result, Err(UpgradeError::IncompatibleVersions { .. })));
+        assert!(matches!(
+            result,
+            Err(UpgradeError::IncompatibleVersions { .. })
+        ));
     }
 
     #[test]
@@ -1183,7 +1204,11 @@ mod tests {
         fs::create_dir(old_dir.path().join("global")).unwrap();
         fs::create_dir(old_dir.path().join("base")).unwrap();
         fs::create_dir(old_dir.path().join("base").join("1")).unwrap();
-        fs::write(old_dir.path().join("base").join("1").join("12345"), "table data").unwrap();
+        fs::write(
+            old_dir.path().join("base").join("1").join("12345"),
+            "table data",
+        )
+        .unwrap();
         fs::write(old_dir.path().join("postgresql.conf"), "# config").unwrap();
 
         let config = UpgradeConfig {
@@ -1263,7 +1288,10 @@ mod tests {
         let v3 = VersionInfo::new(3, 0, 0, 300);
 
         let result = check_compatibility(&v1, &v3);
-        assert!(matches!(result, Err(UpgradeError::IncompatibleVersions { .. })));
+        assert!(matches!(
+            result,
+            Err(UpgradeError::IncompatibleVersions { .. })
+        ));
     }
 
     #[test]

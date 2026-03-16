@@ -6,9 +6,9 @@
 //! - Feature selection and engineering
 //! - Cross-validation and evaluation
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// AutoML task types
@@ -28,23 +28,51 @@ pub enum ModelType {
     // Linear models
     LinearRegression,
     LogisticRegression,
-    Ridge { alpha: f64 },
-    Lasso { alpha: f64 },
-    ElasticNet { alpha: f64, l1_ratio: f64 },
+    Ridge {
+        alpha: f64,
+    },
+    Lasso {
+        alpha: f64,
+    },
+    ElasticNet {
+        alpha: f64,
+        l1_ratio: f64,
+    },
 
     // Tree-based models
-    DecisionTree { max_depth: Option<usize> },
-    RandomForest { n_estimators: usize, max_depth: Option<usize> },
-    GradientBoosting { n_estimators: usize, learning_rate: f64, max_depth: usize },
-    XGBoost { params: HashMap<String, f64> },
-    LightGBM { params: HashMap<String, f64> },
+    DecisionTree {
+        max_depth: Option<usize>,
+    },
+    RandomForest {
+        n_estimators: usize,
+        max_depth: Option<usize>,
+    },
+    GradientBoosting {
+        n_estimators: usize,
+        learning_rate: f64,
+        max_depth: usize,
+    },
+    XGBoost {
+        params: HashMap<String, f64>,
+    },
+    LightGBM {
+        params: HashMap<String, f64>,
+    },
 
     // Neural networks
-    MLP { hidden_layers: Vec<usize>, activation: String },
+    MLP {
+        hidden_layers: Vec<usize>,
+        activation: String,
+    },
 
     // Other
-    KNN { k: usize },
-    SVM { kernel: String, c: f64 },
+    KNN {
+        k: usize,
+    },
+    SVM {
+        kernel: String,
+        c: f64,
+    },
     NaiveBayes,
 }
 
@@ -76,9 +104,17 @@ pub enum HyperparameterSpace {
     /// Categorical values
     Categorical(Vec<String>),
     /// Integer range
-    IntRange { low: i64, high: i64, log_scale: bool },
+    IntRange {
+        low: i64,
+        high: i64,
+        log_scale: bool,
+    },
     /// Float range
-    FloatRange { low: f64, high: f64, log_scale: bool },
+    FloatRange {
+        low: f64,
+        high: f64,
+        log_scale: bool,
+    },
     /// Boolean
     Boolean,
 }
@@ -93,7 +129,11 @@ impl HyperparameterSpace {
                 let idx = (r * options.len() as f64) as usize;
                 HyperparameterValue::String(options[idx.min(options.len() - 1)].clone())
             }
-            HyperparameterSpace::IntRange { low, high, log_scale } => {
+            HyperparameterSpace::IntRange {
+                low,
+                high,
+                log_scale,
+            } => {
                 let value = if *log_scale {
                     let log_low = (*low as f64).ln();
                     let log_high = (*high as f64).ln();
@@ -103,7 +143,11 @@ impl HyperparameterSpace {
                 };
                 HyperparameterValue::Int(value)
             }
-            HyperparameterSpace::FloatRange { low, high, log_scale } => {
+            HyperparameterSpace::FloatRange {
+                low,
+                high,
+                log_scale,
+            } => {
                 let value = if *log_scale {
                     let log_low = low.ln();
                     let log_high = high.ln();
@@ -113,9 +157,7 @@ impl HyperparameterSpace {
                 };
                 HyperparameterValue::Float(value)
             }
-            HyperparameterSpace::Boolean => {
-                HyperparameterValue::Bool(r > 0.5)
-            }
+            HyperparameterSpace::Boolean => HyperparameterValue::Bool(r > 0.5),
         }
     }
 }
@@ -139,7 +181,10 @@ pub enum SearchStrategy {
     /// Bayesian optimization
     Bayesian { n_iter: usize, n_initial: usize },
     /// Successive halving
-    SuccessiveHalving { n_iter: usize, reduction_factor: usize },
+    SuccessiveHalving {
+        n_iter: usize,
+        reduction_factor: usize,
+    },
     /// Hyperband
     Hyperband { max_iter: usize, eta: usize },
 }
@@ -187,11 +232,16 @@ impl Metric {
     /// Is higher better for this metric?
     pub fn higher_is_better(&self) -> bool {
         match self {
-            Metric::Accuracy | Metric::Precision | Metric::Recall |
-            Metric::F1 | Metric::AucRoc | Metric::R2 |
-            Metric::Ndcg | Metric::Map | Metric::Mrr => true,
-            Metric::Mae | Metric::Mse | Metric::Rmse |
-            Metric::Mape | Metric::LogLoss => false,
+            Metric::Accuracy
+            | Metric::Precision
+            | Metric::Recall
+            | Metric::F1
+            | Metric::AucRoc
+            | Metric::R2
+            | Metric::Ndcg
+            | Metric::Map
+            | Metric::Mrr => true,
+            Metric::Mae | Metric::Mse | Metric::Rmse | Metric::Mape | Metric::LogLoss => false,
         }
     }
 }
@@ -230,7 +280,10 @@ impl Default for AutoMLConfig {
             metric: Metric::Accuracy,
             models: vec![
                 ModelType::LogisticRegression,
-                ModelType::RandomForest { n_estimators: 100, max_depth: Some(10) },
+                ModelType::RandomForest {
+                    n_estimators: 100,
+                    max_depth: Some(10),
+                },
                 ModelType::GradientBoosting {
                     n_estimators: 100,
                     learning_rate: 0.1,
@@ -238,7 +291,10 @@ impl Default for AutoMLConfig {
                 },
             ],
             search_strategy: SearchStrategy::Random { n_iter: 50 },
-            cv: CrossValidation::KFold { n_splits: 5, shuffle: true },
+            cv: CrossValidation::KFold {
+                n_splits: 5,
+                shuffle: true,
+            },
             time_budget_seconds: 3600,
             max_trials: 100,
             early_stopping_patience: 10,
@@ -361,21 +417,29 @@ impl TrainingData {
         let test_indices: Vec<usize> = indices[n_train..].to_vec();
 
         let train = TrainingData {
-            features: train_indices.iter().map(|&i| self.features[i].clone()).collect(),
+            features: train_indices
+                .iter()
+                .map(|&i| self.features[i].clone())
+                .collect(),
             targets: train_indices.iter().map(|&i| self.targets[i]).collect(),
             feature_names: self.feature_names.clone(),
-            sample_weights: self.sample_weights.as_ref().map(|w| {
-                train_indices.iter().map(|&i| w[i]).collect()
-            }),
+            sample_weights: self
+                .sample_weights
+                .as_ref()
+                .map(|w| train_indices.iter().map(|&i| w[i]).collect()),
         };
 
         let test = TrainingData {
-            features: test_indices.iter().map(|&i| self.features[i].clone()).collect(),
+            features: test_indices
+                .iter()
+                .map(|&i| self.features[i].clone())
+                .collect(),
             targets: test_indices.iter().map(|&i| self.targets[i]).collect(),
             feature_names: self.feature_names.clone(),
-            sample_weights: self.sample_weights.as_ref().map(|w| {
-                test_indices.iter().map(|&i| w[i]).collect()
-            }),
+            sample_weights: self
+                .sample_weights
+                .as_ref()
+                .map(|w| test_indices.iter().map(|&i| w[i]).collect()),
         };
 
         (train, test)
@@ -405,10 +469,13 @@ impl SimpleModel {
         let lr = 0.01;
         for _ in 0..100 {
             for (features, &target) in data.features.iter().zip(data.targets.iter()) {
-                let pred: f64 = self.weights.iter()
+                let pred: f64 = self
+                    .weights
+                    .iter()
                     .zip(features.iter())
                     .map(|(w, x)| w * x)
-                    .sum::<f64>() + self.bias;
+                    .sum::<f64>()
+                    + self.bias;
 
                 let error = pred - target;
 
@@ -421,10 +488,13 @@ impl SimpleModel {
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
-        let pred: f64 = self.weights.iter()
+        let pred: f64 = self
+            .weights
+            .iter()
             .zip(features.iter())
             .map(|(w, x)| w * x)
-            .sum::<f64>() + self.bias;
+            .sum::<f64>()
+            + self.bias;
 
         match self.model_type {
             ModelType::LogisticRegression => 1.0 / (1.0 + (-pred).exp()),
@@ -528,9 +598,11 @@ impl AutoML {
         let cv_scores = self.cross_validate(&model_type, data, seed);
 
         let mean_score = cv_scores.iter().sum::<f64>() / cv_scores.len() as f64;
-        let variance = cv_scores.iter()
+        let variance = cv_scores
+            .iter()
             .map(|s| (s - mean_score).powi(2))
-            .sum::<f64>() / cv_scores.len() as f64;
+            .sum::<f64>()
+            / cv_scores.len() as f64;
         let std_score = variance.sqrt();
 
         TrialResult {
@@ -561,16 +633,35 @@ impl AutoML {
             ModelType::Ridge { alpha } => {
                 params.insert("alpha".to_string(), HyperparameterValue::Float(*alpha));
             }
-            ModelType::RandomForest { n_estimators, max_depth } => {
-                params.insert("n_estimators".to_string(), HyperparameterValue::Int(*n_estimators as i64));
+            ModelType::RandomForest {
+                n_estimators,
+                max_depth,
+            } => {
+                params.insert(
+                    "n_estimators".to_string(),
+                    HyperparameterValue::Int(*n_estimators as i64),
+                );
                 if let Some(d) = max_depth {
                     params.insert("max_depth".to_string(), HyperparameterValue::Int(*d as i64));
                 }
             }
-            ModelType::GradientBoosting { n_estimators, learning_rate, max_depth } => {
-                params.insert("n_estimators".to_string(), HyperparameterValue::Int(*n_estimators as i64));
-                params.insert("learning_rate".to_string(), HyperparameterValue::Float(*learning_rate));
-                params.insert("max_depth".to_string(), HyperparameterValue::Int(*max_depth as i64));
+            ModelType::GradientBoosting {
+                n_estimators,
+                learning_rate,
+                max_depth,
+            } => {
+                params.insert(
+                    "n_estimators".to_string(),
+                    HyperparameterValue::Int(*n_estimators as i64),
+                );
+                params.insert(
+                    "learning_rate".to_string(),
+                    HyperparameterValue::Float(*learning_rate),
+                );
+                params.insert(
+                    "max_depth".to_string(),
+                    HyperparameterValue::Int(*max_depth as i64),
+                );
             }
             _ => {}
         }
@@ -626,7 +717,8 @@ impl AutoML {
             };
 
             // Train and evaluate
-            let score = self.train_and_evaluate(model_type, &train_data, &test_data, seed + fold as u64);
+            let score =
+                self.train_and_evaluate(model_type, &train_data, &test_data, seed + fold as u64);
             scores.push(score);
         }
 
@@ -645,9 +737,7 @@ impl AutoML {
         model.fit(train);
 
         // Compute metric
-        let predictions: Vec<f64> = test.features.iter()
-            .map(|f| model.predict(f))
-            .collect();
+        let predictions: Vec<f64> = test.features.iter().map(|f| model.predict(f)).collect();
 
         self.compute_metric(&predictions, &test.targets)
     }
@@ -656,35 +746,43 @@ impl AutoML {
     fn compute_metric(&self, predictions: &[f64], targets: &[f64]) -> f64 {
         match self.config.metric {
             Metric::Accuracy => {
-                let correct = predictions.iter()
+                let correct = predictions
+                    .iter()
                     .zip(targets.iter())
                     .filter(|(p, t)| ((**p > 0.5) as i32 as f64 - **t).abs() < 0.5)
                     .count();
                 correct as f64 / predictions.len() as f64
             }
             Metric::Mae => {
-                predictions.iter()
+                predictions
+                    .iter()
                     .zip(targets.iter())
                     .map(|(p, t)| (p - t).abs())
-                    .sum::<f64>() / predictions.len() as f64
+                    .sum::<f64>()
+                    / predictions.len() as f64
             }
             Metric::Mse => {
-                predictions.iter()
+                predictions
+                    .iter()
                     .zip(targets.iter())
                     .map(|(p, t)| (p - t).powi(2))
-                    .sum::<f64>() / predictions.len() as f64
+                    .sum::<f64>()
+                    / predictions.len() as f64
             }
             Metric::Rmse => {
-                let mse: f64 = predictions.iter()
+                let mse: f64 = predictions
+                    .iter()
                     .zip(targets.iter())
                     .map(|(p, t)| (p - t).powi(2))
-                    .sum::<f64>() / predictions.len() as f64;
+                    .sum::<f64>()
+                    / predictions.len() as f64;
                 mse.sqrt()
             }
             Metric::R2 => {
                 let mean_target = targets.iter().sum::<f64>() / targets.len() as f64;
                 let ss_tot: f64 = targets.iter().map(|t| (t - mean_target).powi(2)).sum();
-                let ss_res: f64 = predictions.iter()
+                let ss_res: f64 = predictions
+                    .iter()
                     .zip(targets.iter())
                     .map(|(p, t)| (t - p).powi(2))
                     .sum();
@@ -697,39 +795,50 @@ impl AutoML {
     /// Compile final results
     fn compile_results(&self, data: &TrainingData, total_time: f64) -> AutoMLResult {
         let trials = self.trials.read();
-        let completed: Vec<_> = trials.iter()
+        let completed: Vec<_> = trials
+            .iter()
             .filter(|t| t.status == TrialStatus::Completed)
             .collect();
 
         let best_trial = if self.config.metric.higher_is_better() {
-            completed.iter()
+            completed
+                .iter()
                 .max_by(|a, b| a.mean_score.partial_cmp(&b.mean_score).unwrap())
         } else {
-            completed.iter()
+            completed
+                .iter()
                 .min_by(|a, b| a.mean_score.partial_cmp(&b.mean_score).unwrap())
         };
 
-        let best_trial = best_trial.map(|t| (*t).clone()).unwrap_or_else(|| TrialResult {
-            trial_id: 0,
-            model_type: "None".to_string(),
-            hyperparameters: HashMap::new(),
-            cv_scores: vec![],
-            mean_score: 0.0,
-            std_score: 0.0,
-            training_time_ms: 0,
-            status: TrialStatus::Failed,
-            timestamp: 0,
-        });
+        let best_trial = best_trial
+            .map(|t| (*t).clone())
+            .unwrap_or_else(|| TrialResult {
+                trial_id: 0,
+                model_type: "None".to_string(),
+                hyperparameters: HashMap::new(),
+                cv_scores: vec![],
+                mean_score: 0.0,
+                std_score: 0.0,
+                training_time_ms: 0,
+                status: TrialStatus::Failed,
+                timestamp: 0,
+            });
 
         // Compute feature importances using best model
         let feature_importances = if !data.feature_names.is_empty() {
-            let model_type = self.config.models.first().cloned()
+            let model_type = self
+                .config
+                .models
+                .first()
+                .cloned()
                 .unwrap_or(ModelType::LinearRegression);
             let mut model = SimpleModel::new(model_type, data.n_features());
             model.fit(data);
 
             let importances = model.feature_importances();
-            let mut fi: Vec<_> = data.feature_names.iter()
+            let mut fi: Vec<_> = data
+                .feature_names
+                .iter()
                 .zip(importances.iter())
                 .map(|(name, &imp)| (name.clone(), imp))
                 .collect();
@@ -796,7 +905,9 @@ impl AutoMLRegistry {
         if let Some(automl) = jobs.get(name) {
             let result = automl.fit(data);
             drop(jobs);
-            self.results.write().insert(name.to_string(), result.clone());
+            self.results
+                .write()
+                .insert(name.to_string(), result.clone());
             Some(result)
         } else {
             None
@@ -827,7 +938,8 @@ mod tests {
         let features: Vec<Vec<f64>> = (0..n)
             .map(|i| vec![i as f64 / 10.0, (i as f64 / 5.0).sin()])
             .collect();
-        let targets: Vec<f64> = features.iter()
+        let targets: Vec<f64> = features
+            .iter()
             .map(|f| 2.0 * f[0] + 0.5 * f[1] + 0.1)
             .collect();
 
@@ -846,7 +958,10 @@ mod tests {
             metric: Metric::Mse,
             models: vec![ModelType::LinearRegression],
             search_strategy: SearchStrategy::Random { n_iter: 5 },
-            cv: CrossValidation::KFold { n_splits: 3, shuffle: true },
+            cv: CrossValidation::KFold {
+                n_splits: 3,
+                shuffle: true,
+            },
             time_budget_seconds: 60,
             max_trials: 10,
             ..Default::default()
@@ -895,12 +1010,12 @@ mod tests {
         let config = AutoMLConfig {
             task: TaskType::Regression,
             metric: Metric::R2,
-            models: vec![
-                ModelType::LinearRegression,
-                ModelType::Ridge { alpha: 1.0 },
-            ],
+            models: vec![ModelType::LinearRegression, ModelType::Ridge { alpha: 1.0 }],
             search_strategy: SearchStrategy::Random { n_iter: 2 },
-            cv: CrossValidation::KFold { n_splits: 2, shuffle: false },
+            cv: CrossValidation::KFold {
+                n_splits: 2,
+                shuffle: false,
+            },
             time_budget_seconds: 30,
             max_trials: 5,
             ..Default::default()
@@ -932,6 +1047,8 @@ mod tests {
         let result = automl.fit(&data);
 
         assert_eq!(result.feature_importances.len(), 2);
-        assert!(result.feature_importances[0].importance >= result.feature_importances[1].importance);
+        assert!(
+            result.feature_importances[0].importance >= result.feature_importances[1].importance
+        );
     }
 }

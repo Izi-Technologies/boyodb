@@ -142,8 +142,7 @@ impl WalArchiver {
             Handle::try_current().ok()
         };
 
-        let s3_store = if let (Some(bucket), Some(region)) =
-            (&config.s3_bucket, &config.s3_region)
+        let s3_store = if let (Some(bucket), Some(region)) = (&config.s3_bucket, &config.s3_region)
         {
             let mut builder = AmazonS3Builder::new()
                 .with_region(region)
@@ -154,9 +153,7 @@ impl WalArchiver {
             }
 
             if let (Some(ak), Some(sk)) = (&config.s3_access_key, &config.s3_secret_key) {
-                builder = builder
-                    .with_access_key_id(ak)
-                    .with_secret_access_key(sk);
+                builder = builder.with_access_key_id(ak).with_secret_access_key(sk);
             }
 
             // Allow http for local minio/testing
@@ -506,9 +503,7 @@ impl WalArchiver {
 
         // Execute upload
         runtime
-            .block_on(async move {
-                store.put(&path, payload).await
-            })
+            .block_on(async move { store.put(&path, payload).await })
             .map_err(|e| EngineError::Io(format!("S3 upload failed: {}", e)))?;
 
         tracing::info!("Uploaded WAL archive to S3: {}", s3_path);

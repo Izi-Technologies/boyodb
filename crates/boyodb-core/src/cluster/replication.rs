@@ -491,13 +491,12 @@ pub struct ReplicationState {
 
 impl ReplicationState {
     /// Create a new replication state.
-    pub fn new(
-        node_id: NodeId,
-        db: Arc<Db>,
-        replication_addr: Option<SocketAddr>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, db: Arc<Db>, replication_addr: Option<SocketAddr>) -> Self {
         let handler = if replication_addr.is_some() {
-            Some(Arc::new(ReplicationHandler::new(node_id.clone(), db.clone())))
+            Some(Arc::new(ReplicationHandler::new(
+                node_id.clone(),
+                db.clone(),
+            )))
         } else {
             None
         };
@@ -517,7 +516,10 @@ impl ReplicationState {
 
     /// Called when this node becomes the leader.
     pub async fn become_leader(&self, term: u64) {
-        tracing::info!(term, "node becoming leader, initializing replication coordinator");
+        tracing::info!(
+            term,
+            "node becoming leader, initializing replication coordinator"
+        );
         self.current_term.store(term, AtomicOrdering::SeqCst);
         self.fencing_token.fetch_add(1, AtomicOrdering::SeqCst);
 
@@ -632,7 +634,8 @@ impl ReplicationState {
 
     /// Signal shutdown.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

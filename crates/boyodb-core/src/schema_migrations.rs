@@ -31,11 +31,11 @@
 //! MIGRATE DOWN TO 'initial';
 //! ```
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 // ============================================================================
 // Migration Types
@@ -282,7 +282,8 @@ impl MigrationManager {
         let content = std::fs::read_to_string(path)
             .map_err(|e| MigrationError::Io(format!("cannot read {}: {}", path.display(), e)))?;
 
-        let filename = path.file_stem()
+        let filename = path
+            .file_stem()
             .and_then(|s| s.to_str())
             .ok_or_else(|| MigrationError::Parse("invalid filename".into()))?;
 
@@ -290,11 +291,13 @@ impl MigrationManager {
         let parts: Vec<&str> = filename.splitn(2, '_').collect();
         if parts.len() != 2 {
             return Err(MigrationError::Parse(format!(
-                "invalid migration filename format: {}", filename
+                "invalid migration filename format: {}",
+                filename
             )));
         }
 
-        let version: u64 = parts[0].parse()
+        let version: u64 = parts[0]
+            .parse()
             .map_err(|_| MigrationError::Parse(format!("invalid version: {}", parts[0])))?;
 
         let name = parts[1].to_string();
@@ -302,16 +305,17 @@ impl MigrationManager {
         // Parse content for UP and DOWN sections
         let (up_sql, down_sql) = self.parse_migration_content(&content)?;
 
-        let migration = Migration::new(
-            MigrationVersion::new(version, &name),
-            up_sql,
-        ).with_down(down_sql);
+        let migration =
+            Migration::new(MigrationVersion::new(version, &name), up_sql).with_down(down_sql);
 
         Ok(migration)
     }
 
     /// Parse migration content for UP/DOWN sections
-    fn parse_migration_content(&self, content: &str) -> Result<(Vec<String>, Vec<String>), MigrationError> {
+    fn parse_migration_content(
+        &self,
+        content: &str,
+    ) -> Result<(Vec<String>, Vec<String>), MigrationError> {
         let mut up_sql = Vec::new();
         let mut down_sql = Vec::new();
         let mut current_section = "up";
@@ -407,7 +411,9 @@ impl MigrationManager {
         if *locked {
             let current_holder = self.lock_holder.read();
             return Err(MigrationError::Locked(
-                current_holder.clone().unwrap_or_else(|| "unknown".to_string())
+                current_holder
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
             ));
         }
         *locked = true;
@@ -439,7 +445,7 @@ impl MigrationManager {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                    .unwrap_or(0),
             ),
             rolled_back_at: None,
             duration_ms: None,
@@ -512,7 +518,7 @@ impl MigrationManager {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                    .unwrap_or(0),
             ),
             duration_ms: None,
             error: None,
@@ -552,7 +558,10 @@ impl MigrationManager {
         // Update history
         {
             let mut history = self.history.write();
-            if let Some(existing) = history.iter_mut().find(|r| r.migration_id == migration.id()) {
+            if let Some(existing) = history
+                .iter_mut()
+                .find(|r| r.migration_id == migration.id())
+            {
                 existing.status = MigrationStatus::RolledBack;
                 existing.rolled_back_at = record.rolled_back_at;
             }
@@ -635,7 +644,10 @@ impl MigrationManager {
         let history = self.history.read();
         let mut mismatches = Vec::new();
 
-        for record in history.iter().filter(|r| r.status == MigrationStatus::Applied) {
+        for record in history
+            .iter()
+            .filter(|r| r.status == MigrationStatus::Applied)
+        {
             if let Some(migration) = migrations.get(&record.migration_id) {
                 if migration.checksum != record.checksum {
                     mismatches.push(ChecksumMismatch {
@@ -754,7 +766,8 @@ mod tests {
         let m = Migration::new(
             MigrationVersion::new(1, "create_users"),
             vec!["CREATE TABLE users (id INT);".to_string()],
-        ).with_down(vec!["DROP TABLE users;".to_string()]);
+        )
+        .with_down(vec!["DROP TABLE users;".to_string()]);
 
         assert!(m.reversible);
         assert_eq!(m.up_sql.len(), 1);

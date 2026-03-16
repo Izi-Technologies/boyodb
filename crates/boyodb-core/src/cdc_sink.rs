@@ -7,11 +7,11 @@
 //! - Generic webhooks
 //! - File-based destinations
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -373,7 +373,8 @@ impl KafkaSink {
         }
 
         self.events_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(payload.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -411,18 +412,16 @@ impl KafkaSink {
         // In a real implementation, we would actually send to Kafka
         // For now, just count them as sent
 
-        self.events_sent.fetch_add(events.len() as u64, Ordering::Relaxed);
+        self.events_sent
+            .fetch_add(events.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
     /// Serialize event based on format
     fn serialize(&self, event: &CdcEvent) -> Result<Vec<u8>, CdcSinkError> {
         match self.config.format {
-            SerializationFormat::Json => {
-                serde_json::to_vec(event).map_err(|e| {
-                    CdcSinkError::SerializationError(e.to_string())
-                })
-            }
+            SerializationFormat::Json => serde_json::to_vec(event)
+                .map_err(|e| CdcSinkError::SerializationError(e.to_string())),
             SerializationFormat::DebeziumJson => {
                 // Debezium envelope format
                 let envelope = DebeziumEnvelope {
@@ -447,29 +446,26 @@ impl KafkaSink {
                             CdcOperation::Snapshot => "r",
                             CdcOperation::Truncate => "t",
                             CdcOperation::SchemaChange => "s",
-                        }.to_string(),
+                        }
+                        .to_string(),
                         ts_ms: event.timestamp_ms as i64,
                     },
                 };
 
-                serde_json::to_vec(&envelope).map_err(|e| {
-                    CdcSinkError::SerializationError(e.to_string())
-                })
+                serde_json::to_vec(&envelope)
+                    .map_err(|e| CdcSinkError::SerializationError(e.to_string()))
             }
             SerializationFormat::CanonicalJson => {
                 // Sorted keys for canonical form
-                let json = serde_json::to_value(event).map_err(|e| {
-                    CdcSinkError::SerializationError(e.to_string())
-                })?;
-                serde_json::to_vec(&json).map_err(|e| {
-                    CdcSinkError::SerializationError(e.to_string())
-                })
+                let json = serde_json::to_value(event)
+                    .map_err(|e| CdcSinkError::SerializationError(e.to_string()))?;
+                serde_json::to_vec(&json)
+                    .map_err(|e| CdcSinkError::SerializationError(e.to_string()))
             }
             _ => {
                 // Avro/Protobuf would need schema
-                serde_json::to_vec(event).map_err(|e| {
-                    CdcSinkError::SerializationError(e.to_string())
-                })
+                serde_json::to_vec(event)
+                    .map_err(|e| CdcSinkError::SerializationError(e.to_string()))
             }
         }
     }
@@ -483,7 +479,8 @@ impl KafkaSink {
             }
             TopicConfig::Custom(mapping) => {
                 let key = format!("{}.{}", event.database, event.table);
-                mapping.get(&key)
+                mapping
+                    .get(&key)
                     .cloned()
                     .ok_or_else(|| CdcSinkError::TopicNotFound(key))
             }
@@ -504,7 +501,7 @@ impl KafkaSink {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_millis() as u64
+                    .as_millis() as u64,
             ),
         }
     }
@@ -754,17 +751,20 @@ impl KinesisSink {
                 let pk_str = event.primary_key.join(",");
                 format!("{:x}", md5_hash(&pk_str))
             }
-            PartitionKeyStrategy::Column(col) => {
-                event.after.as_ref()
-                    .and_then(|a| a.get(col))
-                    .map(|v| format!("{:?}", v))
-                    .unwrap_or_default()
-            }
+            PartitionKeyStrategy::Column(col) => event
+                .after
+                .as_ref()
+                .and_then(|a| a.get(col))
+                .map(|v| format!("{:?}", v))
+                .unwrap_or_default(),
             PartitionKeyStrategy::Random => {
-                format!("{}", SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos())
+                format!(
+                    "{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )
             }
             PartitionKeyStrategy::Custom(_expr) => {
                 // Would evaluate expression
@@ -776,7 +776,8 @@ impl KinesisSink {
 
 fn md5_hash(s: &str) -> u64 {
     // Simple hash for demonstration
-    s.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+    s.bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
 }
 
 // ============================================================================
@@ -975,9 +976,8 @@ impl FileSink {
 
     pub fn start(&self) -> Result<(), CdcSinkError> {
         // Create base directory
-        std::fs::create_dir_all(&self.config.base_dir).map_err(|e| {
-            CdcSinkError::ConfigError(format!("failed to create directory: {}", e))
-        })?;
+        std::fs::create_dir_all(&self.config.base_dir)
+            .map_err(|e| CdcSinkError::ConfigError(format!("failed to create directory: {}", e)))?;
 
         self.running.store(true, Ordering::SeqCst);
         Ok(())
@@ -1018,27 +1018,19 @@ impl FileSink {
                 let date = chrono_date(ts);
                 format!(
                     "{}/{}/{}/{}/events.jsonl",
-                    self.config.base_dir,
-                    event.database,
-                    event.table,
-                    date
+                    self.config.base_dir, event.database, event.table, date
                 )
             }
             FilePattern::FlatTimestamp => {
                 format!(
                     "{}/{}.{}.{}.jsonl",
-                    self.config.base_dir,
-                    event.database,
-                    event.table,
-                    event.timestamp_ms
+                    self.config.base_dir, event.database, event.table, event.timestamp_ms
                 )
             }
-            FilePattern::Custom(pattern) => {
-                pattern
-                    .replace("{database}", &event.database)
-                    .replace("{table}", &event.table)
-                    .replace("{timestamp}", &event.timestamp_ms.to_string())
-            }
+            FilePattern::Custom(pattern) => pattern
+                .replace("{database}", &event.database)
+                .replace("{table}", &event.table)
+                .replace("{timestamp}", &event.timestamp_ms.to_string()),
         }
     }
 }
@@ -1090,27 +1082,32 @@ impl SinkManager {
 
     /// Register a Kafka sink
     pub fn register_kafka(&mut self, name: &str, config: KafkaSinkConfig) {
-        self.kafka_sinks.insert(name.to_string(), Arc::new(KafkaSink::new(config)));
+        self.kafka_sinks
+            .insert(name.to_string(), Arc::new(KafkaSink::new(config)));
     }
 
     /// Register a Pulsar sink
     pub fn register_pulsar(&mut self, name: &str, config: PulsarSinkConfig) {
-        self.pulsar_sinks.insert(name.to_string(), Arc::new(PulsarSink::new(config)));
+        self.pulsar_sinks
+            .insert(name.to_string(), Arc::new(PulsarSink::new(config)));
     }
 
     /// Register a Kinesis sink
     pub fn register_kinesis(&mut self, name: &str, config: KinesisSinkConfig) {
-        self.kinesis_sinks.insert(name.to_string(), Arc::new(KinesisSink::new(config)));
+        self.kinesis_sinks
+            .insert(name.to_string(), Arc::new(KinesisSink::new(config)));
     }
 
     /// Register a Webhook sink
     pub fn register_webhook(&mut self, name: &str, config: WebhookSinkConfig) {
-        self.webhook_sinks.insert(name.to_string(), Arc::new(WebhookSink::new(config)));
+        self.webhook_sinks
+            .insert(name.to_string(), Arc::new(WebhookSink::new(config)));
     }
 
     /// Register a File sink
     pub fn register_file(&mut self, name: &str, config: FileSinkConfig) {
-        self.file_sinks.insert(name.to_string(), Arc::new(FileSink::new(config)));
+        self.file_sinks
+            .insert(name.to_string(), Arc::new(FileSink::new(config)));
     }
 
     /// Start all sinks
@@ -1257,7 +1254,9 @@ mod tests {
         };
 
         let config = KafkaSinkConfig {
-            topic: TopicConfig::PerTable { prefix: "cdc".to_string() },
+            topic: TopicConfig::PerTable {
+                prefix: "cdc".to_string(),
+            },
             ..Default::default()
         };
 
@@ -1271,10 +1270,13 @@ mod tests {
         let mut manager = SinkManager::new();
 
         manager.register_kafka("primary", KafkaSinkConfig::default());
-        manager.register_file("backup", FileSinkConfig {
-            base_dir: "/tmp/cdc".to_string(),
-            ..Default::default()
-        });
+        manager.register_file(
+            "backup",
+            FileSinkConfig {
+                base_dir: "/tmp/cdc".to_string(),
+                ..Default::default()
+            },
+        );
 
         let sinks = manager.list_sinks();
         assert_eq!(sinks.len(), 2);

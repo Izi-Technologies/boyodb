@@ -419,9 +419,10 @@ impl AggregateFilter {
             (FilterOp::Eq, Some(v), FilterValue::Int(i)) => {
                 v.as_i64().map(|x| x == *i).unwrap_or(false)
             }
-            (FilterOp::Eq, Some(v), FilterValue::Float(f)) => {
-                v.as_f64().map(|x| (x - f).abs() < f64::EPSILON).unwrap_or(false)
-            }
+            (FilterOp::Eq, Some(v), FilterValue::Float(f)) => v
+                .as_f64()
+                .map(|x| (x - f).abs() < f64::EPSILON)
+                .unwrap_or(false),
             (FilterOp::Eq, Some(v), FilterValue::String(s)) => {
                 v.as_str().map(|x| x == s).unwrap_or(false)
             }
@@ -431,9 +432,10 @@ impl AggregateFilter {
             (FilterOp::Ne, Some(v), FilterValue::Int(i)) => {
                 v.as_i64().map(|x| x != *i).unwrap_or(true)
             }
-            (FilterOp::Ne, Some(v), FilterValue::Float(f)) => {
-                v.as_f64().map(|x| (x - f).abs() >= f64::EPSILON).unwrap_or(true)
-            }
+            (FilterOp::Ne, Some(v), FilterValue::Float(f)) => v
+                .as_f64()
+                .map(|x| (x - f).abs() >= f64::EPSILON)
+                .unwrap_or(true),
             (FilterOp::Ne, Some(v), FilterValue::String(s)) => {
                 v.as_str().map(|x| x != s).unwrap_or(true)
             }
@@ -467,9 +469,7 @@ impl AggregateFilter {
             (FilterOp::Like, Some(v), FilterValue::String(pattern)) => {
                 if let Some(s) = v.as_str() {
                     // Simple LIKE matching: % = any chars, _ = single char
-                    let regex_pattern = pattern
-                        .replace('%', ".*")
-                        .replace('_', ".");
+                    let regex_pattern = pattern.replace('%', ".*").replace('_', ".");
                     regex::Regex::new(&format!("^{}$", regex_pattern))
                         .map(|re| re.is_match(s))
                         .unwrap_or(false)
@@ -478,18 +478,17 @@ impl AggregateFilter {
                 }
             }
             (FilterOp::In, Some(v), FilterValue::List(vals)) => {
-                vals.iter().any(|fv| {
-                    match (v, fv) {
-                        (serde_json::Value::Number(n), FilterValue::Int(i)) => {
-                            n.as_i64().map(|x| x == *i).unwrap_or(false)
-                        }
-                        (serde_json::Value::Number(n), FilterValue::Float(f)) => {
-                            n.as_f64().map(|x| (x - f).abs() < f64::EPSILON).unwrap_or(false)
-                        }
-                        (serde_json::Value::String(s), FilterValue::String(fs)) => s == fs,
-                        (serde_json::Value::Bool(b), FilterValue::Bool(fb)) => b == fb,
-                        _ => false,
+                vals.iter().any(|fv| match (v, fv) {
+                    (serde_json::Value::Number(n), FilterValue::Int(i)) => {
+                        n.as_i64().map(|x| x == *i).unwrap_or(false)
                     }
+                    (serde_json::Value::Number(n), FilterValue::Float(f)) => n
+                        .as_f64()
+                        .map(|x| (x - f).abs() < f64::EPSILON)
+                        .unwrap_or(false),
+                    (serde_json::Value::String(s), FilterValue::String(fs)) => s == fs,
+                    (serde_json::Value::Bool(b), FilterValue::Bool(fb)) => b == fb,
+                    _ => false,
                 })
             }
             _ => false,
@@ -499,7 +498,11 @@ impl AggregateFilter {
 
 impl AggregateExpr {
     pub fn new(kind: AggKind) -> Self {
-        Self { kind, alias: None, filter: None }
+        Self {
+            kind,
+            alias: None,
+            filter: None,
+        }
     }
 
     pub fn with_alias(kind: AggKind, alias: String) -> Self {
@@ -552,7 +555,11 @@ impl AggregateExpr {
             AggKind::VariancePop { column } => format!("var_pop_{}", column),
             AggKind::ApproxCountDistinct { column } => format!("approx_count_distinct_{}", column),
             AggKind::ApproxPercentile { column, percentile } => {
-                format!("approx_percentile_{}_{}", (percentile * 100.0) as i32, column)
+                format!(
+                    "approx_percentile_{}_{}",
+                    (percentile * 100.0) as i32,
+                    column
+                )
             }
             AggKind::ApproxMedian { column } => format!("approx_median_{}", column),
             AggKind::Median { column } => format!("median_{}", column),
@@ -1449,11 +1456,17 @@ pub enum DdlCommand {
     /// ROLLBACK [TRANSACTION] - Rollback the current transaction
     RollbackTransaction,
     /// SAVEPOINT name - Create a savepoint within a transaction
-    Savepoint { name: String },
+    Savepoint {
+        name: String,
+    },
     /// RELEASE SAVEPOINT name - Release a savepoint
-    ReleaseSavepoint { name: String },
+    ReleaseSavepoint {
+        name: String,
+    },
     /// ROLLBACK TO SAVEPOINT name - Rollback to a savepoint
-    RollbackToSavepoint { name: String },
+    RollbackToSavepoint {
+        name: String,
+    },
 
     // User-Defined Functions (UDFs)
     /// CREATE FUNCTION name(args) RETURNS type AS 'body'
@@ -1492,18 +1505,23 @@ pub enum DdlCommand {
     /// SHOW STREAMS
     ShowStreams,
     /// START STREAM name
-    StartStream { name: String },
+    StartStream {
+        name: String,
+    },
     /// STOP STREAM name
-    StopStream { name: String },
+    StopStream {
+        name: String,
+    },
     /// SHOW STREAM STATUS name
-    ShowStreamStatus { name: String },
+    ShowStreamStatus {
+        name: String,
+    },
     /// SHOW REPAIR STATUS - Display auto-repair status and statistics
     ShowRepairStatus,
 
     // ============================================================================
     // Column-Level Encryption Commands
     // ============================================================================
-
     /// CREATE ENCRYPTION KEY key_name [ALGORITHM AES256GCM|CHACHA20] [EXPIRES timestamp]
     CreateEncryptionKey {
         key_name: String,
@@ -1544,7 +1562,6 @@ pub enum DdlCommand {
     // ============================================================================
     // Change Data Capture (CDC) Commands
     // ============================================================================
-
     /// CREATE CDC SUBSCRIPTION name ON database.table [TO target] [WITH options]
     CreateCdcSubscription {
         name: String,
@@ -1589,7 +1606,6 @@ pub enum DdlCommand {
     // ============================================================================
     // Session & Server Management Commands (PostgreSQL/MySQL compatible)
     // ============================================================================
-
     /// SET variable = value - Set session variable
     SetVariable {
         name: String,
@@ -2521,7 +2537,8 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             }));
         }
         return Err(EngineError::InvalidArgument(
-            "REPAIR SEGMENTS requires database.table, database.*, or use REPAIR ALL SEGMENTS".into(),
+            "REPAIR SEGMENTS requires database.table, database.*, or use REPAIR ALL SEGMENTS"
+                .into(),
         ));
     }
 
@@ -2549,17 +2566,27 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     }
 
     // BEGIN [TRANSACTION] - Start a transaction
-    if upper_trimmed == "BEGIN" || upper_trimmed == "BEGIN TRANSACTION" || upper_trimmed == "START TRANSACTION" {
+    if upper_trimmed == "BEGIN"
+        || upper_trimmed == "BEGIN TRANSACTION"
+        || upper_trimmed == "START TRANSACTION"
+    {
         return Ok(Some(DdlCommand::BeginTransaction));
     }
 
     // COMMIT [TRANSACTION] - Commit a transaction
-    if upper_trimmed == "COMMIT" || upper_trimmed == "COMMIT TRANSACTION" || upper_trimmed == "END" || upper_trimmed == "END TRANSACTION" {
+    if upper_trimmed == "COMMIT"
+        || upper_trimmed == "COMMIT TRANSACTION"
+        || upper_trimmed == "END"
+        || upper_trimmed == "END TRANSACTION"
+    {
         return Ok(Some(DdlCommand::CommitTransaction));
     }
 
     // ROLLBACK [TRANSACTION] - Rollback a transaction
-    if upper_trimmed == "ROLLBACK" || upper_trimmed == "ROLLBACK TRANSACTION" || upper_trimmed == "ABORT" {
+    if upper_trimmed == "ROLLBACK"
+        || upper_trimmed == "ROLLBACK TRANSACTION"
+        || upper_trimmed == "ABORT"
+    {
         return Ok(Some(DdlCommand::RollbackTransaction));
     }
 
@@ -2578,7 +2605,11 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     // RELEASE SAVEPOINT name - Release a savepoint
     if upper_trimmed.starts_with("RELEASE SAVEPOINT ") || upper_trimmed.starts_with("RELEASE ") {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
-        let name_idx = if upper_trimmed.starts_with("RELEASE SAVEPOINT ") { 2 } else { 1 };
+        let name_idx = if upper_trimmed.starts_with("RELEASE SAVEPOINT ") {
+            2
+        } else {
+            1
+        };
         if tokens.len() > name_idx {
             let name = tokens[name_idx].trim_end_matches(';').to_string();
             return Ok(Some(DdlCommand::ReleaseSavepoint { name }));
@@ -2589,9 +2620,15 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     }
 
     // ROLLBACK TO [SAVEPOINT] name - Rollback to a savepoint
-    if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ") || upper_trimmed.starts_with("ROLLBACK TO ") {
+    if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ")
+        || upper_trimmed.starts_with("ROLLBACK TO ")
+    {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
-        let name_idx = if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ") { 3 } else { 2 };
+        let name_idx = if upper_trimmed.starts_with("ROLLBACK TO SAVEPOINT ") {
+            3
+        } else {
+            2
+        };
         if tokens.len() > name_idx {
             let name = tokens[name_idx].trim_end_matches(';').to_string();
             return Ok(Some(DdlCommand::RollbackToSavepoint { name }));
@@ -2607,9 +2644,15 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     }
     if upper_trimmed.starts_with("SHOW FUNCTIONS LIKE ") {
         let pattern_part = &sql["SHOW FUNCTIONS LIKE ".len()..];
-        let pattern = pattern_part.trim().trim_end_matches(';')
-            .trim_matches('\'').trim_matches('"').to_string();
-        return Ok(Some(DdlCommand::ShowFunctions { pattern: Some(pattern) }));
+        let pattern = pattern_part
+            .trim()
+            .trim_end_matches(';')
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string();
+        return Ok(Some(DdlCommand::ShowFunctions {
+            pattern: Some(pattern),
+        }));
     }
 
     // DROP FUNCTION [IF EXISTS] name
@@ -2634,7 +2677,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     }
 
     // CREATE [OR REPLACE] FUNCTION name(params) RETURNS type AS 'body' [LANGUAGE lang]
-    if upper_trimmed.starts_with("CREATE FUNCTION ") || upper_trimmed.starts_with("CREATE OR REPLACE FUNCTION ") {
+    if upper_trimmed.starts_with("CREATE FUNCTION ")
+        || upper_trimmed.starts_with("CREATE OR REPLACE FUNCTION ")
+    {
         return parse_create_function(sql);
     }
 
@@ -2645,29 +2690,47 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // START STREAM name
     if upper_trimmed.starts_with("START STREAM ") {
-        let name = upper_trimmed["START STREAM ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["START STREAM ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("START STREAM requires a stream name".into()));
+            return Err(EngineError::InvalidArgument(
+                "START STREAM requires a stream name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::StartStream { name: name.to_string() }));
+        return Ok(Some(DdlCommand::StartStream {
+            name: name.to_string(),
+        }));
     }
 
     // STOP STREAM name
     if upper_trimmed.starts_with("STOP STREAM ") {
-        let name = upper_trimmed["STOP STREAM ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["STOP STREAM ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("STOP STREAM requires a stream name".into()));
+            return Err(EngineError::InvalidArgument(
+                "STOP STREAM requires a stream name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::StopStream { name: name.to_string() }));
+        return Ok(Some(DdlCommand::StopStream {
+            name: name.to_string(),
+        }));
     }
 
     // SHOW STREAM STATUS name
     if upper_trimmed.starts_with("SHOW STREAM STATUS ") {
-        let name = upper_trimmed["SHOW STREAM STATUS ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["SHOW STREAM STATUS ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("SHOW STREAM STATUS requires a stream name".into()));
+            return Err(EngineError::InvalidArgument(
+                "SHOW STREAM STATUS requires a stream name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::ShowStreamStatus { name: name.to_string() }));
+        return Ok(Some(DdlCommand::ShowStreamStatus {
+            name: name.to_string(),
+        }));
     }
 
     // DROP STREAM [IF EXISTS] name
@@ -2681,7 +2744,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         };
         let name = name_part.trim().trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("DROP STREAM requires a stream name".into()));
+            return Err(EngineError::InvalidArgument(
+                "DROP STREAM requires a stream name".into(),
+            ));
         }
         return Ok(Some(DdlCommand::DropStream {
             name: name.to_string(),
@@ -2714,7 +2779,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         };
         let name = name_part.trim().trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("DROP ENCRYPTION KEY requires a key name".into()));
+            return Err(EngineError::InvalidArgument(
+                "DROP ENCRYPTION KEY requires a key name".into(),
+            ));
         }
         return Ok(Some(DdlCommand::DropEncryptionKey {
             key_name: name.to_string(),
@@ -2724,9 +2791,13 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // ROTATE ENCRYPTION KEY key_name
     if upper_trimmed.starts_with("ROTATE ENCRYPTION KEY ") {
-        let name = upper_trimmed["ROTATE ENCRYPTION KEY ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["ROTATE ENCRYPTION KEY ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("ROTATE ENCRYPTION KEY requires a key name".into()));
+            return Err(EngineError::InvalidArgument(
+                "ROTATE ENCRYPTION KEY requires a key name".into(),
+            ));
         }
         return Ok(Some(DdlCommand::RotateEncryptionKey {
             key_name: name.to_string(),
@@ -2746,7 +2817,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }));
     }
     if upper_trimmed.starts_with("SHOW ENCRYPTED COLUMNS FROM ") {
-        let table_name = upper_trimmed["SHOW ENCRYPTED COLUMNS FROM ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["SHOW ENCRYPTED COLUMNS FROM ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::ShowEncryptedColumns {
             database: Some(database),
@@ -2784,7 +2857,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         };
         let name = name_part.trim().trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("DROP CDC SUBSCRIPTION requires a name".into()));
+            return Err(EngineError::InvalidArgument(
+                "DROP CDC SUBSCRIPTION requires a name".into(),
+            ));
         }
         return Ok(Some(DdlCommand::DropCdcSubscription {
             name: name.to_string(),
@@ -2794,20 +2869,32 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // START CDC SUBSCRIPTION name
     if upper_trimmed.starts_with("START CDC SUBSCRIPTION ") {
-        let name = upper_trimmed["START CDC SUBSCRIPTION ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["START CDC SUBSCRIPTION ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("START CDC SUBSCRIPTION requires a name".into()));
+            return Err(EngineError::InvalidArgument(
+                "START CDC SUBSCRIPTION requires a name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::StartCdcSubscription { name: name.to_string() }));
+        return Ok(Some(DdlCommand::StartCdcSubscription {
+            name: name.to_string(),
+        }));
     }
 
     // STOP CDC SUBSCRIPTION name
     if upper_trimmed.starts_with("STOP CDC SUBSCRIPTION ") {
-        let name = upper_trimmed["STOP CDC SUBSCRIPTION ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["STOP CDC SUBSCRIPTION ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("STOP CDC SUBSCRIPTION requires a name".into()));
+            return Err(EngineError::InvalidArgument(
+                "STOP CDC SUBSCRIPTION requires a name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::StopCdcSubscription { name: name.to_string() }));
+        return Ok(Some(DdlCommand::StopCdcSubscription {
+            name: name.to_string(),
+        }));
     }
 
     // SHOW CDC SUBSCRIPTIONS
@@ -2817,11 +2904,17 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // SHOW CDC STATUS name
     if upper_trimmed.starts_with("SHOW CDC STATUS ") {
-        let name = upper_trimmed["SHOW CDC STATUS ".len()..].trim().trim_end_matches(';');
+        let name = upper_trimmed["SHOW CDC STATUS ".len()..]
+            .trim()
+            .trim_end_matches(';');
         if name.is_empty() {
-            return Err(EngineError::InvalidArgument("SHOW CDC STATUS requires a subscription name".into()));
+            return Err(EngineError::InvalidArgument(
+                "SHOW CDC STATUS requires a subscription name".into(),
+            ));
         }
-        return Ok(Some(DdlCommand::ShowCdcStatus { name: name.to_string() }));
+        return Ok(Some(DdlCommand::ShowCdcStatus {
+            name: name.to_string(),
+        }));
     }
 
     // GET CHANGES FROM database.table [SINCE sequence] [LIMIT n]
@@ -2845,13 +2938,12 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // SHOW variable (single variable)
     // Note: This must come after other SHOW commands to avoid conflicts
-    if upper_trimmed.starts_with("SHOW ") && !upper_trimmed.contains(' ')
-        && upper_trimmed != "SHOW"
+    if upper_trimmed.starts_with("SHOW ") && !upper_trimmed.contains(' ') && upper_trimmed != "SHOW"
     {
         let var_name = upper_trimmed["SHOW ".len()..].trim().trim_end_matches(';');
         if !var_name.is_empty() {
             return Ok(Some(DdlCommand::ShowVariable {
-                name: var_name.to_string()
+                name: var_name.to_string(),
             }));
         }
     }
@@ -2862,16 +2954,23 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     }
     if upper_trimmed.starts_with("SHOW VARIABLES LIKE ") {
         let pattern = extract_like_pattern(&sql["SHOW VARIABLES LIKE ".len()..]);
-        return Ok(Some(DdlCommand::ShowVariables { pattern: Some(pattern) }));
+        return Ok(Some(DdlCommand::ShowVariables {
+            pattern: Some(pattern),
+        }));
     }
 
     // SHOW STATUS [LIKE pattern] / SHOW SESSION STATUS / SHOW GLOBAL STATUS
-    if upper_trimmed == "SHOW STATUS" || upper_trimmed == "SHOW SESSION STATUS" || upper_trimmed == "SHOW GLOBAL STATUS" {
+    if upper_trimmed == "SHOW STATUS"
+        || upper_trimmed == "SHOW SESSION STATUS"
+        || upper_trimmed == "SHOW GLOBAL STATUS"
+    {
         return Ok(Some(DdlCommand::ShowStatus { pattern: None }));
     }
     if upper_trimmed.starts_with("SHOW STATUS LIKE ") {
         let pattern = extract_like_pattern(&sql["SHOW STATUS LIKE ".len()..]);
-        return Ok(Some(DdlCommand::ShowStatus { pattern: Some(pattern) }));
+        return Ok(Some(DdlCommand::ShowStatus {
+            pattern: Some(pattern),
+        }));
     }
 
     // SHOW PROCESSLIST / SHOW FULL PROCESSLIST
@@ -2884,20 +2983,27 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // KILL connection_id / KILL CONNECTION connection_id
     if upper_trimmed.starts_with("KILL CONNECTION ") {
-        let id_str = upper_trimmed["KILL CONNECTION ".len()..].trim().trim_end_matches(';');
+        let id_str = upper_trimmed["KILL CONNECTION ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let connection_id = id_str.parse::<u64>().map_err(|_| {
             EngineError::InvalidArgument(format!("Invalid connection ID: {}", id_str))
         })?;
         return Ok(Some(DdlCommand::KillConnection { connection_id }));
     }
     if upper_trimmed.starts_with("KILL QUERY ") {
-        let id_str = upper_trimmed["KILL QUERY ".len()..].trim().trim_end_matches(';');
-        let query_id = id_str.parse::<u64>().map_err(|_| {
-            EngineError::InvalidArgument(format!("Invalid query ID: {}", id_str))
-        })?;
+        let id_str = upper_trimmed["KILL QUERY ".len()..]
+            .trim()
+            .trim_end_matches(';');
+        let query_id = id_str
+            .parse::<u64>()
+            .map_err(|_| EngineError::InvalidArgument(format!("Invalid query ID: {}", id_str)))?;
         return Ok(Some(DdlCommand::KillQuery { query_id }));
     }
-    if upper_trimmed.starts_with("KILL ") && !upper_trimmed.starts_with("KILL CONNECTION ") && !upper_trimmed.starts_with("KILL QUERY ") {
+    if upper_trimmed.starts_with("KILL ")
+        && !upper_trimmed.starts_with("KILL CONNECTION ")
+        && !upper_trimmed.starts_with("KILL QUERY ")
+    {
         let id_str = upper_trimmed["KILL ".len()..].trim().trim_end_matches(';');
         let connection_id = id_str.parse::<u64>().map_err(|_| {
             EngineError::InvalidArgument(format!("Invalid connection ID: {}", id_str))
@@ -2931,7 +3037,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // REINDEX TABLE database.table
     if upper_trimmed.starts_with("REINDEX TABLE ") {
-        let table_name = upper_trimmed["REINDEX TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["REINDEX TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::ReindexTable { database, table }));
     }
@@ -2943,8 +3051,12 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // REINDEX DATABASE database_name
     if upper_trimmed.starts_with("REINDEX DATABASE ") {
-        let database = upper_trimmed["REINDEX DATABASE ".len()..].trim().trim_end_matches(';');
-        return Ok(Some(DdlCommand::ReindexDatabase { database: database.to_string() }));
+        let database = upper_trimmed["REINDEX DATABASE ".len()..]
+            .trim()
+            .trim_end_matches(';');
+        return Ok(Some(DdlCommand::ReindexDatabase {
+            database: database.to_string(),
+        }));
     }
 
     // LOCK TABLES table1 [READ|WRITE], table2 [READ|WRITE], ...
@@ -2959,7 +3071,9 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // OPTIMIZE TABLE database.table
     if upper_trimmed.starts_with("OPTIMIZE TABLE ") {
-        let table_name = upper_trimmed["OPTIMIZE TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["OPTIMIZE TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::OptimizeTable { database, table }));
     }
@@ -2981,7 +3095,10 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // SHOW TABLE STATUS [FROM database] [LIKE pattern]
     if upper_trimmed == "SHOW TABLE STATUS" {
-        return Ok(Some(DdlCommand::ShowTableStatus { database: None, pattern: None }));
+        return Ok(Some(DdlCommand::ShowTableStatus {
+            database: None,
+            pattern: None,
+        }));
     }
     if upper_trimmed.starts_with("SHOW TABLE STATUS ") {
         return parse_show_table_status(sql);
@@ -2989,26 +3106,36 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // SHOW CREATE TABLE database.table
     if upper_trimmed.starts_with("SHOW CREATE TABLE ") {
-        let table_name = upper_trimmed["SHOW CREATE TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["SHOW CREATE TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::ShowCreateTable { database, table }));
     }
 
     // SHOW CREATE VIEW database.view
     if upper_trimmed.starts_with("SHOW CREATE VIEW ") {
-        let view_name = upper_trimmed["SHOW CREATE VIEW ".len()..].trim().trim_end_matches(';');
+        let view_name = upper_trimmed["SHOW CREATE VIEW ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, view) = parse_table_name(view_name)?;
         return Ok(Some(DdlCommand::ShowCreateView { database, view }));
     }
 
     // SHOW CREATE DATABASE database_name
     if upper_trimmed.starts_with("SHOW CREATE DATABASE ") {
-        let database = upper_trimmed["SHOW CREATE DATABASE ".len()..].trim().trim_end_matches(';');
-        return Ok(Some(DdlCommand::ShowCreateDatabase { database: database.to_string() }));
+        let database = upper_trimmed["SHOW CREATE DATABASE ".len()..]
+            .trim()
+            .trim_end_matches(';');
+        return Ok(Some(DdlCommand::ShowCreateDatabase {
+            database: database.to_string(),
+        }));
     }
 
     // SHOW COLUMNS FROM database.table [LIKE pattern]
-    if upper_trimmed.starts_with("SHOW COLUMNS FROM ") || upper_trimmed.starts_with("SHOW FIELDS FROM ") {
+    if upper_trimmed.starts_with("SHOW COLUMNS FROM ")
+        || upper_trimmed.starts_with("SHOW FIELDS FROM ")
+    {
         return parse_show_columns(sql);
     }
 
@@ -3029,21 +3156,27 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
 
     // CHECKSUM TABLE database.table
     if upper_trimmed.starts_with("CHECKSUM TABLE ") {
-        let table_name = upper_trimmed["CHECKSUM TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["CHECKSUM TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::ChecksumTable { database, table }));
     }
 
     // CHECK TABLE database.table
     if upper_trimmed.starts_with("CHECK TABLE ") {
-        let table_name = upper_trimmed["CHECK TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["CHECK TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::CheckTable { database, table }));
     }
 
     // REPAIR TABLE database.table (not the same as REPAIR SEGMENTS)
     if upper_trimmed.starts_with("REPAIR TABLE ") {
-        let table_name = upper_trimmed["REPAIR TABLE ".len()..].trim().trim_end_matches(';');
+        let table_name = upper_trimmed["REPAIR TABLE ".len()..]
+            .trim()
+            .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::RepairTable { database, table }));
     }
@@ -3059,7 +3192,9 @@ fn parse_create_encryption_key(sql: &str) -> Result<Option<DdlCommand>, EngineEr
     // Parse key name
     let tokens: Vec<&str> = rest.split_whitespace().collect();
     if tokens.is_empty() {
-        return Err(EngineError::InvalidArgument("CREATE ENCRYPTION KEY requires a key name".into()));
+        return Err(EngineError::InvalidArgument(
+            "CREATE ENCRYPTION KEY requires a key name".into(),
+        ));
     }
     let key_name = tokens[0].to_string();
 
@@ -3071,10 +3206,15 @@ fn parse_create_encryption_key(sql: &str) -> Result<Option<DdlCommand>, EngineEr
         algorithm = match algo_token.trim_end_matches(';') {
             "AES256GCM" | "AES-256-GCM" => EncryptionAlgorithmType::Aes256Gcm,
             "CHACHA20" | "CHACHA20POLY1305" => EncryptionAlgorithmType::ChaCha20Poly1305,
-            "DETERMINISTIC" | "DETERMINISTIC_AES256" => EncryptionAlgorithmType::DeterministicAes256,
-            other => return Err(EngineError::InvalidArgument(format!(
-                "Unknown encryption algorithm: {}. Use AES256GCM, CHACHA20, or DETERMINISTIC", other
-            ))),
+            "DETERMINISTIC" | "DETERMINISTIC_AES256" => {
+                EncryptionAlgorithmType::DeterministicAes256
+            }
+            other => {
+                return Err(EngineError::InvalidArgument(format!(
+                    "Unknown encryption algorithm: {}. Use AES256GCM, CHACHA20, or DETERMINISTIC",
+                    other
+                )))
+            }
         };
     }
 
@@ -3100,9 +3240,9 @@ fn parse_encrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
 
     // Extract table name (after ALTER TABLE, before ENCRYPT)
     let after_alter = &upper["ALTER TABLE ".len()..];
-    let encrypt_pos = after_alter.find(" ENCRYPT COLUMN ").ok_or_else(|| {
-        EngineError::InvalidArgument("Expected ENCRYPT COLUMN clause".into())
-    })?;
+    let encrypt_pos = after_alter
+        .find(" ENCRYPT COLUMN ")
+        .ok_or_else(|| EngineError::InvalidArgument("Expected ENCRYPT COLUMN clause".into()))?;
     let table_name = &sql["ALTER TABLE ".len()..]["ALTER TABLE ".len() + encrypt_pos..];
     let table_name = sql["ALTER TABLE ".len()..encrypt_pos + "ALTER TABLE ".len()].trim();
     let (database, table) = parse_table_name(table_name)?;
@@ -3117,7 +3257,10 @@ fn parse_encrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     // Extract key name
     let after_with_key = &after_encrypt[with_key_pos + " WITH KEY ".len()..];
     let key_end = after_with_key.find(' ').unwrap_or(after_with_key.len());
-    let key_name = after_with_key[..key_end].trim().trim_end_matches(';').to_string();
+    let key_name = after_with_key[..key_end]
+        .trim()
+        .trim_end_matches(';')
+        .to_string();
 
     // Parse optional ALGORITHM
     let algorithm = if let Some(algo_pos) = upper.find(" ALGORITHM ") {
@@ -3126,7 +3269,9 @@ fn parse_encrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
         Some(match algo_token.trim_end_matches(';') {
             "AES256GCM" | "AES-256-GCM" => EncryptionAlgorithmType::Aes256Gcm,
             "CHACHA20" | "CHACHA20POLY1305" => EncryptionAlgorithmType::ChaCha20Poly1305,
-            "DETERMINISTIC" | "DETERMINISTIC_AES256" => EncryptionAlgorithmType::DeterministicAes256,
+            "DETERMINISTIC" | "DETERMINISTIC_AES256" => {
+                EncryptionAlgorithmType::DeterministicAes256
+            }
             _ => EncryptionAlgorithmType::Aes256Gcm,
         })
     } else {
@@ -3148,19 +3293,25 @@ fn parse_decrypt_column(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
 
     // Extract table name
     let after_alter = &upper["ALTER TABLE ".len()..];
-    let decrypt_pos = after_alter.find(" DECRYPT COLUMN ").ok_or_else(|| {
-        EngineError::InvalidArgument("Expected DECRYPT COLUMN clause".into())
-    })?;
+    let decrypt_pos = after_alter
+        .find(" DECRYPT COLUMN ")
+        .ok_or_else(|| EngineError::InvalidArgument("Expected DECRYPT COLUMN clause".into()))?;
     let table_name = sql["ALTER TABLE ".len()..decrypt_pos + "ALTER TABLE ".len()].trim();
     let (database, table) = parse_table_name(table_name)?;
 
     // Extract column name
     let after_decrypt = &after_alter[decrypt_pos + " DECRYPT COLUMN ".len()..];
-    let column = after_decrypt.split_whitespace().next()
-        .unwrap_or("").trim_end_matches(';').to_string();
+    let column = after_decrypt
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(';')
+        .to_string();
 
     if column.is_empty() {
-        return Err(EngineError::InvalidArgument("DECRYPT COLUMN requires a column name".into()));
+        return Err(EngineError::InvalidArgument(
+            "DECRYPT COLUMN requires a column name".into(),
+        ));
     }
 
     Ok(Some(DdlCommand::DecryptColumn {
@@ -3183,7 +3334,8 @@ fn parse_create_cdc_subscription(sql: &str) -> Result<Option<DdlCommand>, Engine
 
     // Extract table name (after ON)
     let after_on = &rest[on_pos + " ON ".len()..];
-    let table_end = after_on.find(" TO ")
+    let table_end = after_on
+        .find(" TO ")
         .or_else(|| after_on.find(" WITH "))
         .or_else(|| after_on.find(" INCLUDE "))
         .unwrap_or(after_on.trim_end_matches(';').len());
@@ -3235,7 +3387,8 @@ fn parse_get_changes(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let rest = &upper["GET CHANGES FROM ".len()..];
 
     // Extract table name
-    let table_end = rest.find(" SINCE ")
+    let table_end = rest
+        .find(" SINCE ")
         .or_else(|| rest.find(" LIMIT "))
         .unwrap_or(rest.trim_end_matches(';').len());
     let table_name = rest[..table_end].trim().trim_end_matches(';');
@@ -3245,7 +3398,11 @@ fn parse_get_changes(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let since_sequence = if let Some(since_pos) = upper.find(" SINCE ") {
         let after_since = &upper[since_pos + " SINCE ".len()..];
         let seq_end = after_since.find(' ').unwrap_or(after_since.len());
-        after_since[..seq_end].trim().trim_end_matches(';').parse::<u64>().ok()
+        after_since[..seq_end]
+            .trim()
+            .trim_end_matches(';')
+            .parse::<u64>()
+            .ok()
     } else {
         None
     };
@@ -3254,7 +3411,11 @@ fn parse_get_changes(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let limit = if let Some(limit_pos) = upper.find(" LIMIT ") {
         let after_limit = &upper[limit_pos + " LIMIT ".len()..];
         let lim_end = after_limit.find(' ').unwrap_or(after_limit.len());
-        after_limit[..lim_end].trim().trim_end_matches(';').parse::<usize>().ok()
+        after_limit[..lim_end]
+            .trim()
+            .trim_end_matches(';')
+            .parse::<usize>()
+            .ok()
     } else {
         None
     };
@@ -3280,9 +3441,15 @@ fn parse_set_cdc_checkpoint(sql: &str) -> Result<Option<DdlCommand>, EngineError
 
     // Extract sequence number
     let after_to = &rest[to_pos + " TO ".len()..];
-    let sequence = after_to.trim().trim_end_matches(';').parse::<u64>().map_err(|_| {
-        EngineError::InvalidArgument("SET CDC CHECKPOINT requires a valid sequence number".into())
-    })?;
+    let sequence = after_to
+        .trim()
+        .trim_end_matches(';')
+        .parse::<u64>()
+        .map_err(|_| {
+            EngineError::InvalidArgument(
+                "SET CDC CHECKPOINT requires a valid sequence number".into(),
+            )
+        })?;
 
     Ok(Some(DdlCommand::SetCdcCheckpoint { name, sequence }))
 }
@@ -3296,7 +3463,7 @@ fn extract_like_pattern(s: &str) -> String {
     let s = s.trim().trim_end_matches(';');
     // Handle quoted patterns
     if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
-        s[1..s.len()-1].to_string()
+        s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
     }
@@ -3337,25 +3504,27 @@ fn parse_set_variable(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
         (name.to_string(), value.to_string())
     } else {
         return Err(EngineError::InvalidArgument(
-            "SET requires variable = value syntax".into()
+            "SET requires variable = value syntax".into(),
         ));
     };
 
     // Handle quoted values (preserve original case)
     let original_sql = &sql["SET ".len() + var_start..];
     let value = if let Some(eq_pos) = original_sql.find('=') {
-        original_sql[eq_pos + 1..].trim().trim_end_matches(';').to_string()
+        original_sql[eq_pos + 1..]
+            .trim()
+            .trim_end_matches(';')
+            .to_string()
     } else if let Some(to_pos) = original_sql.to_uppercase().find(" TO ") {
-        original_sql[to_pos + 4..].trim().trim_end_matches(';').to_string()
+        original_sql[to_pos + 4..]
+            .trim()
+            .trim_end_matches(';')
+            .to_string()
     } else {
         value
     };
 
-    Ok(Some(DdlCommand::SetVariable {
-        name,
-        value,
-        scope,
-    }))
+    Ok(Some(DdlCommand::SetVariable { name, value, scope }))
 }
 
 /// Parse COMMENT ON TABLE database.table IS 'comment'
@@ -3380,12 +3549,16 @@ fn parse_comment_on_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
     } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
         || (comment_part.starts_with('"') && comment_part.ends_with('"'))
     {
-        Some(comment_part[1..comment_part.len()-1].to_string())
+        Some(comment_part[1..comment_part.len() - 1].to_string())
     } else {
         Some(comment_part.to_string())
     };
 
-    Ok(Some(DdlCommand::CommentOnTable { database, table, comment }))
+    Ok(Some(DdlCommand::CommentOnTable {
+        database,
+        table,
+        comment,
+    }))
 }
 
 /// Parse COMMENT ON COLUMN database.table.column IS 'comment'
@@ -3404,18 +3577,40 @@ fn parse_comment_on_column(sql: &str) -> Result<Option<DdlCommand>, EngineError>
     let parts: Vec<&str> = col_part.trim().split('.').collect();
     let (database, table, column) = match parts.len() {
         3 => (
-            parts[0].trim().trim_matches('"').trim_matches('`').to_string(),
-            parts[1].trim().trim_matches('"').trim_matches('`').to_string(),
-            parts[2].trim().trim_matches('"').trim_matches('`').to_string(),
+            parts[0]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('`')
+                .to_string(),
+            parts[1]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('`')
+                .to_string(),
+            parts[2]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('`')
+                .to_string(),
         ),
         2 => (
             "default".to_string(),
-            parts[0].trim().trim_matches('"').trim_matches('`').to_string(),
-            parts[1].trim().trim_matches('"').trim_matches('`').to_string(),
+            parts[0]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('`')
+                .to_string(),
+            parts[1]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('`')
+                .to_string(),
         ),
-        _ => return Err(EngineError::InvalidArgument(
-            "COMMENT ON COLUMN requires table.column or database.table.column".into()
-        )),
+        _ => {
+            return Err(EngineError::InvalidArgument(
+                "COMMENT ON COLUMN requires table.column or database.table.column".into(),
+            ))
+        }
     };
 
     // Extract comment
@@ -3427,12 +3622,17 @@ fn parse_comment_on_column(sql: &str) -> Result<Option<DdlCommand>, EngineError>
     } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
         || (comment_part.starts_with('"') && comment_part.ends_with('"'))
     {
-        Some(comment_part[1..comment_part.len()-1].to_string())
+        Some(comment_part[1..comment_part.len() - 1].to_string())
     } else {
         Some(comment_part.to_string())
     };
 
-    Ok(Some(DdlCommand::CommentOnColumn { database, table, column, comment }))
+    Ok(Some(DdlCommand::CommentOnColumn {
+        database,
+        table,
+        column,
+        comment,
+    }))
 }
 
 /// Parse COMMENT ON DATABASE database IS 'comment'
@@ -3445,8 +3645,11 @@ fn parse_comment_on_database(sql: &str) -> Result<Option<DdlCommand>, EngineErro
         EngineError::InvalidArgument("COMMENT ON DATABASE requires IS clause".into())
     })?;
 
-    let database = rest[..is_pos - "COMMENT ON DATABASE ".len()].trim()
-        .trim_matches('"').trim_matches('`').to_string();
+    let database = rest[..is_pos - "COMMENT ON DATABASE ".len()]
+        .trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .to_string();
 
     // Extract comment
     let comment_part = &rest[is_pos - "COMMENT ON DATABASE ".len() + " IS ".len()..].trim();
@@ -3457,7 +3660,7 @@ fn parse_comment_on_database(sql: &str) -> Result<Option<DdlCommand>, EngineErro
     } else if (comment_part.starts_with('\'') && comment_part.ends_with('\''))
         || (comment_part.starts_with('"') && comment_part.ends_with('"'))
     {
-        Some(comment_part[1..comment_part.len()-1].to_string())
+        Some(comment_part[1..comment_part.len() - 1].to_string())
     } else {
         Some(comment_part.to_string())
     };
@@ -3479,22 +3682,29 @@ fn parse_cluster_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     };
 
     // Find USING keyword
-    let using_pos = rest.find(" USING ").ok_or_else(|| {
-        EngineError::InvalidArgument("CLUSTER requires USING clause".into())
-    })?;
+    let using_pos = rest
+        .find(" USING ")
+        .ok_or_else(|| EngineError::InvalidArgument("CLUSTER requires USING clause".into()))?;
 
     let table_name = rest[..using_pos].trim();
     let (database, table) = parse_table_name(table_name)?;
 
     let index_name = rest[using_pos + " USING ".len()..].trim().to_string();
 
-    Ok(Some(DdlCommand::ClusterTable { database, table, index_name, verbose }))
+    Ok(Some(DdlCommand::ClusterTable {
+        database,
+        table,
+        index_name,
+        verbose,
+    }))
 }
 
 /// Parse REINDEX INDEX database.table.index_name
 fn parse_reindex_index(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let upper = sql.to_uppercase();
-    let binding = upper["REINDEX INDEX ".len()..].trim_end_matches(';').to_string();
+    let binding = upper["REINDEX INDEX ".len()..]
+        .trim_end_matches(';')
+        .to_string();
     let rest: &str = &binding;
 
     // Parse database.table.index_name
@@ -3510,12 +3720,18 @@ fn parse_reindex_index(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
             parts[0].trim().to_string(),
             parts[1].trim().to_string(),
         ),
-        _ => return Err(EngineError::InvalidArgument(
-            "REINDEX INDEX requires table.index_name or database.table.index_name".into()
-        )),
+        _ => {
+            return Err(EngineError::InvalidArgument(
+                "REINDEX INDEX requires table.index_name or database.table.index_name".into(),
+            ))
+        }
     };
 
-    Ok(Some(DdlCommand::ReindexIndex { database, table, index_name }))
+    Ok(Some(DdlCommand::ReindexIndex {
+        database,
+        table,
+        index_name,
+    }))
 }
 
 /// Parse LOCK TABLES table1 [READ|WRITE], table2 [READ|WRITE], ...
@@ -3537,9 +3753,15 @@ fn parse_lock_tables(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
 
         // Find lock mode
         let (table_part, mode) = if part_upper.ends_with(" READ LOCAL") {
-            (&part[..part.len() - " READ LOCAL".len()], LockMode::ReadLocal)
+            (
+                &part[..part.len() - " READ LOCAL".len()],
+                LockMode::ReadLocal,
+            )
         } else if part_upper.ends_with(" LOW_PRIORITY WRITE") {
-            (&part[..part.len() - " LOW_PRIORITY WRITE".len()], LockMode::LowPriorityWrite)
+            (
+                &part[..part.len() - " LOW_PRIORITY WRITE".len()],
+                LockMode::LowPriorityWrite,
+            )
         } else if part_upper.ends_with(" WRITE") {
             (&part[..part.len() - " WRITE".len()], LockMode::Write)
         } else if part_upper.ends_with(" READ") {
@@ -3550,12 +3772,16 @@ fn parse_lock_tables(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
         };
 
         let (database, table) = parse_table_name(table_part.trim())?;
-        locks.push(TableLock { database, table, mode });
+        locks.push(TableLock {
+            database,
+            table,
+            mode,
+        });
     }
 
     if locks.is_empty() {
         return Err(EngineError::InvalidArgument(
-            "LOCK TABLES requires at least one table".into()
+            "LOCK TABLES requires at least one table".into(),
         ));
     }
 
@@ -3579,7 +3805,8 @@ fn parse_show_table_status(sql: &str) -> Result<Option<DdlCommand>, EngineError>
 
         // Check for LIKE pattern after database
         if let Some(like_pos) = after_from.find(" LIKE ") {
-            let pattern_str = &sql["SHOW TABLE STATUS ".len() + keyword_len + like_pos + " LIKE ".len()..];
+            let pattern_str =
+                &sql["SHOW TABLE STATUS ".len() + keyword_len + like_pos + " LIKE ".len()..];
             pattern = Some(extract_like_pattern(pattern_str));
         }
     } else if rest.starts_with("LIKE ") {
@@ -3603,17 +3830,22 @@ fn parse_show_columns(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let rest_upper = rest.to_uppercase();
 
     // Find LIKE if present
-    let (table_part, pattern): (&str, Option<String>) = if let Some(like_pos) = rest_upper.find(" LIKE ") {
-        let table_part = &rest[..like_pos];
-        let pattern_str = &rest[like_pos + " LIKE ".len()..];
-        (table_part, Some(extract_like_pattern(pattern_str)))
-    } else {
-        (rest, None)
-    };
+    let (table_part, pattern): (&str, Option<String>) =
+        if let Some(like_pos) = rest_upper.find(" LIKE ") {
+            let table_part = &rest[..like_pos];
+            let pattern_str = &rest[like_pos + " LIKE ".len()..];
+            (table_part, Some(extract_like_pattern(pattern_str)))
+        } else {
+            (rest, None)
+        };
 
     let (database, table) = parse_table_name(table_part.trim())?;
 
-    Ok(Some(DdlCommand::ShowColumns { database, table, pattern }))
+    Ok(Some(DdlCommand::ShowColumns {
+        database,
+        table,
+        pattern,
+    }))
 }
 
 /// Parse CREATE STREAM command
@@ -3623,13 +3855,17 @@ fn parse_create_stream(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
 
     // Extract stream name (after CREATE STREAM, before FROM)
     let after_create = &sql["CREATE STREAM ".len()..];
-    let from_pos = upper.find(" FROM ").ok_or_else(|| {
-        EngineError::InvalidArgument("CREATE STREAM requires FROM clause".into())
-    })?;
-    let name = after_create[..from_pos - "CREATE STREAM ".len()].trim().to_string();
+    let from_pos = upper
+        .find(" FROM ")
+        .ok_or_else(|| EngineError::InvalidArgument("CREATE STREAM requires FROM clause".into()))?;
+    let name = after_create[..from_pos - "CREATE STREAM ".len()]
+        .trim()
+        .to_string();
 
     if name.is_empty() {
-        return Err(EngineError::InvalidArgument("CREATE STREAM requires a stream name".into()));
+        return Err(EngineError::InvalidArgument(
+            "CREATE STREAM requires a stream name".into(),
+        ));
     }
 
     // Extract source type and config
@@ -3653,21 +3889,24 @@ fn parse_create_stream(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let after_source = &after_from[config_start..];
 
     // Extract config (quoted string)
-    let (source_config, after_config) = if after_source.starts_with('\'') || after_source.starts_with('"') {
-        let quote_char = after_source.chars().next().unwrap();
-        let end_quote = after_source[1..].find(quote_char).ok_or_else(|| {
-            EngineError::InvalidArgument("Unterminated config string".into())
-        })?;
-        let config = after_source[1..1 + end_quote].to_string();
-        let remaining = &after_source[2 + end_quote..];
-        (config, remaining)
-    } else {
-        // No quotes - take until whitespace
-        let end = after_source.find(char::is_whitespace).unwrap_or(after_source.len());
-        let config = after_source[..end].to_string();
-        let remaining = &after_source[end..];
-        (config, remaining)
-    };
+    let (source_config, after_config) =
+        if after_source.starts_with('\'') || after_source.starts_with('"') {
+            let quote_char = after_source.chars().next().unwrap();
+            let end_quote = after_source[1..]
+                .find(quote_char)
+                .ok_or_else(|| EngineError::InvalidArgument("Unterminated config string".into()))?;
+            let config = after_source[1..1 + end_quote].to_string();
+            let remaining = &after_source[2 + end_quote..];
+            (config, remaining)
+        } else {
+            // No quotes - take until whitespace
+            let end = after_source
+                .find(char::is_whitespace)
+                .unwrap_or(after_source.len());
+            let config = after_source[..end].to_string();
+            let remaining = &after_source[end..];
+            (config, remaining)
+        };
 
     let upper_after_config = after_config.to_uppercase();
 
@@ -3691,7 +3930,8 @@ fn parse_create_stream(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let format_pos = upper_after_config.find(" FORMAT ");
     let format = if let Some(pos) = format_pos {
         let after_format = &after_config[pos + " FORMAT ".len()..];
-        let end = after_format.find(char::is_whitespace)
+        let end = after_format
+            .find(char::is_whitespace)
             .or_else(|| after_format.find(';'))
             .unwrap_or(after_format.len());
         Some(after_format[..end].trim().to_lowercase())
@@ -3722,9 +3962,10 @@ fn parse_create_function(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     };
     let prefix_upper = prefix.to_uppercase();
 
-    let start_idx = upper.find(&prefix_upper).ok_or_else(|| {
-        EngineError::InvalidArgument("Invalid CREATE FUNCTION syntax".into())
-    })? + prefix.len();
+    let start_idx = upper
+        .find(&prefix_upper)
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid CREATE FUNCTION syntax".into()))?
+        + prefix.len();
 
     // Find the opening parenthesis for parameters
     let paren_open = sql[start_idx..].find('(').ok_or_else(|| {
@@ -3755,9 +3996,9 @@ fn parse_create_function(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     })?;
 
     // Find AS keyword
-    let as_pos = upper_after.find(" AS ").ok_or_else(|| {
-        EngineError::InvalidArgument("CREATE FUNCTION requires AS clause".into())
-    })?;
+    let as_pos = upper_after
+        .find(" AS ")
+        .ok_or_else(|| EngineError::InvalidArgument("CREATE FUNCTION requires AS clause".into()))?;
 
     let return_type = after_params[returns_pos + 8..as_pos].trim().to_string();
 
@@ -3769,7 +4010,8 @@ fn parse_create_function(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     let upper_remaining = remaining.to_uppercase();
     let language = if upper_remaining.trim_start().starts_with("LANGUAGE ") {
         let lang_start = remaining.to_uppercase().find("LANGUAGE ").unwrap() + 9;
-        let lang_end = remaining[lang_start..].find(|c: char| c.is_whitespace() || c == ';')
+        let lang_end = remaining[lang_start..]
+            .find(|c: char| c.is_whitespace() || c == ';')
             .map(|i| i + lang_start)
             .unwrap_or(remaining.len());
         Some(remaining[lang_start..lang_end].trim().to_string())
@@ -3883,9 +4125,9 @@ fn extract_function_body_string(s: &str) -> Result<(String, &str), EngineError> 
         '"'
     } else if trimmed.starts_with("$$") {
         // Dollar-quoted string
-        let end = trimmed[2..].find("$$").ok_or_else(|| {
-            EngineError::InvalidArgument("Unterminated $$ string".into())
-        })?;
+        let end = trimmed[2..]
+            .find("$$")
+            .ok_or_else(|| EngineError::InvalidArgument("Unterminated $$ string".into()))?;
         let content = trimmed[2..2 + end].to_string();
         let remaining = &trimmed[2 + end + 2..];
         return Ok((content, remaining));
@@ -4002,9 +4244,15 @@ fn parse_refresh_materialized_view(sql: &str) -> Result<Option<DdlCommand>, Engi
 
     // Check for INCREMENTAL keyword
     let incremental = tokens.len() > 4
-        && tokens[4].trim_end_matches(';').eq_ignore_ascii_case("INCREMENTAL");
+        && tokens[4]
+            .trim_end_matches(';')
+            .eq_ignore_ascii_case("INCREMENTAL");
 
-    Ok(Some(DdlCommand::RefreshMaterializedView { database, name, incremental }))
+    Ok(Some(DdlCommand::RefreshMaterializedView {
+        database,
+        name,
+        incremental,
+    }))
 }
 
 /// Parse ALTER TABLE ... SET DEDUPLICATION or DROP DEDUPLICATION
@@ -4137,7 +4385,10 @@ fn parse_duration_to_seconds(s: &str) -> Result<u64, EngineError> {
         let num_str = s.trim_end_matches("weeks").trim_end_matches("week").trim();
         (num_str, "w")
     } else if s.ends_with("months") || s.ends_with("month") {
-        let num_str = s.trim_end_matches("months").trim_end_matches("month").trim();
+        let num_str = s
+            .trim_end_matches("months")
+            .trim_end_matches("month")
+            .trim();
         (num_str, "m")
     } else if s.ends_with("years") || s.ends_with("year") {
         let num_str = s.trim_end_matches("years").trim_end_matches("year").trim();
@@ -4156,7 +4407,7 @@ fn parse_duration_to_seconds(s: &str) -> Result<u64, EngineError> {
         (&s[..s.len() - 1], "s")
     } else {
         // Assume seconds if no unit
-        (&s[..], "s")
+        (s, "s")
     };
 
     let num: u64 = num_str.parse::<u64>().map_err(|_| {
@@ -4322,7 +4573,9 @@ fn parse_partition_command(sql: &str) -> Result<Option<DdlCommand>, EngineError>
     let time_column = if granularity_idx + 2 < tokens.len()
         && tokens[granularity_idx + 1].to_uppercase() == "ON"
     {
-        tokens[granularity_idx + 2].trim_end_matches(';').to_string()
+        tokens[granularity_idx + 2]
+            .trim_end_matches(';')
+            .to_string()
     } else {
         "event_time".to_string()
     };
@@ -4435,7 +4688,8 @@ fn parse_show_statistics(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     }
 
     // Handle both "SHOW STATISTICS" and "SHOW STATS"
-    let for_idx = if tokens[1].to_uppercase() == "STATISTICS" || tokens[1].to_uppercase() == "STATS" {
+    let for_idx = if tokens[1].to_uppercase() == "STATISTICS" || tokens[1].to_uppercase() == "STATS"
+    {
         if tokens[2].to_uppercase() == "FOR" {
             3
         } else {
@@ -4546,7 +4800,10 @@ fn try_parse_pubsub_command(sql: &str) -> Result<Option<PubSubCommand>, EngineEr
 
         // Check for payload (comma-separated)
         if let Some(comma_pos) = rest.find(',') {
-            let channel = rest[..comma_pos].trim().trim_matches('"').trim_matches('\'');
+            let channel = rest[..comma_pos]
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
             let payload = rest[comma_pos + 1..]
                 .trim()
                 .trim_matches('\'')
@@ -4882,10 +5139,7 @@ fn parse_grant(sql: &str) -> Result<AuthCommand, EngineError> {
         // Extract privilege before parentheses and columns within
         let priv_part = privileges_str[..paren_start].trim();
         let cols_part = &privileges_str[paren_start + 1..paren_end];
-        let cols: Vec<String> = cols_part
-            .split(',')
-            .map(|c| c.trim().to_string())
-            .collect();
+        let cols: Vec<String> = cols_part.split(',').map(|c| c.trim().to_string()).collect();
         (
             vec![priv_part.to_uppercase()],
             if cols.is_empty() { None } else { Some(cols) },
@@ -4972,10 +5226,7 @@ fn parse_revoke(sql: &str) -> Result<AuthCommand, EngineError> {
         // Extract privilege before parentheses and columns within
         let priv_part = privileges_str[..paren_start].trim();
         let cols_part = &privileges_str[paren_start + 1..paren_end];
-        let cols: Vec<String> = cols_part
-            .split(',')
-            .map(|c| c.trim().to_string())
-            .collect();
+        let cols: Vec<String> = cols_part.split(',').map(|c| c.trim().to_string()).collect();
         (
             vec![priv_part.to_uppercase()],
             if cols.is_empty() { None } else { Some(cols) },
@@ -5466,7 +5717,10 @@ pub enum PubSubCommand {
     /// UNLISTEN channel_name | UNLISTEN *
     Unlisten { channel: String },
     /// NOTIFY channel_name [, 'payload']
-    Notify { channel: String, payload: Option<String> },
+    Notify {
+        channel: String,
+        payload: Option<String>,
+    },
 }
 
 /// Convert SQL data types to boyodb schema types
@@ -5584,11 +5838,11 @@ fn parse_statement(stmt: &Statement) -> Result<SqlStatement, EngineError> {
                 name: name.value.clone(),
             }))
         }
-        Statement::ReleaseSavepoint { name } => {
-            Ok(SqlStatement::Transaction(TransactionCommand::ReleaseSavepoint {
+        Statement::ReleaseSavepoint { name } => Ok(SqlStatement::Transaction(
+            TransactionCommand::ReleaseSavepoint {
                 name: name.value.clone(),
-            }))
-        }
+            },
+        )),
         Statement::Prepare {
             name,
             data_types,
@@ -6013,12 +6267,15 @@ fn parse_query(query: &Query) -> Result<ParsedQuery, EngineError> {
                 .iter()
                 .map(|expr| match expr {
                     Expr::Identifier(ident) => Ok(ident.value.clone()),
-                    Expr::CompoundIdentifier(parts) => {
-                        Ok(parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join("."))
-                    }
-                    _ => Err(EngineError::InvalidArgument(
-                        format!("DISTINCT ON only supports column references, got: {:?}", expr)
-                    )),
+                    Expr::CompoundIdentifier(parts) => Ok(parts
+                        .iter()
+                        .map(|p| p.value.clone())
+                        .collect::<Vec<_>>()
+                        .join(".")),
+                    _ => Err(EngineError::InvalidArgument(format!(
+                        "DISTINCT ON only supports column references, got: {:?}",
+                        expr
+                    ))),
                 })
                 .collect();
             (false, Some(columns?))
@@ -6372,12 +6629,16 @@ fn parse_aggregate_filter_expr(expr: &Expr) -> Result<AggregateFilter, EngineErr
             // Extract column name from left side
             let column = match left.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                Expr::CompoundIdentifier(parts) => {
-                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                Expr::CompoundIdentifier(parts) => parts
+                    .iter()
+                    .map(|p| p.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(EngineError::NotImplemented(
+                        "FILTER clause left side must be a column reference".into(),
+                    ))
                 }
-                _ => return Err(EngineError::NotImplemented(
-                    "FILTER clause left side must be a column reference".into()
-                )),
             };
 
             // Parse operator
@@ -6388,87 +6649,135 @@ fn parse_aggregate_filter_expr(expr: &Expr) -> Result<AggregateFilter, EngineErr
                 BinaryOperator::GtEq => FilterOp::Ge,
                 BinaryOperator::Lt => FilterOp::Lt,
                 BinaryOperator::LtEq => FilterOp::Le,
-                _ => return Err(EngineError::NotImplemented(
-                    format!("unsupported operator in FILTER clause: {:?}", op)
-                )),
+                _ => {
+                    return Err(EngineError::NotImplemented(format!(
+                        "unsupported operator in FILTER clause: {:?}",
+                        op
+                    )))
+                }
             };
 
             // Parse value from right side
             let value = parse_filter_value(right)?;
 
-            Ok(AggregateFilter { column, op: filter_op, value })
+            Ok(AggregateFilter {
+                column,
+                op: filter_op,
+                value,
+            })
         }
         Expr::IsNull(inner) => {
             let column = match inner.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                Expr::CompoundIdentifier(parts) => {
-                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                Expr::CompoundIdentifier(parts) => parts
+                    .iter()
+                    .map(|p| p.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(EngineError::NotImplemented(
+                        "IS NULL must reference a column".into(),
+                    ))
                 }
-                _ => return Err(EngineError::NotImplemented(
-                    "IS NULL must reference a column".into()
-                )),
             };
-            Ok(AggregateFilter { column, op: FilterOp::IsNull, value: FilterValue::Null })
+            Ok(AggregateFilter {
+                column,
+                op: FilterOp::IsNull,
+                value: FilterValue::Null,
+            })
         }
         Expr::IsNotNull(inner) => {
             let column = match inner.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                Expr::CompoundIdentifier(parts) => {
-                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                Expr::CompoundIdentifier(parts) => parts
+                    .iter()
+                    .map(|p| p.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(EngineError::NotImplemented(
+                        "IS NOT NULL must reference a column".into(),
+                    ))
                 }
-                _ => return Err(EngineError::NotImplemented(
-                    "IS NOT NULL must reference a column".into()
-                )),
             };
-            Ok(AggregateFilter { column, op: FilterOp::IsNotNull, value: FilterValue::Null })
+            Ok(AggregateFilter {
+                column,
+                op: FilterOp::IsNotNull,
+                value: FilterValue::Null,
+            })
         }
-        Expr::Like { expr: inner, pattern, negated, .. } => {
+        Expr::Like {
+            expr: inner,
+            pattern,
+            negated,
+            ..
+        } => {
             if *negated {
                 return Err(EngineError::NotImplemented(
-                    "NOT LIKE not supported in FILTER clause".into()
+                    "NOT LIKE not supported in FILTER clause".into(),
                 ));
             }
             let column = match inner.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                Expr::CompoundIdentifier(parts) => {
-                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                Expr::CompoundIdentifier(parts) => parts
+                    .iter()
+                    .map(|p| p.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(EngineError::NotImplemented(
+                        "LIKE must reference a column".into(),
+                    ))
                 }
-                _ => return Err(EngineError::NotImplemented(
-                    "LIKE must reference a column".into()
-                )),
             };
             let value = parse_filter_value(pattern)?;
-            Ok(AggregateFilter { column, op: FilterOp::Like, value })
+            Ok(AggregateFilter {
+                column,
+                op: FilterOp::Like,
+                value,
+            })
         }
-        Expr::InList { expr: inner, list, negated } => {
+        Expr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
             if *negated {
                 return Err(EngineError::NotImplemented(
-                    "NOT IN not supported in FILTER clause".into()
+                    "NOT IN not supported in FILTER clause".into(),
                 ));
             }
             let column = match inner.as_ref() {
                 Expr::Identifier(ident) => ident.value.clone(),
-                Expr::CompoundIdentifier(parts) => {
-                    parts.iter().map(|p| p.value.clone()).collect::<Vec<_>>().join(".")
+                Expr::CompoundIdentifier(parts) => parts
+                    .iter()
+                    .map(|p| p.value.clone())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                _ => {
+                    return Err(EngineError::NotImplemented(
+                        "IN clause must reference a column".into(),
+                    ))
                 }
-                _ => return Err(EngineError::NotImplemented(
-                    "IN clause must reference a column".into()
-                )),
             };
-            let values: Result<Vec<FilterValue>, _> = list.iter()
-                .map(|e| parse_filter_value(&Box::new(e.clone())))
-                .collect();
-            Ok(AggregateFilter { column, op: FilterOp::In, value: FilterValue::List(values?) })
+            let values: Result<Vec<FilterValue>, _> =
+                list.iter().map(|e| parse_filter_value(e)).collect();
+            Ok(AggregateFilter {
+                column,
+                op: FilterOp::In,
+                value: FilterValue::List(values?),
+            })
         }
-        _ => Err(EngineError::NotImplemented(
-            format!("unsupported FILTER clause expression: {:?}", expr)
-        )),
+        _ => Err(EngineError::NotImplemented(format!(
+            "unsupported FILTER clause expression: {:?}",
+            expr
+        ))),
     }
 }
 
 /// Parse a value expression into FilterValue
-fn parse_filter_value(expr: &Box<Expr>) -> Result<FilterValue, EngineError> {
-    match expr.as_ref() {
+fn parse_filter_value(expr: &Expr) -> Result<FilterValue, EngineError> {
+    match expr {
         Expr::Value(Value::Number(n, _)) => {
             if n.contains('.') {
                 n.parse::<f64>()
@@ -6484,9 +6793,10 @@ fn parse_filter_value(expr: &Box<Expr>) -> Result<FilterValue, EngineError> {
         Expr::Value(Value::DoubleQuotedString(s)) => Ok(FilterValue::String(s.clone())),
         Expr::Value(Value::Boolean(b)) => Ok(FilterValue::Bool(*b)),
         Expr::Value(Value::Null) => Ok(FilterValue::Null),
-        _ => Err(EngineError::NotImplemented(
-            format!("unsupported value in FILTER clause: {:?}", expr)
-        )),
+        _ => Err(EngineError::NotImplemented(format!(
+            "unsupported value in FILTER clause: {:?}",
+            expr
+        ))),
     }
 }
 
@@ -6574,7 +6884,10 @@ fn parse_aggregate_function(
             }
             let col = extract_function_column(func)?;
             let percentile = extract_function_percentile(func, 1)?;
-            Some(AggKind::PercentileCont { column: col, percentile })
+            Some(AggKind::PercentileCont {
+                column: col,
+                percentile,
+            })
         }
         "percentile_disc" => {
             if func.args.len() < 2 {
@@ -6584,7 +6897,10 @@ fn parse_aggregate_function(
             }
             let col = extract_function_column(func)?;
             let percentile = extract_function_percentile(func, 1)?;
-            Some(AggKind::PercentileDisc { column: col, percentile })
+            Some(AggKind::PercentileDisc {
+                column: col,
+                percentile,
+            })
         }
         "array_agg" => {
             let col = extract_function_column(func)?;
@@ -6603,10 +6919,12 @@ fn parse_aggregate_function(
             };
             // Check for optional order_by column (3rd argument)
             if func.args.len() >= 3 {
-                let order_by = extract_function_string_arg(func, 2)
-                    .unwrap_or_else(|_| col.clone());
+                let order_by = extract_function_string_arg(func, 2).unwrap_or_else(|_| col.clone());
                 let order_desc = if func.args.len() >= 4 {
-                    matches!(extract_function_string_arg(func, 3).as_deref(), Ok("DESC" | "desc"))
+                    matches!(
+                        extract_function_string_arg(func, 3).as_deref(),
+                        Ok("DESC" | "desc")
+                    )
                 } else {
                     false
                 };
@@ -6658,7 +6976,10 @@ fn parse_aggregate_function(
             let col = extract_function_column(func)?;
             let order_by = extract_function_string_arg(func, 1)?;
             let order_desc = if func.args.len() >= 3 {
-                matches!(extract_function_string_arg(func, 2).as_deref(), Ok("DESC" | "desc"))
+                matches!(
+                    extract_function_string_arg(func, 2).as_deref(),
+                    Ok("DESC" | "desc")
+                )
             } else {
                 false
             };
@@ -6729,7 +7050,9 @@ fn extract_function_string_arg(
     arg_index: usize,
 ) -> Result<String, EngineError> {
     if func.args.len() <= arg_index {
-        return Err(EngineError::InvalidArgument("string argument required".into()));
+        return Err(EngineError::InvalidArgument(
+            "string argument required".into(),
+        ));
     }
 
     match &func.args[arg_index] {
@@ -7478,7 +7801,7 @@ fn parse_insert(
     returning: &Option<Vec<sqlparser::ast::SelectItem>>,
     on: &Option<sqlparser::ast::OnInsert>,
 ) -> Result<SqlStatement, EngineError> {
-    use sqlparser::ast::{OnInsert, OnConflictAction as SqlOnConflictAction, ConflictTarget};
+    use sqlparser::ast::{ConflictTarget, OnConflictAction as SqlOnConflictAction, OnInsert};
 
     let full_name = table_name.to_string();
     let (database, table) = parse_table_name(&full_name)?;
@@ -7531,7 +7854,11 @@ fn parse_insert(
             let parsed_assignments: Vec<(String, String)> = assignments
                 .iter()
                 .map(|a| {
-                    let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                    let col =
+                        a.id.iter()
+                            .map(|i| i.value.clone())
+                            .collect::<Vec<_>>()
+                            .join(".");
                     let value = a.value.to_string();
                     (col, value)
                 })
@@ -7564,7 +7891,11 @@ fn parse_insert(
                         .assignments
                         .iter()
                         .map(|a| {
-                            let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                            let col =
+                                a.id.iter()
+                                    .map(|i| i.value.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(".");
                             let value = a.value.to_string();
                             (col, value)
                         })
@@ -7715,9 +8046,10 @@ fn parse_update(
 ) -> Result<SqlStatement, EngineError> {
     // Extract table name and alias from the UPDATE clause
     let (table_name, table_alias) = match &table.relation {
-        TableFactor::Table { name, alias, .. } => {
-            (name.to_string(), alias.as_ref().map(|a| a.name.value.clone()))
-        }
+        TableFactor::Table { name, alias, .. } => (
+            name.to_string(),
+            alias.as_ref().map(|a| a.name.value.clone()),
+        ),
         _ => {
             return Err(EngineError::NotImplemented(
                 "UPDATE only supports simple table references".into(),
@@ -7796,9 +8128,10 @@ fn parse_delete(
         .ok_or_else(|| EngineError::InvalidArgument("DELETE requires FROM clause".into()))?;
 
     let (table_name, table_alias) = match &from_table.relation {
-        TableFactor::Table { name, alias, .. } => {
-            (name.to_string(), alias.as_ref().map(|a| a.name.value.clone()))
-        }
+        TableFactor::Table { name, alias, .. } => (
+            name.to_string(),
+            alias.as_ref().map(|a| a.name.value.clone()),
+        ),
         _ => {
             return Err(EngineError::NotImplemented(
                 "DELETE only supports simple table references".into(),
@@ -7850,7 +8183,7 @@ fn parse_delete(
 fn parse_merge(
     table: &TableFactor,
     source: &TableFactor,
-    on: &Box<Expr>,
+    on: &Expr,
     clauses: &[sqlparser::ast::MergeClause],
 ) -> Result<SqlStatement, EngineError> {
     use sqlparser::ast::MergeClause;
@@ -7892,7 +8225,11 @@ fn parse_merge(
             } => {
                 let mut assigns: Vec<(String, SqlValue)> = Vec::new();
                 for a in assignments {
-                    let col = a.id.iter().map(|i| i.value.clone()).collect::<Vec<_>>().join(".");
+                    let col =
+                        a.id.iter()
+                            .map(|i| i.value.clone())
+                            .collect::<Vec<_>>()
+                            .join(".");
                     let val = expr_to_sql_value(&a.value)?;
                     assigns.push((col, val));
                 }
@@ -8095,7 +8432,11 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
         }
 
         // PostgreSQL JSON operators: ->, ->>, #>, #>>
-        Expr::JsonAccess { left, operator, right } => {
+        Expr::JsonAccess {
+            left,
+            operator,
+            right,
+        } => {
             use sqlparser::ast::JsonOperator;
             let left_expr = parse_expr(left)?;
             match operator {
@@ -8140,12 +8481,10 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
                     }))
                 }
                 // @> : JSON contains
-                JsonOperator::AtArrow => {
-                    Ok(SelectExpr::Function(ScalarFunction::JsonContains {
-                        left: Box::new(left_expr),
-                        right: Box::new(parse_expr(right)?),
-                    }))
-                }
+                JsonOperator::AtArrow => Ok(SelectExpr::Function(ScalarFunction::JsonContains {
+                    left: Box::new(left_expr),
+                    right: Box::new(parse_expr(right)?),
+                })),
                 // <@ : JSON contained by
                 JsonOperator::ArrowAt => {
                     let right_expr = parse_expr(right)?;
@@ -9931,7 +10270,8 @@ mod tests {
     #[test]
     fn test_parse_create_index_using_fulltext() {
         // PostgreSQL syntax: USING comes BEFORE columns
-        let sql = "CREATE INDEX idx_phone_ft ON airtel_cdr.voice_cdr USING FULLTEXT (calling_number)";
+        let sql =
+            "CREATE INDEX idx_phone_ft ON airtel_cdr.voice_cdr USING FULLTEXT (calling_number)";
         let result = parse_sql(sql).unwrap();
         match result {
             SqlStatement::Ddl(DdlCommand::CreateIndex {
@@ -9959,9 +10299,7 @@ mod tests {
         let sql = "CREATE INDEX idx_name ON mydb.users USING BTREE (name)";
         let result = parse_sql(sql).unwrap();
         match result {
-            SqlStatement::Ddl(DdlCommand::CreateIndex {
-                index_type, ..
-            }) => {
+            SqlStatement::Ddl(DdlCommand::CreateIndex { index_type, .. }) => {
                 assert_eq!(index_type, IndexType::BTree);
             }
             _ => panic!("expected CreateIndex"),
@@ -9974,9 +10312,7 @@ mod tests {
         let sql = "CREATE INDEX idx_id ON mydb.users (id)";
         let result = parse_sql(sql).unwrap();
         match result {
-            SqlStatement::Ddl(DdlCommand::CreateIndex {
-                index_type, ..
-            }) => {
+            SqlStatement::Ddl(DdlCommand::CreateIndex { index_type, .. }) => {
                 assert_eq!(index_type, IndexType::BTree);
             }
             _ => panic!("expected CreateIndex"),

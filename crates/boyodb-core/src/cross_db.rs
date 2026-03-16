@@ -5,10 +5,10 @@
 //! - Database links
 //! - Federated query optimization
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Cross-database error types
@@ -95,7 +95,10 @@ impl TableReference {
             let link_name = &s[at_pos + 1..];
 
             let (schema, table) = if let Some(dot_pos) = table_part.rfind('.') {
-                (Some(table_part[..dot_pos].to_string()), table_part[dot_pos + 1..].to_string())
+                (
+                    Some(table_part[..dot_pos].to_string()),
+                    table_part[dot_pos + 1..].to_string(),
+                )
             } else {
                 (None, table_part.to_string())
             };
@@ -224,10 +227,7 @@ pub struct CrossDbContext {
 #[derive(Debug, Clone)]
 pub enum TableLocation {
     /// Local table in current database
-    Local {
-        schema: String,
-        table: String,
-    },
+    Local { schema: String, table: String },
     /// Table in another local database
     OtherDatabase {
         database: String,
@@ -351,9 +351,7 @@ impl DatabaseCatalog {
 
     /// Register a database
     pub fn register_database(&self, info: DatabaseInfo) {
-        self.databases
-            .write()
-            .insert(info.name.clone(), info);
+        self.databases.write().insert(info.name.clone(), info);
     }
 
     /// Get database info
@@ -741,10 +739,7 @@ impl CrossDbExecutor {
     }
 
     /// Execute remote query
-    pub fn execute_remote(
-        &self,
-        query: &RemoteQuery,
-    ) -> Result<RemoteResult, CrossDbError> {
+    pub fn execute_remote(&self, query: &RemoteQuery) -> Result<RemoteResult, CrossDbError> {
         let _conn = self.catalog.get_connection(&query.link_name)?;
 
         // Would execute query on remote database

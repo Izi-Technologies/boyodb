@@ -155,7 +155,11 @@ impl LockTarget {
     /// Create a row lock target from owned data (avoids allocation)
     #[inline]
     pub fn row_owned(database: String, table: String, row_key: Vec<u8>) -> Self {
-        LockTarget::Row { database, table, row_key }
+        LockTarget::Row {
+            database,
+            table,
+            row_key,
+        }
     }
 }
 
@@ -571,7 +575,8 @@ impl LockManager {
                     // Check for deadlock - use atomic check-and-add pattern
                     if self.config.deadlock_detection {
                         // Check cycle and add wait atomically by holding detector lock
-                        let would_deadlock = self.deadlock_detector.would_create_cycle(txn_id, &holders);
+                        let would_deadlock =
+                            self.deadlock_detector.would_create_cycle(txn_id, &holders);
                         if would_deadlock {
                             cleanup_waiter(self, &target);
                             return Err(EngineError::Internal(format!(

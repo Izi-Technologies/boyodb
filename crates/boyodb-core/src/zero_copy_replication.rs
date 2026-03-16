@@ -3,9 +3,9 @@
 //! ClickHouse-style zero-copy replication using object storage.
 //! Replicas share segment files through S3/MinIO instead of copying data.
 
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Object storage reference for a segment
@@ -205,7 +205,11 @@ impl ZeroCopyManager {
         });
 
         // Check if segment already exists
-        if entry.segments.iter().any(|s| s.segment_id == segment.segment_id) {
+        if entry
+            .segments
+            .iter()
+            .any(|s| s.segment_id == segment.segment_id)
+        {
             return Err(ZeroCopyError::SegmentExists(segment.segment_id));
         }
 
@@ -224,11 +228,17 @@ impl ZeroCopyManager {
     }
 
     /// Get object path for a segment
-    pub fn get_segment_path(&self, table: &str, partition: &str, segment_id: &str) -> Option<String> {
+    pub fn get_segment_path(
+        &self,
+        table: &str,
+        partition: &str,
+        segment_id: &str,
+    ) -> Option<String> {
         let metadata = self.metadata.read();
         let key = format!("{}/{}", table, partition);
 
-        metadata.get(&key)
+        metadata
+            .get(&key)
             .and_then(|m| m.segments.iter().find(|s| s.segment_id == segment_id))
             .map(|s| s.object_path.clone())
     }
@@ -245,10 +255,13 @@ impl ZeroCopyManager {
             let mut metadata = self.metadata.write();
             let key = format!("{}/{}", table, partition);
 
-            let entry = metadata.get_mut(&key)
+            let entry = metadata
+                .get_mut(&key)
                 .ok_or(ZeroCopyError::TableNotFound(table.into()))?;
 
-            let segment = entry.segments.iter_mut()
+            let segment = entry
+                .segments
+                .iter_mut()
                 .find(|s| s.segment_id == segment_id)
                 .ok_or(ZeroCopyError::SegmentNotFound(segment_id.into()))?;
 
@@ -279,18 +292,25 @@ impl ZeroCopyManager {
         let local_path = format!("/tmp/boyodb-cache/{}/{}", table, segment_id);
 
         if self.config.enable_local_cache {
-            cache.insert(segment_id.into(), CacheEntry {
-                segment_id: segment_id.into(),
-                local_path: local_path.clone(),
-                size_bytes: 0, // Would get from S3
-                last_access: Instant::now(),
-                access_count: 1,
-            });
+            cache.insert(
+                segment_id.into(),
+                CacheEntry {
+                    segment_id: segment_id.into(),
+                    local_path: local_path.clone(),
+                    size_bytes: 0, // Would get from S3
+                    last_access: Instant::now(),
+                    access_count: 1,
+                },
+            );
         }
 
         Ok(SegmentHandle {
             segment_id: segment_id.into(),
-            path: if self.config.enable_local_cache { local_path } else { path },
+            path: if self.config.enable_local_cache {
+                local_path
+            } else {
+                path
+            },
             is_cached: self.config.enable_local_cache,
         })
     }
@@ -305,10 +325,13 @@ impl ZeroCopyManager {
         let mut metadata = self.metadata.write();
         let key = format!("{}/{}", table, partition);
 
-        let entry = metadata.get_mut(&key)
+        let entry = metadata
+            .get_mut(&key)
             .ok_or(ZeroCopyError::TableNotFound(table.into()))?;
 
-        let segment = entry.segments.iter_mut()
+        let segment = entry
+            .segments
+            .iter_mut()
             .find(|s| s.segment_id == segment_id)
             .ok_or(ZeroCopyError::SegmentNotFound(segment_id.into()))?;
 
@@ -420,11 +443,14 @@ impl ZeroCopyManager {
             }
         }
 
-        locks.insert(key, LockEntry {
-            holder: self.replica_id.clone(),
-            acquired_at: Instant::now(),
-            lock_type: LockType::Exclusive,
-        });
+        locks.insert(
+            key,
+            LockEntry {
+                holder: self.replica_id.clone(),
+                acquired_at: Instant::now(),
+                lock_type: LockType::Exclusive,
+            },
+        );
 
         Ok(())
     }
@@ -459,7 +485,8 @@ impl ZeroCopyManager {
     /// Get total shared bytes
     pub fn total_shared_bytes(&self) -> u64 {
         let metadata = self.metadata.read();
-        metadata.values()
+        metadata
+            .values()
             .flat_map(|m| m.segments.iter())
             .map(|s| s.size_bytes)
             .sum()
@@ -534,10 +561,14 @@ impl std::fmt::Display for ZeroCopyError {
             Self::SegmentExists(s) => write!(f, "Segment already exists: {}", s),
             Self::LockConflict(h) => write!(f, "Lock held by: {}", h),
             Self::S3Error(e) => write!(f, "S3 error: {}", e),
-            Self::ChecksumMismatch { expected, actual } =>
-                write!(f, "Checksum mismatch: expected {}, got {}", expected, actual),
-            Self::VersionConflict { expected, actual } =>
-                write!(f, "Version conflict: expected {}, got {}", expected, actual),
+            Self::ChecksumMismatch { expected, actual } => write!(
+                f,
+                "Checksum mismatch: expected {}, got {}",
+                expected, actual
+            ),
+            Self::VersionConflict { expected, actual } => {
+                write!(f, "Version conflict: expected {}, got {}", expected, actual)
+            }
         }
     }
 }
@@ -566,7 +597,9 @@ mod tests {
             tier: StorageTier::Cold,
         };
 
-        manager.register_segment("test", "2024-01", segment).unwrap();
+        manager
+            .register_segment("test", "2024-01", segment)
+            .unwrap();
 
         let path = manager.get_segment_path("test", "2024-01", "seg-001");
         assert!(path.is_some());
@@ -587,10 +620,14 @@ mod tests {
             tier: StorageTier::Cold,
         };
 
-        manager.register_segment("test", "2024-01", segment).unwrap();
+        manager
+            .register_segment("test", "2024-01", segment)
+            .unwrap();
 
         // Acquire
-        let handle = manager.acquire_segment("test", "2024-01", "seg-001").unwrap();
+        let handle = manager
+            .acquire_segment("test", "2024-01", "seg-001")
+            .unwrap();
         assert_eq!(handle.segment_id, "seg-001");
 
         // Check ref count
@@ -598,7 +635,9 @@ mod tests {
         assert_eq!(meta.segments[0].ref_count, 1);
 
         // Release
-        manager.release_segment("test", "2024-01", "seg-001").unwrap();
+        manager
+            .release_segment("test", "2024-01", "seg-001")
+            .unwrap();
 
         let meta = manager.get_metadata("test", "2024-01").unwrap();
         assert_eq!(meta.segments[0].ref_count, 0);
@@ -606,10 +645,7 @@ mod tests {
 
     #[test]
     fn test_write_lock() {
-        let manager = ZeroCopyManager::new(
-            ZeroCopyConfig::default(),
-            "replica-1".into(),
-        );
+        let manager = ZeroCopyManager::new(ZeroCopyConfig::default(), "replica-1".into());
 
         // Acquire lock
         manager.acquire_write_lock("test", "2024-01").unwrap();
@@ -636,7 +672,9 @@ mod tests {
             tier: StorageTier::Cold,
         };
 
-        manager.register_segment("test", "2024-01", segment).unwrap();
+        manager
+            .register_segment("test", "2024-01", segment)
+            .unwrap();
 
         let stats = manager.stats();
         assert_eq!(stats.segments_referenced, 1);
@@ -663,7 +701,9 @@ mod tests {
             tier: StorageTier::Cold,
         };
 
-        manager.register_segment("test", "2024-01", segment).unwrap();
+        manager
+            .register_segment("test", "2024-01", segment)
+            .unwrap();
 
         let result = manager.run_gc();
         assert_eq!(result.segments_collected, 1);

@@ -3,11 +3,11 @@
 //! Provides range, list, and hash partitioning strategies for large tables.
 //! Supports automatic partition management, pruning, and maintenance.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Partitioning error types
@@ -379,15 +379,9 @@ impl PartitionManager {
         self.stats.write().routing_cache_misses += 1;
 
         match &*config {
-            PartitionStrategy::Range(range_config) => {
-                self.route_range(key_values, range_config)
-            }
-            PartitionStrategy::List(list_config) => {
-                self.route_list(key_values, list_config)
-            }
-            PartitionStrategy::Hash(hash_config) => {
-                self.route_hash(key_values, hash_config)
-            }
+            PartitionStrategy::Range(range_config) => self.route_range(key_values, range_config),
+            PartitionStrategy::List(list_config) => self.route_list(key_values, list_config),
+            PartitionStrategy::Hash(hash_config) => self.route_hash(key_values, hash_config),
             PartitionStrategy::Composite(composite_config) => {
                 self.route_composite(key_values, composite_config)
             }
@@ -406,9 +400,7 @@ impl PartitionManager {
                 let remainder = (hash % hash_config.modulus as u64) as u32;
                 cache.hash_map.get(&remainder).cloned()
             }
-            PartitionStrategy::List(_) => {
-                cache.list_map.get(key_values).cloned()
-            }
+            PartitionStrategy::List(_) => cache.list_map.get(key_values).cloned(),
             PartitionStrategy::Range(_) => {
                 // Find the partition whose upper bound is > key_values
                 for (bound, partition) in cache.range_boundaries.iter() {
@@ -892,7 +884,9 @@ impl PartitionManager {
         all_partitions: &[String],
     ) -> PruningResult {
         // Prune primary partitions first, then subpartitions
-        let primary_result = match &*config.primary {
+        // For simplicity, return primary result
+        // Full implementation would also prune subpartitions
+        match &*config.primary {
             PartitionStrategy::Range(r) => self.prune_range(context, r, all_partitions),
             PartitionStrategy::List(l) => self.prune_list(context, l, all_partitions),
             PartitionStrategy::Hash(h) => self.prune_hash(context, h, all_partitions),
@@ -902,11 +896,7 @@ impl PartitionManager {
                 pruning_applied: false,
                 selectivity: 1.0,
             },
-        };
-
-        // For simplicity, return primary result
-        // Full implementation would also prune subpartitions
-        primary_result
+        }
     }
 
     /// Add a new partition
@@ -1102,7 +1092,9 @@ impl PartitionManager {
             PartitionStrategy::Range(range_config) => {
                 for range in &range_config.ranges {
                     if let Some(upper) = &range.upper_bound {
-                        cache.range_boundaries.insert(upper.clone(), range.name.clone());
+                        cache
+                            .range_boundaries
+                            .insert(upper.clone(), range.name.clone());
                     }
                 }
             }
@@ -1115,7 +1107,9 @@ impl PartitionManager {
             }
             PartitionStrategy::Hash(hash_config) => {
                 for partition in &hash_config.partitions {
-                    cache.hash_map.insert(partition.remainder, partition.name.clone());
+                    cache
+                        .hash_map
+                        .insert(partition.remainder, partition.name.clone());
                 }
             }
             _ => {}
@@ -1243,7 +1237,11 @@ impl PartitionMaintenance {
         actions
     }
 
-    fn check_pre_create(&self, table: &str, _manager: &PartitionManager) -> Option<MaintenanceAction> {
+    fn check_pre_create(
+        &self,
+        table: &str,
+        _manager: &PartitionManager,
+    ) -> Option<MaintenanceAction> {
         // Implementation would check interval partitions and pre-create
         Some(MaintenanceAction::PreCreate {
             table: table.to_string(),
@@ -1251,7 +1249,11 @@ impl PartitionMaintenance {
         })
     }
 
-    fn check_auto_drop(&self, table: &str, manager: &PartitionManager) -> Option<MaintenanceAction> {
+    fn check_auto_drop(
+        &self,
+        table: &str,
+        manager: &PartitionManager,
+    ) -> Option<MaintenanceAction> {
         let retention = self.config.retention?;
         let now = SystemTime::now();
         let mut to_drop = Vec::new();
@@ -1374,13 +1376,19 @@ mod tests {
 
         let manager = PartitionManager::new("test_table".to_string(), config);
 
-        let partition = manager.route_row(&[PartitionValue::String("US".to_string())]).unwrap();
+        let partition = manager
+            .route_row(&[PartitionValue::String("US".to_string())])
+            .unwrap();
         assert_eq!(partition, "p_americas");
 
-        let partition = manager.route_row(&[PartitionValue::String("DE".to_string())]).unwrap();
+        let partition = manager
+            .route_row(&[PartitionValue::String("DE".to_string())])
+            .unwrap();
         assert_eq!(partition, "p_europe");
 
-        let partition = manager.route_row(&[PartitionValue::String("JP".to_string())]).unwrap();
+        let partition = manager
+            .route_row(&[PartitionValue::String("JP".to_string())])
+            .unwrap();
         assert_eq!(partition, "p_other");
     }
 
@@ -1390,10 +1398,26 @@ mod tests {
             key_columns: vec!["user_id".to_string()],
             modulus: 4,
             partitions: vec![
-                HashPartition { name: "p0".to_string(), remainder: 0, tablespace: None },
-                HashPartition { name: "p1".to_string(), remainder: 1, tablespace: None },
-                HashPartition { name: "p2".to_string(), remainder: 2, tablespace: None },
-                HashPartition { name: "p3".to_string(), remainder: 3, tablespace: None },
+                HashPartition {
+                    name: "p0".to_string(),
+                    remainder: 0,
+                    tablespace: None,
+                },
+                HashPartition {
+                    name: "p1".to_string(),
+                    remainder: 1,
+                    tablespace: None,
+                },
+                HashPartition {
+                    name: "p2".to_string(),
+                    remainder: 2,
+                    tablespace: None,
+                },
+                HashPartition {
+                    name: "p3".to_string(),
+                    remainder: 3,
+                    tablespace: None,
+                },
             ],
         });
 
@@ -1435,41 +1459,45 @@ mod tests {
         let manager = PartitionManager::new("test_table".to_string(), config);
 
         // Add partition metadata
-        manager.add_partition(PartitionMetadata {
-            name: "p2022".to_string(),
-            table_name: "test_table".to_string(),
-            strategy: PartitionStrategy::Range(RangePartitionConfig {
-                key_columns: vec![],
-                ranges: vec![],
-                default_partition: None,
-                interval: None,
-            }),
-            parent_partition: None,
-            created_at: SystemTime::now(),
-            row_count: 1000,
-            size_bytes: 10000,
-            last_analyzed: None,
-            is_attached: true,
-            tablespace: None,
-        }).unwrap();
+        manager
+            .add_partition(PartitionMetadata {
+                name: "p2022".to_string(),
+                table_name: "test_table".to_string(),
+                strategy: PartitionStrategy::Range(RangePartitionConfig {
+                    key_columns: vec![],
+                    ranges: vec![],
+                    default_partition: None,
+                    interval: None,
+                }),
+                parent_partition: None,
+                created_at: SystemTime::now(),
+                row_count: 1000,
+                size_bytes: 10000,
+                last_analyzed: None,
+                is_attached: true,
+                tablespace: None,
+            })
+            .unwrap();
 
-        manager.add_partition(PartitionMetadata {
-            name: "p2023".to_string(),
-            table_name: "test_table".to_string(),
-            strategy: PartitionStrategy::Range(RangePartitionConfig {
-                key_columns: vec![],
-                ranges: vec![],
-                default_partition: None,
-                interval: None,
-            }),
-            parent_partition: None,
-            created_at: SystemTime::now(),
-            row_count: 2000,
-            size_bytes: 20000,
-            last_analyzed: None,
-            is_attached: true,
-            tablespace: None,
-        }).unwrap();
+        manager
+            .add_partition(PartitionMetadata {
+                name: "p2023".to_string(),
+                table_name: "test_table".to_string(),
+                strategy: PartitionStrategy::Range(RangePartitionConfig {
+                    key_columns: vec![],
+                    ranges: vec![],
+                    default_partition: None,
+                    interval: None,
+                }),
+                parent_partition: None,
+                created_at: SystemTime::now(),
+                row_count: 2000,
+                size_bytes: 20000,
+                last_analyzed: None,
+                is_attached: true,
+                tablespace: None,
+            })
+            .unwrap();
 
         // Prune with equals predicate
         let context = PruningContext {

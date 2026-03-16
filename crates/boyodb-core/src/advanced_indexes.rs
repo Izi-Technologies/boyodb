@@ -23,10 +23,10 @@
 //! CREATE INDEX idx_events_time ON events USING BRIN (created_at);
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::SystemTime;
 
 // ============================================================================
@@ -299,7 +299,9 @@ impl IndexPredicate {
                     CompareOp::Le => col_value.map(|v| v <= value).unwrap_or(false),
                     CompareOp::Gt => col_value.map(|v| v > value).unwrap_or(false),
                     CompareOp::Ge => col_value.map(|v| v >= value).unwrap_or(false),
-                    CompareOp::IsNull => col_value.is_none() || col_value == Some(&IndexValue::Null),
+                    CompareOp::IsNull => {
+                        col_value.is_none() || col_value == Some(&IndexValue::Null)
+                    }
                     CompareOp::IsNotNull => {
                         col_value.is_some() && col_value != Some(&IndexValue::Null)
                     }
@@ -560,7 +562,12 @@ impl CoveringIndex {
             .iter()
             .flat_map(|c| c.referenced_columns())
             .collect();
-        let include_cols: HashSet<_> = self.def.include_columns.iter().map(|s| s.as_str()).collect();
+        let include_cols: HashSet<_> = self
+            .def
+            .include_columns
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
 
         columns
             .iter()
@@ -1108,14 +1115,26 @@ mod tests {
 
         // Active user - should be indexed
         let mut row1 = HashMap::new();
-        row1.insert("email".to_string(), IndexValue::String("a@b.com".to_string()));
-        row1.insert("status".to_string(), IndexValue::String("active".to_string()));
+        row1.insert(
+            "email".to_string(),
+            IndexValue::String("a@b.com".to_string()),
+        );
+        row1.insert(
+            "status".to_string(),
+            IndexValue::String("active".to_string()),
+        );
         assert!(index.should_index(&row1));
 
         // Inactive user - should not be indexed
         let mut row2 = HashMap::new();
-        row2.insert("email".to_string(), IndexValue::String("c@d.com".to_string()));
-        row2.insert("status".to_string(), IndexValue::String("inactive".to_string()));
+        row2.insert(
+            "email".to_string(),
+            IndexValue::String("c@d.com".to_string()),
+        );
+        row2.insert(
+            "status".to_string(),
+            IndexValue::String("inactive".to_string()),
+        );
         assert!(!index.should_index(&row2));
     }
 
@@ -1199,11 +1218,17 @@ mod tests {
         let pred = IndexPredicate::eq("status", IndexValue::String("active".to_string()));
 
         let mut row1 = HashMap::new();
-        row1.insert("status".to_string(), IndexValue::String("active".to_string()));
+        row1.insert(
+            "status".to_string(),
+            IndexValue::String("active".to_string()),
+        );
         assert!(pred.matches(&row1));
 
         let mut row2 = HashMap::new();
-        row2.insert("status".to_string(), IndexValue::String("inactive".to_string()));
+        row2.insert(
+            "status".to_string(),
+            IndexValue::String("inactive".to_string()),
+        );
         assert!(!pred.matches(&row2));
     }
 
@@ -1213,8 +1238,14 @@ mod tests {
             .and(IndexPredicate::is_not_null("email"));
 
         let mut row = HashMap::new();
-        row.insert("status".to_string(), IndexValue::String("active".to_string()));
-        row.insert("email".to_string(), IndexValue::String("a@b.com".to_string()));
+        row.insert(
+            "status".to_string(),
+            IndexValue::String("active".to_string()),
+        );
+        row.insert(
+            "email".to_string(),
+            IndexValue::String("a@b.com".to_string()),
+        );
         assert!(pred.matches(&row));
     }
 

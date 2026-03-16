@@ -3,10 +3,10 @@
 //! PostgreSQL-compatible exclusion constraints that prevent overlapping data.
 //! Useful for scheduling, resource allocation, and temporal data.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// Exclusion constraint definition
 #[derive(Debug, Clone)]
@@ -227,8 +227,7 @@ impl RangeValue {
         };
 
         // Adjacent if one's upper equals other's lower
-        u1 == l2 && !self.upper_inclusive && other.lower_inclusive
-            || u1 == l2 && self.upper_inclusive && !other.lower_inclusive
+        u1 == l2 && (self.upper_inclusive != other.lower_inclusive)
     }
 }
 
@@ -246,30 +245,22 @@ impl ConstraintValue {
     /// Check if values conflict using the given operator
     pub fn conflicts_with(&self, other: &ConstraintValue, op: ExclusionOperator) -> bool {
         match (self, other) {
-            (ConstraintValue::Range(r1), ConstraintValue::Range(r2)) => {
-                match op {
-                    ExclusionOperator::Overlaps => r1.overlaps(r2),
-                    ExclusionOperator::Contains => r1.contains(r2),
-                    ExclusionOperator::ContainedBy => r2.contains(r1),
-                    ExclusionOperator::Adjacent => r1.adjacent(r2) || r2.adjacent(r1),
-                    ExclusionOperator::Equal => {
-                        r1.lower == r2.lower && r1.upper == r2.upper
-                    }
-                    _ => false,
-                }
-            }
-            (ConstraintValue::Integer(i1), ConstraintValue::Integer(i2)) => {
-                match op {
-                    ExclusionOperator::Equal => i1 == i2,
-                    _ => false,
-                }
-            }
-            (ConstraintValue::Text(t1), ConstraintValue::Text(t2)) => {
-                match op {
-                    ExclusionOperator::Equal => t1 == t2,
-                    _ => false,
-                }
-            }
+            (ConstraintValue::Range(r1), ConstraintValue::Range(r2)) => match op {
+                ExclusionOperator::Overlaps => r1.overlaps(r2),
+                ExclusionOperator::Contains => r1.contains(r2),
+                ExclusionOperator::ContainedBy => r2.contains(r1),
+                ExclusionOperator::Adjacent => r1.adjacent(r2) || r2.adjacent(r1),
+                ExclusionOperator::Equal => r1.lower == r2.lower && r1.upper == r2.upper,
+                _ => false,
+            },
+            (ConstraintValue::Integer(i1), ConstraintValue::Integer(i2)) => match op {
+                ExclusionOperator::Equal => i1 == i2,
+                _ => false,
+            },
+            (ConstraintValue::Text(t1), ConstraintValue::Text(t2)) => match op {
+                ExclusionOperator::Equal => t1 == t2,
+                _ => false,
+            },
             (ConstraintValue::Point(x1, y1), ConstraintValue::Point(x2, y2)) => {
                 match op {
                     ExclusionOperator::Equal => {
@@ -378,7 +369,8 @@ impl ExclusionConstraintManager {
 
     /// Get constraints for a table
     pub fn get_table_constraints(&self, table: &str) -> Vec<ExclusionConstraint> {
-        self.constraints.read()
+        self.constraints
+            .read()
             .values()
             .filter(|c| c.table == table)
             .cloned()
@@ -399,8 +391,15 @@ impl ExclusionConstraintManager {
 
         for constraint in constraints {
             // Extract values for this constraint
-            let row_values: Vec<ConstraintValue> = constraint.elements.iter()
-                .map(|e| values.get(&e.column).cloned().unwrap_or(ConstraintValue::Null))
+            let row_values: Vec<ConstraintValue> = constraint
+                .elements
+                .iter()
+                .map(|e| {
+                    values
+                        .get(&e.column)
+                        .cloned()
+                        .unwrap_or(ConstraintValue::Null)
+                })
                 .collect();
 
             // Check against existing entries
@@ -425,18 +424,20 @@ impl ExclusionConstraintManager {
     }
 
     /// Add row to exclusion indexes
-    pub fn index_row(
-        &self,
-        table: &str,
-        row_id: RowId,
-        values: &HashMap<String, ConstraintValue>,
-    ) {
+    pub fn index_row(&self, table: &str, row_id: RowId, values: &HashMap<String, ConstraintValue>) {
         let constraints = self.get_table_constraints(table);
         let mut indexes = self.indexes.write();
 
         for constraint in constraints {
-            let row_values: Vec<ConstraintValue> = constraint.elements.iter()
-                .map(|e| values.get(&e.column).cloned().unwrap_or(ConstraintValue::Null))
+            let row_values: Vec<ConstraintValue> = constraint
+                .elements
+                .iter()
+                .map(|e| {
+                    values
+                        .get(&e.column)
+                        .cloned()
+                        .unwrap_or(ConstraintValue::Null)
+                })
                 .collect();
 
             if let Some(index) = indexes.get_mut(&constraint.name) {
@@ -468,21 +469,21 @@ impl ExclusionConstraintManager {
         existing_values: &[ConstraintValue],
     ) -> bool {
         // All element comparisons must be true for a conflict
-        constraint.elements.iter()
-            .enumerate()
-            .all(|(i, element)| {
-                if i >= new_values.len() || i >= existing_values.len() {
-                    return false;
-                }
-                new_values[i].conflicts_with(&existing_values[i], element.operator)
-            })
+        constraint.elements.iter().enumerate().all(|(i, element)| {
+            if i >= new_values.len() || i >= existing_values.len() {
+                return false;
+            }
+            new_values[i].conflicts_with(&existing_values[i], element.operator)
+        })
     }
 
     /// Generate CREATE statement
     pub fn to_ddl(&self, name: &str) -> Option<String> {
         let constraint = self.get_constraint(name)?;
 
-        let elements: Vec<String> = constraint.elements.iter()
+        let elements: Vec<String> = constraint
+            .elements
+            .iter()
             .map(|e| format!("{} WITH {}", e.column, e.operator.as_str()))
             .collect();
 
@@ -635,19 +636,29 @@ mod tests {
         let row1 = RowId { page: 0, slot: 0 };
         let mut values1 = HashMap::new();
         values1.insert("room_id".into(), ConstraintValue::Integer(1));
-        values1.insert("during".into(), ConstraintValue::Range(RangeValue::new(100, 200)));
+        values1.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(100, 200)),
+        );
 
-        manager.check_insert("room_bookings", &row1, &values1).unwrap();
+        manager
+            .check_insert("room_bookings", &row1, &values1)
+            .unwrap();
         manager.index_row("room_bookings", row1, &values1);
 
         // Insert non-overlapping booking
         let row2 = RowId { page: 0, slot: 1 };
         let mut values2 = HashMap::new();
         values2.insert("room_id".into(), ConstraintValue::Integer(1));
-        values2.insert("during".into(), ConstraintValue::Range(RangeValue::new(200, 300)));
+        values2.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(200, 300)),
+        );
 
         // Should succeed (no overlap)
-        manager.check_insert("room_bookings", &row2, &values2).unwrap();
+        manager
+            .check_insert("room_bookings", &row2, &values2)
+            .unwrap();
     }
 
     #[test]
@@ -658,16 +669,24 @@ mod tests {
         let row1 = RowId { page: 0, slot: 0 };
         let mut values1 = HashMap::new();
         values1.insert("room_id".into(), ConstraintValue::Integer(1));
-        values1.insert("during".into(), ConstraintValue::Range(RangeValue::new(100, 200)));
+        values1.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(100, 200)),
+        );
 
-        manager.check_insert("room_bookings", &row1, &values1).unwrap();
+        manager
+            .check_insert("room_bookings", &row1, &values1)
+            .unwrap();
         manager.index_row("room_bookings", row1, &values1);
 
         // Insert overlapping booking
         let row2 = RowId { page: 0, slot: 1 };
         let mut values2 = HashMap::new();
         values2.insert("room_id".into(), ConstraintValue::Integer(1));
-        values2.insert("during".into(), ConstraintValue::Range(RangeValue::new(150, 250)));
+        values2.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(150, 250)),
+        );
 
         // Should fail (overlaps)
         let result = manager.check_insert("room_bookings", &row2, &values2);
@@ -682,19 +701,29 @@ mod tests {
         let row1 = RowId { page: 0, slot: 0 };
         let mut values1 = HashMap::new();
         values1.insert("room_id".into(), ConstraintValue::Integer(1));
-        values1.insert("during".into(), ConstraintValue::Range(RangeValue::new(100, 200)));
+        values1.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(100, 200)),
+        );
 
-        manager.check_insert("room_bookings", &row1, &values1).unwrap();
+        manager
+            .check_insert("room_bookings", &row1, &values1)
+            .unwrap();
         manager.index_row("room_bookings", row1, &values1);
 
         // Insert overlapping time but different room
         let row2 = RowId { page: 0, slot: 1 };
         let mut values2 = HashMap::new();
         values2.insert("room_id".into(), ConstraintValue::Integer(2)); // Different room
-        values2.insert("during".into(), ConstraintValue::Range(RangeValue::new(150, 250)));
+        values2.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(150, 250)),
+        );
 
         // Should succeed (different room)
-        manager.check_insert("room_bookings", &row2, &values2).unwrap();
+        manager
+            .check_insert("room_bookings", &row2, &values2)
+            .unwrap();
     }
 
     #[test]
@@ -714,7 +743,10 @@ mod tests {
         let row1 = RowId { page: 0, slot: 0 };
         let mut values1 = HashMap::new();
         values1.insert("room_id".into(), ConstraintValue::Integer(1));
-        values1.insert("during".into(), ConstraintValue::Range(RangeValue::new(100, 200)));
+        values1.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(100, 200)),
+        );
 
         manager.index_row("room_bookings", row1.clone(), &values1);
 
@@ -725,8 +757,13 @@ mod tests {
         let row2 = RowId { page: 0, slot: 1 };
         let mut values2 = HashMap::new();
         values2.insert("room_id".into(), ConstraintValue::Integer(1));
-        values2.insert("during".into(), ConstraintValue::Range(RangeValue::new(150, 250)));
+        values2.insert(
+            "during".into(),
+            ConstraintValue::Range(RangeValue::new(150, 250)),
+        );
 
-        manager.check_insert("room_bookings", &row2, &values2).unwrap();
+        manager
+            .check_insert("room_bookings", &row2, &values2)
+            .unwrap();
     }
 }

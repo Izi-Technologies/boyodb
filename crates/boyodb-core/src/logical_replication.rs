@@ -3,10 +3,10 @@
 //! Provides PostgreSQL-style CREATE PUBLICATION / CREATE SUBSCRIPTION
 //! for selective table replication with conflict resolution.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Logical replication error types
@@ -720,11 +720,7 @@ impl LogicalReplicationManager {
 
     /// List all subscriptions
     pub fn list_subscriptions(&self) -> Vec<Subscription> {
-        self.subscriptions
-            .read()
-            .values()
-            .cloned()
-            .collect()
+        self.subscriptions.read().values().cloned().collect()
     }
 
     // ========================================================================
@@ -887,7 +883,11 @@ impl LogicalReplicationManager {
     // ========================================================================
 
     /// Send change to slot
-    pub fn send_change(&self, slot_name: &str, change: ChangeEvent) -> Result<(), ReplicationError> {
+    pub fn send_change(
+        &self,
+        slot_name: &str,
+        change: ChangeEvent,
+    ) -> Result<(), ReplicationError> {
         let mut pending = self.pending_changes.write();
 
         let queue = pending
@@ -1073,7 +1073,10 @@ impl LogicalReplicationManager {
             confirmed_flush_lsn: slot.confirmed_flush_lsn,
             active: slot.active,
             pending_changes: pending_count,
-            lag_bytes: slot.restart_lsn.0.saturating_sub(slot.confirmed_flush_lsn.0),
+            lag_bytes: slot
+                .restart_lsn
+                .0
+                .saturating_sub(slot.confirmed_flush_lsn.0),
         })
     }
 }
@@ -1172,7 +1175,8 @@ impl SubscriptionWorker {
 
         // Advance slot
         if let Some(last) = changes.last() {
-            self.manager.advance_slot(&subscription.slot_name, last.lsn)?;
+            self.manager
+                .advance_slot(&subscription.slot_name, last.lsn)?;
         }
 
         Ok(applied)
@@ -1265,7 +1269,14 @@ mod tests {
         let manager = LogicalReplicationManager::new(ReplicationConfig::default());
 
         let lsn = manager
-            .create_replication_slot("test_slot", "pgoutput", SlotType::Logical, "testdb", false, false)
+            .create_replication_slot(
+                "test_slot",
+                "pgoutput",
+                SlotType::Logical,
+                "testdb",
+                false,
+                false,
+            )
             .unwrap();
 
         assert_eq!(lsn, LSN::zero());
@@ -1281,7 +1292,14 @@ mod tests {
         let manager = LogicalReplicationManager::new(ReplicationConfig::default());
 
         manager
-            .create_replication_slot("stream_slot", "pgoutput", SlotType::Logical, "testdb", false, false)
+            .create_replication_slot(
+                "stream_slot",
+                "pgoutput",
+                SlotType::Logical,
+                "testdb",
+                false,
+                false,
+            )
             .unwrap();
 
         // Send some changes

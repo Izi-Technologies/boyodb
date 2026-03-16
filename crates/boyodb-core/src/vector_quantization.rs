@@ -116,7 +116,9 @@ impl ScalarQuantizer {
     /// Train the quantizer on sample vectors
     pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), QuantizationError> {
         if vectors.is_empty() {
-            return Err(QuantizationError::TrainingFailed("empty training set".into()));
+            return Err(QuantizationError::TrainingFailed(
+                "empty training set".into(),
+            ));
         }
 
         let dims = self.config.dimensions;
@@ -203,7 +205,11 @@ impl ScalarQuantizer {
     }
 
     /// Compute distance between encoded vector and query
-    pub fn asymmetric_distance(&self, codes: &[u8], query: &[f32]) -> Result<f32, QuantizationError> {
+    pub fn asymmetric_distance(
+        &self,
+        codes: &[u8],
+        query: &[f32],
+    ) -> Result<f32, QuantizationError> {
         if !self.trained {
             return Err(QuantizationError::NotTrained);
         }
@@ -212,17 +218,15 @@ impl ScalarQuantizer {
 
         match self.config.metric {
             DistanceMetric::L2 => {
-                let dist: f32 = decoded.iter()
+                let dist: f32 = decoded
+                    .iter()
                     .zip(query.iter())
                     .map(|(a, b)| (a - b).powi(2))
                     .sum();
                 Ok(dist)
             }
             DistanceMetric::InnerProduct => {
-                let ip: f32 = decoded.iter()
-                    .zip(query.iter())
-                    .map(|(a, b)| a * b)
-                    .sum();
+                let ip: f32 = decoded.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
                 Ok(-ip) // Negate so lower is better
             }
             DistanceMetric::Cosine => {
@@ -301,7 +305,7 @@ impl ProductQuantizer {
     pub fn new(config: ProductQuantizerConfig) -> Result<Self, QuantizationError> {
         if config.dimensions % config.num_subspaces != 0 {
             return Err(QuantizationError::InvalidParameters(
-                "dimensions must be divisible by num_subspaces".into()
+                "dimensions must be divisible by num_subspaces".into(),
             ));
         }
 
@@ -318,7 +322,9 @@ impl ProductQuantizer {
     /// Train on sample vectors
     pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), QuantizationError> {
         if vectors.is_empty() {
-            return Err(QuantizationError::TrainingFailed("empty training set".into()));
+            return Err(QuantizationError::TrainingFailed(
+                "empty training set".into(),
+            ));
         }
 
         for vec in vectors {
@@ -338,9 +344,8 @@ impl ProductQuantizer {
             let end = start + self.dims_per_subspace;
 
             // Extract subvectors
-            let subvectors: Vec<Vec<f32>> = vectors.iter()
-                .map(|v| v[start..end].to_vec())
-                .collect();
+            let subvectors: Vec<Vec<f32>> =
+                vectors.iter().map(|v| v[start..end].to_vec()).collect();
 
             // K-means clustering
             let centroids = self.kmeans(&subvectors, self.config.num_centroids)?;
@@ -370,7 +375,8 @@ impl ProductQuantizer {
             let mut max_idx = 0;
 
             for (i, v) in vectors.iter().enumerate() {
-                let min_dist = centroids.iter()
+                let min_dist = centroids
+                    .iter()
                     .map(|c| Self::l2_squared(v, c))
                     .fold(f32::MAX, f32::min);
 
@@ -480,7 +486,7 @@ impl ProductQuantizer {
 
         if codes.len() != self.config.num_subspaces {
             return Err(QuantizationError::InvalidParameters(
-                "codes length must equal num_subspaces".into()
+                "codes length must equal num_subspaces".into(),
             ));
         }
 
@@ -495,7 +501,10 @@ impl ProductQuantizer {
     }
 
     /// Precompute distance table for asymmetric search
-    pub fn compute_distance_table(&self, query: &[f32]) -> Result<Vec<Vec<f32>>, QuantizationError> {
+    pub fn compute_distance_table(
+        &self,
+        query: &[f32],
+    ) -> Result<Vec<Vec<f32>>, QuantizationError> {
         if !self.trained {
             return Err(QuantizationError::NotTrained);
         }
@@ -514,22 +523,23 @@ impl ProductQuantizer {
             let end = start + self.dims_per_subspace;
             let subquery = &query[start..end];
 
-            let distances: Vec<f32> = self.centroids[m].iter()
-                .map(|c| {
-                    match self.config.metric {
-                        DistanceMetric::L2 => Self::l2_squared(subquery, c),
-                        DistanceMetric::InnerProduct => {
-                            -subquery.iter().zip(c.iter()).map(|(a, b)| a * b).sum::<f32>()
-                        }
-                        DistanceMetric::Cosine => {
-                            let dot: f32 = subquery.iter().zip(c.iter()).map(|(a, b)| a * b).sum();
-                            let norm_q: f32 = subquery.iter().map(|x| x * x).sum::<f32>().sqrt();
-                            let norm_c: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
-                            if norm_q > 0.0 && norm_c > 0.0 {
-                                1.0 - dot / (norm_q * norm_c)
-                            } else {
-                                1.0
-                            }
+            let distances: Vec<f32> = self.centroids[m]
+                .iter()
+                .map(|c| match self.config.metric {
+                    DistanceMetric::L2 => Self::l2_squared(subquery, c),
+                    DistanceMetric::InnerProduct => -subquery
+                        .iter()
+                        .zip(c.iter())
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>(),
+                    DistanceMetric::Cosine => {
+                        let dot: f32 = subquery.iter().zip(c.iter()).map(|(a, b)| a * b).sum();
+                        let norm_q: f32 = subquery.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let norm_c: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        if norm_q > 0.0 && norm_c > 0.0 {
+                            1.0 - dot / (norm_q * norm_c)
+                        } else {
+                            1.0
                         }
                     }
                 })
@@ -543,7 +553,9 @@ impl ProductQuantizer {
 
     /// Fast distance lookup using precomputed table
     pub fn lookup_distance(&self, table: &[Vec<f32>], codes: &[u8]) -> f32 {
-        codes.iter().enumerate()
+        codes
+            .iter()
+            .enumerate()
             .map(|(m, &code)| table[m][code as usize])
             .sum()
     }
@@ -587,7 +599,10 @@ pub struct BinaryQuantizer {
 impl BinaryQuantizer {
     pub fn new(config: BinaryQuantizerConfig) -> Self {
         let trained = config.thresholds.is_some();
-        let thresholds = config.thresholds.clone().unwrap_or_else(|| vec![0.0; config.dimensions]);
+        let thresholds = config
+            .thresholds
+            .clone()
+            .unwrap_or_else(|| vec![0.0; config.dimensions]);
         Self {
             config,
             thresholds,
@@ -598,16 +613,16 @@ impl BinaryQuantizer {
     /// Train using median thresholds
     pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), QuantizationError> {
         if vectors.is_empty() {
-            return Err(QuantizationError::TrainingFailed("empty training set".into()));
+            return Err(QuantizationError::TrainingFailed(
+                "empty training set".into(),
+            ));
         }
 
         let dims = self.config.dimensions;
         self.thresholds = Vec::with_capacity(dims);
 
         for d in 0..dims {
-            let mut values: Vec<f32> = vectors.iter()
-                .filter_map(|v| v.get(d).copied())
-                .collect();
+            let mut values: Vec<f32> = vectors.iter().filter_map(|v| v.get(d).copied()).collect();
             values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let median = if values.len() % 2 == 0 {
@@ -651,7 +666,8 @@ impl BinaryQuantizer {
 
     /// Hamming distance between two encoded vectors
     pub fn hamming_distance(a: &[u64], b: &[u64]) -> u32 {
-        a.iter().zip(b.iter())
+        a.iter()
+            .zip(b.iter())
             .map(|(x, y)| (x ^ y).count_ones())
             .sum()
     }
@@ -731,7 +747,9 @@ impl OptimizedProductQuantizer {
     /// Train OPQ
     pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), QuantizationError> {
         if vectors.is_empty() {
-            return Err(QuantizationError::TrainingFailed("empty training set".into()));
+            return Err(QuantizationError::TrainingFailed(
+                "empty training set".into(),
+            ));
         }
 
         // For each OPQ iteration:
@@ -746,10 +764,9 @@ impl OptimizedProductQuantizer {
             self.pq.train(&rotated)?;
 
             // Encode and decode to get reconstructions
-            let _reconstructed: Vec<Vec<f32>> = rotated.iter()
-                .filter_map(|v| {
-                    self.pq.encode(v).ok().and_then(|c| self.pq.decode(&c).ok())
-                })
+            let _reconstructed: Vec<Vec<f32>> = rotated
+                .iter()
+                .filter_map(|v| self.pq.encode(v).ok().and_then(|c| self.pq.decode(&c).ok()))
                 .collect();
 
             // In a full implementation, we would compute optimal rotation
@@ -852,44 +869,52 @@ pub struct QuantizedIndex {
 impl QuantizedIndex {
     pub fn new(config: QuantizedIndexConfig) -> Result<Self, QuantizationError> {
         let sq = match config.quantization_type {
-            QuantizationType::ScalarQuantization => Some(ScalarQuantizer::new(ScalarQuantizerConfig {
-                dimensions: config.dimensions,
-                bits: config.sq_bits,
-                metric: config.metric,
-            })),
+            QuantizationType::ScalarQuantization => {
+                Some(ScalarQuantizer::new(ScalarQuantizerConfig {
+                    dimensions: config.dimensions,
+                    bits: config.sq_bits,
+                    metric: config.metric,
+                }))
+            }
             _ => None,
         };
 
         let pq = match config.quantization_type {
-            QuantizationType::ProductQuantization => Some(ProductQuantizer::new(ProductQuantizerConfig {
-                dimensions: config.dimensions,
-                num_subspaces: config.pq_subspaces,
-                num_centroids: 256,
-                metric: config.metric,
-                kmeans_iterations: 25,
-            })?),
-            _ => None,
-        };
-
-        let bq = match config.quantization_type {
-            QuantizationType::BinaryQuantization => Some(BinaryQuantizer::new(BinaryQuantizerConfig {
-                dimensions: config.dimensions,
-                thresholds: None,
-            })),
-            _ => None,
-        };
-
-        let opq = match config.quantization_type {
-            QuantizationType::OptimizedProductQuantization => Some(OptimizedProductQuantizer::new(OpqConfig {
-                pq_config: ProductQuantizerConfig {
+            QuantizationType::ProductQuantization => {
+                Some(ProductQuantizer::new(ProductQuantizerConfig {
                     dimensions: config.dimensions,
                     num_subspaces: config.pq_subspaces,
                     num_centroids: 256,
                     metric: config.metric,
                     kmeans_iterations: 25,
-                },
-                opq_iterations: 10,
-            })?),
+                })?)
+            }
+            _ => None,
+        };
+
+        let bq = match config.quantization_type {
+            QuantizationType::BinaryQuantization => {
+                Some(BinaryQuantizer::new(BinaryQuantizerConfig {
+                    dimensions: config.dimensions,
+                    thresholds: None,
+                }))
+            }
+            _ => None,
+        };
+
+        let opq = match config.quantization_type {
+            QuantizationType::OptimizedProductQuantization => {
+                Some(OptimizedProductQuantizer::new(OpqConfig {
+                    pq_config: ProductQuantizerConfig {
+                        dimensions: config.dimensions,
+                        num_subspaces: config.pq_subspaces,
+                        num_centroids: 256,
+                        metric: config.metric,
+                        kmeans_iterations: 25,
+                    },
+                    opq_iterations: 10,
+                })?)
+            }
             _ => None,
         };
 
@@ -907,7 +932,12 @@ impl QuantizedIndex {
     }
 
     /// Add vector (buffers for training if not yet trained)
-    pub fn add(&mut self, id: u64, vector: Vec<f32>, metadata: Option<HashMap<String, String>>) -> Result<(), QuantizationError> {
+    pub fn add(
+        &mut self,
+        id: u64,
+        vector: Vec<f32>,
+        metadata: Option<HashMap<String, String>>,
+    ) -> Result<(), QuantizationError> {
         if vector.len() != self.config.dimensions {
             return Err(QuantizationError::InvalidDimensions {
                 expected: self.config.dimensions,
@@ -987,12 +1017,8 @@ impl QuantizedIndex {
     /// Encode a vector
     fn encode(&self, vector: &[f32]) -> Result<Vec<u8>, QuantizationError> {
         match self.config.quantization_type {
-            QuantizationType::ScalarQuantization => {
-                self.sq.as_ref().unwrap().encode(vector)
-            }
-            QuantizationType::ProductQuantization => {
-                self.pq.as_ref().unwrap().encode(vector)
-            }
+            QuantizationType::ScalarQuantization => self.sq.as_ref().unwrap().encode(vector),
+            QuantizationType::ProductQuantization => self.pq.as_ref().unwrap().encode(vector),
             QuantizationType::BinaryQuantization => {
                 let bits = self.bq.as_ref().unwrap().encode(vector)?;
                 // Convert u64 to bytes
@@ -1023,14 +1049,16 @@ impl QuantizedIndex {
                 let pq = self.pq.as_ref().unwrap();
                 let table = pq.compute_distance_table(query)?;
 
-                self.vectors.iter()
+                self.vectors
+                    .iter()
                     .map(|v| (v.id, pq.lookup_distance(&table, &v.codes)))
                     .collect()
             }
             QuantizationType::ScalarQuantization => {
                 let sq = self.sq.as_ref().unwrap();
 
-                self.vectors.iter()
+                self.vectors
+                    .iter()
                     .map(|v| {
                         let dist = sq.asymmetric_distance(&v.codes, query).unwrap_or(f32::MAX);
                         (v.id, dist)
@@ -1041,10 +1069,13 @@ impl QuantizedIndex {
                 let bq = self.bq.as_ref().unwrap();
                 let query_bits = bq.encode(query)?;
 
-                self.vectors.iter()
+                self.vectors
+                    .iter()
                     .map(|v| {
                         // Convert bytes back to u64
-                        let vec_bits: Vec<u64> = v.codes.chunks(8)
+                        let vec_bits: Vec<u64> = v
+                            .codes
+                            .chunks(8)
                             .map(|chunk| {
                                 let mut bytes = [0u8; 8];
                                 bytes[..chunk.len()].copy_from_slice(chunk);
@@ -1062,7 +1093,8 @@ impl QuantizedIndex {
                 // Use underlying PQ for search
                 let table = opq.pq.compute_distance_table(query)?;
 
-                self.vectors.iter()
+                self.vectors
+                    .iter()
                     .map(|v| (v.id, opq.pq.lookup_distance(&table, &v.codes)))
                     .collect()
             }
@@ -1071,7 +1103,8 @@ impl QuantizedIndex {
         // Sort by distance and take top k
         results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(results.into_iter()
+        Ok(results
+            .into_iter()
             .take(k)
             .map(|(id, distance)| SearchResult { id, distance })
             .collect())
@@ -1090,18 +1123,26 @@ impl QuantizedIndex {
     /// Memory usage in bytes
     pub fn memory_usage(&self) -> usize {
         let bytes_per_vec = match self.config.quantization_type {
-            QuantizationType::ScalarQuantization => {
-                self.sq.as_ref().map(|sq| sq.bytes_per_vector()).unwrap_or(0)
-            }
-            QuantizationType::ProductQuantization => {
-                self.pq.as_ref().map(|pq| pq.bytes_per_vector()).unwrap_or(0)
-            }
-            QuantizationType::BinaryQuantization => {
-                self.bq.as_ref().map(|bq| bq.bytes_per_vector()).unwrap_or(0)
-            }
-            QuantizationType::OptimizedProductQuantization => {
-                self.opq.as_ref().map(|opq| opq.pq.bytes_per_vector()).unwrap_or(0)
-            }
+            QuantizationType::ScalarQuantization => self
+                .sq
+                .as_ref()
+                .map(|sq| sq.bytes_per_vector())
+                .unwrap_or(0),
+            QuantizationType::ProductQuantization => self
+                .pq
+                .as_ref()
+                .map(|pq| pq.bytes_per_vector())
+                .unwrap_or(0),
+            QuantizationType::BinaryQuantization => self
+                .bq
+                .as_ref()
+                .map(|bq| bq.bytes_per_vector())
+                .unwrap_or(0),
+            QuantizationType::OptimizedProductQuantization => self
+                .opq
+                .as_ref()
+                .map(|opq| opq.pq.bytes_per_vector())
+                .unwrap_or(0),
         };
 
         self.vectors.len() * bytes_per_vec
@@ -1188,7 +1229,8 @@ mod tests {
             num_centroids: 4,
             metric: DistanceMetric::L2,
             kmeans_iterations: 5,
-        }).unwrap();
+        })
+        .unwrap();
 
         let vectors = random_vectors(100, 8);
         pq.train(&vectors).unwrap();
@@ -1227,7 +1269,8 @@ mod tests {
             sq_bits: 8,
             training_sample_size: 50,
             use_residuals: false,
-        }).unwrap();
+        })
+        .unwrap();
 
         let vectors = random_vectors(100, 8);
 
