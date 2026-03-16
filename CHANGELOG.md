@@ -5,9 +5,66 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.6] - 2026-03-14
+## [0.9.6] - 2026-03-15
 
 ### Added
+
+#### Enterprise Operations Features (Phase 41)
+- **Query Result Caching**: Distributed cache with Redis-compatible protocol
+  - Sharded LRU cache with configurable size limits
+  - Time-based and event-based invalidation
+  - Redis RESP protocol server for external cache access
+  - Table dependency tracking for automatic invalidation
+  - Per-tenant cache isolation
+
+- **Multi-Region Disaster Recovery**: Cross-region replication with automatic failover
+  - WAL-based async replication to secondary regions
+  - Configurable RPO/RTO with violation alerting
+  - DNS routing integration for traffic failover
+  - Automatic failover based on health checks
+  - Failover state machine (Normal → InProgress → Completed)
+
+- **Query Cost Estimation API**: Pre-flight cost estimates for query planning
+  - Cardinality estimation with statistics
+  - CPU, memory, I/O, and network cost prediction
+  - Query complexity analysis
+  - Cost model calibration from execution history
+
+- **Tenant Isolation Enhancements**: Namespace-level encryption and per-tenant backup
+  - Per-namespace encryption keys with rotation
+  - KMS integration (AWS, Azure, GCP, HashiCorp Vault)
+  - Per-tenant backup/restore with PITR
+  - Resource quota enforcement (storage, connections, QPS)
+
+- **CDC to Data Lakes**: Direct CDC to Delta Lake/Iceberg format
+  - Delta Lake writer with transaction log
+  - Apache Iceberg writer with snapshot management
+  - Schema evolution support
+  - Partitioned writes with compaction
+
+- **Query Replay/Shadowing**: Traffic capture and replay for testing
+  - Query capture with configurable sampling
+  - Replay to test clusters with result comparison
+  - Shadow traffic service for live duplication
+  - Performance regression detection
+
+- **Auto-Scaling Policies**: Metrics-based scaling triggers
+  - Policy-based scaling (threshold, step, target tracking)
+  - Predictive scaling with seasonality modeling
+  - Cooldown periods and consecutive breach requirements
+  - Support for CPU, memory, connections, QPS metrics
+
+- **Data Retention Policies**: GDPR/CCPA compliant data management
+  - Retention policies with purge/anonymize/archive actions
+  - Legal hold management with scope control
+  - Data subject request handling (access, erasure, portability)
+  - Compliance reporting (GDPR, CCPA, HIPAA, SOX, PCI)
+
+### Fixed
+- **Memory Leak Prevention**: Added bounds to prevent unbounded growth in all enterprise modules
+  - Bounded history vectors in all modules (configurable limits)
+  - Cleanup methods for completed/expired entries
+  - Stale dependency pruning in query cache
 
 #### ClickHouse Parity Features (Phase 38)
 - **Approximate Functions**: Statistical estimation with bounded error

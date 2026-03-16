@@ -8,6 +8,16 @@ A high-performance columnar database engine built in Rust for real-time analytic
 
 ## What's New in v0.9.6
 
+### Enterprise Operations
+- **Query Result Caching**: Distributed cache with Redis-compatible protocol and event-based invalidation
+- **Multi-Region DR**: Cross-region replication with automatic failover, RPO/RTO controls
+- **Query Cost API**: Pre-flight cost estimates for query planning and resource prediction
+- **Tenant Isolation**: Namespace-level encryption, per-tenant backup/restore, quota enforcement
+- **CDC to Data Lakes**: Direct CDC to Delta Lake/Iceberg with schema evolution
+- **Query Replay**: Traffic capture and replay to test clusters with result comparison
+- **Auto-Scaling**: Metrics-based scaling triggers with predictive scaling
+- **Data Retention**: GDPR/CCPA compliant purging, legal holds, data subject requests
+
 ### ClickHouse Parity
 - **Approximate Functions**: HyperLogLog, T-Digest, Count-Min Sketch for fast approximate analytics
 - **MergeTree Variants**: Replacing, Collapsing, Aggregating, Summing for specialized workloads
@@ -737,6 +747,109 @@ Quota enforcement includes:
 - Concurrent query limits
 - Queries per minute (QPM) rate limiting
 - Fair scheduling across tenants
+
+### Enterprise Operations
+
+#### Query Result Caching
+
+Distributed cache layer for query results with Redis-compatible protocol:
+
+```sql
+-- Configure cache TTL for a session
+SET query_cache_ttl = 300;  -- 5 minutes
+
+-- Query results are automatically cached
+SELECT * FROM analytics.daily_stats WHERE date > '2024-01-01';
+
+-- Invalidate cache for a table after writes
+INVALIDATE CACHE FOR analytics.daily_stats;
+```
+
+**Cache Features:**
+- Sharded LRU cache with configurable size limits
+- Time-based TTL and event-based invalidation
+- Redis RESP protocol server for external access
+- Per-tenant isolation
+- Table dependency tracking
+
+#### Auto-Scaling Policies
+
+Metrics-based scaling triggers with predictive scaling:
+
+```sql
+-- Create scaling policy
+CREATE SCALING POLICY scale_out_cpu
+  METRIC cpu_utilization
+  THRESHOLD 70
+  ACTION ADD_NODES 1
+  COOLDOWN 300;
+
+-- View scaling status
+SHOW SCALING STATUS;
+
+-- Manual scale
+SCALE TO 5 NODES;
+```
+
+**Scaling Features:**
+- Policy types: threshold, step, target tracking, predictive
+- Metrics: CPU, memory, connections, QPS, replication lag
+- Predictive scaling with hourly/daily seasonality
+- Cooldown periods between scale actions
+
+#### Data Retention Policies
+
+GDPR/CCPA compliant data lifecycle management:
+
+```sql
+-- Create retention policy
+CREATE RETENTION POLICY pii_retention
+  ON users
+  RETAIN 2 YEARS
+  ACTION ANONYMIZE
+  COMPLIANCE GDPR;
+
+-- Create legal hold
+CREATE LEGAL HOLD litigation_hold
+  ON transactions
+  MATTER 'CASE-2024-001'
+  SCOPE DATE_RANGE '2023-01-01' TO '2023-12-31';
+
+-- Process data subject request
+PROCESS DATA SUBJECT REQUEST
+  TYPE ERASURE
+  SUBJECT 'user@example.com';
+```
+
+**Retention Features:**
+- Purge actions: delete, soft-delete, anonymize, archive
+- Legal holds with scope control
+- Data subject requests (access, erasure, portability)
+- Compliance reporting (GDPR, CCPA, HIPAA)
+
+#### Query Replay/Shadowing
+
+Capture and replay production traffic for testing:
+
+```sql
+-- Start query capture
+START QUERY CAPTURE
+  SAMPLE_RATE 0.1
+  MIN_EXEC_TIME_MS 100;
+
+-- Replay to test cluster
+REPLAY QUERIES TO 'test-cluster:8765'
+  COMPARE_RESULTS true;
+
+-- View replay report
+SHOW REPLAY REPORT;
+```
+
+**Replay Features:**
+- Configurable sampling rate
+- Result comparison with diff reporting
+- Shadow traffic to test clusters
+- Performance regression detection
 
 ### Multi-Region Replication
 

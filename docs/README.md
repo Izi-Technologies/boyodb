@@ -19,6 +19,14 @@ Welcome to the BoyoDB documentation. This directory contains comprehensive guide
 - **[SECURITY.md](SECURITY.md)** - Authentication, authorization, and TLS
 - **[STORAGE_PHASES.md](STORAGE_PHASES.md)** - Storage tiers and data lifecycle
 
+### Enterprise Features
+- **Query Result Caching** - Distributed cache with Redis protocol (see README)
+- **Multi-Region DR** - Cross-region replication and failover (see README)
+- **Auto-Scaling** - Metrics-based scaling policies (see README)
+- **Data Retention** - GDPR/CCPA compliance and legal holds (see README)
+- **Query Replay** - Traffic capture and shadow testing (see README)
+- **CDC to Data Lakes** - Delta Lake/Iceberg CDC streaming (see README)
+
 ### Development
 - **[API.md](API.md)** - Protocol and API documentation
 - **[ROADMAP.md](ROADMAP.md)** - Feature roadmap and planned improvements
