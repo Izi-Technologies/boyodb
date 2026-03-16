@@ -5017,6 +5017,10 @@ impl Db {
             return Ok(response);
         }
 
+        // Expand view references in the SQL query
+        // This replaces view names with their underlying queries as subqueries
+        let expanded_sql = self.expand_views_in_sql(&request.sql, None)?;
+
         // Calculate deadline for timeout enforcement
         let deadline = if request.timeout_millis > 0 {
             Some(
@@ -5027,7 +5031,7 @@ impl Db {
             None
         };
 
-        let plan = self.get_or_parse_plan(&request.sql)?;
+        let plan = self.get_or_parse_plan(&expanded_sql)?;
 
         // Try distributed execution if clustered
         if self.cluster_manager.read().is_some() {
@@ -5101,6 +5105,9 @@ impl Db {
         }
         let _read_guard = self.read_guard();
 
+        // Expand view references in the SQL query
+        let expanded_sql = self.expand_views_in_sql(&request.sql, None)?;
+
         let deadline = if request.timeout_millis > 0 {
             Some(
                 std::time::Instant::now()
@@ -5110,7 +5117,7 @@ impl Db {
             None
         };
 
-        let plan = self.get_or_parse_plan(&request.sql)?;
+        let plan = self.get_or_parse_plan(&expanded_sql)?;
         let (agg, db, table, projection, filter) = match plan.kind {
             PlanKind::Join => {
                 return Err(EngineError::NotImplemented(
@@ -5124,7 +5131,7 @@ impl Db {
             }
             PlanKind::Subquery => {
                 return Err(EngineError::NotImplemented(
-                    "streaming does not support subqueries".into(),
+                    "streaming does not support subqueries (including views)".into(),
                 ))
             }
             PlanKind::Cte => {
@@ -11053,6 +11060,188 @@ impl Db {
             .iter()
             .find(|v| v.database == database && v.name == name)
             .map(|v| v.query_sql.clone()))
+    }
+
+    /// Expand view references in a SQL query.
+    /// Replaces table references that are actually views with their underlying query as subqueries.
+    /// Handles nested view references recursively and detects circular references.
+    pub fn expand_views_in_sql(
+        &self,
+        sql: &str,
+        default_database: Option<&str>,
+    ) -> Result<String, EngineError> {
+        self.expand_views_recursive(sql, default_database, &mut HashSet::new(), 0)
+    }
+
+    fn expand_views_recursive(
+        &self,
+        sql: &str,
+        default_database: Option<&str>,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) -> Result<String, EngineError> {
+        // Prevent infinite recursion
+        if depth > 100 {
+            return Err(EngineError::InvalidArgument(
+                "view expansion depth limit exceeded (possible circular reference)".into(),
+            ));
+        }
+
+        // Build maps of view information (clone to release lock quickly)
+        let (views, unqualified_views) = {
+            let manifest = self.manifest.read();
+
+            // Build a map of all views: (db.name) -> query_sql (owned strings)
+            let views: HashMap<String, String> = manifest
+                .views
+                .iter()
+                .map(|v| (format!("{}.{}", v.database, v.name), v.query_sql.clone()))
+                .collect();
+
+            // Also build a map for unqualified view names: name -> (db, query_sql)
+            let unqualified_views: HashMap<String, (String, String)> = manifest
+                .views
+                .iter()
+                .map(|v| (v.name.clone(), (v.database.clone(), v.query_sql.clone())))
+                .collect();
+
+            (views, unqualified_views)
+        }; // manifest lock released here
+
+        if views.is_empty() {
+            return Ok(sql.to_string());
+        }
+
+        let mut result = sql.to_string();
+        let mut made_replacement = true;
+
+        // Keep replacing until no more views are found (handles nested views)
+        while made_replacement {
+            made_replacement = false;
+
+            // Find FROM and JOIN clauses and replace view references
+            // Pattern: FROM db.table or FROM table or JOIN db.table or JOIN table
+            // We need to be careful not to replace inside strings or comments
+
+            let sql_upper = result.to_uppercase();
+
+            // Find all potential table reference locations
+            let from_positions: Vec<usize> = sql_upper
+                .match_indices(" FROM ")
+                .map(|(i, _)| i + 6)
+                .collect();
+            let join_positions: Vec<usize> = sql_upper
+                .match_indices(" JOIN ")
+                .map(|(i, _)| i + 6)
+                .collect();
+
+            let mut positions: Vec<usize> = from_positions;
+            positions.extend(join_positions);
+            positions.sort_unstable();
+            positions.reverse(); // Process from end to start to preserve positions
+
+            for pos in positions {
+                // Extract the table reference starting at this position
+                let rest = &result[pos..];
+                let table_ref = Self::extract_table_reference(rest);
+
+                if table_ref.is_empty() {
+                    continue;
+                }
+
+                // Check if this is a view
+                let (db, name) = if table_ref.contains('.') {
+                    let parts: Vec<&str> = table_ref.splitn(2, '.').collect();
+                    (parts[0].to_string(), parts[1].to_string())
+                } else if let Some(default_db) = default_database {
+                    (default_db.to_string(), table_ref.clone())
+                } else {
+                    // Try to find in unqualified views
+                    if let Some((db, _)) = unqualified_views.get(table_ref.as_str()) {
+                        (db.to_string(), table_ref.clone())
+                    } else {
+                        continue;
+                    }
+                };
+
+                let view_key = format!("{}.{}", db, name);
+
+                if let Some(view_sql) = views.get(&view_key) {
+                    // Check for circular reference
+                    if visited.contains(&view_key) {
+                        return Err(EngineError::InvalidArgument(format!(
+                            "circular view reference detected: {}",
+                            view_key
+                        )));
+                    }
+
+                    visited.insert(view_key.clone());
+
+                    // Recursively expand any views in this view's SQL
+                    let expanded_view_sql = self.expand_views_recursive(
+                        view_sql,
+                        Some(&db),
+                        visited,
+                        depth + 1,
+                    )?;
+
+                    visited.remove(&view_key);
+
+                    // Replace the table reference with the subquery
+                    // Use the original table name as alias
+                    let alias = &name;
+                    let replacement = format!("({}) AS {}", expanded_view_sql, alias);
+
+                    // Find exact position of table_ref in rest and replace
+                    let end_pos = pos + table_ref.len();
+                    result = format!("{}{}{}", &result[..pos], replacement, &result[end_pos..]);
+                    made_replacement = true;
+                    break; // Start over since positions have changed
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Extract a table reference (db.table or table) from the start of a string.
+    /// Stops at whitespace, comma, parenthesis, or SQL keywords.
+    fn extract_table_reference(s: &str) -> String {
+        let s = s.trim_start();
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' => {
+                    result.push(c);
+                }
+                '"' | '`' | '[' => {
+                    // Quoted identifier - include the whole thing
+                    let close = match c {
+                        '"' => '"',
+                        '`' => '`',
+                        '[' => ']',
+                        _ => unreachable!(),
+                    };
+                    result.push(c);
+                    for inner in chars.by_ref() {
+                        result.push(inner);
+                        if inner == close {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Remove any quotes from the result for matching
+        result
+            .replace('"', "")
+            .replace('`', "")
+            .replace('[', "")
+            .replace(']', "")
     }
 
     /// Create a materialized view
@@ -37030,5 +37219,154 @@ mod tests {
         assert!(db
             .rename_table("testdb", "new_users", "other_table")
             .is_err());
+    }
+
+    #[test]
+    fn test_view_create_drop_list() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database
+        db.create_database("testdb").unwrap();
+
+        // Create a view
+        db.create_view(
+            "testdb",
+            "user_summary",
+            "SELECT id, name FROM testdb.users",
+            false,
+        )
+        .unwrap();
+
+        // List views
+        let views = db.list_views(Some("testdb")).unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].0, "testdb");
+        assert_eq!(views[0].1, "user_summary");
+        assert!(views[0].2.contains("SELECT"));
+
+        // Get view
+        let view_sql = db.get_view("testdb", "user_summary").unwrap();
+        assert!(view_sql.is_some());
+        assert!(view_sql.unwrap().contains("SELECT id, name"));
+
+        // Create view with same name should fail
+        let result = db.create_view("testdb", "user_summary", "SELECT 1", false);
+        assert!(result.is_err());
+
+        // Create or replace should succeed
+        db.create_view("testdb", "user_summary", "SELECT id, email FROM testdb.users", true)
+            .unwrap();
+        let view_sql = db.get_view("testdb", "user_summary").unwrap();
+        assert!(view_sql.unwrap().contains("email"));
+
+        // Drop view
+        db.drop_view("testdb", "user_summary", false).unwrap();
+        let views = db.list_views(Some("testdb")).unwrap();
+        assert_eq!(views.len(), 0);
+
+        // Drop non-existent view should fail
+        assert!(db.drop_view("testdb", "user_summary", false).is_err());
+
+        // Drop with if_exists should succeed
+        db.drop_view("testdb", "user_summary", true).unwrap();
+    }
+
+    #[test]
+    fn test_view_expansion() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database
+        db.create_database("testdb").unwrap();
+
+        // Create a view
+        db.create_view(
+            "testdb",
+            "my_view",
+            "SELECT id, name FROM testdb.users WHERE active = true",
+            false,
+        )
+        .unwrap();
+
+        // Test view expansion
+        let sql = "SELECT * FROM testdb.my_view WHERE id > 10";
+        let expanded = db.expand_views_in_sql(sql, None).unwrap();
+
+        // The view reference should be replaced with a subquery
+        assert!(expanded.contains("SELECT id, name FROM testdb.users"));
+        assert!(expanded.contains("AS my_view"));
+        assert!(expanded.contains("WHERE id > 10"));
+    }
+
+    #[test]
+    fn test_view_nested_expansion() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database
+        db.create_database("testdb").unwrap();
+
+        // Create base view
+        db.create_view(
+            "testdb",
+            "base_view",
+            "SELECT id, name FROM testdb.users",
+            false,
+        )
+        .unwrap();
+
+        // Create view that references another view
+        db.create_view(
+            "testdb",
+            "derived_view",
+            "SELECT * FROM testdb.base_view WHERE id > 0",
+            false,
+        )
+        .unwrap();
+
+        // Test nested view expansion
+        let sql = "SELECT * FROM testdb.derived_view";
+        let expanded = db.expand_views_in_sql(sql, None).unwrap();
+
+        // Both views should be expanded
+        assert!(expanded.contains("SELECT id, name FROM testdb.users"));
+    }
+
+    #[test]
+    fn test_view_circular_reference_detection() {
+        let dir = tempdir().unwrap();
+        let cfg = EngineConfig::new(dir.path(), 1);
+        let db = Db::open_for_test(cfg).unwrap();
+
+        // Create database
+        db.create_database("testdb").unwrap();
+
+        // Create circular views (view_a references view_b, view_b references view_a)
+        db.create_view(
+            "testdb",
+            "view_a",
+            "SELECT * FROM testdb.view_b",
+            false,
+        )
+        .unwrap();
+
+        db.create_view(
+            "testdb",
+            "view_b",
+            "SELECT * FROM testdb.view_a",
+            false,
+        )
+        .unwrap();
+
+        // Expansion should detect circular reference and error
+        let sql = "SELECT * FROM testdb.view_a";
+        let result = db.expand_views_in_sql(sql, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("circular") || err_msg.contains("depth"));
     }
 }
