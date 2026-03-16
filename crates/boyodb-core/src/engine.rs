@@ -5337,10 +5337,23 @@ impl Db {
     }
 
     pub fn execute_distributed_plan(&self, plan: PlanKind) -> Result<QueryResponse, EngineError> {
+        self.execute_distributed_plan_with_timeout(plan, 0)
+    }
+
+    pub fn execute_distributed_plan_with_timeout(
+        &self,
+        plan: PlanKind,
+        timeout_millis: u64,
+    ) -> Result<QueryResponse, EngineError> {
         let manifest_version = self.get_manifest_version()?;
         let query_start = std::time::Instant::now();
-        // TODO: Support timeout in distributed request
-        let deadline = None;
+        let deadline = if timeout_millis > 0 {
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(timeout_millis))
+        } else if self.cfg.query_timeout_ms > 0 {
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(self.cfg.query_timeout_ms))
+        } else {
+            None
+        };
 
         let result = match plan {
             PlanKind::Simple {
@@ -31214,15 +31227,224 @@ fn merge_array_value_to_string(arr: &dyn arrow_array::Array, idx: usize) -> Opti
 }
 
 /// Evaluate a simple condition for MERGE.
-/// For now, always returns true (conditions are not fully evaluated).
+/// Supports basic comparison operators: =, <>, !=, <, >, <=, >=, IS NULL, IS NOT NULL
+/// Also supports AND/OR for combining conditions.
 fn evaluate_simple_condition(
-    _condition: Option<&String>,
-    _batch: &RecordBatch,
-    _row_idx: usize,
+    condition: Option<&String>,
+    batch: &RecordBatch,
+    row_idx: usize,
 ) -> bool {
-    // TODO: Implement proper condition evaluation
-    // For now, conditions without explicit predicates always match
+    let cond = match condition {
+        Some(c) if !c.trim().is_empty() => c.trim(),
+        _ => return true, // No condition means always match
+    };
+
+    // Handle AND/OR combinations (simple split, not full parser)
+    let upper = cond.to_uppercase();
+    if upper.contains(" AND ") {
+        let parts: Vec<&str> = cond.split_whitespace().collect();
+        let mut current_cond = String::new();
+        let mut results = Vec::new();
+
+        for part in parts {
+            if part.eq_ignore_ascii_case("AND") {
+                if !current_cond.is_empty() {
+                    results.push(evaluate_single_condition(&current_cond, batch, row_idx));
+                    current_cond.clear();
+                }
+            } else {
+                if !current_cond.is_empty() {
+                    current_cond.push(' ');
+                }
+                current_cond.push_str(part);
+            }
+        }
+        if !current_cond.is_empty() {
+            results.push(evaluate_single_condition(&current_cond, batch, row_idx));
+        }
+        return results.iter().all(|&r| r);
+    }
+
+    if upper.contains(" OR ") {
+        let parts: Vec<&str> = cond.split_whitespace().collect();
+        let mut current_cond = String::new();
+        let mut results = Vec::new();
+
+        for part in parts {
+            if part.eq_ignore_ascii_case("OR") {
+                if !current_cond.is_empty() {
+                    results.push(evaluate_single_condition(&current_cond, batch, row_idx));
+                    current_cond.clear();
+                }
+            } else {
+                if !current_cond.is_empty() {
+                    current_cond.push(' ');
+                }
+                current_cond.push_str(part);
+            }
+        }
+        if !current_cond.is_empty() {
+            results.push(evaluate_single_condition(&current_cond, batch, row_idx));
+        }
+        return results.iter().any(|&r| r);
+    }
+
+    evaluate_single_condition(cond, batch, row_idx)
+}
+
+/// Evaluate a single condition (no AND/OR)
+fn evaluate_single_condition(cond: &str, batch: &RecordBatch, row_idx: usize) -> bool {
+    let cond = cond.trim();
+    let upper = cond.to_uppercase();
+
+    // Handle IS NULL / IS NOT NULL
+    if upper.ends_with(" IS NULL") {
+        let col_name = cond[..cond.len() - 8].trim();
+        let col_name = strip_table_prefix(col_name);
+        return get_column_value_as_string(batch, col_name, row_idx).is_none();
+    }
+    if upper.ends_with(" IS NOT NULL") {
+        let col_name = cond[..cond.len() - 12].trim();
+        let col_name = strip_table_prefix(col_name);
+        return get_column_value_as_string(batch, col_name, row_idx).is_some();
+    }
+
+    // Parse comparison operators (order matters: check longer ones first)
+    let operators = ["<>", "!=", "<=", ">=", "=", "<", ">"];
+    for op in operators {
+        if let Some(pos) = cond.find(op) {
+            let left = cond[..pos].trim();
+            let right = cond[pos + op.len()..].trim();
+
+            let left_val = resolve_value(left, batch, row_idx);
+            let right_val = resolve_value(right, batch, row_idx);
+
+            return compare_condition_values(&left_val, &right_val, op);
+        }
+    }
+
+    // If no operator found, treat as truthy check
     true
+}
+
+/// Strip table prefix like "source." or "target." from column name
+fn strip_table_prefix(col_name: &str) -> &str {
+    if let Some(pos) = col_name.find('.') {
+        &col_name[pos + 1..]
+    } else {
+        col_name
+    }
+}
+
+/// Resolve a value - could be a column reference or a literal
+fn resolve_value(val: &str, batch: &RecordBatch, row_idx: usize) -> Option<String> {
+    let val = val.trim();
+
+    // String literal (quoted)
+    if (val.starts_with('\'') && val.ends_with('\''))
+        || (val.starts_with('"') && val.ends_with('"'))
+    {
+        return Some(val[1..val.len() - 1].to_string());
+    }
+
+    // Numeric literal
+    if val.parse::<f64>().is_ok() {
+        return Some(val.to_string());
+    }
+
+    // NULL literal
+    if val.eq_ignore_ascii_case("NULL") {
+        return None;
+    }
+
+    // TRUE/FALSE literals
+    if val.eq_ignore_ascii_case("TRUE") {
+        return Some("true".to_string());
+    }
+    if val.eq_ignore_ascii_case("FALSE") {
+        return Some("false".to_string());
+    }
+
+    // Column reference
+    let col_name = strip_table_prefix(val);
+    get_column_value_as_string(batch, col_name, row_idx)
+}
+
+/// Get a column value as a string for comparison
+fn get_column_value_as_string(batch: &RecordBatch, col_name: &str, row_idx: usize) -> Option<String> {
+    let col_idx = batch.schema().index_of(col_name).ok()?;
+    let col = batch.column(col_idx);
+
+    if col.is_null(row_idx) {
+        return None;
+    }
+
+    use arrow_array::*;
+
+    Some(match col.data_type() {
+        DataType::Utf8 => col.as_any().downcast_ref::<StringArray>()?.value(row_idx).to_string(),
+        DataType::LargeUtf8 => col.as_any().downcast_ref::<LargeStringArray>()?.value(row_idx).to_string(),
+        DataType::Int8 => col.as_any().downcast_ref::<Int8Array>()?.value(row_idx).to_string(),
+        DataType::Int16 => col.as_any().downcast_ref::<Int16Array>()?.value(row_idx).to_string(),
+        DataType::Int32 => col.as_any().downcast_ref::<Int32Array>()?.value(row_idx).to_string(),
+        DataType::Int64 => col.as_any().downcast_ref::<Int64Array>()?.value(row_idx).to_string(),
+        DataType::UInt8 => col.as_any().downcast_ref::<UInt8Array>()?.value(row_idx).to_string(),
+        DataType::UInt16 => col.as_any().downcast_ref::<UInt16Array>()?.value(row_idx).to_string(),
+        DataType::UInt32 => col.as_any().downcast_ref::<UInt32Array>()?.value(row_idx).to_string(),
+        DataType::UInt64 => col.as_any().downcast_ref::<UInt64Array>()?.value(row_idx).to_string(),
+        DataType::Float32 => col.as_any().downcast_ref::<Float32Array>()?.value(row_idx).to_string(),
+        DataType::Float64 => col.as_any().downcast_ref::<Float64Array>()?.value(row_idx).to_string(),
+        DataType::Boolean => col.as_any().downcast_ref::<BooleanArray>()?.value(row_idx).to_string(),
+        DataType::Date32 => col.as_any().downcast_ref::<Date32Array>()?.value(row_idx).to_string(),
+        DataType::Date64 => col.as_any().downcast_ref::<Date64Array>()?.value(row_idx).to_string(),
+        DataType::Timestamp(_, _) => {
+            if let Some(arr) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+                arr.value(row_idx).to_string()
+            } else if let Some(arr) = col.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                arr.value(row_idx).to_string()
+            } else if let Some(arr) = col.as_any().downcast_ref::<TimestampNanosecondArray>() {
+                arr.value(row_idx).to_string()
+            } else if let Some(arr) = col.as_any().downcast_ref::<TimestampSecondArray>() {
+                arr.value(row_idx).to_string()
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Compare two condition values using the given operator (for MERGE condition evaluation)
+fn compare_condition_values(left: &Option<String>, right: &Option<String>, op: &str) -> bool {
+    match (left, right) {
+        (None, None) => op == "=" || op == "<=" || op == ">=",
+        (None, _) | (_, None) => op == "<>" || op == "!=",
+        (Some(l), Some(r)) => {
+            // Try numeric comparison first
+            if let (Ok(ln), Ok(rn)) = (l.parse::<f64>(), r.parse::<f64>()) {
+                return match op {
+                    "=" => (ln - rn).abs() < f64::EPSILON,
+                    "<>" | "!=" => (ln - rn).abs() >= f64::EPSILON,
+                    "<" => ln < rn,
+                    ">" => ln > rn,
+                    "<=" => ln <= rn,
+                    ">=" => ln >= rn,
+                    _ => false,
+                };
+            }
+
+            // Fall back to string comparison
+            match op {
+                "=" => l == r,
+                "<>" | "!=" => l != r,
+                "<" => l < r,
+                ">" => l > r,
+                "<=" => l <= r,
+                ">=" => l >= r,
+                _ => false,
+            }
+        }
+    }
 }
 
 /// Build IPC data from an InsertCommand for MERGE insertion.

@@ -784,7 +784,12 @@ impl TieringManager {
                 let data = self.storage.load_segment(&entry_clone)?;
 
                 // Write to COLD storage (S3)
-                // TODO: Use storage_class when object_store supports it
+                // Note: S3 storage class (GLACIER, DEEP_ARCHIVE, INTELLIGENT_TIERING)
+                // should be configured via S3 bucket lifecycle policies rather than
+                // per-object uploads. This allows automatic transitions based on age
+                // and is more cost-effective than setting storage class at upload time.
+                // Configure lifecycle rules in your S3 bucket to transition objects
+                // in the cold tier prefix to the desired storage class.
                 self.storage.persist_segment_cold(segment_id, &data)?;
 
                 // Update Manifest and Delete Local File

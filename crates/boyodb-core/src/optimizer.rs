@@ -1853,9 +1853,70 @@ impl CostBasedOptimizer {
         }
     }
 
-    fn is_sorted_by(&self, _plan: &PhysicalPlan, _columns: &[String]) -> bool {
-        // TODO: Track sort order through physical plan
-        false
+    fn is_sorted_by(&self, plan: &PhysicalPlan, columns: &[String]) -> bool {
+        if columns.is_empty() {
+            return true;
+        }
+
+        match plan {
+            // Sort explicitly produces sorted output
+            PhysicalPlan::Sort { order_by, .. } | PhysicalPlan::TopN { order_by, .. } => {
+                // Check if the sort order matches the required columns
+                if order_by.len() < columns.len() {
+                    return false;
+                }
+                for (i, col) in columns.iter().enumerate() {
+                    if &order_by[i].column != col {
+                        return false;
+                    }
+                }
+                true
+            }
+
+            // MergeJoin produces sorted output on join keys
+            PhysicalPlan::MergeJoin { left_keys, .. } => {
+                // Output is sorted on left keys
+                if left_keys.len() < columns.len() {
+                    return false;
+                }
+                columns.iter().zip(left_keys.iter()).all(|(c, k)| c == k)
+            }
+
+            // SortedAggregate produces output sorted on group_by columns
+            PhysicalPlan::SortedAggregate { group_by, .. } => {
+                if group_by.len() < columns.len() {
+                    return false;
+                }
+                columns.iter().zip(group_by.iter()).all(|(c, g)| c == g)
+            }
+
+            // IndexScan may produce sorted output if using a B-tree index
+            PhysicalPlan::IndexScan { index, columns: scan_cols, .. } => {
+                // Check if index provides the required sort order
+                // For simplicity, assume index name contains column name for sorted access
+                if columns.len() == 1 && index.contains(&columns[0]) {
+                    return true;
+                }
+                false
+            }
+
+            // These operators preserve input sort order
+            PhysicalPlan::Filter { input, .. } => self.is_sorted_by(input, columns),
+            PhysicalPlan::Project { input, .. } => {
+                // Project preserves order if columns are still present
+                self.is_sorted_by(input, columns)
+            }
+            PhysicalPlan::Limit { input, .. } => self.is_sorted_by(input, columns),
+
+            // These operators don't preserve sort order
+            PhysicalPlan::SeqScan { .. } => false,
+            PhysicalPlan::HashAggregate { .. } => false,
+            PhysicalPlan::HashJoin { .. } => false,
+            PhysicalPlan::NestedLoopJoin { .. } => false,
+            PhysicalPlan::Exchange { .. } => false, // Repartitioning destroys order
+            PhysicalPlan::Gather { .. } => false,   // Gathering parallel streams destroys order
+            PhysicalPlan::UnionAll { .. } => false, // Union doesn't preserve order
+        }
     }
 
     fn extract_equi_join_keys(
