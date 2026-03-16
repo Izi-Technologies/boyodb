@@ -9,6 +9,45 @@ const BLOOM_FALLBACK_MIN_ITEMS: usize = 1024;
 const BLOOM_FALLBACK_MAX_ITEMS: usize = 10_000_000;
 const DEFAULT_FP_RATE: f64 = 0.01; // 1% false positive rate
 
+/// Calculate adaptive false positive probability based on data characteristics
+///
+/// Adapts FPP based on:
+/// - Cardinality ratio (distinct/total): High cardinality benefits from tighter FPP
+/// - Segment size: Large segments benefit from tighter FPP, small segments can use looser FPP
+///
+/// Returns FPP clamped to [0.001, 0.05] range
+pub fn calculate_adaptive_fpp(
+    row_count: usize,
+    distinct_count: Option<u64>,
+    segment_size_bytes: u64,
+) -> f64 {
+    let mut fpp = DEFAULT_FP_RATE; // Start with 1% baseline
+
+    // Adjust based on cardinality ratio
+    if let Some(distinct) = distinct_count {
+        let ratio = distinct as f64 / row_count.max(1) as f64;
+        if ratio > 0.8 {
+            // High cardinality (>80% distinct) -> tighter FPP for better pruning
+            fpp = 0.005;
+        } else if ratio < 0.1 {
+            // Low cardinality (<10% distinct) -> looser FPP acceptable
+            fpp = 0.02;
+        }
+    }
+
+    // Adjust based on segment size
+    if segment_size_bytes > 10_485_760 {
+        // Large segments (>10MB) -> tighter FPP justified by I/O savings
+        fpp = fpp.min(0.005);
+    } else if segment_size_bytes < 102_400 {
+        // Small segments (<100KB) -> looser FPP to save memory
+        fpp = fpp.max(0.02);
+    }
+
+    // Clamp to reasonable range
+    fpp.clamp(0.001, 0.05)
+}
+
 /// A generic bloom filter index for any column
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnBloomFilter {
@@ -33,13 +72,30 @@ pub struct BloomFilterBuilder {
 impl BloomFilterBuilder {
     /// Create a new builder for a column with estimated item count
     pub fn new(column: &str, estimated_items: usize) -> Self {
+        Self::with_fp_rate(column, estimated_items, DEFAULT_FP_RATE)
+    }
+
+    /// Create a new builder with a custom false positive rate
+    pub fn with_fp_rate(column: &str, estimated_items: usize, fp_rate: f64) -> Self {
         let capacity = estimated_items.clamp(BLOOM_FALLBACK_MIN_ITEMS, BLOOM_FALLBACK_MAX_ITEMS);
+        let clamped_fp_rate = fp_rate.clamp(0.001, 0.05);
         Self {
             column: column.to_string(),
-            bloom: Bloom::new_for_fp_rate(capacity, DEFAULT_FP_RATE),
+            bloom: Bloom::new_for_fp_rate(capacity, clamped_fp_rate),
             item_count: 0,
-            fp_rate: DEFAULT_FP_RATE,
+            fp_rate: clamped_fp_rate,
         }
+    }
+
+    /// Create a new builder with adaptive false positive rate
+    pub fn new_adaptive(
+        column: &str,
+        estimated_items: usize,
+        distinct_count: Option<u64>,
+        segment_size_bytes: u64,
+    ) -> Self {
+        let fp_rate = calculate_adaptive_fpp(estimated_items, distinct_count, segment_size_bytes);
+        Self::with_fp_rate(column, estimated_items, fp_rate)
     }
 
     /// Add a string value to the bloom filter
@@ -309,5 +365,54 @@ mod tests {
             deserialized.might_contain("col", &BloomValue::String("value".to_string())),
             Some(true)
         );
+    }
+
+    #[test]
+    fn test_adaptive_fpp_high_cardinality() {
+        // High cardinality (>80% distinct) should use tighter FPP
+        let fpp = calculate_adaptive_fpp(1000, Some(900), 1_000_000);
+        assert!(fpp <= 0.005, "High cardinality should use tight FPP");
+    }
+
+    #[test]
+    fn test_adaptive_fpp_low_cardinality() {
+        // Low cardinality (<10% distinct) can use looser FPP
+        let fpp = calculate_adaptive_fpp(1000, Some(50), 100_000);
+        assert!(fpp >= 0.02, "Low cardinality should use loose FPP");
+    }
+
+    #[test]
+    fn test_adaptive_fpp_large_segment() {
+        // Large segments (>10MB) should use tighter FPP
+        let fpp = calculate_adaptive_fpp(100000, None, 20_000_000);
+        assert!(fpp <= 0.005, "Large segment should use tight FPP");
+    }
+
+    #[test]
+    fn test_adaptive_fpp_small_segment() {
+        // Small segments (<100KB) can use looser FPP
+        let fpp = calculate_adaptive_fpp(100, None, 50_000);
+        assert!(fpp >= 0.02, "Small segment should use loose FPP");
+    }
+
+    #[test]
+    fn test_adaptive_fpp_clamped() {
+        // FPP should always be in [0.001, 0.05] range
+        let fpp = calculate_adaptive_fpp(1000, Some(1000), 100_000_000);
+        assert!(fpp >= 0.001 && fpp <= 0.05, "FPP should be clamped");
+    }
+
+    #[test]
+    fn test_bloom_filter_builder_adaptive() {
+        // Test adaptive builder creates valid filter
+        let mut builder = BloomFilterBuilder::new_adaptive(
+            "user_id",
+            10000,
+            Some(9500), // High cardinality
+            5_000_000,  // 5MB segment
+        );
+        builder.add_string("test_user");
+        let filter = builder.build().unwrap();
+        assert!(filter.fp_rate <= 0.01, "Adaptive should use appropriate FPP");
     }
 }

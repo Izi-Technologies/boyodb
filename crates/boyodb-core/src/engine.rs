@@ -1,6 +1,7 @@
 use crate::replication::{
     compute_bundle_plan_hash, BundlePayload, BundlePlan, BundlePlanner, BundleRequest,
-    BundleSegment, IndexMeta, IndexState, Manifest, ManifestEntry, SegmentTier, TableMeta,
+    BundleSegment, EnumTypeMeta, IndexMeta, IndexState, Manifest, ManifestEntry,
+    ProcedureMetadata, ProcedureParameter, SegmentTier, TableMeta,
 };
 use crate::sql::SelectExpr;
 use crate::sql::SqlValue;
@@ -695,6 +696,21 @@ pub struct EngineConfig {
     /// Statistics sample size for cost estimation (rows)
     /// Default: 10000
     pub stats_sample_size: usize,
+
+    // --- Adaptive Cache Sharding ---
+    /// Number of shards for segment cache (default: auto based on CPU count and cache size)
+    /// 0 = auto-calculate optimal shard count
+    pub segment_cache_shards: usize,
+
+    // --- Adaptive Bloom Filter ---
+    /// Enable adaptive false positive probability based on cardinality and segment size
+    /// Default: true
+    pub adaptive_bloom_fpp: bool,
+
+    // --- Parallel Compression ---
+    /// Enable parallel compression for batch ingestion
+    /// Default: true
+    pub parallel_compression: bool,
 }
 
 impl EngineConfig {
@@ -896,6 +912,12 @@ impl EngineConfig {
             // Cost-based optimizer defaults
             cost_based_optimizer_enabled: true, // Enable CBO
             stats_sample_size: 10000,           // 10K row sample for stats
+            // Adaptive cache sharding defaults (0 = auto-calculate)
+            segment_cache_shards: 0,
+            // Adaptive bloom filter defaults
+            adaptive_bloom_fpp: true,
+            // Parallel compression defaults
+            parallel_compression: true,
         }
     }
 
@@ -1463,6 +1485,7 @@ pub enum PlanKind {
         projection: Option<Vec<String>>,
         filter: QueryFilter,
         computed_columns: Vec<crate::sql::SelectColumn>,
+        sample: Option<crate::sql::SampleClause>,
     },
     Join,
     SetOperation,
@@ -1999,10 +2022,34 @@ impl SegmentCacheShard {
 
 /// Sharded LRU Segment cache for high-concurrency access
 /// Each shard is independently lockable, enabling parallel segment loads
-const SEGMENT_CACHE_SHARDS: usize = 64;
+const DEFAULT_SEGMENT_CACHE_SHARDS: usize = 64;
+
+/// Calculate optimal shard count based on CPU count and cache size
+/// More CPUs and larger caches benefit from more shards to reduce contention
+fn calculate_optimal_shards(num_cpus: usize, cache_size_bytes: u64) -> usize {
+    // Base: 3 shards per CPU core for good concurrency
+    let base = num_cpus * 3;
+
+    // Increase shards for larger caches to improve eviction locality
+    // >1GB: 2x multiplier, >256MB: 1.5x multiplier
+    let size_factor = if cache_size_bytes > 1_073_741_824 {
+        2
+    } else if cache_size_bytes > 268_435_456 {
+        1
+    } else {
+        0
+    };
+
+    // Apply size factor: base * (1 + size_factor / 2)
+    let shards = base + (base * size_factor) / 2;
+
+    // Clamp to reasonable range: 16-256 shards
+    shards.clamp(16, 256)
+}
 
 struct ShardedSegmentCache {
     shards: Vec<ParkingMutex<SegmentCacheShard>>,
+    shard_count: usize,
     max_bytes_per_shard: u64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -2013,7 +2060,7 @@ impl std::fmt::Debug for ShardedSegmentCache {
         let total_entries: usize = self.shards.iter().map(|s| s.lock().lru.len()).sum();
         let total_bytes: u64 = self.shards.iter().map(|s| s.lock().current_bytes).sum();
         f.debug_struct("ShardedSegmentCache")
-            .field("shards", &SEGMENT_CACHE_SHARDS)
+            .field("shards", &self.shard_count)
             .field("total_entries", &total_entries)
             .field("total_bytes", &total_bytes)
             .field("max_bytes_per_shard", &self.max_bytes_per_shard)
@@ -2022,16 +2069,32 @@ impl std::fmt::Debug for ShardedSegmentCache {
 }
 
 impl ShardedSegmentCache {
-    fn new(max_bytes: u64) -> Self {
-        let max_bytes_per_shard = max_bytes / SEGMENT_CACHE_SHARDS as u64;
+    fn new(max_bytes: u64, shard_count: usize) -> Self {
+        // Use provided shard count or fall back to default
+        let actual_shards = if shard_count == 0 {
+            DEFAULT_SEGMENT_CACHE_SHARDS
+        } else {
+            shard_count
+        };
+        let max_bytes_per_shard = max_bytes / actual_shards as u64;
         ShardedSegmentCache {
-            shards: (0..SEGMENT_CACHE_SHARDS)
+            shards: (0..actual_shards)
                 .map(|_| ParkingMutex::new(SegmentCacheShard::new()))
                 .collect(),
+            shard_count: actual_shards,
             max_bytes_per_shard,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
+    }
+
+    /// Create a new cache with auto-calculated shard count based on system resources
+    fn new_adaptive(max_bytes: u64) -> Self {
+        let num_cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(8);
+        let shard_count = calculate_optimal_shards(num_cpus, max_bytes);
+        Self::new(max_bytes, shard_count)
     }
 
     #[inline]
@@ -2039,7 +2102,7 @@ impl ShardedSegmentCache {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
         segment_id.hash(&mut hasher);
-        (hasher.finish() as usize) % SEGMENT_CACHE_SHARDS
+        (hasher.finish() as usize) % self.shard_count
     }
 
     fn get(&self, segment_id: &str) -> Option<Arc<Vec<u8>>> {
@@ -3616,7 +3679,11 @@ impl Db {
                 cfg.plan_cache_size,
                 cfg.plan_cache_ttl_secs,
             )),
-            segment_cache: SegmentCache::new(cfg.segment_cache_bytes),
+            segment_cache: if cfg.segment_cache_shards == 0 {
+                SegmentCache::new_adaptive(cfg.segment_cache_bytes)
+            } else {
+                SegmentCache::new(cfg.segment_cache_bytes, cfg.segment_cache_shards)
+            },
             batch_cache: BatchCache::new(cfg.batch_cache_bytes),
             schema_cache: ParkingMutex::new(LruCache::new(
                 NonZeroUsize::new(cfg.schema_cache_entries.max(1)).unwrap(),
@@ -4492,123 +4559,243 @@ impl Db {
         self.check_disk_space(total_bytes + 4096 * batches.len() as u64)?;
 
         // Collect validated entries and payloads
-        let mut validated_entries: Vec<(
+        // Phase 1: Validate and compress batches
+        // Use parallel compression when enabled and multiple batches
+        let validated_entries: Vec<(
             ManifestEntry,
             Vec<u8>, // stored_payload
             String,  // db_name
             String,  // table_name
             u16,     // shard_id
             u64,     // row_count
-        )> = Vec::with_capacity(batches.len());
+        )> = if self.cfg.parallel_compression && batches.len() > 1 {
+            // Parallel validation and compression pipeline
+            // First, collect metadata needed for compression (requires manifest read)
+            let batch_metadata: Vec<_> = batches
+                .iter()
+                .map(|batch| {
+                    let db_name = batch
+                        .database
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default")
+                        .to_string();
+                    let table_name = batch
+                        .table
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default")
+                        .to_string();
+                    let existing_table = {
+                        let manifest = self.manifest.read();
+                        manifest
+                            .tables
+                            .iter()
+                            .find(|t| t.database == db_name && t.name == table_name)
+                            .cloned()
+                    };
+                    (db_name, table_name, existing_table, batch.shard_override, batch.watermark_micros)
+                })
+                .collect();
 
-        // Phase 1: Validate all batches (no locks held yet)
-        for batch in &batches {
-            if batch.payload_ipc.is_empty() {
-                return Err(EngineError::InvalidArgument(
-                    "empty ingest payload in batch".to_string(),
+            // Pre-allocate sequence numbers for all batches
+            let base_seq = self.segment_seq.fetch_add(batches.len() as u64, Ordering::SeqCst);
+
+            // Get config values for parallel closure
+            let compression_skip = self.cfg.compression_skip_threshold_bytes;
+            let adaptive_levels = self.cfg.adaptive_compression_levels;
+            let tier_compression = self.cfg.tier_hot_compression.clone();
+            let shard_map = self.shard_map.read().clone();
+
+            // Parallel validation and compression
+            let results: Vec<Result<_, EngineError>> = batches
+                .par_iter()
+                .zip(batch_metadata.par_iter())
+                .enumerate()
+                .map(|(idx, (batch, (db_name, table_name, existing_table, shard_override, watermark)))| {
+                    if batch.payload_ipc.is_empty() {
+                        return Err(EngineError::InvalidArgument(
+                            "empty ingest payload in batch".to_string(),
+                        ));
+                    }
+
+                    validate_identifier(db_name, "database")?;
+                    validate_identifier(table_name, "table")?;
+
+                    // Validate and get stats
+                    let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
+                    let stats = validated.stats;
+                    let row_count = stats.column_stats.values().next().map(|cs| cs.row_count).unwrap_or(0);
+
+                    // Compression with adaptive optimization
+                    let table_compression = normalize_compression(
+                        existing_table
+                            .as_ref()
+                            .and_then(|t| t.compression.clone())
+                            .or_else(|| tier_compression.clone()),
+                    )?;
+                    let stored_payload = compress_payload_adaptive(
+                        &batch.payload_ipc,
+                        table_compression.as_deref(),
+                        compression_skip,
+                        adaptive_levels,
+                    )?;
+
+                    // Compute shard and segment ID
+                    let seq = base_seq + idx as u64;
+                    let global_shard_id = if let Some(hint) = shard_override {
+                        shard_map.get_shard_id(*hint)
+                    } else if let Some(tid) = stats.tenant_id_min {
+                        shard_map.get_shard_id(tid)
+                    } else {
+                        (seq % shard_map.total_shards.max(1) as u64) as u16
+                    };
+
+                    let segment_id = format!("seg-{global_shard_id}-{seq}");
+                    let manifest_entry = ManifestEntry {
+                        segment_id,
+                        shard_id: global_shard_id,
+                        version_added: 0,
+                        size_bytes: stored_payload.len() as u64,
+                        checksum: compute_checksum(&stored_payload),
+                        tier: SegmentTier::Hot,
+                        database: db_name.to_string(),
+                        table: table_name.to_string(),
+                        compression: table_compression,
+                        watermark_micros: *watermark,
+                        event_time_min: stats.event_time_min,
+                        event_time_max: stats.event_time_max,
+                        tenant_id_min: stats.tenant_id_min,
+                        tenant_id_max: stats.tenant_id_max,
+                        route_id_min: stats.route_id_min,
+                        route_id_max: stats.route_id_max,
+                        bloom_tenant: stats.bloom_tenant,
+                        bloom_route: stats.bloom_route,
+                        column_stats: if stats.column_stats.is_empty() { None } else { Some(stats.column_stats) },
+                        schema_hash: Some(validated.schema_hash),
+                        created_txn: None,
+                        deleted_txn: None,
+                        deleted_version: None,
+                    };
+
+                    Ok((manifest_entry, stored_payload, db_name.clone(), table_name.clone(), global_shard_id, row_count))
+                })
+                .collect();
+
+            // Collect results, failing fast on any error
+            results.into_iter().collect::<Result<Vec<_>, _>>()?
+        } else {
+            // Sequential path for single batch or when parallel compression is disabled
+            let mut entries = Vec::with_capacity(batches.len());
+            for batch in &batches {
+                if batch.payload_ipc.is_empty() {
+                    return Err(EngineError::InvalidArgument(
+                        "empty ingest payload in batch".to_string(),
+                    ));
+                }
+
+                let db_name = batch
+                    .database
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default");
+                let table_name = batch
+                    .table
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("default");
+
+                validate_identifier(db_name, "database")?;
+                validate_identifier(table_name, "table")?;
+
+                // Look up existing schema
+                let existing_table = {
+                    let manifest = self.manifest.read();
+                    manifest
+                        .tables
+                        .iter()
+                        .find(|t| t.database == db_name && t.name == table_name)
+                        .cloned()
+                };
+
+                // Validate and get stats
+                let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
+                let stats = validated.stats;
+
+                // Get row count
+                let row_count = stats
+                    .column_stats
+                    .values()
+                    .next()
+                    .map(|cs| cs.row_count)
+                    .unwrap_or(0);
+
+                // Compression and encoding with adaptive optimization
+                let table_compression = normalize_compression(
+                    existing_table
+                        .as_ref()
+                        .and_then(|t| t.compression.clone())
+                        .or_else(|| self.cfg.tier_hot_compression.clone()),
+                )?;
+                let stored_payload = compress_payload_adaptive(
+                    &batch.payload_ipc,
+                    table_compression.as_deref(),
+                    self.cfg.compression_skip_threshold_bytes,
+                    self.cfg.adaptive_compression_levels,
+                )?;
+
+                // Choose shard
+                let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
+                let global_shard_id = if let Some(hint) = batch.shard_override {
+                    self.shard_map.read().get_shard_id(hint)
+                } else if let Some(tid) = stats.tenant_id_min {
+                    self.shard_map.read().get_shard_id(tid)
+                } else {
+                    (seq % self.shard_map.read().total_shards.max(1) as u64) as u16
+                };
+
+                let segment_id = format!("seg-{global_shard_id}-{seq}");
+                let manifest_entry = ManifestEntry {
+                    segment_id,
+                    shard_id: global_shard_id,
+                    version_added: 0,
+                    size_bytes: stored_payload.len() as u64,
+                    checksum: compute_checksum(&stored_payload),
+                    tier: SegmentTier::Hot,
+                    database: db_name.to_string(),
+                    table: table_name.to_string(),
+                    compression: table_compression.clone(),
+                    watermark_micros: batch.watermark_micros,
+                    event_time_min: stats.event_time_min,
+                    event_time_max: stats.event_time_max,
+                    tenant_id_min: stats.tenant_id_min,
+                    tenant_id_max: stats.tenant_id_max,
+                    route_id_min: stats.route_id_min,
+                    route_id_max: stats.route_id_max,
+                    bloom_tenant: stats.bloom_tenant,
+                    bloom_route: stats.bloom_route,
+                    column_stats: if stats.column_stats.is_empty() {
+                        None
+                    } else {
+                        Some(stats.column_stats)
+                    },
+                    schema_hash: Some(validated.schema_hash),
+                    created_txn: None,
+                    deleted_txn: None,
+                    deleted_version: None,
+                };
+
+                entries.push((
+                    manifest_entry,
+                    stored_payload,
+                    db_name.to_string(),
+                    table_name.to_string(),
+                    global_shard_id,
+                    row_count,
                 ));
             }
-
-            let db_name = batch
-                .database
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("default");
-            let table_name = batch
-                .table
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("default");
-
-            validate_identifier(db_name, "database")?;
-            validate_identifier(table_name, "table")?;
-
-            // Look up existing schema
-            let existing_table = {
-                let manifest = self.manifest.read();
-                manifest
-                    .tables
-                    .iter()
-                    .find(|t| t.database == db_name && t.name == table_name)
-                    .cloned()
-            };
-
-            // Validate and get stats
-            let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
-            let stats = validated.stats;
-
-            // Get row count
-            let row_count = stats
-                .column_stats
-                .values()
-                .next()
-                .map(|cs| cs.row_count)
-                .unwrap_or(0);
-
-            // Compression and encoding with adaptive optimization
-            let table_compression = normalize_compression(
-                existing_table
-                    .as_ref()
-                    .and_then(|t| t.compression.clone())
-                    .or_else(|| self.cfg.tier_hot_compression.clone()),
-            )?;
-            let stored_payload = compress_payload_adaptive(
-                &batch.payload_ipc,
-                table_compression.as_deref(),
-                self.cfg.compression_skip_threshold_bytes,
-                self.cfg.adaptive_compression_levels,
-            )?;
-
-            // Choose shard
-            let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
-            let global_shard_id = if let Some(hint) = batch.shard_override {
-                self.shard_map.read().get_shard_id(hint)
-            } else if let Some(tid) = stats.tenant_id_min {
-                self.shard_map.read().get_shard_id(tid)
-            } else {
-                (seq % self.shard_map.read().total_shards.max(1) as u64) as u16
-            };
-
-            let segment_id = format!("seg-{global_shard_id}-{seq}");
-            let manifest_entry = ManifestEntry {
-                segment_id,
-                shard_id: global_shard_id,
-                version_added: 0,
-                size_bytes: stored_payload.len() as u64,
-                checksum: compute_checksum(&stored_payload),
-                tier: SegmentTier::Hot,
-                database: db_name.to_string(),
-                table: table_name.to_string(),
-                compression: table_compression.clone(),
-                watermark_micros: batch.watermark_micros,
-                event_time_min: stats.event_time_min,
-                event_time_max: stats.event_time_max,
-                tenant_id_min: stats.tenant_id_min,
-                tenant_id_max: stats.tenant_id_max,
-                route_id_min: stats.route_id_min,
-                route_id_max: stats.route_id_max,
-                bloom_tenant: stats.bloom_tenant,
-                bloom_route: stats.bloom_route,
-                column_stats: if stats.column_stats.is_empty() {
-                    None
-                } else {
-                    Some(stats.column_stats)
-                },
-                schema_hash: Some(validated.schema_hash),
-                created_txn: None,
-                deleted_txn: None,
-                deleted_version: None,
-            };
-
-            validated_entries.push((
-                manifest_entry,
-                stored_payload,
-                db_name.to_string(),
-                table_name.to_string(),
-                global_shard_id,
-                row_count,
-            ));
-        }
+            entries
+        };
 
         let count = validated_entries.len();
         let use_memtable = self.cfg.memtable_max_bytes > 0 && self.cfg.memtable_max_entries > 0;
@@ -5068,6 +5255,7 @@ impl Db {
                 projection,
                 filter,
                 computed_columns,
+                sample,
             } => self.execute_simple_plan(
                 agg,
                 db,
@@ -5075,6 +5263,7 @@ impl Db {
                 projection,
                 filter,
                 computed_columns,
+                sample,
                 deadline,
                 manifest_version,
                 collect_stats,
@@ -5150,6 +5339,7 @@ impl Db {
                 projection,
                 filter,
                 computed_columns: _,
+                sample: _,
             } => (agg, db, table, projection, filter),
         };
 
@@ -5478,6 +5668,7 @@ impl Db {
                 projection,
                 filter,
                 computed_columns,
+                sample,
             } => self.execute_simple_plan(
                 agg,
                 db,
@@ -5485,6 +5676,7 @@ impl Db {
                 projection,
                 filter,
                 computed_columns,
+                sample,
                 deadline,
                 manifest_version,
                 false,
@@ -5509,6 +5701,7 @@ impl Db {
         projection: Option<Vec<String>>,
         filter: QueryFilter,
         computed_columns: Vec<crate::sql::SelectColumn>,
+        sample: Option<crate::sql::SampleClause>,
         deadline: Option<std::time::Instant>,
         _manifest_version: u64,
         collect_stats: bool,
@@ -5812,6 +6005,12 @@ impl Db {
             )));
         }
 
+        // Prefetch initial batch of segments into cache for better sequential scan performance
+        if self.cfg.prefetch_enabled && matching.len() > self.cfg.prefetch_segments {
+            let prefetch_count = self.cfg.prefetch_segments.min(matching.len());
+            self.prefetch_segments(&matching[..prefetch_count]);
+        }
+
         let estimated_capacity = filter
             .limit
             .unwrap_or(matching.len().saturating_mul(64))
@@ -5953,11 +6152,22 @@ impl Db {
                     None
                 };
 
-                for entry in &matching {
+                let prefetch_interval = self.cfg.prefetch_segments / 2;
+                for (i, entry) in matching.iter().enumerate() {
                     if estimated_rows >= limit || remaining_limit == 0 {
                         break;
                     }
                     check_timeout()?;
+
+                    // Progressive prefetch: load next batch at halfway points
+                    if self.cfg.prefetch_enabled && prefetch_interval > 0 && i > 0 && i % prefetch_interval == 0 {
+                        let next_start = i + self.cfg.prefetch_segments;
+                        if next_start < matching.len() {
+                            let next_end = (next_start + self.cfg.prefetch_segments).min(matching.len());
+                            self.prefetch_segments(&matching[next_start..next_end]);
+                        }
+                    }
+
                     // Use try_load to skip damaged segments
                     let payload = match self.try_load_segment_cached(entry)? {
                         Some(p) => p,
@@ -6127,22 +6337,34 @@ impl Db {
                     })
                     .collect();
 
-                // Merge partial results
-                let mut final_agg = Aggregator::new(agg_plan)?;
-                for partial in partial_results {
-                    check_timeout()?;
-                    let partial_ipc = partial?;
-                    if !partial_ipc.is_empty() {
-                        // Feed partial aggregates into final aggregator
-                        final_agg.consume_ipc(&partial_ipc, &default_filter)?;
-                    }
-                }
-                records = final_agg.finish()?;
+                // Collect valid partial results
+                let valid_partials: Vec<Vec<u8>> = partial_results
+                    .into_iter()
+                    .filter_map(|r| {
+                        check_timeout().ok()?;
+                        r.ok()
+                    })
+                    .filter(|p| !p.is_empty())
+                    .collect();
+
+                // Use parallel tree reduction for many partials, sequential for few
+                records = Aggregator::merge_parallel(valid_partials, agg_plan)?;
             } else {
                 // Sequential path for small number of segments
                 let mut agg_state = Aggregator::new(agg_plan)?;
-                for entry in &matching {
+                let prefetch_interval = self.cfg.prefetch_segments / 2;
+                for (i, entry) in matching.iter().enumerate() {
                     check_timeout()?;
+
+                    // Progressive prefetch for sequential aggregation
+                    if self.cfg.prefetch_enabled && prefetch_interval > 0 && i > 0 && i % prefetch_interval == 0 {
+                        let next_start = i + self.cfg.prefetch_segments;
+                        if next_start < matching.len() {
+                            let next_end = (next_start + self.cfg.prefetch_segments).min(matching.len());
+                            self.prefetch_segments(&matching[next_start..next_end]);
+                        }
+                    }
+
                     let payload = self.load_segment_cached(entry)?;
                     let filtered = filter_ipc(&payload, &filter)?;
                     agg_state.consume_ipc(&filtered, &default_filter)?;
@@ -6253,6 +6475,47 @@ impl Db {
                 Ok(None)
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Prefetch segments into cache for sequential scans
+    /// Loads segments in parallel using rayon, pre-populating the cache
+    /// for better hit rates during the main query scan
+    fn prefetch_segments(&self, entries: &[ManifestEntry]) {
+        if !self.cfg.prefetch_enabled || entries.is_empty() {
+            return;
+        }
+
+        // Filter to entries not already in cache
+        let entries_to_load: Vec<&ManifestEntry> = entries
+            .iter()
+            .filter(|e| self.segment_cache.get(&e.segment_id).is_none())
+            .collect();
+
+        if entries_to_load.is_empty() {
+            return;
+        }
+
+        // Load segments in parallel using rayon
+        // This runs synchronously but uses thread pool for parallelism
+        let storage = &self.storage;
+        let results: Vec<_> = entries_to_load
+            .par_iter()
+            .filter_map(|entry| {
+                // Skip if already cached (race condition check)
+                if self.segment_cache.get(&entry.segment_id).is_some() {
+                    return None;
+                }
+                // Load from storage
+                load_segment(storage, entry)
+                    .ok()
+                    .map(|data| (entry.segment_id.clone(), data))
+            })
+            .collect();
+
+        // Insert all loaded segments into cache
+        for (segment_id, data) in results {
+            self.segment_cache.insert(segment_id, data);
         }
     }
 
@@ -11244,6 +11507,145 @@ impl Db {
             .replace(']', "")
     }
 
+    /// Describe a view, returning its metadata including inferred columns
+    pub fn describe_view(
+        &self,
+        database: &str,
+        view: &str,
+    ) -> Result<ViewDescription, EngineError> {
+        let manifest = self.manifest.read();
+
+        // Find the view
+        let view_meta = manifest
+            .views
+            .iter()
+            .find(|v| v.database == database && v.name == view)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!("view {}.{} not found", database, view))
+            })?;
+
+        let query_sql = view_meta.query_sql.clone();
+        drop(manifest);
+
+        // Try to infer columns from the view's query
+        let columns = self.infer_view_columns(&query_sql, database);
+
+        // Extract table dependencies from the query
+        let dependencies = self.extract_view_dependencies(&query_sql, database);
+
+        Ok(ViewDescription {
+            database: database.to_string(),
+            view: view.to_string(),
+            query_sql,
+            columns,
+            dependencies,
+        })
+    }
+
+    /// Infer column information from a view's SELECT query
+    fn infer_view_columns(&self, query_sql: &str, _default_db: &str) -> Vec<ViewColumn> {
+        // Helper to get a readable name from a SelectExpr
+        fn infer_expr_name(expr: &crate::sql::SelectExpr) -> String {
+            match expr {
+                crate::sql::SelectExpr::Column(col) => col.clone(),
+                crate::sql::SelectExpr::QualifiedColumn { table, column } => {
+                    format!("{}.{}", table, column)
+                }
+                crate::sql::SelectExpr::Function(f) => {
+                    // Get function name from ScalarFunction variant
+                    format!("{:?}", f).split('(').next().unwrap_or("function").to_lowercase()
+                }
+                crate::sql::SelectExpr::Aggregate(agg) => format!("{:?}", agg).to_lowercase(),
+                crate::sql::SelectExpr::Window { function, .. } => {
+                    format!("{:?}", function).to_lowercase()
+                }
+                crate::sql::SelectExpr::Literal(_) => "literal".to_string(),
+                crate::sql::SelectExpr::BinaryOp { .. } => "expr".to_string(),
+                crate::sql::SelectExpr::UnaryOp { .. } => "expr".to_string(),
+                crate::sql::SelectExpr::Case { .. } => "case".to_string(),
+                crate::sql::SelectExpr::Null => "null".to_string(),
+                crate::sql::SelectExpr::Subquery(_) => "subquery".to_string(),
+            }
+        }
+
+        use crate::sql::parse_sql;
+
+        let mut columns = Vec::new();
+
+        // Try to parse the query and extract column information
+        if let Ok(crate::sql::SqlStatement::Query(select)) = parse_sql(query_sql) {
+            // First, add simple projection columns
+            if let Some(ref projection) = select.projection {
+                for col_name in projection {
+                    if col_name == "*" {
+                        columns.push(ViewColumn {
+                            name: "*".to_string(),
+                            data_type: None,
+                            nullable: true,
+                        });
+                    } else {
+                        columns.push(ViewColumn {
+                            name: col_name.to_string(),
+                            data_type: None,
+                            nullable: true,
+                        });
+                    }
+                }
+            }
+
+            // Then, add computed columns with their aliases
+            for select_col in &select.computed_columns {
+                let name = select_col
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| infer_expr_name(&select_col.expr));
+                columns.push(ViewColumn {
+                    name,
+                    data_type: None, // Would need type inference
+                    nullable: true,
+                });
+            }
+        }
+
+        columns
+    }
+
+    /// Extract table dependencies from a view's query
+    fn extract_view_dependencies(&self, query_sql: &str, default_db: &str) -> Vec<String> {
+        let mut dependencies = Vec::new();
+        let sql_upper = query_sql.to_uppercase();
+
+        // Find FROM and JOIN references
+        let from_positions: Vec<usize> = sql_upper
+            .match_indices(" FROM ")
+            .map(|(i, _)| i + 6)
+            .collect();
+        let join_positions: Vec<usize> = sql_upper
+            .match_indices(" JOIN ")
+            .map(|(i, _)| i + 6)
+            .collect();
+
+        let mut positions: Vec<usize> = from_positions;
+        positions.extend(join_positions);
+
+        for pos in positions {
+            let rest = &query_sql[pos..];
+            let table_ref = Self::extract_table_reference(rest);
+            if !table_ref.is_empty() {
+                let full_ref = if table_ref.contains('.') {
+                    table_ref
+                } else {
+                    format!("{}.{}", default_db, table_ref)
+                };
+                if !dependencies.contains(&full_ref) {
+                    dependencies.push(full_ref);
+                }
+            }
+        }
+
+        dependencies
+    }
+
     /// Create a materialized view
     pub fn create_materialized_view(
         &self,
@@ -11973,7 +12375,17 @@ impl Db {
         }
 
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-        let mut bloom = Bloom::new_for_fp_rate(total_rows.max(1), 0.01);
+        // Use adaptive FPP when enabled, estimating segment size from entry
+        let bloom_fpp = if self.cfg.adaptive_bloom_fpp {
+            crate::bloom_utils::calculate_adaptive_fpp(
+                total_rows,
+                None, // We don't have distinct count here
+                entry.size_bytes,
+            )
+        } else {
+            0.01
+        };
+        let mut bloom = Bloom::new_for_fp_rate(total_rows.max(1), bloom_fpp);
         let mut hash_values: HashSet<u64> = HashSet::new();
 
         // For fulltext indexes, we use a different approach - build an n-gram index
@@ -14553,6 +14965,316 @@ impl Db {
                 )))
             }
         }
+    }
+
+    // ========================================================================
+    // Stored Procedures
+    // ========================================================================
+
+    /// Create a stored procedure
+    pub fn create_procedure(
+        &self,
+        name: &str,
+        parameters: Vec<crate::sql::FunctionParameter>,
+        body: &str,
+        or_replace: bool,
+        language: Option<&str>,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "procedure")?;
+
+        let mut manifest = self.manifest.write();
+
+        // Check if procedure already exists
+        if manifest.procedures.iter().any(|p| p.name == name) {
+            if !or_replace {
+                return Err(EngineError::InvalidArgument(format!(
+                    "procedure '{}' already exists (use CREATE OR REPLACE to overwrite)",
+                    name
+                )));
+            }
+            // Remove existing procedure
+            manifest.procedures.retain(|p| p.name != name);
+        }
+
+        manifest.procedures.push(ProcedureMetadata {
+            name: name.to_string(),
+            parameters: parameters
+                .iter()
+                .map(|p| ProcedureParameter {
+                    name: p.name.clone(),
+                    data_type: p.data_type.clone(),
+                    default_value: p.default_value.clone(),
+                })
+                .collect(),
+            body: body.to_string(),
+            language: language.unwrap_or("SQL").to_string(),
+        });
+
+        tracing::info!(procedure = %name, "stored procedure created");
+        Ok(())
+    }
+
+    /// Drop a stored procedure
+    pub fn drop_procedure(&self, name: &str, if_exists: bool) -> Result<(), EngineError> {
+        self.validate_identifier(name, "procedure")?;
+
+        let mut manifest = self.manifest.write();
+        let initial_len = manifest.procedures.len();
+        manifest.procedures.retain(|p| p.name != name);
+
+        if manifest.procedures.len() < initial_len {
+            tracing::info!(procedure = %name, "stored procedure dropped");
+            Ok(())
+        } else if if_exists {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound(format!(
+                "procedure '{}' not found",
+                name
+            )))
+        }
+    }
+
+    /// Call a stored procedure
+    pub fn call_procedure(
+        &self,
+        name: &str,
+        arguments: &[String],
+    ) -> Result<String, EngineError> {
+        let manifest = self.manifest.read();
+        let procedure = manifest
+            .procedures
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| EngineError::NotFound(format!("procedure '{}' not found", name)))?;
+
+        // Clone the body so we can drop the manifest lock
+        let body = procedure.body.clone();
+        let _params = procedure.parameters.clone();
+        drop(manifest);
+
+        // Execute the procedure body as SQL
+        // For now, we simply execute the body as a SQL statement
+        // A full implementation would handle parameter substitution, control flow, etc.
+        let result = self.query(QueryRequest {
+            sql: body.clone(),
+            timeout_millis: 30000,
+            collect_stats: false,
+            transaction_id: None,
+        });
+
+        match result {
+            Ok(response) => {
+                tracing::info!(procedure = %name, args = ?arguments, "procedure executed");
+                let bytes = response.records_ipc.len();
+                Ok(format!(
+                    "Procedure '{}' executed ({} bytes returned)",
+                    name, bytes
+                ))
+            }
+            Err(e) => Err(EngineError::Internal(format!(
+                "procedure '{}' execution failed: {}",
+                name, e
+            ))),
+        }
+    }
+
+    /// List all stored procedures
+    pub fn list_procedures(&self, pattern: Option<&str>) -> Vec<ProcedureMetadata> {
+        let manifest = self.manifest.read();
+        manifest
+            .procedures
+            .iter()
+            .filter(|p| {
+                if let Some(pat) = pattern {
+                    let pat_lower = pat.to_lowercase().replace('%', "");
+                    p.name.to_lowercase().contains(&pat_lower)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    // ========================================================================
+    // ENUM TYPE MANAGEMENT
+    // ========================================================================
+
+    /// Create a new ENUM type
+    pub fn create_enum_type(
+        &self,
+        database: &str,
+        name: &str,
+        values: Vec<String>,
+        if_not_exists: bool,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "type")?;
+
+        let mut manifest = self.manifest.write();
+
+        // Check if type already exists
+        let exists = manifest
+            .enum_types
+            .iter()
+            .any(|t| t.database == database && t.name == name);
+
+        if exists {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(EngineError::InvalidArgument(format!(
+                "type '{}' already exists in database '{}'",
+                name, database
+            )));
+        }
+
+        // Validate values are unique
+        let mut seen = std::collections::HashSet::new();
+        for value in &values {
+            if !seen.insert(value) {
+                return Err(EngineError::InvalidArgument(format!(
+                    "duplicate value '{}' in ENUM type",
+                    value
+                )));
+            }
+        }
+
+        manifest.enum_types.push(EnumTypeMeta {
+            database: database.to_string(),
+            name: name.to_string(),
+            values,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        });
+
+        tracing::info!(database = %database, type_name = %name, "ENUM type created");
+        Ok(())
+    }
+
+    /// Drop an ENUM type
+    pub fn drop_enum_type(
+        &self,
+        database: &str,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "type")?;
+
+        let mut manifest = self.manifest.write();
+        let initial_len = manifest.enum_types.len();
+        manifest
+            .enum_types
+            .retain(|t| !(t.database == database && t.name == name));
+
+        if manifest.enum_types.len() < initial_len {
+            tracing::info!(database = %database, type_name = %name, "ENUM type dropped");
+            Ok(())
+        } else if if_exists {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound(format!(
+                "type '{}' not found in database '{}'",
+                name, database
+            )))
+        }
+    }
+
+    /// Add a value to an existing ENUM type
+    pub fn alter_enum_type_add_value(
+        &self,
+        database: &str,
+        name: &str,
+        new_value: String,
+        position: Option<crate::sql::EnumValuePosition>,
+    ) -> Result<(), EngineError> {
+        self.validate_identifier(name, "type")?;
+
+        let mut manifest = self.manifest.write();
+        let enum_type = manifest
+            .enum_types
+            .iter_mut()
+            .find(|t| t.database == database && t.name == name)
+            .ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "type '{}' not found in database '{}'",
+                    name, database
+                ))
+            })?;
+
+        // Check if value already exists
+        if enum_type.values.contains(&new_value) {
+            return Err(EngineError::InvalidArgument(format!(
+                "value '{}' already exists in ENUM type '{}'",
+                new_value, name
+            )));
+        }
+
+        // Add value at the specified position
+        match position {
+            Some(crate::sql::EnumValuePosition::Before(existing)) => {
+                let idx = enum_type
+                    .values
+                    .iter()
+                    .position(|v| v == &existing)
+                    .ok_or_else(|| {
+                        EngineError::InvalidArgument(format!(
+                            "value '{}' not found in ENUM type",
+                            existing
+                        ))
+                    })?;
+                enum_type.values.insert(idx, new_value.clone());
+            }
+            Some(crate::sql::EnumValuePosition::After(existing)) => {
+                let idx = enum_type
+                    .values
+                    .iter()
+                    .position(|v| v == &existing)
+                    .ok_or_else(|| {
+                        EngineError::InvalidArgument(format!(
+                            "value '{}' not found in ENUM type",
+                            existing
+                        ))
+                    })?;
+                enum_type.values.insert(idx + 1, new_value.clone());
+            }
+            None => {
+                // Append to end
+                enum_type.values.push(new_value.clone());
+            }
+        }
+
+        tracing::info!(database = %database, type_name = %name, value = %new_value, "ENUM value added");
+        Ok(())
+    }
+
+    /// List all ENUM types in a database
+    pub fn list_enum_types(&self, database: Option<&str>) -> Vec<EnumTypeMeta> {
+        let manifest = self.manifest.read();
+        manifest
+            .enum_types
+            .iter()
+            .filter(|t| {
+                if let Some(db) = database {
+                    t.database == db
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Get an ENUM type by name
+    pub fn get_enum_type(&self, database: &str, name: &str) -> Option<EnumTypeMeta> {
+        let manifest = self.manifest.read();
+        manifest
+            .enum_types
+            .iter()
+            .find(|t| t.database == database && t.name == name)
+            .cloned()
     }
 
     /// Parse a default value string into ScalarValue
@@ -20537,6 +21259,24 @@ pub struct TableDescription {
     pub event_time_max: Option<u64>,
 }
 
+/// Description of a view's structure
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ViewDescription {
+    pub database: String,
+    pub view: String,
+    pub query_sql: String,
+    pub columns: Vec<ViewColumn>,
+    pub dependencies: Vec<String>,
+}
+
+/// Column information in a view
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ViewColumn {
+    pub name: String,
+    pub data_type: Option<String>,
+    pub nullable: bool,
+}
+
 /// Server information and statistics
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerInfo {
@@ -22744,6 +23484,14 @@ fn having_condition_from_sql(cond: crate::sql::HavingCondition) -> HavingConditi
     }
 }
 
+fn group_by_column_from_sql(col: crate::sql::GroupByColumn) -> GroupByColumn {
+    match col {
+        crate::sql::GroupByColumn::TenantId => GroupByColumn::TenantId,
+        crate::sql::GroupByColumn::RouteId => GroupByColumn::RouteId,
+        crate::sql::GroupByColumn::Named(name) => GroupByColumn::Named(name),
+    }
+}
+
 fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
     AggPlan {
         group_by: match plan.group_by {
@@ -22752,19 +23500,21 @@ fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
             crate::sql::GroupBy::Route => GroupBy::Route,
             crate::sql::GroupBy::Columns(cols) => GroupBy::Columns(
                 cols.into_iter()
-                    .filter_map(|c| match c {
-                        crate::sql::GroupByColumn::TenantId => Some(GroupByColumn::TenantId),
-                        crate::sql::GroupByColumn::RouteId => Some(GroupByColumn::RouteId),
-                        crate::sql::GroupByColumn::Named(_) => None, // Named columns handled at SQL layer
-                    })
+                    .map(group_by_column_from_sql)
                     .collect(),
             ),
-            // Advanced GROUP BY features - fall back to None for this internal API
-            // The full GROUPING SETS/CUBE/ROLLUP support is handled at the SQL execution layer
-            crate::sql::GroupBy::All
-            | crate::sql::GroupBy::GroupingSets(_)
-            | crate::sql::GroupBy::Rollup(_)
-            | crate::sql::GroupBy::Cube(_) => GroupBy::None,
+            crate::sql::GroupBy::All => GroupBy::All,
+            crate::sql::GroupBy::GroupingSets(sets) => GroupBy::GroupingSets(
+                sets.into_iter()
+                    .map(|cols| cols.into_iter().map(group_by_column_from_sql).collect())
+                    .collect(),
+            ),
+            crate::sql::GroupBy::Rollup(cols) => GroupBy::Rollup(
+                cols.into_iter().map(group_by_column_from_sql).collect(),
+            ),
+            crate::sql::GroupBy::Cube(cols) => GroupBy::Cube(
+                cols.into_iter().map(group_by_column_from_sql).collect(),
+            ),
         },
         aggs: plan.aggs.into_iter().map(agg_expr_from_sql).collect(),
         having: plan
@@ -22861,6 +23611,7 @@ fn build_query_plan(sql: &str) -> Result<CachedPlan, EngineError> {
                     projection: parsed.projection,
                     filter,
                     computed_columns: parsed.computed_columns,
+                    sample: parsed.sample,
                 },
             })
         }
@@ -26934,8 +27685,15 @@ pub fn validate_and_stats<T>(
     }
 
     // Build bloom filters for tenant_id and route_id (legacy compatibility)
+    // Use adaptive FPP based on cardinality ratio
     let bloom_tenant = if !tenant_ids.is_empty() {
-        let mut bloom = Bloom::new_for_fp_rate(tenant_ids.len().max(100), 0.01);
+        let distinct_count = tenant_ids.len();
+        let fpp = crate::bloom_utils::calculate_adaptive_fpp(
+            total_rows as usize,
+            Some(distinct_count as u64),
+            ipc.len() as u64,
+        );
+        let mut bloom = Bloom::new_for_fp_rate(distinct_count.max(100), fpp);
         for id in &tenant_ids {
             bloom.set(id);
         }
@@ -26945,7 +27703,13 @@ pub fn validate_and_stats<T>(
     };
 
     let bloom_route = if !route_ids.is_empty() {
-        let mut bloom = Bloom::new_for_fp_rate(route_ids.len().max(100), 0.01);
+        let distinct_count = route_ids.len();
+        let fpp = crate::bloom_utils::calculate_adaptive_fpp(
+            total_rows as usize,
+            Some(distinct_count as u64),
+            ipc.len() as u64,
+        );
+        let mut bloom = Bloom::new_for_fp_rate(distinct_count.max(100), fpp);
         for id in &route_ids {
             bloom.set(id);
         }
@@ -28487,6 +29251,52 @@ impl Aggregator {
         }
 
         Ok(buf)
+    }
+
+    /// Merge multiple partial aggregation results in parallel using tree reduction
+    ///
+    /// When merging many partials (>8), uses parallel pairwise merging for better performance.
+    /// For small counts, falls back to sequential merging which has less overhead.
+    pub fn merge_parallel(partials: Vec<Vec<u8>>, plan: AggPlan) -> Result<Vec<u8>, EngineError> {
+        // Filter out empty partials
+        let valid: Vec<Vec<u8>> = partials.into_iter().filter(|p| !p.is_empty()).collect();
+
+        if valid.is_empty() {
+            // No data - return empty aggregation result
+            let agg = Aggregator::new(plan)?;
+            return agg.finish();
+        }
+
+        // For small counts, sequential is faster (less overhead)
+        if valid.len() <= 8 {
+            let mut agg = Aggregator::new(plan)?;
+            for p in valid {
+                agg.consume_ipc(&p, &QueryFilter::default())?;
+            }
+            return agg.finish();
+        }
+
+        // Parallel tree reduction: merge pairs in parallel until one remains
+        let mut current = valid;
+        while current.len() > 1 {
+            let plan_clone = plan.clone();
+            current = current
+                .par_chunks(2)
+                .map(|pair| {
+                    let mut agg = Aggregator::new(plan_clone.clone())?;
+                    for p in pair {
+                        if !p.is_empty() {
+                            agg.consume_ipc(p, &QueryFilter::default())?;
+                        }
+                    }
+                    agg.finish()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+
+        current
+            .pop()
+            .ok_or_else(|| EngineError::Internal("empty merge result".to_string()))
     }
 
     fn build_output_schema(&self) -> Result<Arc<Schema>, EngineError> {
@@ -33482,6 +34292,8 @@ mod tests {
             materialized_views: Vec::new(),
             indexes: Vec::new(),
             sequences: Vec::new(),
+            procedures: Vec::new(),
+            enum_types: Vec::new(),
             entries: Vec::new(),
             table_stats: Vec::new(),
         };
