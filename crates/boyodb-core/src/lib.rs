@@ -718,3 +718,45 @@ pub use tiered_compilation::{
     CompiledCode, IRAggregate, IROp, IRPredicate, IRValue, QueryIR, TieredCompilationConfig,
     TieredCompilationManager,
 };
+
+// --- Operational & Data Platform Features (Phase 40) ---
+pub mod schema_migrations;
+pub mod deployment;
+pub mod data_lineage;
+pub mod integrations;
+
+// Schema Migrations (aliased to avoid conflict with tooling module)
+pub use schema_migrations::{
+    Migration as SchemaMigration, MigrationConfig, MigrationError, MigrationId,
+    MigrationManager as SchemaMigrationManager, MigrationRecord, MigrationStatus,
+    MigrationStatusReport, MigrationVersion, ChecksumMismatch,
+};
+
+// Deployment (Blue-Green, Connection Draining, Resource Pools)
+pub use deployment::{
+    BlueGreenConfig, ConnectionInfo, ConnectionTracker, DeploymentError, DeploymentManager,
+    DeploymentRecord, DeploymentSlot, DeploymentStatus, DrainConfig, DrainHandle, DrainResult,
+    PoolStatus, PoolUsage, ResourceError as DeploymentResourceError, ResourceGrant, ResourcePool,
+    ResourcePoolManager, SlotInfo, SlotStatus,
+};
+
+// Data Lineage, Schema Evolution, Data Quality Monitoring
+pub use data_lineage::{
+    Anomaly as LineageAnomaly, AnomalyConfig, AnomalyDetector, AnomalyType as LineageAnomalyType,
+    AssetId, AssetType, ColumnId, ColumnInfo, ColumnRef as LineageColumnRef,
+    ColumnStats as LineageColumnStats, CompatibilityLevel,
+    CompatibilityResult as LineageCompatibilityResult, CompatibilityViolation, DataAsset,
+    DataQualityManager, DataQualityRule, DataSensitivity, ImpactAnalysis,
+    LineageEdge as DataLineageEdge, LineageGraph as DataLineageGraph, LineageManager, LineageType,
+    QualityCheckResult, RuleSeverity, RuleType, SchemaChange as LineageSchemaChange,
+    SchemaChangeType as LineageSchemaChangeType, SchemaEvolutionManager, SchemaVersion,
+};
+
+// Data Platform Integrations (Spark, Flink, dbt, Airflow, Presto/Trino)
+pub use integrations::{
+    AirflowOperatorConfig, AirflowOperatorGenerator, ConnectionConfig as IntegrationConnectionConfig,
+    DbtAdapterConfig, DbtColumn, DbtMaterialization, DbtModel, DbtProfileGenerator,
+    FlinkConnectorConfig, FlinkDdlGenerator, FlinkLookupCache, IntegrationManager,
+    PrestoConnectorConfig, PrestoConnectorGenerator, PrestoPluginInfo, SparkConnector,
+    SparkConnectorConfig, SparkField, SparkPartition, SparkSchema, SparkWriteMode, TypeMapping,
+};
