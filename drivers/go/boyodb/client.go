@@ -2794,3 +2794,19 @@ func (c *Client) PollNotifications(timeoutMs int) ([]Notification, error) {
 	}
 	return notifications, nil
 }
+
+// ============================================================================
+// CDC and Async Insert Helpers
+// ============================================================================
+
+// NewCDCSubscriberFromClient creates a CDC subscriber from this client.
+// This is a convenience method equivalent to NewCDCSubscriber(client, table, onChange, config).
+func (c *Client) NewCDCSubscriber(table string, onChange func(*ChangeEvent), config *CDCConfig) *CDCSubscriber {
+	return NewCDCSubscriber(c, table, onChange, config)
+}
+
+// NewAsyncInsertBufferFromClient creates an async insert buffer from this client.
+// This is a convenience method equivalent to NewAsyncInsertBuffer(client, table, config).
+func (c *Client) NewAsyncInsertBuffer(table string, config *AsyncInsertConfig) *AsyncInsertBuffer {
+	return NewAsyncInsertBuffer(c, table, config)
+}

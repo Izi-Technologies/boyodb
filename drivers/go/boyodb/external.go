@@ -256,22 +256,22 @@ func (vs *VectorSearch) CreateIndex(table, column string, opts *VectorIndexOptio
 	return vs.client.Exec(sql)
 }
 
-// VectorSearchOptions holds options for vector search.
-type VectorSearchOptions struct {
+// VectorSearchOpts holds options for vector search via VectorSearch struct.
+type VectorSearchOpts struct {
 	K             int
 	Where         string
 	EfSearch      int
 	ReturnColumns []string
 }
 
-// VectorSearchResult represents a vector search result.
-type VectorSearchResult struct {
+// VectorSearchRes represents a vector search result via VectorSearch struct.
+type VectorSearchRes struct {
 	Distance float64
 	Data     map[string]interface{}
 }
 
 // Search finds k nearest neighbors.
-func (vs *VectorSearch) Search(table, column string, queryVector []float64, opts *VectorSearchOptions) (*Result, error) {
+func (vs *VectorSearch) Search(table, column string, queryVector []float64, opts *VectorSearchOpts) (*Result, error) {
 	k := 10
 	whereClause := ""
 	cols := "*"
@@ -306,15 +306,15 @@ func (vs *VectorSearch) Search(table, column string, queryVector []float64, opts
 	return vs.client.Query(sql)
 }
 
-// HybridSearchOptions holds options for hybrid search.
-type HybridSearchOptions struct {
+// HybridSearchOpts holds options for hybrid search via VectorSearch struct.
+type HybridSearchOpts struct {
 	K            int
 	VectorWeight float64
 	TextWeight   float64
 }
 
 // HybridSearch performs hybrid vector + full-text search.
-func (vs *VectorSearch) HybridSearch(table, vectorColumn, textColumn string, queryVector []float64, queryText string, opts *HybridSearchOptions) (*Result, error) {
+func (vs *VectorSearch) HybridSearch(table, vectorColumn, textColumn string, queryVector []float64, queryText string, opts *HybridSearchOpts) (*Result, error) {
 	k := 10
 	vectorWeight := 0.7
 	textWeight := 0.3
