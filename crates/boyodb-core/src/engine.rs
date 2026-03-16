@@ -1,7 +1,7 @@
 use crate::replication::{
     compute_bundle_plan_hash, BundlePayload, BundlePlan, BundlePlanner, BundleRequest,
-    BundleSegment, EnumTypeMeta, IndexMeta, IndexState, Manifest, ManifestEntry,
-    ProcedureMetadata, ProcedureParameter, SegmentTier, TableMeta,
+    BundleSegment, EnumTypeMeta, IndexMeta, IndexState, Manifest, ManifestEntry, ProcedureMetadata,
+    ProcedureParameter, SegmentTier, TableMeta,
 };
 use crate::sql::SelectExpr;
 use crate::sql::SqlValue;
@@ -4594,12 +4594,20 @@ impl Db {
                             .find(|t| t.database == db_name && t.name == table_name)
                             .cloned()
                     };
-                    (db_name, table_name, existing_table, batch.shard_override, batch.watermark_micros)
+                    (
+                        db_name,
+                        table_name,
+                        existing_table,
+                        batch.shard_override,
+                        batch.watermark_micros,
+                    )
                 })
                 .collect();
 
             // Pre-allocate sequence numbers for all batches
-            let base_seq = self.segment_seq.fetch_add(batches.len() as u64, Ordering::SeqCst);
+            let base_seq = self
+                .segment_seq
+                .fetch_add(batches.len() as u64, Ordering::SeqCst);
 
             // Get config values for parallel closure
             let compression_skip = self.cfg.compression_skip_threshold_bytes;
@@ -4612,74 +4620,96 @@ impl Db {
                 .par_iter()
                 .zip(batch_metadata.par_iter())
                 .enumerate()
-                .map(|(idx, (batch, (db_name, table_name, existing_table, shard_override, watermark)))| {
-                    if batch.payload_ipc.is_empty() {
-                        return Err(EngineError::InvalidArgument(
-                            "empty ingest payload in batch".to_string(),
-                        ));
-                    }
+                .map(
+                    |(
+                        idx,
+                        (batch, (db_name, table_name, existing_table, shard_override, watermark)),
+                    )| {
+                        if batch.payload_ipc.is_empty() {
+                            return Err(EngineError::InvalidArgument(
+                                "empty ingest payload in batch".to_string(),
+                            ));
+                        }
 
-                    validate_identifier(db_name, "database")?;
-                    validate_identifier(table_name, "table")?;
+                        validate_identifier(db_name, "database")?;
+                        validate_identifier(table_name, "table")?;
 
-                    // Validate and get stats
-                    let validated = validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
-                    let stats = validated.stats;
-                    let row_count = stats.column_stats.values().next().map(|cs| cs.row_count).unwrap_or(0);
+                        // Validate and get stats
+                        let validated =
+                            validate_and_stats(&batch.payload_ipc, existing_table.as_ref())?;
+                        let stats = validated.stats;
+                        let row_count = stats
+                            .column_stats
+                            .values()
+                            .next()
+                            .map(|cs| cs.row_count)
+                            .unwrap_or(0);
 
-                    // Compression with adaptive optimization
-                    let table_compression = normalize_compression(
-                        existing_table
-                            .as_ref()
-                            .and_then(|t| t.compression.clone())
-                            .or_else(|| tier_compression.clone()),
-                    )?;
-                    let stored_payload = compress_payload_adaptive(
-                        &batch.payload_ipc,
-                        table_compression.as_deref(),
-                        compression_skip,
-                        adaptive_levels,
-                    )?;
+                        // Compression with adaptive optimization
+                        let table_compression = normalize_compression(
+                            existing_table
+                                .as_ref()
+                                .and_then(|t| t.compression.clone())
+                                .or_else(|| tier_compression.clone()),
+                        )?;
+                        let stored_payload = compress_payload_adaptive(
+                            &batch.payload_ipc,
+                            table_compression.as_deref(),
+                            compression_skip,
+                            adaptive_levels,
+                        )?;
 
-                    // Compute shard and segment ID
-                    let seq = base_seq + idx as u64;
-                    let global_shard_id = if let Some(hint) = shard_override {
-                        shard_map.get_shard_id(*hint)
-                    } else if let Some(tid) = stats.tenant_id_min {
-                        shard_map.get_shard_id(tid)
-                    } else {
-                        (seq % shard_map.total_shards.max(1) as u64) as u16
-                    };
+                        // Compute shard and segment ID
+                        let seq = base_seq + idx as u64;
+                        let global_shard_id = if let Some(hint) = shard_override {
+                            shard_map.get_shard_id(*hint)
+                        } else if let Some(tid) = stats.tenant_id_min {
+                            shard_map.get_shard_id(tid)
+                        } else {
+                            (seq % shard_map.total_shards.max(1) as u64) as u16
+                        };
 
-                    let segment_id = format!("seg-{global_shard_id}-{seq}");
-                    let manifest_entry = ManifestEntry {
-                        segment_id,
-                        shard_id: global_shard_id,
-                        version_added: 0,
-                        size_bytes: stored_payload.len() as u64,
-                        checksum: compute_checksum(&stored_payload),
-                        tier: SegmentTier::Hot,
-                        database: db_name.to_string(),
-                        table: table_name.to_string(),
-                        compression: table_compression,
-                        watermark_micros: *watermark,
-                        event_time_min: stats.event_time_min,
-                        event_time_max: stats.event_time_max,
-                        tenant_id_min: stats.tenant_id_min,
-                        tenant_id_max: stats.tenant_id_max,
-                        route_id_min: stats.route_id_min,
-                        route_id_max: stats.route_id_max,
-                        bloom_tenant: stats.bloom_tenant,
-                        bloom_route: stats.bloom_route,
-                        column_stats: if stats.column_stats.is_empty() { None } else { Some(stats.column_stats) },
-                        schema_hash: Some(validated.schema_hash),
-                        created_txn: None,
-                        deleted_txn: None,
-                        deleted_version: None,
-                    };
+                        let segment_id = format!("seg-{global_shard_id}-{seq}");
+                        let manifest_entry = ManifestEntry {
+                            segment_id,
+                            shard_id: global_shard_id,
+                            version_added: 0,
+                            size_bytes: stored_payload.len() as u64,
+                            checksum: compute_checksum(&stored_payload),
+                            tier: SegmentTier::Hot,
+                            database: db_name.to_string(),
+                            table: table_name.to_string(),
+                            compression: table_compression,
+                            watermark_micros: *watermark,
+                            event_time_min: stats.event_time_min,
+                            event_time_max: stats.event_time_max,
+                            tenant_id_min: stats.tenant_id_min,
+                            tenant_id_max: stats.tenant_id_max,
+                            route_id_min: stats.route_id_min,
+                            route_id_max: stats.route_id_max,
+                            bloom_tenant: stats.bloom_tenant,
+                            bloom_route: stats.bloom_route,
+                            column_stats: if stats.column_stats.is_empty() {
+                                None
+                            } else {
+                                Some(stats.column_stats)
+                            },
+                            schema_hash: Some(validated.schema_hash),
+                            created_txn: None,
+                            deleted_txn: None,
+                            deleted_version: None,
+                        };
 
-                    Ok((manifest_entry, stored_payload, db_name.clone(), table_name.clone(), global_shard_id, row_count))
-                })
+                        Ok((
+                            manifest_entry,
+                            stored_payload,
+                            db_name.clone(),
+                            table_name.clone(),
+                            global_shard_id,
+                            row_count,
+                        ))
+                    },
+                )
                 .collect();
 
             // Collect results, failing fast on any error
@@ -6160,10 +6190,15 @@ impl Db {
                     check_timeout()?;
 
                     // Progressive prefetch: load next batch at halfway points
-                    if self.cfg.prefetch_enabled && prefetch_interval > 0 && i > 0 && i % prefetch_interval == 0 {
+                    if self.cfg.prefetch_enabled
+                        && prefetch_interval > 0
+                        && i > 0
+                        && i % prefetch_interval == 0
+                    {
                         let next_start = i + self.cfg.prefetch_segments;
                         if next_start < matching.len() {
-                            let next_end = (next_start + self.cfg.prefetch_segments).min(matching.len());
+                            let next_end =
+                                (next_start + self.cfg.prefetch_segments).min(matching.len());
                             self.prefetch_segments(&matching[next_start..next_end]);
                         }
                     }
@@ -6357,10 +6392,15 @@ impl Db {
                     check_timeout()?;
 
                     // Progressive prefetch for sequential aggregation
-                    if self.cfg.prefetch_enabled && prefetch_interval > 0 && i > 0 && i % prefetch_interval == 0 {
+                    if self.cfg.prefetch_enabled
+                        && prefetch_interval > 0
+                        && i > 0
+                        && i % prefetch_interval == 0
+                    {
                         let next_start = i + self.cfg.prefetch_segments;
                         if next_start < matching.len() {
-                            let next_end = (next_start + self.cfg.prefetch_segments).min(matching.len());
+                            let next_end =
+                                (next_start + self.cfg.prefetch_segments).min(matching.len());
                             self.prefetch_segments(&matching[next_start..next_end]);
                         }
                     }
@@ -11441,12 +11481,8 @@ impl Db {
                     visited.insert(view_key.clone());
 
                     // Recursively expand any views in this view's SQL
-                    let expanded_view_sql = self.expand_views_recursive(
-                        view_sql,
-                        Some(&db),
-                        visited,
-                        depth + 1,
-                    )?;
+                    let expanded_view_sql =
+                        self.expand_views_recursive(view_sql, Some(&db), visited, depth + 1)?;
 
                     visited.remove(&view_key);
 
@@ -11500,11 +11536,7 @@ impl Db {
         }
 
         // Remove any quotes from the result for matching
-        result
-            .replace('"', "")
-            .replace('`', "")
-            .replace('[', "")
-            .replace(']', "")
+        result.replace(['"', '`', '[', ']'], "")
     }
 
     /// Describe a view, returning its metadata including inferred columns
@@ -11553,7 +11585,11 @@ impl Db {
                 }
                 crate::sql::SelectExpr::Function(f) => {
                     // Get function name from ScalarFunction variant
-                    format!("{:?}", f).split('(').next().unwrap_or("function").to_lowercase()
+                    format!("{:?}", f)
+                        .split('(')
+                        .next()
+                        .unwrap_or("function")
+                        .to_lowercase()
                 }
                 crate::sql::SelectExpr::Aggregate(agg) => format!("{:?}", agg).to_lowercase(),
                 crate::sql::SelectExpr::Window { function, .. } => {
@@ -15036,11 +15072,7 @@ impl Db {
     }
 
     /// Call a stored procedure
-    pub fn call_procedure(
-        &self,
-        name: &str,
-        arguments: &[String],
-    ) -> Result<String, EngineError> {
+    pub fn call_procedure(&self, name: &str, arguments: &[String]) -> Result<String, EngineError> {
         let manifest = self.manifest.read();
         let procedure = manifest
             .procedures
@@ -23498,23 +23530,21 @@ fn agg_plan_from_sql(plan: crate::sql::AggPlan) -> AggPlan {
             crate::sql::GroupBy::None => GroupBy::None,
             crate::sql::GroupBy::Tenant => GroupBy::Tenant,
             crate::sql::GroupBy::Route => GroupBy::Route,
-            crate::sql::GroupBy::Columns(cols) => GroupBy::Columns(
-                cols.into_iter()
-                    .map(group_by_column_from_sql)
-                    .collect(),
-            ),
+            crate::sql::GroupBy::Columns(cols) => {
+                GroupBy::Columns(cols.into_iter().map(group_by_column_from_sql).collect())
+            }
             crate::sql::GroupBy::All => GroupBy::All,
             crate::sql::GroupBy::GroupingSets(sets) => GroupBy::GroupingSets(
                 sets.into_iter()
                     .map(|cols| cols.into_iter().map(group_by_column_from_sql).collect())
                     .collect(),
             ),
-            crate::sql::GroupBy::Rollup(cols) => GroupBy::Rollup(
-                cols.into_iter().map(group_by_column_from_sql).collect(),
-            ),
-            crate::sql::GroupBy::Cube(cols) => GroupBy::Cube(
-                cols.into_iter().map(group_by_column_from_sql).collect(),
-            ),
+            crate::sql::GroupBy::Rollup(cols) => {
+                GroupBy::Rollup(cols.into_iter().map(group_by_column_from_sql).collect())
+            }
+            crate::sql::GroupBy::Cube(cols) => {
+                GroupBy::Cube(cols.into_iter().map(group_by_column_from_sql).collect())
+            }
         },
         aggs: plan.aggs.into_iter().map(agg_expr_from_sql).collect(),
         having: plan
@@ -38068,8 +38098,13 @@ mod tests {
         assert!(result.is_err());
 
         // Create or replace should succeed
-        db.create_view("testdb", "user_summary", "SELECT id, email FROM testdb.users", true)
-            .unwrap();
+        db.create_view(
+            "testdb",
+            "user_summary",
+            "SELECT id, email FROM testdb.users",
+            true,
+        )
+        .unwrap();
         let view_sql = db.get_view("testdb", "user_summary").unwrap();
         assert!(view_sql.unwrap().contains("email"));
 
@@ -38158,21 +38193,11 @@ mod tests {
         db.create_database("testdb").unwrap();
 
         // Create circular views (view_a references view_b, view_b references view_a)
-        db.create_view(
-            "testdb",
-            "view_a",
-            "SELECT * FROM testdb.view_b",
-            false,
-        )
-        .unwrap();
+        db.create_view("testdb", "view_a", "SELECT * FROM testdb.view_b", false)
+            .unwrap();
 
-        db.create_view(
-            "testdb",
-            "view_b",
-            "SELECT * FROM testdb.view_a",
-            false,
-        )
-        .unwrap();
+        db.create_view("testdb", "view_b", "SELECT * FROM testdb.view_a", false)
+            .unwrap();
 
         // Expansion should detect circular reference and error
         let sql = "SELECT * FROM testdb.view_a";

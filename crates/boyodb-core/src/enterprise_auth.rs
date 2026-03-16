@@ -319,7 +319,10 @@ impl LdapProvider {
         let safe_username = Self::escape_ldap_filter(username);
 
         // Build user search filter
-        let filter = self.config.user_filter.replace("{username}", &safe_username);
+        let filter = self
+            .config
+            .user_filter
+            .replace("{username}", &safe_username);
 
         // Use tokio's runtime to perform async LDAP operations
         let handle = Handle::try_current()
@@ -380,8 +383,8 @@ impl LdapProvider {
         filter: &str,
     ) -> Result<Identity, AuthError> {
         // Configure LDAP connection settings
-        let settings = LdapConnSettings::new()
-            .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+        let settings =
+            LdapConnSettings::new().set_conn_timeout(Duration::from_secs(config.timeout_secs));
 
         // Connect to LDAP server
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
@@ -534,8 +537,8 @@ impl LdapProvider {
         let config = self.config.clone();
 
         handle.block_on(async move {
-            let settings = LdapConnSettings::new()
-                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+            let settings =
+                LdapConnSettings::new().set_conn_timeout(Duration::from_secs(config.timeout_secs));
 
             let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
                 .await
@@ -578,8 +581,8 @@ impl LdapProvider {
         let filter = filter.to_string();
 
         handle.block_on(async move {
-            let settings = LdapConnSettings::new()
-                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+            let settings =
+                LdapConnSettings::new().set_conn_timeout(Duration::from_secs(config.timeout_secs));
 
             let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
                 .await
@@ -670,8 +673,8 @@ impl LdapProvider {
         let config = self.config.clone();
 
         handle.block_on(async move {
-            let settings = LdapConnSettings::new()
-                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+            let settings =
+                LdapConnSettings::new().set_conn_timeout(Duration::from_secs(config.timeout_secs));
 
             let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
                 .await
@@ -688,7 +691,10 @@ impl LdapProvider {
             }
 
             let group_base = config.group_base_dn.as_ref().unwrap_or(&config.base_dn);
-            let group_filter = config.group_filter.as_deref().unwrap_or("(objectClass=group)");
+            let group_filter = config
+                .group_filter
+                .as_deref()
+                .unwrap_or("(objectClass=group)");
 
             let (rs, _res) = ldap
                 .search(
@@ -721,11 +727,7 @@ impl LdapProvider {
                             .get("description")
                             .and_then(|v| v.first())
                             .cloned(),
-                        members: entry
-                            .attrs
-                            .get("member")
-                            .cloned()
-                            .unwrap_or_default(),
+                        members: entry.attrs.get("member").cloned().unwrap_or_default(),
                     }
                 })
                 .collect();

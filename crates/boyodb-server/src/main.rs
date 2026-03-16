@@ -2161,7 +2161,8 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {
                 // Manual configuration
-                let mut config = LdapConfig {
+
+                LdapConfig {
                     url: cfg
                         .ldap_url
                         .clone()
@@ -2178,8 +2179,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
                     use_tls: cfg.ldap_start_tls,
                     skip_tls_verify: cfg.ldap_skip_tls_verify,
                     ..LdapConfig::default()
-                };
-                config
+                }
             }
         };
 

@@ -413,6 +413,9 @@ mod tests {
         );
         builder.add_string("test_user");
         let filter = builder.build().unwrap();
-        assert!(filter.fp_rate <= 0.01, "Adaptive should use appropriate FPP");
+        assert!(
+            filter.fp_rate <= 0.01,
+            "Adaptive should use appropriate FPP"
+        );
     }
 }

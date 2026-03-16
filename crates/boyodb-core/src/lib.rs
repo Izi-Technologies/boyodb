@@ -178,10 +178,6 @@ pub use auth::{
     AuthError, AuthManager, PasswordPolicy, Privilege, PrivilegeGrant, PrivilegeTarget, Role,
     RoleInfo, Session, SessionInfo, User, UserInfo, UserStatus,
 };
-pub use enterprise_auth::{
-    AuthProviderType, EnterpriseAuthManager, Identity, LdapConfig, LdapGroup, LdapProvider,
-    LdapUser, MfaConfig, MfaMethod, OAuth2Config, OAuth2Provider, SamlConfig, SamlProvider,
-};
 pub use engine::{
     apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
     merge_cte_results, start_auto_repair_task, validate_identifier, AutoRepairConfig,
@@ -189,6 +185,10 @@ pub use engine::{
     EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
     QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
     TableDescription, UdfRegistry, UserDefinedFunction, VacuumResult, ViewColumn, ViewDescription,
+};
+pub use enterprise_auth::{
+    AuthProviderType, EnterpriseAuthManager, Identity, LdapConfig, LdapGroup, LdapProvider,
+    LdapUser, MfaConfig, MfaMethod, OAuth2Config, OAuth2Provider, SamlConfig, SamlProvider,
 };
 pub use replica_sync::{
     spawn_replica_sync_worker, ReplicaSyncConfig, ReplicaSyncMetrics, ReplicaSyncMetricsSnapshot,
