@@ -13,6 +13,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "ldap-auth")]
+use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
+#[cfg(feature = "ldap-auth")]
+use tokio::runtime::Handle;
+
 // ============================================================================
 // Common Types
 // ============================================================================
@@ -185,10 +190,116 @@ impl Default for LdapConfig {
     }
 }
 
+impl LdapConfig {
+    /// Create a configuration for Microsoft Active Directory
+    pub fn active_directory(url: &str, base_dn: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            base_dn: base_dn.to_string(),
+            bind_dn: None,
+            bind_password: None,
+            // AD uses sAMAccountName for Windows login names
+            user_filter: "(&(objectClass=user)(sAMAccountName={username}))".to_string(),
+            group_base_dn: Some(base_dn.to_string()),
+            group_filter: Some("(&(objectClass=group)(member={dn}))".to_string()),
+            // AD-specific attributes
+            user_id_attr: "sAMAccountName".to_string(),
+            email_attr: "mail".to_string(),
+            display_name_attr: "displayName".to_string(),
+            member_of_attr: "memberOf".to_string(),
+            use_tls: true,
+            skip_tls_verify: false,
+            timeout_secs: 10,
+            pool_size: 10,
+        }
+    }
+
+    /// Create a configuration for OpenLDAP
+    pub fn openldap(url: &str, base_dn: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            base_dn: base_dn.to_string(),
+            bind_dn: None,
+            bind_password: None,
+            // OpenLDAP typically uses uid
+            user_filter: "(&(objectClass=inetOrgPerson)(uid={username}))".to_string(),
+            group_base_dn: Some(base_dn.to_string()),
+            group_filter: Some("(&(objectClass=groupOfNames)(member={dn}))".to_string()),
+            user_id_attr: "uid".to_string(),
+            email_attr: "mail".to_string(),
+            display_name_attr: "cn".to_string(),
+            member_of_attr: "memberOf".to_string(),
+            use_tls: true,
+            skip_tls_verify: false,
+            timeout_secs: 10,
+            pool_size: 10,
+        }
+    }
+
+    /// Create a configuration for FreeIPA
+    pub fn freeipa(url: &str, base_dn: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            base_dn: base_dn.to_string(),
+            bind_dn: None,
+            bind_password: None,
+            // FreeIPA uses uid and ipaUniqueID
+            user_filter: "(&(objectClass=person)(uid={username}))".to_string(),
+            group_base_dn: Some(format!("cn=groups,cn=accounts,{}", base_dn)),
+            group_filter: Some("(&(objectClass=groupOfNames)(member={dn}))".to_string()),
+            user_id_attr: "uid".to_string(),
+            email_attr: "mail".to_string(),
+            display_name_attr: "cn".to_string(),
+            member_of_attr: "memberOf".to_string(),
+            use_tls: true,
+            skip_tls_verify: false,
+            timeout_secs: 10,
+            pool_size: 10,
+        }
+    }
+
+    /// Set the service account credentials for bind operations
+    pub fn with_bind_credentials(mut self, bind_dn: &str, bind_password: &str) -> Self {
+        self.bind_dn = Some(bind_dn.to_string());
+        self.bind_password = Some(bind_password.to_string());
+        self
+    }
+
+    /// Set whether to use TLS
+    pub fn with_tls(mut self, use_tls: bool) -> Self {
+        self.use_tls = use_tls;
+        self
+    }
+
+    /// Set whether to skip TLS verification (not recommended for production)
+    pub fn with_skip_tls_verify(mut self, skip: bool) -> Self {
+        self.skip_tls_verify = skip;
+        self
+    }
+
+    /// Set the connection timeout
+    pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+
+    /// Set a custom user filter
+    pub fn with_user_filter(mut self, filter: &str) -> Self {
+        self.user_filter = filter.to_string();
+        self
+    }
+
+    /// Set group search configuration
+    pub fn with_group_search(mut self, base_dn: &str, filter: &str) -> Self {
+        self.group_base_dn = Some(base_dn.to_string());
+        self.group_filter = Some(filter.to_string());
+        self
+    }
+}
+
 /// LDAP authentication provider
 pub struct LdapProvider {
     config: LdapConfig,
-    // In a real implementation, this would hold connection pool
 }
 
 impl LdapProvider {
@@ -197,6 +308,34 @@ impl LdapProvider {
     }
 
     /// Authenticate user with LDAP
+    #[cfg(feature = "ldap-auth")]
+    pub fn authenticate(&self, username: &str, password: &str) -> Result<Identity, AuthError> {
+        // Validate inputs
+        if username.is_empty() || password.is_empty() {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        // Escape special characters in username for LDAP filter
+        let safe_username = Self::escape_ldap_filter(username);
+
+        // Build user search filter
+        let filter = self.config.user_filter.replace("{username}", &safe_username);
+
+        // Use tokio's runtime to perform async LDAP operations
+        let handle = Handle::try_current()
+            .map_err(|_| AuthError::ProviderError("no tokio runtime available".into()))?;
+
+        let config = self.config.clone();
+        let password = password.to_string();
+        let username = username.to_string();
+
+        handle.block_on(async move {
+            Self::authenticate_async(&config, &username, &password, &filter).await
+        })
+    }
+
+    /// Authenticate user with LDAP (fallback when ldap3 is not available)
+    #[cfg(not(feature = "ldap-auth"))]
     pub fn authenticate(&self, username: &str, password: &str) -> Result<Identity, AuthError> {
         // Validate inputs
         if username.is_empty() || password.is_empty() {
@@ -206,13 +345,7 @@ impl LdapProvider {
         // Build user search filter
         let filter = self.config.user_filter.replace("{username}", username);
 
-        // In a real implementation:
-        // 1. Bind with service account (if configured)
-        // 2. Search for user by filter
-        // 3. Attempt bind with user DN and password
-        // 4. If successful, fetch user attributes and groups
-
-        // Simulated successful authentication
+        // Simulated successful authentication (for testing/development)
         let user_dn = format!("cn={},{}", username, self.config.base_dn);
 
         // Fetch groups (simulated)
@@ -239,32 +372,371 @@ impl LdapProvider {
         })
     }
 
+    #[cfg(feature = "ldap-auth")]
+    async fn authenticate_async(
+        config: &LdapConfig,
+        username: &str,
+        password: &str,
+        filter: &str,
+    ) -> Result<Identity, AuthError> {
+        // Configure LDAP connection settings
+        let settings = LdapConnSettings::new()
+            .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+
+        // Connect to LDAP server
+        let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
+            .await
+            .map_err(|e| AuthError::NetworkError(format!("LDAP connection failed: {}", e)))?;
+
+        // Spawn the connection handler
+        ldap3::drive!(conn);
+
+        // If StartTLS is enabled (for non-ldaps:// connections)
+        if config.use_tls && config.url.starts_with("ldap://") {
+            ldap.start_tls(config.skip_tls_verify)
+                .await
+                .map_err(|e| AuthError::NetworkError(format!("StartTLS failed: {}", e)))?;
+        }
+
+        // Bind with service account if configured
+        if let (Some(bind_dn), Some(bind_password)) = (&config.bind_dn, &config.bind_password) {
+            ldap.simple_bind(bind_dn, bind_password)
+                .await
+                .map_err(|e| AuthError::ProviderError(format!("service bind failed: {}", e)))?
+                .success()
+                .map_err(|e| AuthError::ProviderError(format!("service bind rejected: {}", e)))?;
+        }
+
+        // Search for the user
+        let (rs, _res) = ldap
+            .search(
+                &config.base_dn,
+                Scope::Subtree,
+                filter,
+                vec![
+                    &config.user_id_attr,
+                    &config.email_attr,
+                    &config.display_name_attr,
+                    &config.member_of_attr,
+                    "dn",
+                ],
+            )
+            .await
+            .map_err(|e| AuthError::ProviderError(format!("user search failed: {}", e)))?
+            .success()
+            .map_err(|e| AuthError::ProviderError(format!("user search rejected: {}", e)))?;
+
+        if rs.is_empty() {
+            return Err(AuthError::UserNotFound(username.to_string()));
+        }
+
+        let entry = SearchEntry::construct(rs.into_iter().next().unwrap());
+        let user_dn = entry.dn.clone();
+
+        // Attempt to bind as the user to verify password
+        ldap.simple_bind(&user_dn, password)
+            .await
+            .map_err(|e| AuthError::ProviderError(format!("user bind failed: {}", e)))?
+            .success()
+            .map_err(|_| AuthError::InvalidCredentials)?;
+
+        // Extract user attributes
+        let user_id = entry
+            .attrs
+            .get(&config.user_id_attr)
+            .and_then(|v| v.first())
+            .cloned()
+            .unwrap_or_else(|| format!("ldap:{}", username));
+
+        let email = entry
+            .attrs
+            .get(&config.email_attr)
+            .and_then(|v| v.first())
+            .cloned();
+
+        let display_name = entry
+            .attrs
+            .get(&config.display_name_attr)
+            .and_then(|v| v.first())
+            .cloned();
+
+        // Extract groups from memberOf attribute
+        let groups: Vec<String> = entry
+            .attrs
+            .get(&config.member_of_attr)
+            .map(|v| {
+                v.iter()
+                    .filter_map(|dn| Self::extract_cn_from_dn(dn))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Unbind gracefully
+        let _ = ldap.unbind().await;
+
+        Ok(Identity {
+            user_id: format!("ldap:{}", user_id),
+            username: username.to_string(),
+            email,
+            display_name,
+            groups,
+            provider: AuthProviderType::Ldap,
+            attributes: {
+                let mut attrs = HashMap::new();
+                attrs.insert("dn".to_string(), user_dn);
+                attrs
+            },
+            authenticated_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            expires_at: None,
+        })
+    }
+
+    /// Extract CN from a DN string (e.g., "cn=Admins,ou=Groups,dc=example,dc=com" -> "Admins")
+    #[cfg(feature = "ldap-auth")]
+    fn extract_cn_from_dn(dn: &str) -> Option<String> {
+        dn.split(',')
+            .find(|part| part.trim().to_lowercase().starts_with("cn="))
+            .map(|part| part.trim()[3..].to_string())
+    }
+
+    /// Escape special characters for LDAP filter
+    #[cfg(feature = "ldap-auth")]
+    fn escape_ldap_filter(input: &str) -> String {
+        let mut result = String::with_capacity(input.len() * 2);
+        for c in input.chars() {
+            match c {
+                '\\' => result.push_str("\\5c"),
+                '*' => result.push_str("\\2a"),
+                '(' => result.push_str("\\28"),
+                ')' => result.push_str("\\29"),
+                '\0' => result.push_str("\\00"),
+                _ => result.push(c),
+            }
+        }
+        result
+    }
+
     /// Get user groups from LDAP
     fn get_user_groups(&self, _user_dn: &str) -> Result<Vec<String>, AuthError> {
-        // In a real implementation, this would:
-        // 1. Search for groups containing the user
-        // 2. Parse group DNs to extract names
-        // 3. Optionally resolve nested groups
-
+        // For non-ldap3 builds, return placeholder groups
         Ok(vec!["users".to_string(), "developers".to_string()])
     }
 
     /// Test LDAP connection
+    #[cfg(feature = "ldap-auth")]
     pub fn test_connection(&self) -> Result<(), AuthError> {
-        // Would attempt to connect and bind
+        let handle = Handle::try_current()
+            .map_err(|_| AuthError::ProviderError("no tokio runtime available".into()))?;
+
+        let config = self.config.clone();
+
+        handle.block_on(async move {
+            let settings = LdapConnSettings::new()
+                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+
+            let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
+                .await
+                .map_err(|e| AuthError::NetworkError(format!("connection failed: {}", e)))?;
+
+            ldap3::drive!(conn);
+
+            if config.use_tls && config.url.starts_with("ldap://") {
+                ldap.start_tls(config.skip_tls_verify)
+                    .await
+                    .map_err(|e| AuthError::NetworkError(format!("StartTLS failed: {}", e)))?;
+            }
+
+            if let (Some(bind_dn), Some(bind_password)) = (&config.bind_dn, &config.bind_password) {
+                ldap.simple_bind(bind_dn, bind_password)
+                    .await
+                    .map_err(|e| AuthError::ProviderError(format!("bind failed: {}", e)))?
+                    .success()
+                    .map_err(|e| AuthError::ProviderError(format!("bind rejected: {}", e)))?;
+            }
+
+            let _ = ldap.unbind().await;
+            Ok(())
+        })
+    }
+
+    /// Test LDAP connection (fallback)
+    #[cfg(not(feature = "ldap-auth"))]
+    pub fn test_connection(&self) -> Result<(), AuthError> {
         Ok(())
     }
 
     /// Search users
+    #[cfg(feature = "ldap-auth")]
     pub fn search_users(&self, filter: &str, limit: usize) -> Result<Vec<LdapUser>, AuthError> {
-        // Would search LDAP directory
-        let _ = (filter, limit);
+        let handle = Handle::try_current()
+            .map_err(|_| AuthError::ProviderError("no tokio runtime available".into()))?;
+
+        let config = self.config.clone();
+        let filter = filter.to_string();
+
+        handle.block_on(async move {
+            let settings = LdapConnSettings::new()
+                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+
+            let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
+                .await
+                .map_err(|e| AuthError::NetworkError(format!("connection failed: {}", e)))?;
+
+            ldap3::drive!(conn);
+
+            if let (Some(bind_dn), Some(bind_password)) = (&config.bind_dn, &config.bind_password) {
+                ldap.simple_bind(bind_dn, bind_password)
+                    .await
+                    .map_err(|e| AuthError::ProviderError(format!("bind failed: {}", e)))?
+                    .success()
+                    .map_err(|e| AuthError::ProviderError(format!("bind rejected: {}", e)))?;
+            }
+
+            let (rs, _res) = ldap
+                .search(
+                    &config.base_dn,
+                    Scope::Subtree,
+                    &filter,
+                    vec![
+                        &config.user_id_attr,
+                        &config.email_attr,
+                        &config.display_name_attr,
+                        &config.member_of_attr,
+                    ],
+                )
+                .await
+                .map_err(|e| AuthError::ProviderError(format!("search failed: {}", e)))?
+                .success()
+                .map_err(|e| AuthError::ProviderError(format!("search rejected: {}", e)))?;
+
+            let _ = ldap.unbind().await;
+
+            let users: Vec<LdapUser> = rs
+                .into_iter()
+                .take(limit)
+                .map(|entry| {
+                    let entry = SearchEntry::construct(entry);
+                    LdapUser {
+                        dn: entry.dn.clone(),
+                        username: entry
+                            .attrs
+                            .get(&config.user_id_attr)
+                            .and_then(|v| v.first())
+                            .cloned()
+                            .unwrap_or_default(),
+                        email: entry
+                            .attrs
+                            .get(&config.email_attr)
+                            .and_then(|v| v.first())
+                            .cloned(),
+                        display_name: entry
+                            .attrs
+                            .get(&config.display_name_attr)
+                            .and_then(|v| v.first())
+                            .cloned(),
+                        groups: entry
+                            .attrs
+                            .get(&config.member_of_attr)
+                            .map(|v| {
+                                v.iter()
+                                    .filter_map(|dn| Self::extract_cn_from_dn(dn))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        enabled: true,
+                    }
+                })
+                .collect();
+
+            Ok(users)
+        })
+    }
+
+    /// Search users (fallback)
+    #[cfg(not(feature = "ldap-auth"))]
+    pub fn search_users(&self, _filter: &str, _limit: usize) -> Result<Vec<LdapUser>, AuthError> {
         Ok(vec![])
     }
 
     /// Sync groups from LDAP
+    #[cfg(feature = "ldap-auth")]
     pub fn sync_groups(&self) -> Result<Vec<LdapGroup>, AuthError> {
-        // Would fetch all groups from LDAP
+        let handle = Handle::try_current()
+            .map_err(|_| AuthError::ProviderError("no tokio runtime available".into()))?;
+
+        let config = self.config.clone();
+
+        handle.block_on(async move {
+            let settings = LdapConnSettings::new()
+                .set_conn_timeout(Duration::from_secs(config.timeout_secs));
+
+            let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &config.url)
+                .await
+                .map_err(|e| AuthError::NetworkError(format!("connection failed: {}", e)))?;
+
+            ldap3::drive!(conn);
+
+            if let (Some(bind_dn), Some(bind_password)) = (&config.bind_dn, &config.bind_password) {
+                ldap.simple_bind(bind_dn, bind_password)
+                    .await
+                    .map_err(|e| AuthError::ProviderError(format!("bind failed: {}", e)))?
+                    .success()
+                    .map_err(|e| AuthError::ProviderError(format!("bind rejected: {}", e)))?;
+            }
+
+            let group_base = config.group_base_dn.as_ref().unwrap_or(&config.base_dn);
+            let group_filter = config.group_filter.as_deref().unwrap_or("(objectClass=group)");
+
+            let (rs, _res) = ldap
+                .search(
+                    group_base,
+                    Scope::Subtree,
+                    group_filter,
+                    vec!["cn", "description", "member"],
+                )
+                .await
+                .map_err(|e| AuthError::ProviderError(format!("search failed: {}", e)))?
+                .success()
+                .map_err(|e| AuthError::ProviderError(format!("search rejected: {}", e)))?;
+
+            let _ = ldap.unbind().await;
+
+            let groups: Vec<LdapGroup> = rs
+                .into_iter()
+                .map(|entry| {
+                    let entry = SearchEntry::construct(entry);
+                    LdapGroup {
+                        dn: entry.dn.clone(),
+                        name: entry
+                            .attrs
+                            .get("cn")
+                            .and_then(|v| v.first())
+                            .cloned()
+                            .unwrap_or_default(),
+                        description: entry
+                            .attrs
+                            .get("description")
+                            .and_then(|v| v.first())
+                            .cloned(),
+                        members: entry
+                            .attrs
+                            .get("member")
+                            .cloned()
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect();
+
+            Ok(groups)
+        })
+    }
+
+    /// Sync groups from LDAP (fallback)
+    #[cfg(not(feature = "ldap-auth"))]
+    pub fn sync_groups(&self) -> Result<Vec<LdapGroup>, AuthError> {
         Ok(vec![])
     }
 }

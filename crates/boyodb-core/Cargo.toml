@@ -85,6 +85,9 @@ icu_collator = { version = "1.4", optional = true }
 icu_normalizer = { version = "1.4", optional = true }
 icu_locid = { version = "1.4", optional = true }
 
+# LDAP/AD authentication
+ldap3 = { version = "0.11", optional = true, default-features = false, features = ["tls-rustls"] }
+
 # Metal GPU support (macOS)
 metal = { version = "0.27", optional = true }
 objc = { version = "0.2", optional = true }
@@ -104,6 +107,8 @@ jit-cranelift = ["cranelift", "cranelift-module", "cranelift-jit", "cranelift-co
 icu-collation = ["icu", "icu_collator", "icu_normalizer", "icu_locid"]
 # Enable Metal GPU support (macOS only)
 metal-gpu = ["metal", "objc", "block"]
+# Enable LDAP/AD authentication
+ldap-auth = ["ldap3"]
 
 [lints]
 workspace = true

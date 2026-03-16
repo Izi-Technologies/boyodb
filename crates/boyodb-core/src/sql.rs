@@ -53,6 +53,95 @@ pub enum SampleMethod {
     Reservoir,
 }
 
+/// Extract TABLESAMPLE clause from SQL string and return parsed clause + cleaned SQL
+/// Syntax: TABLESAMPLE [BERNOULLI|SYSTEM|RESERVOIR] (percentage) [REPEATABLE (seed)]
+pub fn extract_tablesample(sql: &str) -> (Option<SampleClause>, String) {
+    let upper = sql.to_uppercase();
+
+    // Find TABLESAMPLE keyword
+    if let Some(start) = upper.find(" TABLESAMPLE ") {
+        let after_tablesample = &sql[start + " TABLESAMPLE ".len()..];
+        let upper_after = &upper[start + " TABLESAMPLE ".len()..];
+
+        // Parse method (default to BERNOULLI)
+        let (method, rest) = if upper_after.starts_with("BERNOULLI") {
+            (
+                SampleMethod::Bernoulli,
+                after_tablesample["BERNOULLI".len()..].trim_start(),
+            )
+        } else if upper_after.starts_with("SYSTEM") {
+            (
+                SampleMethod::System,
+                after_tablesample["SYSTEM".len()..].trim_start(),
+            )
+        } else if upper_after.starts_with("RESERVOIR") {
+            (
+                SampleMethod::Reservoir,
+                after_tablesample["RESERVOIR".len()..].trim_start(),
+            )
+        } else {
+            // Default to BERNOULLI if no method specified
+            (SampleMethod::Bernoulli, after_tablesample.trim_start())
+        };
+
+        // Parse percentage in parentheses
+        if rest.starts_with('(') {
+            if let Some(close_paren) = rest.find(')') {
+                let size_str = rest[1..close_paren].trim();
+                if let Ok(size) = size_str.parse::<f64>() {
+                    let rest_after_paren = &rest[close_paren + 1..];
+                    let upper_rest = rest_after_paren.to_uppercase();
+
+                    // Parse optional REPEATABLE (seed)
+                    let seed = if let Some(rep_pos) = upper_rest.find("REPEATABLE") {
+                        let after_rep = &rest_after_paren[rep_pos + "REPEATABLE".len()..].trim_start();
+                        if after_rep.starts_with('(') {
+                            if let Some(seed_close) = after_rep.find(')') {
+                                let seed_str = after_rep[1..seed_close].trim();
+                                seed_str.parse::<u64>().ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Find where the TABLESAMPLE clause ends
+                    let end_offset = if let Some(rep_pos) = upper_rest.find("REPEATABLE") {
+                        let after_rep = &rest_after_paren[rep_pos + "REPEATABLE".len()..].trim_start();
+                        if let Some(seed_close) = after_rep.find(')') {
+                            start
+                                + " TABLESAMPLE ".len()
+                                + (rest.len() - after_rep.len())
+                                + rep_pos
+                                + "REPEATABLE".len()
+                                + (after_rep.len() - after_rep[seed_close..].len())
+                                + 1
+                        } else {
+                            start + " TABLESAMPLE ".len() + close_paren + 1
+                        }
+                    } else {
+                        start + " TABLESAMPLE ".len() + close_paren + 1
+                    };
+
+                    // Remove TABLESAMPLE clause from SQL
+                    let cleaned_sql = format!("{}{}", &sql[..start], &sql[end_offset..]);
+
+                    return (
+                        Some(SampleClause { method, size, seed }),
+                        cleaned_sql,
+                    );
+                }
+            }
+        }
+    }
+
+    (None, sql.to_string())
+}
+
 /// JOIN clause representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinClause {
@@ -1203,6 +1292,11 @@ pub enum DdlCommand {
     ShowViews {
         database: Option<String>,
     },
+    /// DESCRIBE VIEW [database.]view
+    DescribeView {
+        database: String,
+        view: String,
+    },
     /// CREATE MATERIALIZED VIEW [database.]view AS SELECT ...
     CreateMaterializedView {
         database: String,
@@ -1487,6 +1581,94 @@ pub enum DdlCommand {
     ShowFunctions {
         pattern: Option<String>,
     },
+
+    /// CREATE [OR REPLACE] PROCEDURE name(params) LANGUAGE lang AS $$ body $$
+    CreateProcedure {
+        name: String,
+        parameters: Vec<FunctionParameter>,
+        body: String,
+        or_replace: bool,
+        language: Option<String>,
+    },
+    /// DROP PROCEDURE [IF EXISTS] name
+    DropProcedure {
+        name: String,
+        if_exists: bool,
+    },
+    /// CALL procedure_name(args)
+    CallProcedure {
+        name: String,
+        arguments: Vec<String>,
+    },
+    /// SHOW PROCEDURES [LIKE pattern]
+    ShowProcedures {
+        pattern: Option<String>,
+    },
+
+    // Foreign Data Wrapper commands
+    /// CREATE FOREIGN DATA WRAPPER name OPTIONS (...)
+    CreateForeignDataWrapper {
+        name: String,
+        handler: Option<String>,
+        validator: Option<String>,
+        options: Vec<(String, String)>,
+    },
+    /// DROP FOREIGN DATA WRAPPER [IF EXISTS] name
+    DropForeignDataWrapper {
+        name: String,
+        if_exists: bool,
+    },
+    /// CREATE SERVER name FOREIGN DATA WRAPPER wrapper OPTIONS (...)
+    CreateForeignServer {
+        name: String,
+        wrapper_name: String,
+        server_type: Option<String>,
+        version: Option<String>,
+        options: Vec<(String, String)>,
+    },
+    /// DROP SERVER [IF EXISTS] name
+    DropForeignServer {
+        name: String,
+        if_exists: bool,
+    },
+    /// CREATE USER MAPPING FOR user SERVER server OPTIONS (...)
+    CreateUserMapping {
+        local_user: String,
+        server_name: String,
+        remote_user: Option<String>,
+        options: Vec<(String, String)>,
+    },
+    /// DROP USER MAPPING [IF EXISTS] FOR user SERVER server
+    DropUserMapping {
+        local_user: String,
+        server_name: String,
+        if_exists: bool,
+    },
+    /// CREATE FOREIGN TABLE name (...) SERVER server
+    CreateForeignTable {
+        name: String,
+        server_name: String,
+        columns: Vec<ForeignTableColumn>,
+        options: Vec<(String, String)>,
+    },
+    /// DROP FOREIGN TABLE [IF EXISTS] name
+    DropForeignTable {
+        name: String,
+        if_exists: bool,
+    },
+    /// IMPORT FOREIGN SCHEMA schema FROM SERVER server INTO database
+    ImportForeignSchema {
+        remote_schema: String,
+        server_name: String,
+        local_database: String,
+        limit_to: Option<Vec<String>>,
+    },
+    /// SHOW FOREIGN DATA WRAPPERS
+    ShowForeignDataWrappers,
+    /// SHOW FOREIGN SERVERS
+    ShowForeignServers,
+    /// SHOW FOREIGN TABLES
+    ShowForeignTables,
 
     // Streaming/CDC commands
     /// CREATE STREAM name FROM KAFKA 'topic' WITH (options)
@@ -1777,6 +1959,34 @@ pub enum DdlCommand {
         database: Option<String>,
         table: Option<String>,
     },
+
+    // ============================================================================
+    // ENUM Type Commands
+    // ============================================================================
+    /// CREATE TYPE name AS ENUM ('val1', 'val2', ...)
+    CreateEnumType {
+        database: String,
+        name: String,
+        values: Vec<String>,
+        if_not_exists: bool,
+    },
+    /// DROP TYPE [IF EXISTS] name
+    DropEnumType {
+        database: String,
+        name: String,
+        if_exists: bool,
+    },
+    /// ALTER TYPE name ADD VALUE 'new_value' [BEFORE|AFTER 'existing']
+    AlterEnumType {
+        database: String,
+        name: String,
+        new_value: String,
+        position: Option<EnumValuePosition>,
+    },
+    /// SHOW TYPES [IN database]
+    ShowTypes {
+        database: Option<String>,
+    },
 }
 
 /// Trigger timing
@@ -1806,6 +2016,15 @@ pub enum VariableScope {
     Local,
     /// Global (affects all sessions)
     Global,
+}
+
+/// Position for adding ENUM values
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EnumValuePosition {
+    /// Add before an existing value
+    Before(String),
+    /// Add after an existing value
+    After(String),
 }
 
 /// Table lock mode for LOCK TABLES
@@ -1862,6 +2081,15 @@ pub struct FunctionParameter {
     pub name: String,
     pub data_type: String,
     pub default_value: Option<String>,
+}
+
+/// Foreign table column definition
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForeignTableColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub options: Vec<(String, String)>,
 }
 
 /// Function body - can be SQL expression or reference to external code
@@ -2096,11 +2324,14 @@ pub fn parse_sql(sql: &str) -> Result<SqlStatement, EngineError> {
         return Ok(SqlStatement::Ddl(ddl_cmd));
     }
 
+    // Extract TABLESAMPLE clause before parsing (sqlparser doesn't support it)
+    let (sample_clause, cleaned_sql) = extract_tablesample(sql);
+
     let dialect = PostgreSqlDialect {};
-    let statements = match Parser::parse_sql(&dialect, sql) {
+    let statements = match Parser::parse_sql(&dialect, &cleaned_sql) {
         Ok(s) => s,
         Err(e) => {
-            if let Some(stmt) = parse_drop_database_fallback(sql) {
+            if let Some(stmt) = parse_drop_database_fallback(&cleaned_sql) {
                 return Ok(stmt);
             }
             return Err(EngineError::InvalidArgument(format!(
@@ -2119,7 +2350,16 @@ pub fn parse_sql(sql: &str) -> Result<SqlStatement, EngineError> {
         ));
     }
 
-    parse_statement(&statements[0])
+    let mut result = parse_statement(&statements[0])?;
+
+    // Apply TABLESAMPLE clause to parsed query if present
+    if let Some(sample) = sample_clause {
+        if let SqlStatement::Query(ref mut query) = result {
+            query.sample = Some(sample);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Try to parse SHOW DATABASES, SHOW TABLES, or DESCRIBE commands
@@ -2160,6 +2400,16 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }
     }
 
+    // DESCRIBE VIEW database.view or DESC VIEW database.view
+    if upper_trimmed.starts_with("DESCRIBE VIEW ") || upper_trimmed.starts_with("DESC VIEW ") {
+        let tokens: Vec<&str> = sql.split_whitespace().collect();
+        if tokens.len() >= 3 {
+            let view_name = tokens[2].trim_end_matches(';');
+            let (database, view) = parse_table_name(view_name)?;
+            return Ok(Some(DdlCommand::DescribeView { database, view }));
+        }
+    }
+
     // DESCRIBE TABLE database.table or DESC database.table
     if upper_trimmed.starts_with("DESCRIBE TABLE ") || upper_trimmed.starts_with("DESC TABLE ") {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
@@ -2170,8 +2420,11 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }
     }
 
-    // DESCRIBE database.table (without TABLE keyword)
-    if upper_trimmed.starts_with("DESCRIBE ") && !upper_trimmed.starts_with("DESCRIBE TABLE ") {
+    // DESCRIBE database.table (without TABLE keyword) - but not VIEW
+    if upper_trimmed.starts_with("DESCRIBE ")
+        && !upper_trimmed.starts_with("DESCRIBE TABLE ")
+        && !upper_trimmed.starts_with("DESCRIBE VIEW ")
+    {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
         if tokens.len() >= 2 {
             let table_name = tokens[1].trim_end_matches(';');
@@ -2180,8 +2433,11 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         }
     }
 
-    // DESC database.table (shorthand without TABLE keyword)
-    if upper_trimmed.starts_with("DESC ") && !upper_trimmed.starts_with("DESC TABLE ") {
+    // DESC database.table (shorthand without TABLE keyword) - but not VIEW
+    if upper_trimmed.starts_with("DESC ")
+        && !upper_trimmed.starts_with("DESC TABLE ")
+        && !upper_trimmed.starts_with("DESC VIEW ")
+    {
         let tokens: Vec<&str> = sql.split_whitespace().collect();
         if tokens.len() >= 2 {
             let table_name = tokens[1].trim_end_matches(';');
@@ -2683,6 +2939,137 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
         return parse_create_function(sql);
     }
 
+    // CREATE [OR REPLACE] PROCEDURE name(params) LANGUAGE lang AS $$ body $$
+    if upper_trimmed.starts_with("CREATE PROCEDURE ")
+        || upper_trimmed.starts_with("CREATE OR REPLACE PROCEDURE ")
+    {
+        return parse_create_procedure(sql);
+    }
+
+    // DROP PROCEDURE [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP PROCEDURE ") {
+        let or_replace = upper_trimmed.starts_with("DROP PROCEDURE IF EXISTS ");
+        let rest = if or_replace {
+            upper_trimmed["DROP PROCEDURE IF EXISTS ".len()..].trim()
+        } else {
+            upper_trimmed["DROP PROCEDURE ".len()..].trim()
+        };
+        let name = rest.trim_end_matches(';').to_string();
+        return Ok(Some(DdlCommand::DropProcedure {
+            name,
+            if_exists: or_replace,
+        }));
+    }
+
+    // CALL procedure_name(args)
+    if upper_trimmed.starts_with("CALL ") {
+        return parse_call_procedure(sql);
+    }
+
+    // SHOW PROCEDURES [LIKE pattern]
+    if upper_trimmed == "SHOW PROCEDURES" || upper_trimmed.starts_with("SHOW PROCEDURES ") {
+        let pattern = if upper_trimmed.starts_with("SHOW PROCEDURES LIKE ") {
+            let rest = sql["SHOW PROCEDURES LIKE ".len()..].trim();
+            let pat = rest.trim_matches('\'').trim_end_matches(';').to_string();
+            Some(pat)
+        } else {
+            None
+        };
+        return Ok(Some(DdlCommand::ShowProcedures { pattern }));
+    }
+
+    // Foreign Data Wrapper commands
+
+    // SHOW FOREIGN DATA WRAPPERS
+    if upper_trimmed == "SHOW FOREIGN DATA WRAPPERS"
+        || upper_trimmed == "SHOW FDW"
+        || upper_trimmed == "SHOW FDWS"
+    {
+        return Ok(Some(DdlCommand::ShowForeignDataWrappers));
+    }
+
+    // SHOW FOREIGN SERVERS
+    if upper_trimmed == "SHOW FOREIGN SERVERS" {
+        return Ok(Some(DdlCommand::ShowForeignServers));
+    }
+
+    // SHOW FOREIGN TABLES
+    if upper_trimmed == "SHOW FOREIGN TABLES" {
+        return Ok(Some(DdlCommand::ShowForeignTables));
+    }
+
+    // CREATE FOREIGN DATA WRAPPER name [HANDLER handler] [VALIDATOR validator] [OPTIONS (...)]
+    if upper_trimmed.starts_with("CREATE FOREIGN DATA WRAPPER ") {
+        return parse_create_foreign_data_wrapper(sql);
+    }
+
+    // DROP FOREIGN DATA WRAPPER [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP FOREIGN DATA WRAPPER ") {
+        let rest = upper_trimmed["DROP FOREIGN DATA WRAPPER ".len()..].trim();
+        let (if_exists, name) = if rest.starts_with("IF EXISTS ") {
+            (true, rest["IF EXISTS ".len()..].trim().trim_end_matches(';'))
+        } else {
+            (false, rest.trim_end_matches(';'))
+        };
+        return Ok(Some(DdlCommand::DropForeignDataWrapper {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // CREATE SERVER name FOREIGN DATA WRAPPER wrapper [TYPE type] [VERSION version] [OPTIONS (...)]
+    if upper_trimmed.starts_with("CREATE SERVER ") {
+        return parse_create_foreign_server(sql);
+    }
+
+    // DROP SERVER [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP SERVER ") {
+        let rest = upper_trimmed["DROP SERVER ".len()..].trim();
+        let (if_exists, name) = if rest.starts_with("IF EXISTS ") {
+            (true, rest["IF EXISTS ".len()..].trim().trim_end_matches(';'))
+        } else {
+            (false, rest.trim_end_matches(';'))
+        };
+        return Ok(Some(DdlCommand::DropForeignServer {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // CREATE USER MAPPING FOR user SERVER server [OPTIONS (...)]
+    if upper_trimmed.starts_with("CREATE USER MAPPING ") {
+        return parse_create_user_mapping(sql);
+    }
+
+    // DROP USER MAPPING [IF EXISTS] FOR user SERVER server
+    if upper_trimmed.starts_with("DROP USER MAPPING ") {
+        return parse_drop_user_mapping(sql);
+    }
+
+    // CREATE FOREIGN TABLE name (...) SERVER server
+    if upper_trimmed.starts_with("CREATE FOREIGN TABLE ") {
+        return parse_create_foreign_table(sql);
+    }
+
+    // DROP FOREIGN TABLE [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP FOREIGN TABLE ") {
+        let rest = upper_trimmed["DROP FOREIGN TABLE ".len()..].trim();
+        let (if_exists, name) = if rest.starts_with("IF EXISTS ") {
+            (true, rest["IF EXISTS ".len()..].trim().trim_end_matches(';'))
+        } else {
+            (false, rest.trim_end_matches(';'))
+        };
+        return Ok(Some(DdlCommand::DropForeignTable {
+            name: name.to_string(),
+            if_exists,
+        }));
+    }
+
+    // IMPORT FOREIGN SCHEMA schema FROM SERVER server INTO database
+    if upper_trimmed.starts_with("IMPORT FOREIGN SCHEMA ") {
+        return parse_import_foreign_schema(sql);
+    }
+
     // SHOW STREAMS
     if upper_trimmed == "SHOW STREAMS" {
         return Ok(Some(DdlCommand::ShowStreams));
@@ -3179,6 +3566,41 @@ fn try_parse_show_command(sql: &str) -> Result<Option<DdlCommand>, EngineError> 
             .trim_end_matches(';');
         let (database, table) = parse_table_name(table_name)?;
         return Ok(Some(DdlCommand::RepairTable { database, table }));
+    }
+
+    // ========================================================================
+    // ENUM Type Commands
+    // ========================================================================
+
+    // CREATE TYPE name AS ENUM ('val1', 'val2', ...)
+    if upper_trimmed.starts_with("CREATE TYPE ") && upper_trimmed.contains(" AS ENUM ") {
+        return parse_create_enum_type(sql);
+    }
+
+    // DROP TYPE [IF EXISTS] name
+    if upper_trimmed.starts_with("DROP TYPE ") {
+        return parse_drop_enum_type(sql);
+    }
+
+    // ALTER TYPE name ADD VALUE 'new_value' [BEFORE|AFTER 'existing']
+    if upper_trimmed.starts_with("ALTER TYPE ") && upper_trimmed.contains(" ADD VALUE ") {
+        return parse_alter_enum_type(sql);
+    }
+
+    // SHOW TYPES [IN database]
+    if upper_trimmed == "SHOW TYPES" {
+        return Ok(Some(DdlCommand::ShowTypes { database: None }));
+    }
+    if upper_trimmed.starts_with("SHOW TYPES IN ") || upper_trimmed.starts_with("SHOW TYPES FROM ") {
+        let keyword_len = if upper_trimmed.starts_with("SHOW TYPES IN ") {
+            "SHOW TYPES IN ".len()
+        } else {
+            "SHOW TYPES FROM ".len()
+        };
+        let database = sql[keyword_len..].trim().trim_end_matches(';').to_string();
+        return Ok(Some(DdlCommand::ShowTypes {
+            database: Some(database),
+        }));
     }
 
     Ok(None)
@@ -3848,6 +4270,170 @@ fn parse_show_columns(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
     }))
 }
 
+/// Parse CREATE TYPE name AS ENUM ('val1', 'val2', ...)
+fn parse_create_enum_type(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Extract type name (after CREATE TYPE, before AS ENUM)
+    let after_create = &sql["CREATE TYPE ".len()..];
+    let as_enum_pos = upper.find(" AS ENUM ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE TYPE requires AS ENUM clause".into())
+    })?;
+
+    let type_part = after_create[..as_enum_pos - "CREATE TYPE ".len()].trim();
+
+    // Check for IF NOT EXISTS
+    let (if_not_exists, type_name) = if type_part.to_uppercase().starts_with("IF NOT EXISTS ") {
+        (true, type_part["IF NOT EXISTS ".len()..].trim())
+    } else {
+        (false, type_part)
+    };
+
+    // Parse database.name or just name
+    let (database, name) = parse_table_name(type_name)?;
+
+    // Extract values from parentheses
+    let after_enum = &sql[as_enum_pos + " AS ENUM ".len()..];
+    let values = parse_enum_values(after_enum)?;
+
+    if values.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "ENUM type requires at least one value".into(),
+        ));
+    }
+
+    Ok(Some(DdlCommand::CreateEnumType {
+        database,
+        name,
+        values,
+        if_not_exists,
+    }))
+}
+
+/// Parse ENUM values from parentheses: ('val1', 'val2', ...)
+fn parse_enum_values(s: &str) -> Result<Vec<String>, EngineError> {
+    let s = s.trim().trim_end_matches(';');
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return Err(EngineError::InvalidArgument(
+            "ENUM values must be enclosed in parentheses".into(),
+        ));
+    }
+
+    let inner = &s[1..s.len() - 1];
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = ' ';
+
+    for ch in inner.chars() {
+        match ch {
+            '\'' | '"' if !in_quotes => {
+                in_quotes = true;
+                quote_char = ch;
+            }
+            c if c == quote_char && in_quotes => {
+                in_quotes = false;
+                values.push(current.clone());
+                current.clear();
+            }
+            ',' if !in_quotes => {
+                // Skip commas between values
+            }
+            _ if in_quotes => {
+                current.push(ch);
+            }
+            _ => {
+                // Skip whitespace outside quotes
+            }
+        }
+    }
+
+    Ok(values)
+}
+
+/// Parse DROP TYPE [IF EXISTS] name
+fn parse_drop_enum_type(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let rest = upper["DROP TYPE ".len()..].trim_end_matches(';').to_string();
+
+    let (if_exists, type_name) = if rest.starts_with("IF EXISTS ") {
+        (true, &rest["IF EXISTS ".len()..])
+    } else {
+        (false, rest.as_str())
+    };
+
+    let (database, name) = parse_table_name(type_name.trim())?;
+
+    Ok(Some(DdlCommand::DropEnumType {
+        database,
+        name,
+        if_exists,
+    }))
+}
+
+/// Parse ALTER TYPE name ADD VALUE 'new_value' [BEFORE|AFTER 'existing']
+fn parse_alter_enum_type(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let original_sql = sql.trim().trim_end_matches(';');
+
+    // Extract type name (after ALTER TYPE, before ADD VALUE)
+    let after_alter = &original_sql["ALTER TYPE ".len()..];
+    let add_value_pos = upper.find(" ADD VALUE ").ok_or_else(|| {
+        EngineError::InvalidArgument("ALTER TYPE requires ADD VALUE clause".into())
+    })?;
+
+    let type_name = after_alter[..add_value_pos - "ALTER TYPE ".len()].trim();
+    let (database, name) = parse_table_name(type_name)?;
+
+    // Extract the new value
+    let after_add = &original_sql[add_value_pos + " ADD VALUE ".len()..];
+    let upper_after_add = after_add.to_uppercase();
+
+    // Find the quoted value
+    let (new_value, position_part) = if after_add.starts_with('\'') || after_add.starts_with('"') {
+        let quote = after_add.chars().next().unwrap();
+        let end = after_add[1..]
+            .find(quote)
+            .ok_or_else(|| EngineError::InvalidArgument("Unclosed quote in ADD VALUE".into()))?
+            + 1;
+        let value = after_add[1..end].to_string();
+        let rest = &after_add[end + 1..].trim();
+        (value, rest.to_string())
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "ADD VALUE requires a quoted string".into(),
+        ));
+    };
+
+    // Parse optional BEFORE/AFTER
+    let position = if upper_after_add.contains(" BEFORE ") {
+        let before_pos = upper_after_add.find(" BEFORE ").unwrap();
+        let after_before = &position_part[before_pos - (position_part.len() - upper_after_add.len()) + " BEFORE ".len()..];
+        if let Some(existing) = extract_quoted_string(after_before) {
+            Some(EnumValuePosition::Before(existing))
+        } else {
+            None
+        }
+    } else if upper_after_add.contains(" AFTER ") {
+        let after_pos = upper_after_add.find(" AFTER ").unwrap();
+        let after_after = &position_part[after_pos - (position_part.len() - upper_after_add.len()) + " AFTER ".len()..];
+        if let Some(existing) = extract_quoted_string(after_after) {
+            Some(EnumValuePosition::After(existing))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::AlterEnumType {
+        database,
+        name,
+        new_value,
+        position,
+    }))
+}
+
 /// Parse CREATE STREAM command
 /// Syntax: CREATE STREAM name FROM KAFKA|PULSAR 'config' INTO database.table [FORMAT json|csv]
 fn parse_create_stream(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
@@ -4035,6 +4621,560 @@ fn parse_create_function(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
         body,
         or_replace,
         language,
+    }))
+}
+
+/// Parse CREATE [OR REPLACE] PROCEDURE name(params) LANGUAGE lang AS $$ body $$
+fn parse_create_procedure(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let or_replace = upper.contains("OR REPLACE");
+
+    // Find the procedure name and parameters
+    let prefix = if or_replace {
+        "CREATE OR REPLACE PROCEDURE "
+    } else {
+        "CREATE PROCEDURE "
+    };
+    let prefix_upper = prefix.to_uppercase();
+
+    let start_idx = upper
+        .find(&prefix_upper)
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid CREATE PROCEDURE syntax".into()))?
+        + prefix.len();
+
+    // Find the opening parenthesis for parameters
+    let paren_open = sql[start_idx..].find('(').ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE PROCEDURE requires parameter list".into())
+    })? + start_idx;
+
+    let name = sql[start_idx..paren_open].trim().to_string();
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "CREATE PROCEDURE requires a procedure name".into(),
+        ));
+    }
+
+    // Find the closing parenthesis
+    let paren_close = sql[paren_open..].find(')').ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE PROCEDURE requires closing parenthesis".into())
+    })? + paren_open;
+
+    // Parse parameters
+    let params_str = &sql[paren_open + 1..paren_close];
+    let parameters = parse_function_parameters(params_str)?;
+
+    // Find AS or LANGUAGE keyword after params
+    let after_params = &sql[paren_close + 1..];
+    let upper_after = after_params.to_uppercase();
+
+    // Check for LANGUAGE clause
+    let language = if let Some(lang_pos) = upper_after.find("LANGUAGE ") {
+        let lang_start = lang_pos + 9;
+        let lang_end = after_params[lang_start..]
+            .find(|c: char| c.is_whitespace() || c == ';')
+            .map(|i| i + lang_start)
+            .unwrap_or(after_params.len());
+        Some(after_params[lang_start..lang_end].trim().to_string())
+    } else {
+        None
+    };
+
+    // Find AS keyword and extract body
+    let as_pos = upper_after.find(" AS ").ok_or_else(|| {
+        EngineError::InvalidArgument("CREATE PROCEDURE requires AS clause".into())
+    })?;
+
+    let after_as = after_params[as_pos + 4..].trim();
+    let (body_str, _remaining) = extract_function_body_string(after_as)?;
+
+    Ok(Some(DdlCommand::CreateProcedure {
+        name,
+        parameters,
+        body: body_str,
+        or_replace,
+        language,
+    }))
+}
+
+/// Parse CALL procedure_name(args)
+fn parse_call_procedure(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let trimmed = sql.trim().trim_end_matches(';');
+    let upper = trimmed.to_uppercase();
+
+    if !upper.starts_with("CALL ") {
+        return Err(EngineError::InvalidArgument(
+            "Invalid CALL syntax".into(),
+        ));
+    }
+
+    let rest = trimmed["CALL ".len()..].trim();
+
+    // Find procedure name and optional arguments
+    if let Some(paren_open) = rest.find('(') {
+        let name = rest[..paren_open].trim().to_string();
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "CALL requires a procedure name".into(),
+            ));
+        }
+
+        // Find closing parenthesis
+        let paren_close = rest.rfind(')').ok_or_else(|| {
+            EngineError::InvalidArgument("CALL requires closing parenthesis".into())
+        })?;
+
+        // Parse arguments
+        let args_str = &rest[paren_open + 1..paren_close];
+        let arguments: Vec<String> = if args_str.trim().is_empty() {
+            Vec::new()
+        } else {
+            // Simple split by comma (doesn't handle nested parens or quoted strings)
+            args_str
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .collect()
+        };
+
+        Ok(Some(DdlCommand::CallProcedure { name, arguments }))
+    } else {
+        // No parentheses - just the procedure name
+        let name = rest.to_string();
+        if name.is_empty() {
+            return Err(EngineError::InvalidArgument(
+                "CALL requires a procedure name".into(),
+            ));
+        }
+        Ok(Some(DdlCommand::CallProcedure {
+            name,
+            arguments: Vec::new(),
+        }))
+    }
+}
+
+// ============================================================================
+// Foreign Data Wrapper parsing functions
+// ============================================================================
+
+/// Parse OPTIONS (key 'value', key2 'value2')
+fn parse_fdw_options(sql: &str) -> Vec<(String, String)> {
+    let mut options = Vec::new();
+    let upper = sql.to_uppercase();
+
+    if let Some(opt_start) = upper.find("OPTIONS") {
+        if let Some(paren_start) = sql[opt_start..].find('(') {
+            let start = opt_start + paren_start + 1;
+            if let Some(paren_end) = sql[start..].find(')') {
+                let opts_str = &sql[start..start + paren_end];
+                // Simple parsing: split by comma, handle key 'value' pairs
+                for pair in opts_str.split(',') {
+                    let trimmed = pair.trim();
+                    if let Some(space_pos) = trimmed.find(char::is_whitespace) {
+                        let key = trimmed[..space_pos].trim().to_string();
+                        let value = trimmed[space_pos..]
+                            .trim()
+                            .trim_matches('\'')
+                            .trim_matches('"')
+                            .to_string();
+                        options.push((key, value));
+                    }
+                }
+            }
+        }
+    }
+
+    options
+}
+
+/// Parse CREATE FOREIGN DATA WRAPPER name [HANDLER handler] [VALIDATOR validator] [OPTIONS (...)]
+fn parse_create_foreign_data_wrapper(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+    let start = upper
+        .find("CREATE FOREIGN DATA WRAPPER ")
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid CREATE FDW syntax".into()))?
+        + "CREATE FOREIGN DATA WRAPPER ".len();
+
+    // Find the name (until HANDLER, VALIDATOR, OPTIONS, or end)
+    let rest = &sql[start..];
+    let name_end = rest
+        .to_uppercase()
+        .find(" HANDLER")
+        .or_else(|| rest.to_uppercase().find(" VALIDATOR"))
+        .or_else(|| rest.to_uppercase().find(" OPTIONS"))
+        .unwrap_or(rest.len());
+
+    let name = rest[..name_end].trim().trim_end_matches(';').to_string();
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "CREATE FOREIGN DATA WRAPPER requires a name".into(),
+        ));
+    }
+
+    // Parse HANDLER
+    let handler = if let Some(h_pos) = upper.find(" HANDLER ") {
+        let h_start = h_pos + " HANDLER ".len();
+        let h_rest = &sql[h_start..];
+        let h_end = h_rest
+            .to_uppercase()
+            .find(" VALIDATOR")
+            .or_else(|| h_rest.to_uppercase().find(" OPTIONS"))
+            .unwrap_or(h_rest.len());
+        Some(h_rest[..h_end].trim().trim_end_matches(';').to_string())
+    } else {
+        None
+    };
+
+    // Parse VALIDATOR
+    let validator = if let Some(v_pos) = upper.find(" VALIDATOR ") {
+        let v_start = v_pos + " VALIDATOR ".len();
+        let v_rest = &sql[v_start..];
+        let v_end = v_rest.to_uppercase().find(" OPTIONS").unwrap_or(v_rest.len());
+        Some(v_rest[..v_end].trim().trim_end_matches(';').to_string())
+    } else {
+        None
+    };
+
+    let options = parse_fdw_options(sql);
+
+    Ok(Some(DdlCommand::CreateForeignDataWrapper {
+        name,
+        handler,
+        validator,
+        options,
+    }))
+}
+
+/// Parse CREATE SERVER name FOREIGN DATA WRAPPER wrapper [TYPE type] [VERSION version] [OPTIONS (...)]
+fn parse_create_foreign_server(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Get server name
+    let start = upper
+        .find("CREATE SERVER ")
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid CREATE SERVER syntax".into()))?
+        + "CREATE SERVER ".len();
+
+    let rest = &sql[start..];
+    let fdw_pos = rest
+        .to_uppercase()
+        .find(" FOREIGN DATA WRAPPER ")
+        .ok_or_else(|| {
+            EngineError::InvalidArgument(
+                "CREATE SERVER requires FOREIGN DATA WRAPPER clause".into(),
+            )
+        })?;
+
+    let name = rest[..fdw_pos].trim().to_string();
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "CREATE SERVER requires a server name".into(),
+        ));
+    }
+
+    // Get wrapper name
+    let wrapper_start = fdw_pos + " FOREIGN DATA WRAPPER ".len();
+    let wrapper_rest = &rest[wrapper_start..];
+    let wrapper_end = wrapper_rest
+        .to_uppercase()
+        .find(" TYPE")
+        .or_else(|| wrapper_rest.to_uppercase().find(" VERSION"))
+        .or_else(|| wrapper_rest.to_uppercase().find(" OPTIONS"))
+        .unwrap_or(wrapper_rest.len());
+
+    let wrapper_name = wrapper_rest[..wrapper_end]
+        .trim()
+        .trim_end_matches(';')
+        .to_string();
+
+    // Parse TYPE
+    let server_type = if let Some(t_pos) = upper.find(" TYPE ") {
+        let t_start = t_pos + " TYPE ".len();
+        let t_rest = &sql[t_start..];
+        let t_end = t_rest
+            .to_uppercase()
+            .find(" VERSION")
+            .or_else(|| t_rest.to_uppercase().find(" OPTIONS"))
+            .unwrap_or(t_rest.len());
+        Some(t_rest[..t_end].trim().trim_end_matches(';').trim_matches('\'').to_string())
+    } else {
+        None
+    };
+
+    // Parse VERSION
+    let version = if let Some(v_pos) = upper.find(" VERSION ") {
+        let v_start = v_pos + " VERSION ".len();
+        let v_rest = &sql[v_start..];
+        let v_end = v_rest.to_uppercase().find(" OPTIONS").unwrap_or(v_rest.len());
+        Some(v_rest[..v_end].trim().trim_end_matches(';').trim_matches('\'').to_string())
+    } else {
+        None
+    };
+
+    let options = parse_fdw_options(sql);
+
+    Ok(Some(DdlCommand::CreateForeignServer {
+        name,
+        wrapper_name,
+        server_type,
+        version,
+        options,
+    }))
+}
+
+/// Parse CREATE USER MAPPING FOR user SERVER server [OPTIONS (...)]
+fn parse_create_user_mapping(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Get local user
+    let for_pos = upper
+        .find(" FOR ")
+        .ok_or_else(|| EngineError::InvalidArgument("CREATE USER MAPPING requires FOR clause".into()))?;
+
+    let user_start = for_pos + " FOR ".len();
+    let server_pos = upper[user_start..]
+        .find(" SERVER ")
+        .ok_or_else(|| {
+            EngineError::InvalidArgument("CREATE USER MAPPING requires SERVER clause".into())
+        })?;
+
+    let local_user = sql[user_start..user_start + server_pos].trim().to_string();
+
+    // Get server name
+    let srv_start = user_start + server_pos + " SERVER ".len();
+    let srv_rest = &sql[srv_start..];
+    let srv_end = srv_rest
+        .to_uppercase()
+        .find(" OPTIONS")
+        .unwrap_or(srv_rest.len());
+
+    let server_name = srv_rest[..srv_end]
+        .trim()
+        .trim_end_matches(';')
+        .to_string();
+
+    let options = parse_fdw_options(sql);
+
+    // Look for remote user in options
+    let remote_user = options
+        .iter()
+        .find(|(k, _)| k.to_uppercase() == "USER")
+        .map(|(_, v)| v.clone());
+
+    Ok(Some(DdlCommand::CreateUserMapping {
+        local_user,
+        server_name,
+        remote_user,
+        options,
+    }))
+}
+
+/// Parse DROP USER MAPPING [IF EXISTS] FOR user SERVER server
+fn parse_drop_user_mapping(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    let if_exists = upper.contains(" IF EXISTS ");
+
+    // Get local user
+    let for_pos = upper
+        .find(" FOR ")
+        .ok_or_else(|| EngineError::InvalidArgument("DROP USER MAPPING requires FOR clause".into()))?;
+
+    let user_start = for_pos + " FOR ".len();
+    let server_pos = upper[user_start..]
+        .find(" SERVER ")
+        .ok_or_else(|| {
+            EngineError::InvalidArgument("DROP USER MAPPING requires SERVER clause".into())
+        })?;
+
+    let local_user = sql[user_start..user_start + server_pos].trim().to_string();
+
+    // Get server name
+    let srv_start = user_start + server_pos + " SERVER ".len();
+    let server_name = sql[srv_start..].trim().trim_end_matches(';').to_string();
+
+    Ok(Some(DdlCommand::DropUserMapping {
+        local_user,
+        server_name,
+        if_exists,
+    }))
+}
+
+/// Parse CREATE FOREIGN TABLE name (...) SERVER server [OPTIONS (...)]
+fn parse_create_foreign_table(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Get table name
+    let start = upper
+        .find("CREATE FOREIGN TABLE ")
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid CREATE FOREIGN TABLE syntax".into()))?
+        + "CREATE FOREIGN TABLE ".len();
+
+    let rest = &sql[start..];
+    let paren_pos = rest
+        .find('(')
+        .ok_or_else(|| EngineError::InvalidArgument("CREATE FOREIGN TABLE requires columns".into()))?;
+
+    let name = rest[..paren_pos].trim().to_string();
+    if name.is_empty() {
+        return Err(EngineError::InvalidArgument(
+            "CREATE FOREIGN TABLE requires a table name".into(),
+        ));
+    }
+
+    // Find matching closing parenthesis for columns
+    let mut depth = 0;
+    let mut col_end = paren_pos;
+    for (i, c) in rest[paren_pos..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    col_end = paren_pos + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let columns_str = &rest[paren_pos + 1..col_end];
+    let columns = parse_foreign_table_columns(columns_str)?;
+
+    // Find SERVER clause
+    let after_cols = &rest[col_end + 1..];
+    let upper_after = after_cols.to_uppercase();
+    let server_pos = upper_after.find(" SERVER ").or_else(|| upper_after.find("SERVER "));
+
+    let server_name = if let Some(sp) = server_pos {
+        let srv_start = sp + " SERVER ".len().min(sp + "SERVER ".len());
+        let srv_rest = &after_cols[srv_start..];
+        let srv_end = srv_rest
+            .to_uppercase()
+            .find(" OPTIONS")
+            .unwrap_or(srv_rest.len());
+        srv_rest[..srv_end].trim().trim_end_matches(';').to_string()
+    } else {
+        return Err(EngineError::InvalidArgument(
+            "CREATE FOREIGN TABLE requires SERVER clause".into(),
+        ));
+    };
+
+    let options = parse_fdw_options(sql);
+
+    Ok(Some(DdlCommand::CreateForeignTable {
+        name,
+        server_name,
+        columns,
+        options,
+    }))
+}
+
+/// Parse foreign table columns
+fn parse_foreign_table_columns(cols_str: &str) -> Result<Vec<ForeignTableColumn>, EngineError> {
+    let mut columns = Vec::new();
+
+    for col_def in cols_str.split(',') {
+        let trimmed = col_def.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let name = parts[0].to_string();
+        let data_type = parts[1].to_string();
+        let nullable = !trimmed.to_uppercase().contains("NOT NULL");
+
+        // Parse column options if present
+        let options = if trimmed.to_uppercase().contains("OPTIONS") {
+            parse_fdw_options(trimmed)
+        } else {
+            Vec::new()
+        };
+
+        columns.push(ForeignTableColumn {
+            name,
+            data_type,
+            nullable,
+            options,
+        });
+    }
+
+    Ok(columns)
+}
+
+/// Parse IMPORT FOREIGN SCHEMA schema FROM SERVER server INTO database [LIMIT TO (tables)]
+fn parse_import_foreign_schema(sql: &str) -> Result<Option<DdlCommand>, EngineError> {
+    let upper = sql.to_uppercase();
+
+    // Get remote schema
+    let start = upper
+        .find("IMPORT FOREIGN SCHEMA ")
+        .ok_or_else(|| EngineError::InvalidArgument("Invalid IMPORT FOREIGN SCHEMA syntax".into()))?
+        + "IMPORT FOREIGN SCHEMA ".len();
+
+    let rest = &sql[start..];
+    let from_pos = rest
+        .to_uppercase()
+        .find(" FROM SERVER ")
+        .ok_or_else(|| {
+            EngineError::InvalidArgument("IMPORT FOREIGN SCHEMA requires FROM SERVER clause".into())
+        })?;
+
+    let remote_schema = rest[..from_pos].trim().to_string();
+
+    // Get server name
+    let srv_start = from_pos + " FROM SERVER ".len();
+    let srv_rest = &rest[srv_start..];
+    let into_pos = srv_rest
+        .to_uppercase()
+        .find(" INTO ")
+        .ok_or_else(|| {
+            EngineError::InvalidArgument("IMPORT FOREIGN SCHEMA requires INTO clause".into())
+        })?;
+
+    let server_name = srv_rest[..into_pos].trim().to_string();
+
+    // Get local database
+    let db_start = srv_start + into_pos + " INTO ".len();
+    let db_rest = &rest[db_start..];
+    let db_end = db_rest
+        .to_uppercase()
+        .find(" LIMIT")
+        .unwrap_or(db_rest.len());
+
+    let local_database = db_rest[..db_end].trim().trim_end_matches(';').to_string();
+
+    // Parse LIMIT TO if present
+    let limit_to = if upper.contains(" LIMIT TO ") {
+        if let Some(lt_pos) = upper.find(" LIMIT TO (") {
+            let lt_start = lt_pos + " LIMIT TO (".len();
+            if let Some(lt_end) = sql[lt_start..].find(')') {
+                let tables_str = &sql[lt_start..lt_start + lt_end];
+                Some(
+                    tables_str
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .collect(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(DdlCommand::ImportForeignSchema {
+        remote_schema,
+        server_name,
+        local_database,
+        limit_to,
     }))
 }
 
@@ -6231,6 +7371,16 @@ fn parse_query(query: &Query) -> Result<ParsedQuery, EngineError> {
         filter.limit = n.parse().ok();
     }
 
+    // Parse FETCH FIRST n ROWS ONLY (ANSI SQL standard)
+    if let Some(fetch) = &query.fetch {
+        // Only set limit if not already set by LIMIT clause
+        if filter.limit.is_none() {
+            if let Some(Expr::Value(Value::Number(n, _))) = &fetch.quantity {
+                filter.limit = n.parse().ok();
+            }
+        }
+    }
+
     // Parse OFFSET
     if let Some(offset_expr) = &query.offset {
         if let Expr::Value(Value::Number(n, _)) = &offset_expr.value {
@@ -7640,6 +8790,30 @@ fn parse_group_by(group_by: &GroupByExpr) -> Result<GroupBy, EngineError> {
             if exprs.is_empty() {
                 return Ok(GroupBy::None);
             }
+
+            // Check for ROLLUP, CUBE, or GROUPING SETS
+            for expr in exprs {
+                if let Expr::Rollup(rollup_exprs) = expr {
+                    // ROLLUP(a, b, c) = GROUPING SETS ((a,b,c), (a,b), (a), ())
+                    let columns = parse_nested_group_by_columns(rollup_exprs)?;
+                    return Ok(GroupBy::Rollup(columns));
+                }
+                if let Expr::Cube(cube_exprs) = expr {
+                    // CUBE(a, b) = GROUPING SETS ((a,b), (a), (b), ())
+                    let columns = parse_nested_group_by_columns(cube_exprs)?;
+                    return Ok(GroupBy::Cube(columns));
+                }
+                if let Expr::GroupingSets(sets) = expr {
+                    // GROUPING SETS ((a, b), (a), ())
+                    let mut grouping_sets = Vec::with_capacity(sets.len());
+                    for set in sets {
+                        let cols = parse_group_by_columns(set)?;
+                        grouping_sets.push(cols);
+                    }
+                    return Ok(GroupBy::GroupingSets(grouping_sets));
+                }
+            }
+
             if exprs.len() == 1 {
                 // Single column - use legacy types for backwards compatibility if possible
                 match &exprs[0] {
@@ -7688,10 +8862,39 @@ fn parse_group_by(group_by: &GroupByExpr) -> Result<GroupBy, EngineError> {
                 Ok(GroupBy::Columns(columns))
             }
         }
-        GroupByExpr::All => Err(EngineError::NotImplemented(
-            "GROUP BY ALL not supported".into(),
-        )),
+        GroupByExpr::All => Ok(GroupBy::All),
     }
+}
+
+/// Parse a list of expressions into GroupByColumns
+fn parse_group_by_columns(exprs: &[Expr]) -> Result<Vec<GroupByColumn>, EngineError> {
+    let mut columns = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        columns.push(parse_group_by_column(expr)?);
+    }
+    Ok(columns)
+}
+
+/// Parse nested group by columns (for ROLLUP and CUBE which use Vec<Vec<Expr>>)
+fn parse_nested_group_by_columns(
+    nested_exprs: &[Vec<Expr>],
+) -> Result<Vec<GroupByColumn>, EngineError> {
+    let mut columns = Vec::with_capacity(nested_exprs.len());
+    for inner in nested_exprs {
+        if inner.len() == 1 {
+            // Simple column reference
+            columns.push(parse_group_by_column(&inner[0])?);
+        } else if inner.is_empty() {
+            // Skip empty groups (represents grand total)
+            continue;
+        } else {
+            // Composite grouping columns like (a, b) - not currently supported
+            return Err(EngineError::NotImplemented(
+                "composite grouping columns in ROLLUP/CUBE are not supported".into(),
+            ));
+        }
+    }
+    Ok(columns)
 }
 
 /// Parse HAVING clause expression

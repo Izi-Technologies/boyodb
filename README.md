@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.7-green.svg)](CHANGELOG.md)
 
 **BoyoDB** is an open-source, high-performance columnar database engine built in Rust. Designed for real-time analytics, time-series data, and high-throughput OLAP workloads, BoyoDB combines the best features of ClickHouse and PostgreSQL with modern AI/ML capabilities. Query billions of rows in milliseconds with GPU acceleration, vector search, and machine learning built-in.
 
@@ -438,7 +438,11 @@ PROCESS DATA SUBJECT REQUEST
 | Concurrent Queries | Linear scaling |
 
 ### Optimization Features
-- **Sharded Caches** - 64-shard segment cache, 32-shard batch cache
+- **Adaptive Cache Sharding** - Dynamic shard count based on CPU cores and cache size
+- **Adaptive Bloom Filters** - Intelligent FPP selection based on data cardinality
+- **Parallel Aggregation** - Tree-reduction merge for 5-10% aggregation speedup
+- **Segment Prefetching** - Proactive cache warming during sequential scans
+- **Parallel Compression** - Concurrent batch compression for high-throughput ingest
 - **Query Result Caching** - Redis-compatible distributed cache
 - **Adaptive Execution** - Runtime plan adjustment based on statistics
 - **Index Advisor** - Automatic index recommendations

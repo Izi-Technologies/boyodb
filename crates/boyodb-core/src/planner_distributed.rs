@@ -419,6 +419,7 @@ pub fn distribute_plan_with_options(
             projection,
             filter,
             computed_columns,
+            sample: _,
         } => distribute_simple_plan(
             agg.as_ref(),
             db,
@@ -484,6 +485,7 @@ fn distribute_simple_plan(
             projection: projection.clone(),
             filter: filter.clone(),
             computed_columns: computed_columns.to_vec(),
+            sample: None, // Sampling not supported in distributed mode
         };
 
         // Local plan gets LIMIT for pushdown (limit + offset)
@@ -696,6 +698,7 @@ fn distribute_aggregation(
         projection: projection.clone(),
         filter: filter.clone(),
         computed_columns: computed_columns.to_vec(),
+        sample: None,
     };
 
     let local_plan = LocalPlan::new(local_kind);
@@ -714,6 +717,7 @@ fn distribute_aggregation(
         projection: projection.clone(),
         filter: QueryFilter::default(), // Filter already applied locally
         computed_columns: computed_columns.to_vec(),
+        sample: None,
     };
 
     // Determine merge strategy
@@ -1037,6 +1041,7 @@ mod tests {
             projection: Some(vec!["*".to_string()]),
             filter: QueryFilter::default(),
             computed_columns: vec![],
+            sample: None,
         }
     }
 
@@ -1052,6 +1057,7 @@ mod tests {
             projection: Some(vec!["*".to_string()]),
             filter: QueryFilter::default(),
             computed_columns: vec![],
+            sample: None,
         }
     }
 
@@ -1161,6 +1167,7 @@ mod tests {
                 projection: None,
                 filter: QueryFilter::default(),
                 computed_columns: vec![],
+                sample: None,
             }),
             GlobalPlan::new(PlanKind::Simple {
                 agg: None,
@@ -1169,6 +1176,7 @@ mod tests {
                 projection: None,
                 filter: QueryFilter::default(),
                 computed_columns: vec![],
+                sample: None,
             }),
         );
 
@@ -1180,6 +1188,7 @@ mod tests {
                 projection: None,
                 filter: QueryFilter::default(),
                 computed_columns: vec![],
+                sample: None,
             }),
             GlobalPlan::new(PlanKind::Simple {
                 agg: None,
@@ -1188,6 +1197,7 @@ mod tests {
                 projection: None,
                 filter: QueryFilter::default(),
                 computed_columns: vec![],
+                sample: None,
             }),
         );
 
@@ -1233,6 +1243,7 @@ mod tests {
             projection: None,
             filter: QueryFilter::default(),
             computed_columns: vec![],
+            sample: None,
         };
 
         let decision = should_distribute(&plan, Some(&stats));

@@ -74,6 +74,8 @@ impl ManifestV2 {
             materialized_views: self.materialized_views,
             indexes: self.indexes,
             sequences: self.sequences,
+            procedures: Vec::new(), // V2 doesn't have procedures
+            enum_types: Vec::new(), // V2 doesn't have enum_types
             entries: self.entries,
             table_stats: Vec::new(), // V2 doesn't have table_stats
         }
@@ -115,6 +117,8 @@ impl ManifestV4Old {
             materialized_views: self.materialized_views,
             indexes: self.indexes,
             sequences: self.sequences,
+            procedures: Vec::new(), // V4 doesn't have procedures
+            enum_types: Vec::new(), // V4 doesn't have enum_types
             entries: self.entries,
             table_stats: self
                 .table_stats
@@ -487,6 +491,34 @@ impl Default for SequenceMeta {
             max_value: i64::MAX,
             cycle: false,
             created_micros: 0,
+        }
+    }
+}
+
+/// Stored procedure metadata
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcedureMetadata {
+    pub name: String,
+    pub parameters: Vec<ProcedureParameter>,
+    pub body: String,
+    pub language: String,
+}
+
+/// Stored procedure parameter
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProcedureParameter {
+    pub name: String,
+    pub data_type: String,
+    pub default_value: Option<String>,
+}
+
+impl Default for ProcedureMetadata {
+    fn default() -> Self {
+        ProcedureMetadata {
+            name: String::new(),
+            parameters: Vec::new(),
+            body: String::new(),
+            language: "SQL".to_string(),
         }
     }
 }
@@ -1288,10 +1320,28 @@ pub struct Manifest {
     pub indexes: Vec<IndexMeta>,
     #[serde(default)]
     pub sequences: Vec<SequenceMeta>,
+    #[serde(default)]
+    pub procedures: Vec<ProcedureMetadata>,
+    #[serde(default)]
+    pub enum_types: Vec<EnumTypeMeta>,
     pub entries: Vec<ManifestEntry>,
     /// Table statistics for query optimization
     #[serde(default)]
     pub table_stats: Vec<TableStatsMeta>,
+}
+
+/// Metadata for a user-defined ENUM type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EnumTypeMeta {
+    /// Database where this type is defined
+    pub database: String,
+    /// Name of the ENUM type
+    pub name: String,
+    /// Allowed values for this ENUM
+    pub values: Vec<String>,
+    /// Timestamp when the type was created
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 impl Default for Manifest {
@@ -1311,6 +1361,8 @@ impl Manifest {
             materialized_views: Vec::new(),
             indexes: Vec::new(),
             sequences: Vec::new(),
+            procedures: Vec::new(),
+            enum_types: Vec::new(),
             entries: Vec::new(),
             table_stats: Vec::new(),
         }
@@ -1369,6 +1421,8 @@ impl Manifest {
             materialized_views: self.materialized_views.clone(),
             indexes: self.indexes.clone(),
             sequences: self.sequences.clone(),
+            procedures: self.procedures.clone(),
+            enum_types: self.enum_types.clone(),
             entries: self
                 .entries
                 .iter()
@@ -1580,6 +1634,8 @@ mod tests {
             materialized_views: Vec::new(),
             indexes: Vec::new(),
             sequences: Vec::new(),
+            procedures: Vec::new(),
+            enum_types: Vec::new(),
             entries: vec![
                 entry("a", SegmentTier::Hot, 10, 1),
                 entry("b", SegmentTier::Warm, 20, 2),
@@ -1608,6 +1664,8 @@ mod tests {
             materialized_views: Vec::new(),
             indexes: Vec::new(),
             sequences: Vec::new(),
+            procedures: Vec::new(),
+            enum_types: Vec::new(),
             entries: vec![
                 entry("cold", SegmentTier::Cold, 50, 1),
                 entry("hot", SegmentTier::Hot, 30, 2),
@@ -1646,6 +1704,8 @@ mod tests {
             materialized_views: Vec::new(),
             indexes: Vec::new(),
             sequences: Vec::new(),
+            procedures: Vec::new(),
+            enum_types: Vec::new(),
             entries: vec![entry("x", SegmentTier::Hot, 5_000_000, 1)],
             table_stats: Vec::new(),
         };

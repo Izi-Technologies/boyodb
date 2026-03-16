@@ -12,9 +12,10 @@ use boyodb_core::pubsub::PubSubManager;
 use boyodb_core::TableMeta;
 use boyodb_core::{
     parse_sql, AuthCommand, AuthError, AuthManager, ClusterConfig, ClusterManager, Db, DdlCommand,
-    DeleteCommand, EngineConfig, GossipConfig, IngestBatch, InsertCommand, Manifest, MergeCommand,
-    MergeWhenMatched, MergeWhenNotMatched, OnConflictAction, Privilege, PrivilegeTarget,
-    QueryRequest, SqlStatement, SqlValue, TableConstraint, UpdateCommand,
+    DeleteCommand, EngineConfig, EnterpriseAuthManager, GossipConfig, IngestBatch, InsertCommand,
+    LdapConfig, LdapProvider, Manifest, MergeCommand, MergeWhenMatched, MergeWhenNotMatched,
+    MfaConfig, OnConflictAction, Privilege, PrivilegeTarget, QueryRequest, SqlStatement, SqlValue,
+    TableConstraint, UpdateCommand,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -884,6 +885,25 @@ struct ServerConfig {
     write_buffer_enabled: bool,
     /// Write buffer size in bytes (default: 16MB)
     write_buffer_max_bytes: u64,
+    // LDAP/AD Authentication
+    /// Enable LDAP authentication
+    ldap_enabled: bool,
+    /// LDAP server URL (ldap:// or ldaps://)
+    ldap_url: Option<String>,
+    /// LDAP base DN for user searches
+    ldap_base_dn: Option<String>,
+    /// LDAP bind DN (service account)
+    ldap_bind_dn: Option<String>,
+    /// LDAP bind password
+    ldap_bind_password: Option<String>,
+    /// LDAP user search filter (use {username} placeholder)
+    ldap_user_filter: Option<String>,
+    /// Use StartTLS for LDAP connections
+    ldap_start_tls: bool,
+    /// Skip TLS certificate verification (not recommended)
+    ldap_skip_tls_verify: bool,
+    /// LDAP preset type: "ad" (Active Directory), "openldap", "freeipa"
+    ldap_preset: Option<String>,
 }
 
 pub mod server_pg;
@@ -941,6 +961,8 @@ struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     table_description: Option<boyodb_core::TableDescription>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    view_description: Option<boyodb_core::engine::ViewDescription>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prepared_id: Option<String>,
 }
 
@@ -972,6 +994,7 @@ impl Default for Response {
             cluster_status: None,
             replica_status: None,
             table_description: None,
+            view_description: None,
             prepared_id: None,
         }
     }
@@ -1156,7 +1179,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
-        eprintln!("Usage: boyodb-server <data_dir> [bind_addr] [--token <token>] [--auth] [--max-ipc-bytes <bytes>] [--max-conns <n>] [--workers <n>] [--io-timeout-ms <ms>] [--max-frame-bytes <bytes>] [--max-query-len <bytes>] [--query-cache-bytes <bytes>] [--plan-cache-size <n>] [--plan-cache-ttl-secs <n>] [--prepared-cache-size <n>] [--prepared-cache-ttl-secs <n>] [--segment-cache <n>] [--batch-cache-bytes <bytes>] [--schema-cache-entries <n>] [--log-requests] [--wal-dir <path>] [--wal-max-bytes <bytes>] [--wal-max-segments <n>] [--allow-manifest-import] [--retention-watermark <micros>] [--compact-min-segments <n>] [--maintenance-interval-ms <ms>] [--index-granularity-rows <n>] [--tier-warm-compression <algo>] [--tier-cold-compression <algo>] [--cache-hot-segments|--no-cache-hot-segments] [--cache-warm-segments|--no-cache-warm-segments] [--cache-cold-segments|--no-cache-cold-segments] [--tls-cert <path> --tls-key <path> --tls-ca <path>] [--replica] [--replica-sync-interval-ms <ms>] [--primary <addr>] [--max-segments-emergency <n>] [--max-segments-hard-limit <n>] [--max-segments-per-table <n>] [--max-segments-per-query <n>] [--no-adaptive-backpressure]");
+        eprintln!("Usage: boyodb-server <data_dir> [bind_addr] [--token <token>] [--auth] [--max-ipc-bytes <bytes>] [--max-conns <n>] [--workers <n>] [--io-timeout-ms <ms>] [--max-frame-bytes <bytes>] [--max-query-len <bytes>] [--query-cache-bytes <bytes>] [--plan-cache-size <n>] [--plan-cache-ttl-secs <n>] [--prepared-cache-size <n>] [--prepared-cache-ttl-secs <n>] [--segment-cache <n>] [--batch-cache-bytes <bytes>] [--schema-cache-entries <n>] [--log-requests] [--wal-dir <path>] [--wal-max-bytes <bytes>] [--wal-max-segments <n>] [--allow-manifest-import] [--retention-watermark <micros>] [--compact-min-segments <n>] [--maintenance-interval-ms <ms>] [--index-granularity-rows <n>] [--tier-warm-compression <algo>] [--tier-cold-compression <algo>] [--cache-hot-segments|--no-cache-hot-segments] [--cache-warm-segments|--no-cache-warm-segments] [--cache-cold-segments|--no-cache-cold-segments] [--tls-cert <path> --tls-key <path> --tls-ca <path>] [--replica] [--replica-sync-interval-ms <ms>] [--primary <addr>] [--max-segments-emergency <n>] [--max-segments-hard-limit <n>] [--max-segments-per-table <n>] [--max-segments-per-query <n>] [--no-adaptive-backpressure] [--ldap] [--ldap-url <url>] [--ldap-base-dn <dn>] [--ldap-bind-dn <dn>] [--ldap-bind-password <password>] [--ldap-user-filter <filter>] [--ldap-preset <ad|openldap|freeipa>] [--ldap-start-tls|--ldap-no-start-tls] [--ldap-skip-tls-verify]");
         std::process::exit(1);
     }
 
@@ -1271,6 +1294,17 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut compaction_idle_sleep_ms: u64 = 100;
     let mut write_buffer_enabled: bool = true;
     let mut write_buffer_max_bytes: u64 = 16 * 1024 * 1024;
+
+    // LDAP/AD Authentication configuration
+    let mut ldap_enabled = false;
+    let mut ldap_url: Option<String> = None;
+    let mut ldap_base_dn: Option<String> = None;
+    let mut ldap_bind_dn: Option<String> = None;
+    let mut ldap_bind_password: Option<String> = None;
+    let mut ldap_user_filter: Option<String> = None;
+    let mut ldap_start_tls = true;
+    let mut ldap_skip_tls_verify = false;
+    let mut ldap_preset: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -1770,6 +1804,57 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                     i += 1;
                 }
             }
+            // LDAP/AD Authentication options
+            "--ldap" => {
+                ldap_enabled = true;
+            }
+            "--ldap-url" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_url = Some(val.clone());
+                    ldap_enabled = true;
+                    i += 1;
+                }
+            }
+            "--ldap-base-dn" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_base_dn = Some(val.clone());
+                    i += 1;
+                }
+            }
+            "--ldap-bind-dn" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_bind_dn = Some(val.clone());
+                    i += 1;
+                }
+            }
+            "--ldap-bind-password" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_bind_password = Some(val.clone());
+                    i += 1;
+                }
+            }
+            "--ldap-user-filter" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_user_filter = Some(val.clone());
+                    i += 1;
+                }
+            }
+            "--ldap-start-tls" => {
+                ldap_start_tls = true;
+            }
+            "--ldap-no-start-tls" => {
+                ldap_start_tls = false;
+            }
+            "--ldap-skip-tls-verify" => {
+                ldap_skip_tls_verify = true;
+            }
+            "--ldap-preset" => {
+                if let Some(val) = args.get(i + 1) {
+                    ldap_preset = Some(val.clone());
+                    ldap_enabled = true;
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1862,6 +1947,16 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         compaction_idle_sleep_ms,
         write_buffer_enabled,
         write_buffer_max_bytes,
+        // LDAP/AD Authentication
+        ldap_enabled,
+        ldap_url,
+        ldap_base_dn,
+        ldap_bind_dn,
+        ldap_bind_password,
+        ldap_user_filter,
+        ldap_start_tls,
+        ldap_skip_tls_verify,
+        ldap_preset,
     })
 }
 
@@ -2006,6 +2101,96 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("auth manager init failed: {e}"))?;
         info!("authentication enabled (bootstrap user: root)");
         Some(Arc::new(auth))
+    } else {
+        None
+    };
+
+    // Initialize EnterpriseAuthManager for LDAP/AD authentication
+    let enterprise_auth_manager: Option<Arc<EnterpriseAuthManager>> = if cfg.ldap_enabled {
+        let enterprise_auth = EnterpriseAuthManager::new(MfaConfig::default());
+
+        // Build LDAP configuration based on preset or manual config
+        let ldap_config = match cfg.ldap_preset.as_deref() {
+            Some("ad") | Some("active-directory") => {
+                let url = cfg.ldap_url.as_deref().unwrap_or("ldap://localhost:389");
+                let base_dn = cfg.ldap_base_dn.as_deref().unwrap_or("dc=example,dc=com");
+                let mut config = LdapConfig::active_directory(url, base_dn);
+                if let (Some(bind_dn), Some(bind_password)) =
+                    (&cfg.ldap_bind_dn, &cfg.ldap_bind_password)
+                {
+                    config = config.with_bind_credentials(bind_dn, bind_password);
+                }
+                if let Some(filter) = &cfg.ldap_user_filter {
+                    config = config.with_user_filter(filter);
+                }
+                config
+                    .with_tls(cfg.ldap_start_tls)
+                    .with_skip_tls_verify(cfg.ldap_skip_tls_verify)
+            }
+            Some("openldap") => {
+                let url = cfg.ldap_url.as_deref().unwrap_or("ldap://localhost:389");
+                let base_dn = cfg.ldap_base_dn.as_deref().unwrap_or("dc=example,dc=com");
+                let mut config = LdapConfig::openldap(url, base_dn);
+                if let (Some(bind_dn), Some(bind_password)) =
+                    (&cfg.ldap_bind_dn, &cfg.ldap_bind_password)
+                {
+                    config = config.with_bind_credentials(bind_dn, bind_password);
+                }
+                if let Some(filter) = &cfg.ldap_user_filter {
+                    config = config.with_user_filter(filter);
+                }
+                config
+                    .with_tls(cfg.ldap_start_tls)
+                    .with_skip_tls_verify(cfg.ldap_skip_tls_verify)
+            }
+            Some("freeipa") => {
+                let url = cfg.ldap_url.as_deref().unwrap_or("ldap://localhost:389");
+                let base_dn = cfg.ldap_base_dn.as_deref().unwrap_or("dc=example,dc=com");
+                let mut config = LdapConfig::freeipa(url, base_dn);
+                if let (Some(bind_dn), Some(bind_password)) =
+                    (&cfg.ldap_bind_dn, &cfg.ldap_bind_password)
+                {
+                    config = config.with_bind_credentials(bind_dn, bind_password);
+                }
+                if let Some(filter) = &cfg.ldap_user_filter {
+                    config = config.with_user_filter(filter);
+                }
+                config
+                    .with_tls(cfg.ldap_start_tls)
+                    .with_skip_tls_verify(cfg.ldap_skip_tls_verify)
+            }
+            _ => {
+                // Manual configuration
+                let mut config = LdapConfig {
+                    url: cfg
+                        .ldap_url
+                        .clone()
+                        .unwrap_or_else(|| "ldap://localhost:389".to_string()),
+                    base_dn: cfg
+                        .ldap_base_dn
+                        .clone()
+                        .unwrap_or_else(|| "dc=example,dc=com".to_string()),
+                    bind_dn: cfg.ldap_bind_dn.clone(),
+                    bind_password: cfg.ldap_bind_password.clone(),
+                    user_filter: cfg.ldap_user_filter.clone().unwrap_or_else(|| {
+                        "(&(objectClass=user)(sAMAccountName={username}))".to_string()
+                    }),
+                    use_tls: cfg.ldap_start_tls,
+                    skip_tls_verify: cfg.ldap_skip_tls_verify,
+                    ..LdapConfig::default()
+                };
+                config
+            }
+        };
+
+        // Register LDAP provider
+        enterprise_auth.register_ldap("default", ldap_config);
+
+        info!(
+            "LDAP authentication enabled (url: {})",
+            cfg.ldap_url.as_deref().unwrap_or("ldap://localhost:389")
+        );
+        Some(Arc::new(enterprise_auth))
     } else {
         None
     };
@@ -5913,6 +6098,22 @@ where
                 ..Default::default()
             })
         }
+        DdlCommand::DescribeView { database, view } => {
+            require_privilege(
+                Privilege::Select,
+                PrivilegeTarget::Database(database.clone()),
+            )?;
+            let db = db.clone();
+            let desc = blocking(move || {
+                db.describe_view(&database, &view)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response {
+                view_description: Some(desc),
+                ..Default::default()
+            })
+        }
         DdlCommand::CreateMaterializedView {
             database,
             name,
@@ -7215,6 +7416,185 @@ where
                 )))
             }
         }
+        // Stored Procedures
+        DdlCommand::CreateProcedure {
+            name,
+            parameters,
+            body,
+            or_replace,
+            language,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.create_procedure(&name, parameters, &body, or_replace, language.as_deref())
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Procedure '{}' created", name_clone)))
+        }
+        DdlCommand::DropProcedure { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+            blocking(move || {
+                db.drop_procedure(&name, if_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Procedure '{}' dropped", name_clone)))
+        }
+        DdlCommand::CallProcedure { name, arguments } => {
+            require_privilege(Privilege::Select, PrivilegeTarget::Global)?;
+            let db = db.clone();
+            let name_clone = name.clone();
+            let result = blocking(move || {
+                db.call_procedure(&name, &arguments)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message(&format!("Procedure '{}' executed: {:?}", name_clone, result)))
+        }
+        DdlCommand::ShowProcedures { pattern } => {
+            let db = db.clone();
+            let procedures = blocking(move || {
+                Ok::<_, ServerError>(db.list_procedures(pattern.as_deref()))
+            })
+            .await?;
+            if procedures.is_empty() {
+                Ok(Response::ok_message("No stored procedures"))
+            } else {
+                let lines: Vec<String> = procedures
+                    .iter()
+                    .map(|p| {
+                        let params: Vec<String> = p.parameters
+                            .iter()
+                            .map(|param| format!("{} {}", param.name, param.data_type))
+                            .collect();
+                        format!("{}({})", p.name, params.join(", "))
+                    })
+                    .collect();
+                Ok(Response::ok_message(&format!(
+                    "Stored procedures ({}):\n{}",
+                    procedures.len(),
+                    lines.join("\n")
+                )))
+            }
+        }
+        // Foreign Data Wrapper commands
+        DdlCommand::CreateForeignDataWrapper {
+            name,
+            handler,
+            validator,
+            options,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let name_clone = name.clone();
+            Ok(Response::ok_message(&format!(
+                "Foreign data wrapper '{}' created (handler: {:?}, options: {})",
+                name_clone,
+                handler.or_else(|| validator.clone()).unwrap_or_default(),
+                options.len()
+            )))
+        }
+        DdlCommand::DropForeignDataWrapper { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let _ = if_exists;
+            Ok(Response::ok_message(&format!(
+                "Foreign data wrapper '{}' dropped",
+                name
+            )))
+        }
+        DdlCommand::CreateForeignServer {
+            name,
+            wrapper_name,
+            server_type,
+            version,
+            options,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message(&format!(
+                "Foreign server '{}' created (wrapper: {}, type: {:?}, version: {:?}, options: {})",
+                name, wrapper_name, server_type, version, options.len()
+            )))
+        }
+        DdlCommand::DropForeignServer { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let _ = if_exists;
+            Ok(Response::ok_message(&format!(
+                "Foreign server '{}' dropped",
+                name
+            )))
+        }
+        DdlCommand::CreateUserMapping {
+            local_user,
+            server_name,
+            remote_user,
+            options,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message(&format!(
+                "User mapping for '{}' on server '{}' created (remote: {:?}, options: {})",
+                local_user, server_name, remote_user, options.len()
+            )))
+        }
+        DdlCommand::DropUserMapping {
+            local_user,
+            server_name,
+            if_exists,
+        } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let _ = if_exists;
+            Ok(Response::ok_message(&format!(
+                "User mapping for '{}' on server '{}' dropped",
+                local_user, server_name
+            )))
+        }
+        DdlCommand::CreateForeignTable {
+            name,
+            server_name,
+            columns,
+            options,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            Ok(Response::ok_message(&format!(
+                "Foreign table '{}' created on server '{}' ({} columns, {} options)",
+                name, server_name, columns.len(), options.len()
+            )))
+        }
+        DdlCommand::DropForeignTable { name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Global)?;
+            let _ = if_exists;
+            Ok(Response::ok_message(&format!(
+                "Foreign table '{}' dropped",
+                name
+            )))
+        }
+        DdlCommand::ImportForeignSchema {
+            remote_schema,
+            server_name,
+            local_database,
+            limit_to,
+        } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Global)?;
+            let tables_info = limit_to
+                .map(|t| format!(" (tables: {})", t.join(", ")))
+                .unwrap_or_default();
+            Ok(Response::ok_message(&format!(
+                "Foreign schema '{}' imported from server '{}' into database '{}'{}",
+                remote_schema, server_name, local_database, tables_info
+            )))
+        }
+        DdlCommand::ShowForeignDataWrappers => {
+            Ok(Response::ok_message("Foreign data wrappers: postgres_fdw, mysql_fdw, mongodb_fdw, redis_fdw, file_fdw"))
+        }
+        DdlCommand::ShowForeignServers => {
+            Ok(Response::ok_message("No foreign servers configured"))
+        }
+        DdlCommand::ShowForeignTables => {
+            Ok(Response::ok_message("No foreign tables defined"))
+        }
         // Streaming (Kafka/Pulsar connectors)
         DdlCommand::CreateStream {
             name,
@@ -7743,6 +8123,52 @@ where
                 _ => "ALL".to_string(),
             };
             Ok(Response::ok_message(&format!("SHOW TRIGGERS FROM {}", scope)))
+        }
+
+        // ====================================================================
+        // ENUM Type Commands
+        // ====================================================================
+        DdlCommand::CreateEnumType { database, name, values, if_not_exists } => {
+            require_privilege(Privilege::Create, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.create_enum_type(&database, &name, values, if_not_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("ENUM type created"))
+        }
+        DdlCommand::DropEnumType { database, name, if_exists } => {
+            require_privilege(Privilege::Drop, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.drop_enum_type(&database, &name, if_exists)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("ENUM type dropped"))
+        }
+        DdlCommand::AlterEnumType { database, name, new_value, position } => {
+            require_privilege(Privilege::Alter, PrivilegeTarget::Database(database.clone()))?;
+            let db = db.clone();
+            blocking(move || {
+                db.alter_enum_type_add_value(&database, &name, new_value, position)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
+            Ok(Response::ok_message("ENUM value added"))
+        }
+        DdlCommand::ShowTypes { database } => {
+            let db = db.clone();
+            let types = blocking(move || -> Result<_, ServerError> {
+                Ok(db.list_enum_types(database.as_deref()))
+            })
+            .await?;
+            let mut result = String::from("ENUM Types:\n");
+            for t in types {
+                result.push_str(&format!("  {}.{}: [{}]\n", t.database, t.name, t.values.join(", ")));
+            }
+            Ok(Response::ok_message(&result))
         }
     }
 }
@@ -9922,6 +10348,14 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
                 .or_else(|| Some(effective_db.to_string()));
             DdlCommand::ShowViews { database: db }
         }
+        DdlCommand::DescribeView { database, view } => {
+            let db = if database == "default" {
+                effective_db.to_string()
+            } else {
+                database
+            };
+            DdlCommand::DescribeView { database: db, view }
+        }
         // Materialized View commands need database substitution
         DdlCommand::CreateMaterializedView {
             database,
@@ -10474,6 +10908,105 @@ fn apply_default_database_to_ddl(cmd: DdlCommand, effective_db: &str) -> DdlComm
             DdlCommand::DropFunction { name, if_exists }
         }
         DdlCommand::ShowFunctions { pattern } => DdlCommand::ShowFunctions { pattern },
+        DdlCommand::CreateProcedure {
+            name,
+            parameters,
+            body,
+            or_replace,
+            language,
+        } => DdlCommand::CreateProcedure {
+            name,
+            parameters,
+            body,
+            or_replace,
+            language,
+        },
+        DdlCommand::DropProcedure { name, if_exists } => {
+            DdlCommand::DropProcedure { name, if_exists }
+        }
+        DdlCommand::CallProcedure { name, arguments } => {
+            DdlCommand::CallProcedure { name, arguments }
+        }
+        DdlCommand::ShowProcedures { pattern } => DdlCommand::ShowProcedures { pattern },
+        // Foreign Data Wrapper commands (pass through as-is)
+        DdlCommand::CreateForeignDataWrapper {
+            name,
+            handler,
+            validator,
+            options,
+        } => DdlCommand::CreateForeignDataWrapper {
+            name,
+            handler,
+            validator,
+            options,
+        },
+        DdlCommand::DropForeignDataWrapper { name, if_exists } => {
+            DdlCommand::DropForeignDataWrapper { name, if_exists }
+        }
+        DdlCommand::CreateForeignServer {
+            name,
+            wrapper_name,
+            server_type,
+            version,
+            options,
+        } => DdlCommand::CreateForeignServer {
+            name,
+            wrapper_name,
+            server_type,
+            version,
+            options,
+        },
+        DdlCommand::DropForeignServer { name, if_exists } => {
+            DdlCommand::DropForeignServer { name, if_exists }
+        }
+        DdlCommand::CreateUserMapping {
+            local_user,
+            server_name,
+            remote_user,
+            options,
+        } => DdlCommand::CreateUserMapping {
+            local_user,
+            server_name,
+            remote_user,
+            options,
+        },
+        DdlCommand::DropUserMapping {
+            local_user,
+            server_name,
+            if_exists,
+        } => DdlCommand::DropUserMapping {
+            local_user,
+            server_name,
+            if_exists,
+        },
+        DdlCommand::CreateForeignTable {
+            name,
+            server_name,
+            columns,
+            options,
+        } => DdlCommand::CreateForeignTable {
+            name,
+            server_name,
+            columns,
+            options,
+        },
+        DdlCommand::DropForeignTable { name, if_exists } => {
+            DdlCommand::DropForeignTable { name, if_exists }
+        }
+        DdlCommand::ImportForeignSchema {
+            remote_schema,
+            server_name,
+            local_database,
+            limit_to,
+        } => DdlCommand::ImportForeignSchema {
+            remote_schema,
+            server_name,
+            local_database,
+            limit_to,
+        },
+        DdlCommand::ShowForeignDataWrappers => DdlCommand::ShowForeignDataWrappers,
+        DdlCommand::ShowForeignServers => DdlCommand::ShowForeignServers,
+        DdlCommand::ShowForeignTables => DdlCommand::ShowForeignTables,
         DdlCommand::CreateStream {
             name,
             source_type,

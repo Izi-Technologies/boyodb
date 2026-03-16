@@ -2,7 +2,7 @@
 
 Welcome to the official documentation for **BoyoDB**, an open-source columnar database engine built in Rust for real-time analytics, time-series data, and OLAP workloads.
 
-**Current Version: 0.9.6** | [View Changelog](../CHANGELOG.md)
+**Current Version: 0.9.7** | [View Changelog](../CHANGELOG.md)
 
 ## Documentation Index
 
@@ -84,6 +84,11 @@ Welcome to the official documentation for **BoyoDB**, an open-source columnar da
 | JIT Compilation | Cranelift native code generation |
 | Vectorized Execution | SIMD-optimized query processing |
 | Group Commit | Batched WAL writes for high throughput |
+| Adaptive Cache Sharding | Dynamic shard count based on CPU cores and cache size |
+| Adaptive Bloom Filters | Intelligent FPP selection based on data cardinality |
+| Parallel Aggregation | Tree-reduction merge for aggregation speedup |
+| Segment Prefetching | Proactive cache warming during sequential scans |
+| Parallel Compression | Concurrent batch compression for high-throughput ingest |
 
 ---
 
