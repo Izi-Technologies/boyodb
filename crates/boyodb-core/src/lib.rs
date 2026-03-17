@@ -49,6 +49,7 @@ pub mod rbac_v2;
 pub mod realtime;
 pub mod resource_governance;
 pub mod security;
+pub mod simd_ops;
 pub mod sql;
 pub mod storage;
 pub mod streaming;

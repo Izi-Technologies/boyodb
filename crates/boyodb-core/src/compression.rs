@@ -424,12 +424,13 @@ impl Default for Lz4Codec {
 
 impl Codec for Lz4Codec {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-        // Simplified LZ4-like compression
+        // High-performance LZ4-like compression with O(1) hash-based matching
         // Uses a simple format: [original_size:u32][blocks...]
         // Each block: [token:u8][literal_extra?][literals][offset:u16][match_extra?]
         // Token: upper 4 bits = literal length (15 = more follows), lower 4 bits = match length - 4
 
-        let mut result = Vec::new();
+        // Pre-allocate result buffer (estimate ~75% compression for typical data)
+        let mut result = Vec::with_capacity(4 + data.len() * 3 / 4);
 
         // Header: original size
         result.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -438,23 +439,31 @@ impl Codec for Lz4Codec {
             return Ok(result);
         }
 
+        // Hash table for O(1) match finding - 4096 entries covers 64KB window effectively
+        let mut hash_table = [0u32; 4096];
+
         let mut pos = 0;
 
         while pos < data.len() {
             // Collect literals until we find a match
             let literal_start = pos;
 
-            // Find next match position
+            // Find next match position using hash table
             let mut match_pos = pos;
             let mut best_match_len = 0usize;
             let mut best_match_offset = 0usize;
 
             while match_pos < data.len() {
-                let (len, offset) = self.find_match(data, match_pos);
+                let (len, offset) = self.find_match_with_table(data, match_pos, &mut hash_table);
                 if len >= 4 {
                     best_match_len = len;
                     best_match_offset = offset;
                     break;
+                }
+                // Still update hash table for positions we skip
+                if match_pos + 4 <= data.len() {
+                    let hash = Self::hash4(data, match_pos) & 0xFFF;
+                    hash_table[hash] = match_pos as u32;
                 }
                 match_pos += 1;
             }
@@ -606,6 +615,54 @@ impl Codec for Lz4Codec {
 }
 
 impl Lz4Codec {
+    /// Fast hash function for 4-byte sequences (FNV-1a inspired)
+    #[inline(always)]
+    fn hash4(data: &[u8], pos: usize) -> usize {
+        if pos + 4 > data.len() {
+            return 0;
+        }
+        let v = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        // Multiplicative hash with good distribution
+        ((v.wrapping_mul(2654435761)) >> 16) as usize
+    }
+
+    /// O(1) hash-table based match finding - ClickHouse-style optimization
+    fn find_match_with_table(&self, data: &[u8], pos: usize, hash_table: &mut [u32; 4096]) -> (usize, usize) {
+        if pos < 4 || pos + 4 > data.len() {
+            return (0, 0);
+        }
+
+        let hash = Self::hash4(data, pos) & 0xFFF; // 4096 entries
+        let candidate = hash_table[hash] as usize;
+
+        // Update hash table with current position
+        hash_table[hash] = pos as u32;
+
+        // Check if candidate is valid and within window
+        if candidate == 0 || pos - candidate > 65535 {
+            return (0, 0);
+        }
+
+        // Verify the 4-byte prefix matches
+        if data[candidate..candidate + 4] != data[pos..pos + 4] {
+            return (0, 0);
+        }
+
+        // Extend match forward
+        let mut len = 4;
+        while pos + len < data.len()
+            && candidate + len < pos
+            && data[candidate + len] == data[pos + len]
+            && len < 65535
+        {
+            len += 1;
+        }
+
+        (len, pos - candidate)
+    }
+
+    /// Legacy linear search - kept for fallback verification
+    #[allow(dead_code)]
     fn find_match(&self, data: &[u8], pos: usize) -> (usize, usize) {
         if pos == 0 {
             return (0, 0);

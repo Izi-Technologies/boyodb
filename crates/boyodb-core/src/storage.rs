@@ -5,7 +5,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as ObjPath;
 use object_store::{GetResult, ObjectStore, ObjectStoreExt};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
@@ -138,6 +138,11 @@ impl TieredStorage {
 
     pub fn has_remote(&self) -> bool {
         self.remote.is_some()
+    }
+
+    /// Get the local segments directory path
+    pub fn local_segments_dir(&self) -> &Path {
+        &self.local_root
     }
 
     /// Create a TieredStorage for local-only operations

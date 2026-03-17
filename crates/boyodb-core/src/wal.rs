@@ -780,6 +780,43 @@ impl Wal {
                 // Persist segment file
                 persist_segment_ipc(storage, &entry.segment_id, &payload)?;
 
+                // CRITICAL: Verify segment file was actually written before adding to manifest
+                // This prevents crash recovery from creating manifest entries for missing segments
+                let segment_path = storage.local_segments_dir()
+                    .join(format!("{}.ipc", entry.segment_id));
+                if !segment_path.exists() {
+                    warn!(
+                        "WAL replay: segment file {} was not persisted correctly - skipping",
+                        entry.segment_id
+                    );
+                    continue;
+                }
+
+                // Verify file size matches
+                if let Ok(metadata) = std::fs::metadata(&segment_path) {
+                    if metadata.len() != entry.size_bytes {
+                        warn!(
+                            "WAL replay: segment {} size mismatch (expected {}, got {}) - removing corrupt file",
+                            entry.segment_id, entry.size_bytes, metadata.len()
+                        );
+                        let _ = std::fs::remove_file(&segment_path);
+                        continue;
+                    }
+                }
+
+                // Verify checksum
+                if let Ok(data) = std::fs::read(&segment_path) {
+                    let actual_checksum = compute_checksum(&data);
+                    if actual_checksum != entry.checksum {
+                        warn!(
+                            "WAL replay: segment {} checksum mismatch - removing corrupt file",
+                            entry.segment_id
+                        );
+                        let _ = std::fs::remove_file(&segment_path);
+                        continue;
+                    }
+                }
+
                 // Only add to manifest if not already present
                 if !existing_ids.contains(&entry.segment_id) {
                     new_entries.push(entry);

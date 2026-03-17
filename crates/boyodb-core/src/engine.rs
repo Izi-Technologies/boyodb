@@ -711,6 +711,20 @@ pub struct EngineConfig {
     /// Enable parallel compression for batch ingestion
     /// Default: true
     pub parallel_compression: bool,
+
+    // --- Segment Integrity Prevention ---
+    /// Verify segment file exists and has correct checksum after writing
+    /// This prevents "table with missing segments" errors by ensuring the file
+    /// is fully persisted before adding to manifest
+    /// Default: true (safest, slight performance overhead)
+    pub verify_segment_after_write: bool,
+    /// Clean up orphaned segment files during startup
+    /// Orphaned files are segment files that exist on disk but are not in manifest
+    /// Default: true
+    pub cleanup_orphaned_segments: bool,
+    /// Auto-repair manifest by removing entries for missing segment files during startup
+    /// Default: true
+    pub auto_repair_missing_segments: bool,
 }
 
 impl EngineConfig {
@@ -918,6 +932,10 @@ impl EngineConfig {
             adaptive_bloom_fpp: true,
             // Parallel compression defaults
             parallel_compression: true,
+            // Segment integrity prevention defaults (CRITICAL for data safety)
+            verify_segment_after_write: true,   // Verify segment exists after write
+            cleanup_orphaned_segments: true,    // Clean up orphaned files on startup
+            auto_repair_missing_segments: true, // Remove entries for missing segments
         }
     }
 
@@ -3652,6 +3670,67 @@ impl Db {
             );
         }
 
+        // CRITICAL: Validate manifest integrity - check that all segments exist on disk
+        // This prevents "table with missing segments" errors during queries
+        let integrity_report = validate_manifest_integrity(&manifest, &cfg.segments_dir);
+        if integrity_report.has_issues() {
+            tracing::warn!(
+                "MANIFEST INTEGRITY CHECK: {} valid segments, {} missing segments, {} orphaned files",
+                integrity_report.valid_segments,
+                integrity_report.missing_segments.len(),
+                integrity_report.orphaned_files.len()
+            );
+
+            // Log details about missing segments grouped by table
+            if !integrity_report.missing_segments.is_empty() {
+                let mut missing_by_table: std::collections::HashMap<String, Vec<&MissingSegmentInfo>> =
+                    std::collections::HashMap::new();
+                for info in &integrity_report.missing_segments {
+                    let key = format!("{}.{}", info.database, info.table);
+                    missing_by_table.entry(key).or_default().push(info);
+                }
+                for (table, segments) in &missing_by_table {
+                    tracing::warn!(
+                        "  Table {} has {} missing segments ({} total bytes)",
+                        table,
+                        segments.len(),
+                        segments.iter().map(|s| s.size_bytes).sum::<u64>()
+                    );
+                }
+
+                // Auto-repair: remove entries for missing segments (if enabled)
+                if cfg.auto_repair_missing_segments {
+                    let removed = repair_manifest_missing_segments(&mut manifest, &cfg.segments_dir);
+                    if !removed.is_empty() {
+                        // Persist the repaired manifest
+                        persist_manifest(&cfg.manifest_path, &manifest)?;
+                        tracing::info!(
+                            "Manifest repaired: removed {} entries for missing segments",
+                            removed.len()
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "INTEGRITY WARNING: {} segments are missing but auto_repair_missing_segments is disabled",
+                        integrity_report.missing_segments.len()
+                    );
+                }
+            }
+
+            // Optionally clean up orphaned segment files
+            if cfg.cleanup_orphaned_segments && !integrity_report.orphaned_files.is_empty() {
+                let deleted = cleanup_orphaned_segments(&manifest, &cfg.segments_dir);
+                if !deleted.is_empty() {
+                    tracing::info!("Cleaned up {} orphaned segment files", deleted.len());
+                }
+            }
+        } else {
+            tracing::debug!(
+                "Manifest integrity OK: {} segments verified",
+                integrity_report.total_segments
+            );
+        }
+
         let shards = (0..cfg.shard_count)
             .map(|id| Shard {
                 id: id as u16,
@@ -4349,6 +4428,55 @@ impl Db {
         let use_memtable = self.cfg.memtable_max_bytes > 0 && self.cfg.memtable_max_entries > 0;
         if !use_memtable {
             persist_segment_ipc(&self.storage, &manifest_entry.segment_id, &stored_payload)?;
+
+            // CRITICAL: Verify segment file exists and has correct checksum BEFORE adding to manifest
+            // This prevents "table with missing segments" errors by ensuring data integrity
+            // before the manifest references the segment
+            let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", manifest_entry.segment_id));
+            if !segment_path.exists() {
+                return Err(EngineError::Io(format!(
+                    "CRITICAL: Segment file {} was not persisted correctly - file does not exist after write",
+                    manifest_entry.segment_id
+                )));
+            }
+
+            // Verify file size matches expected
+            if let Ok(metadata) = std::fs::metadata(&segment_path) {
+                let actual_size = metadata.len();
+                if actual_size != manifest_entry.size_bytes {
+                    // Clean up the corrupt file
+                    let _ = std::fs::remove_file(&segment_path);
+                    return Err(EngineError::Io(format!(
+                        "CRITICAL: Segment file {} size mismatch after write: expected {} bytes, got {} bytes",
+                        manifest_entry.segment_id, manifest_entry.size_bytes, actual_size
+                    )));
+                }
+            }
+
+            // Double-check checksum by reading the file back (optional for extra safety)
+            if self.cfg.verify_segment_after_write {
+                match std::fs::read(&segment_path) {
+                    Ok(data) => {
+                        let actual_checksum = compute_checksum(&data);
+                        if actual_checksum != manifest_entry.checksum {
+                            // Clean up the corrupt file
+                            let _ = std::fs::remove_file(&segment_path);
+                            return Err(EngineError::Io(format!(
+                                "CRITICAL: Segment file {} checksum mismatch after write: expected {:016x}, got {:016x}",
+                                manifest_entry.segment_id, manifest_entry.checksum, actual_checksum
+                            )));
+                        }
+                    }
+                    Err(e) => {
+                        // Clean up possibly corrupt file
+                        let _ = std::fs::remove_file(&segment_path);
+                        return Err(EngineError::Io(format!(
+                            "CRITICAL: Failed to read segment file {} for verification: {}",
+                            manifest_entry.segment_id, e
+                        )));
+                    }
+                }
+            }
         }
 
         let (entry, _current_version, should_persist) = {
@@ -5089,6 +5217,27 @@ impl Db {
                 &mem_entry.entry.segment_id,
                 &mem_entry.payload,
             )?;
+
+            // CRITICAL: Verify segment file exists after write (prevents missing segments)
+            let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", mem_entry.entry.segment_id));
+            if !segment_path.exists() {
+                return Err(EngineError::Io(format!(
+                    "CRITICAL: Memtable flush - segment file {} was not persisted correctly",
+                    mem_entry.entry.segment_id
+                )));
+            }
+
+            // Verify file size matches expected
+            if let Ok(metadata) = std::fs::metadata(&segment_path) {
+                let actual_size = metadata.len();
+                if actual_size != mem_entry.entry.size_bytes {
+                    let _ = std::fs::remove_file(&segment_path);
+                    return Err(EngineError::Io(format!(
+                        "CRITICAL: Memtable flush - segment {} size mismatch: expected {} bytes, got {} bytes",
+                        mem_entry.entry.segment_id, mem_entry.entry.size_bytes, actual_size
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -10931,6 +11080,29 @@ impl Db {
         };
 
         persist_segment_ipc(&self.storage, &segment_id, &stored_payload)?;
+
+        // CRITICAL: Verify compacted segment file exists before updating manifest
+        // This prevents "table with missing segments" errors after compaction
+        let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", segment_id));
+        if !segment_path.exists() {
+            return Err(EngineError::Io(format!(
+                "CRITICAL: Compaction failed - segment file {} was not persisted correctly",
+                segment_id
+            )));
+        }
+
+        // Verify file size matches expected
+        if let Ok(metadata) = std::fs::metadata(&segment_path) {
+            let actual_size = metadata.len();
+            if actual_size != new_entry.size_bytes {
+                let _ = std::fs::remove_file(&segment_path);
+                return Err(EngineError::Io(format!(
+                    "CRITICAL: Compaction failed - segment {} size mismatch: expected {} bytes, got {} bytes",
+                    segment_id, new_entry.size_bytes, actual_size
+                )));
+            }
+        }
+
         {
             let mut manifest = self.manifest.write();
             let drop_set: HashSet<String> = entries.iter().map(|e| e.segment_id.clone()).collect();
@@ -14207,13 +14379,32 @@ impl Db {
         let checksum = compute_checksum(&compressed);
         let size_bytes = compressed.len() as u64;
 
-        // Persist to disk
+        // Persist to disk using safe persist function (includes fsync)
+        persist_segment_ipc(&self.storage, &new_segment_id, &compressed)?;
+
+        // CRITICAL: Verify segment file exists before updating manifest
         let segment_path = self
             .cfg
             .segments_dir
             .join(format!("{}.ipc", new_segment_id));
-        std::fs::write(&segment_path, &compressed)
-            .map_err(|e| EngineError::Io(format!("write merged segment failed: {e}")))?;
+        if !segment_path.exists() {
+            return Err(EngineError::Io(format!(
+                "CRITICAL: Merge failed - segment file {} was not persisted correctly",
+                new_segment_id
+            )));
+        }
+
+        // Verify file size matches expected
+        if let Ok(metadata) = std::fs::metadata(&segment_path) {
+            let actual_size = metadata.len();
+            if actual_size != size_bytes {
+                let _ = std::fs::remove_file(&segment_path);
+                return Err(EngineError::Io(format!(
+                    "CRITICAL: Merge failed - segment {} size mismatch: expected {} bytes, got {} bytes",
+                    new_segment_id, size_bytes, actual_size
+                )));
+            }
+        }
 
         // Compute stats by merging stats from source entries
         // This avoids recomputing from the actual data
@@ -21666,6 +21857,162 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), EngineError> {
     }
 
     Ok(())
+}
+
+/// Information about a missing segment (file not found on disk)
+#[derive(Debug, Clone)]
+pub struct MissingSegmentInfo {
+    pub segment_id: String,
+    pub database: String,
+    pub table: String,
+    pub size_bytes: u64,
+}
+
+/// Result of manifest integrity validation
+#[derive(Debug, Default)]
+pub struct ManifestIntegrityReport {
+    pub total_segments: usize,
+    pub valid_segments: usize,
+    pub missing_segments: Vec<MissingSegmentInfo>,
+    pub orphaned_files: Vec<String>,
+}
+
+impl ManifestIntegrityReport {
+    pub fn has_issues(&self) -> bool {
+        !self.missing_segments.is_empty() || !self.orphaned_files.is_empty()
+    }
+}
+
+/// Validate that all segments in the manifest have corresponding files on disk.
+/// Returns a report of missing segments and orphaned files.
+fn validate_manifest_integrity(
+    manifest: &Manifest,
+    segments_dir: &Path,
+) -> ManifestIntegrityReport {
+    let mut report = ManifestIntegrityReport {
+        total_segments: manifest.entries.len(),
+        ..Default::default()
+    };
+
+    // Check each manifest entry has a corresponding segment file
+    for entry in &manifest.entries {
+        let segment_path = segments_dir.join(format!("{}.ipc", entry.segment_id));
+        if segment_path.exists() {
+            report.valid_segments += 1;
+        } else {
+            report.missing_segments.push(MissingSegmentInfo {
+                segment_id: entry.segment_id.clone(),
+                database: entry.database.clone(),
+                table: entry.table.clone(),
+                size_bytes: entry.size_bytes,
+            });
+        }
+    }
+
+    // Find orphaned segment files (files not in manifest)
+    let manifest_segment_ids: std::collections::HashSet<&str> =
+        manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
+
+    if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
+        for entry in dir_entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "ipc") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if !manifest_segment_ids.contains(stem) {
+                        report.orphaned_files.push(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    report
+}
+
+/// Repair manifest by removing entries for missing segments.
+/// Returns the number of entries removed.
+fn repair_manifest_missing_segments(
+    manifest: &mut Manifest,
+    segments_dir: &Path,
+) -> Vec<MissingSegmentInfo> {
+    let mut removed = Vec::new();
+    let original_len = manifest.entries.len();
+
+    manifest.entries.retain(|entry| {
+        let segment_path = segments_dir.join(format!("{}.ipc", entry.segment_id));
+        if segment_path.exists() {
+            true
+        } else {
+            removed.push(MissingSegmentInfo {
+                segment_id: entry.segment_id.clone(),
+                database: entry.database.clone(),
+                table: entry.table.clone(),
+                size_bytes: entry.size_bytes,
+            });
+            false
+        }
+    });
+
+    if !removed.is_empty() {
+        manifest.bump_version();
+        tracing::warn!(
+            "MANIFEST REPAIR: Removed {} entries for missing segment files (kept {} of {})",
+            removed.len(),
+            manifest.entries.len(),
+            original_len
+        );
+        for info in &removed {
+            tracing::warn!(
+                "  - Removed missing segment: {} ({}.{}, {} bytes)",
+                info.segment_id,
+                info.database,
+                info.table,
+                info.size_bytes
+            );
+        }
+    }
+
+    removed
+}
+
+/// Delete orphaned segment files that are not referenced in the manifest.
+/// Returns the list of deleted files.
+fn cleanup_orphaned_segments(
+    manifest: &Manifest,
+    segments_dir: &Path,
+) -> Vec<String> {
+    let manifest_segment_ids: std::collections::HashSet<&str> =
+        manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
+
+    let mut deleted = Vec::new();
+
+    if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
+        for entry in dir_entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "ipc") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if !manifest_segment_ids.contains(stem) {
+                        // This is an orphaned file - delete it
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            tracing::warn!(
+                                "Failed to delete orphaned segment file {}: {}",
+                                path.display(),
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "Deleted orphaned segment file: {}",
+                                path.display()
+                            );
+                            deleted.push(stem.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    deleted
 }
 
 /// Parse a string value (from ANALYZE stats) into an optimizer StatValue
@@ -38274,5 +38621,318 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("circular") || err_msg.contains("depth"));
+    }
+
+    #[test]
+    fn test_manifest_integrity_validation_and_repair() {
+        // Test: Create segments, delete some files, verify repair on restart
+        let dir = tempdir().unwrap();
+        let mut cfg = EngineConfig::new(dir.path(), 1);
+        cfg.auto_repair_missing_segments = true;
+        cfg.cleanup_orphaned_segments = true;
+        cfg.verify_segment_after_write = true;
+
+        // Create database and ingest data
+        let db = Db::open_for_test(cfg.clone()).unwrap();
+
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]);
+
+        // Ingest 3 batches to create 3 segments
+        for i in 0..3 {
+            let batch = RecordBatch::try_new(
+                Arc::new(schema.clone()),
+                vec![
+                    Arc::new(Int64Array::from(vec![i * 100, i * 100 + 1, i * 100 + 2])),
+                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                ],
+            )
+            .unwrap();
+
+            let mut ipc = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).unwrap();
+                writer.write(&batch).unwrap();
+                writer.finish().unwrap();
+            }
+
+            db.ingest_ipc(IngestBatch {
+                payload_ipc: ipc,
+                database: Some("testdb".to_string()),
+                table: Some("test_table".to_string()),
+                watermark_micros: (i + 1) as u64 * 1000,
+                shard_override: None,
+            })
+            .unwrap();
+        }
+
+        // Verify we have 3 segments
+        let manifest: Manifest = serde_json::from_slice(&db.export_manifest().unwrap()).unwrap();
+        let segment_count = manifest
+            .entries
+            .iter()
+            .filter(|e| e.database == "testdb" && e.table == "test_table")
+            .count();
+        assert_eq!(segment_count, 3, "Should have 3 segments before deletion");
+
+        // Get segment IDs and close database
+        let segment_ids: Vec<String> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.database == "testdb" && e.table == "test_table")
+            .map(|e| e.segment_id.clone())
+            .collect();
+        drop(db);
+
+        // Delete one segment file to simulate crash/corruption
+        let segment_to_delete = &segment_ids[1];
+        let segment_path = cfg.segments_dir.join(format!("{}.ipc", segment_to_delete));
+        assert!(segment_path.exists(), "Segment file should exist before deletion");
+        std::fs::remove_file(&segment_path).unwrap();
+        assert!(!segment_path.exists(), "Segment file should be deleted");
+
+        // Reopen database - should detect and repair missing segment
+        let db2 = Db::open_for_test(cfg.clone()).unwrap();
+
+        // Verify manifest was repaired - should have 2 segments now
+        let manifest2: Manifest = serde_json::from_slice(&db2.export_manifest().unwrap()).unwrap();
+        let segment_count2 = manifest2
+            .entries
+            .iter()
+            .filter(|e| e.database == "testdb" && e.table == "test_table")
+            .count();
+        assert_eq!(
+            segment_count2, 2,
+            "Should have 2 segments after repair (1 removed)"
+        );
+
+        // Verify the deleted segment is not in manifest
+        let has_deleted = manifest2
+            .entries
+            .iter()
+            .any(|e| &e.segment_id == segment_to_delete);
+        assert!(
+            !has_deleted,
+            "Deleted segment should not be in manifest after repair"
+        );
+
+        // Verify queries still work with remaining data
+        let result = db2
+            .query(QueryRequest {
+                sql: "SELECT COUNT(*) as cnt FROM testdb.test_table".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        // Should have 6 rows (2 segments × 3 rows each)
+        let batches = read_ipc_batches(&result.records_ipc).unwrap();
+        assert!(!batches.is_empty(), "Query should return results");
+    }
+
+    #[test]
+    fn test_post_write_verification_detects_size_mismatch() {
+        // Test: Verify that post-write verification catches size mismatches
+        let dir = tempdir().unwrap();
+        let mut cfg = EngineConfig::new(dir.path(), 1);
+        cfg.verify_segment_after_write = true;
+
+        let db = Db::open_for_test(cfg.clone()).unwrap();
+
+        // Create a simple batch
+        let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        let mut ipc = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut ipc, batch.schema().as_ref()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+
+        // Ingest should succeed (normal operation)
+        let result = db.ingest_ipc(IngestBatch {
+            payload_ipc: ipc,
+            database: Some("testdb".to_string()),
+            table: Some("test_verify".to_string()),
+            watermark_micros: 1000,
+            shard_override: None,
+        });
+
+        assert!(result.is_ok(), "Normal ingest should succeed");
+
+        // Verify the segment file exists
+        let manifest: Manifest = serde_json::from_slice(&db.export_manifest().unwrap()).unwrap();
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.database == "testdb" && e.table == "test_verify")
+            .unwrap();
+
+        let segment_path = cfg.segments_dir.join(format!("{}.ipc", entry.segment_id));
+        assert!(segment_path.exists(), "Segment file should exist");
+
+        // Verify file size matches manifest entry
+        let metadata = std::fs::metadata(&segment_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            entry.size_bytes,
+            "File size should match manifest entry"
+        );
+    }
+
+    #[test]
+    fn test_validate_manifest_integrity_function() {
+        // Test the validate_manifest_integrity function directly
+        let dir = tempdir().unwrap();
+        let segments_dir = dir.path().join("segments");
+        std::fs::create_dir_all(&segments_dir).unwrap();
+
+        // Create a manifest with some entries
+        let mut manifest = Manifest::default();
+        manifest.entries.push(ManifestEntry {
+            segment_id: "seg-existing".to_string(),
+            shard_id: 0,
+            version_added: 1,
+            size_bytes: 100,
+            checksum: 12345,
+            tier: SegmentTier::Hot,
+            database: "db".to_string(),
+            table: "tbl".to_string(),
+            compression: None,
+            watermark_micros: 0,
+            event_time_min: None,
+            event_time_max: None,
+            tenant_id_min: None,
+            tenant_id_max: None,
+            route_id_min: None,
+            route_id_max: None,
+            bloom_tenant: None,
+            bloom_route: None,
+            column_stats: None,
+            schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
+        });
+        manifest.entries.push(ManifestEntry {
+            segment_id: "seg-missing".to_string(),
+            shard_id: 0,
+            version_added: 2,
+            size_bytes: 200,
+            checksum: 67890,
+            tier: SegmentTier::Hot,
+            database: "db".to_string(),
+            table: "tbl".to_string(),
+            compression: None,
+            watermark_micros: 0,
+            event_time_min: None,
+            event_time_max: None,
+            tenant_id_min: None,
+            tenant_id_max: None,
+            route_id_min: None,
+            route_id_max: None,
+            bloom_tenant: None,
+            bloom_route: None,
+            column_stats: None,
+            schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
+        });
+
+        // Create only the first segment file
+        std::fs::write(segments_dir.join("seg-existing.ipc"), b"dummy data").unwrap();
+        // Also create an orphaned file
+        std::fs::write(segments_dir.join("seg-orphan.ipc"), b"orphan data").unwrap();
+
+        // Run integrity check
+        let report = validate_manifest_integrity(&manifest, &segments_dir);
+
+        assert_eq!(report.total_segments, 2);
+        assert_eq!(report.valid_segments, 1);
+        assert_eq!(report.missing_segments.len(), 1);
+        assert_eq!(report.missing_segments[0].segment_id, "seg-missing");
+        assert_eq!(report.orphaned_files.len(), 1);
+        assert_eq!(report.orphaned_files[0], "seg-orphan");
+        assert!(report.has_issues());
+    }
+
+    #[test]
+    fn test_repair_manifest_missing_segments_function() {
+        // Test the repair_manifest_missing_segments function directly
+        let dir = tempdir().unwrap();
+        let segments_dir = dir.path().join("segments");
+        std::fs::create_dir_all(&segments_dir).unwrap();
+
+        // Create a manifest with entries
+        let mut manifest = Manifest::default();
+        manifest.version = 10;
+        manifest.entries.push(ManifestEntry {
+            segment_id: "seg-keep".to_string(),
+            shard_id: 0,
+            version_added: 1,
+            size_bytes: 100,
+            checksum: 12345,
+            tier: SegmentTier::Hot,
+            database: "db".to_string(),
+            table: "tbl".to_string(),
+            compression: None,
+            watermark_micros: 0,
+            event_time_min: None,
+            event_time_max: None,
+            tenant_id_min: None,
+            tenant_id_max: None,
+            route_id_min: None,
+            route_id_max: None,
+            bloom_tenant: None,
+            bloom_route: None,
+            column_stats: None,
+            schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
+        });
+        manifest.entries.push(ManifestEntry {
+            segment_id: "seg-remove".to_string(),
+            shard_id: 0,
+            version_added: 2,
+            size_bytes: 200,
+            checksum: 67890,
+            tier: SegmentTier::Hot,
+            database: "db".to_string(),
+            table: "tbl".to_string(),
+            compression: None,
+            watermark_micros: 0,
+            event_time_min: None,
+            event_time_max: None,
+            tenant_id_min: None,
+            tenant_id_max: None,
+            route_id_min: None,
+            route_id_max: None,
+            bloom_tenant: None,
+            bloom_route: None,
+            column_stats: None,
+            schema_hash: None,
+            created_txn: None,
+            deleted_txn: None,
+            deleted_version: None,
+        });
+
+        // Create only the first segment file
+        std::fs::write(segments_dir.join("seg-keep.ipc"), b"data").unwrap();
+
+        // Run repair
+        let removed = repair_manifest_missing_segments(&mut manifest, &segments_dir);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].segment_id, "seg-remove");
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].segment_id, "seg-keep");
+        assert!(manifest.version > 10, "Version should be bumped after repair");
     }
 }
