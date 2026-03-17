@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Performance Optimizations (ClickHouse-Level Efficiency)
+#### High-Performance Optimizations
 
 - **LZ4 Hash-Table Compression**: O(1) match finding replaces O(n) linear search
   - 4096-entry hash table for 64KB match window
@@ -84,6 +84,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Parallel validation and compression for multi-batch ingestion
   - Pre-allocated sequence numbers for consistency
   - Reduced I/O latency for bulk writes
+
+- **Bulk Segment Loading**: Optimized multi-segment reads
+  - Parallel I/O for loading multiple segments simultaneously
+  - Prefetch streaming for sequential scans
+  - Cache-first lookup to minimize disk I/O
+  - Zero-copy Arc-based sharing between threads
+
+- **Smart Compression**: CPU-efficient compression
+  - Fast entropy estimation to detect incompressible data
+  - Skip compression for random/already-compressed data
+  - Adaptive compression levels based on data size
+  - Pre-allocated buffers to reduce memory allocations
+
+- **Mixed-Tier Parallel Loading**: Improved I/O throughput
+  - Rayon-based parallel loading for local segments
+  - Concurrent loading across hot/warm/cold tiers
+  - 64KB cache-friendly chunk copying for mmap
 
 ## [0.9.6] - 2026-03-15
 
