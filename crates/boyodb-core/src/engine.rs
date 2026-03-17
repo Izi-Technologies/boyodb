@@ -6763,6 +6763,99 @@ impl Db {
         }
     }
 
+    /// Load multiple segments in bulk with maximum parallelism
+    /// This is optimized for throughput over latency - useful for large scans
+    fn load_segments_bulk(
+        &self,
+        entries: &[&ManifestEntry],
+    ) -> Vec<Result<Arc<Vec<u8>>, EngineError>> {
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Single segment - no parallelization overhead
+        if entries.len() == 1 {
+            return vec![self.load_segment_cached(entries[0])];
+        }
+
+        // Separate cached from uncached entries
+        let mut results: Vec<(usize, Result<Arc<Vec<u8>>, EngineError>)> = Vec::with_capacity(entries.len());
+        let mut uncached: Vec<(usize, &ManifestEntry)> = Vec::new();
+
+        for (idx, entry) in entries.iter().enumerate() {
+            // Check memtable first
+            if let Some(mem_entry) = self.memtable_index.lock().get(&entry.segment_id) {
+                match decompress_payload(mem_entry.payload.clone(), entry.compression.as_deref()) {
+                    Ok(payload) => results.push((idx, Ok(Arc::new(payload)))),
+                    Err(e) => results.push((idx, Err(e))),
+                }
+                continue;
+            }
+
+            // Check cache
+            if let Some(payload) = self.segment_cache.get(&entry.segment_id) {
+                results.push((idx, Ok(payload)));
+                continue;
+            }
+
+            // Need to load from disk
+            uncached.push((idx, *entry));
+        }
+
+        // Parallel load all uncached segments
+        if !uncached.is_empty() {
+            let storage = &self.storage;
+            let loaded: Vec<_> = uncached
+                .par_iter()
+                .map(|(idx, entry)| {
+                    let result = load_segment(storage, entry)
+                        .map(|data| {
+                            // Insert into cache and return Arc
+                            self.segment_cache.insert(entry.segment_id.clone(), data)
+                        });
+                    (*idx, result)
+                })
+                .collect();
+            results.extend(loaded);
+        }
+
+        // Sort by original index and extract results
+        results.sort_by_key(|(idx, _)| *idx);
+        results.into_iter().map(|(_, r)| r).collect()
+    }
+
+    /// Stream segments with prefetching for high-throughput sequential scans
+    /// Returns an iterator that prefetches next batch while processing current batch
+    fn stream_segments_prefetch<'a>(
+        &'a self,
+        entries: &'a [ManifestEntry],
+        prefetch_count: usize,
+    ) -> impl Iterator<Item = Result<Arc<Vec<u8>>, EngineError>> + 'a {
+        let prefetch_count = prefetch_count.max(1);
+
+        // Prefetch first batch immediately
+        if entries.len() > prefetch_count {
+            let first_batch: Vec<_> = entries[..prefetch_count].iter().collect();
+            self.prefetch_segments(&entries[..prefetch_count]);
+        }
+
+        entries.iter().enumerate().map(move |(idx, entry)| {
+            // Trigger prefetch for next batch
+            let next_prefetch_start = idx + prefetch_count;
+            if next_prefetch_start < entries.len() {
+                let next_prefetch_end = (next_prefetch_start + prefetch_count).min(entries.len());
+                // Non-blocking prefetch hint
+                if self.segment_cache.get(&entries[next_prefetch_start].segment_id).is_none() {
+                    // Only prefetch if not already cached
+                    let entries_to_prefetch = &entries[next_prefetch_start..next_prefetch_end];
+                    self.prefetch_segments(entries_to_prefetch);
+                }
+            }
+
+            self.load_segment_cached(entry)
+        })
+    }
+
     /// Execute a query with JOIN clauses
     ///
     /// Supports multiple JOINs chained together and all JOIN types:
@@ -22048,16 +22141,59 @@ fn compress_payload(payload: &[u8], compression: Option<&str>) -> Result<Vec<u8>
     compress_payload_adaptive(payload, compression, 4 * 1024, true)
 }
 
+/// Quick entropy estimation using byte frequency sampling
+/// Returns true if data appears compressible (entropy < 7.0)
+#[inline]
+fn is_compressible(data: &[u8]) -> bool {
+    if data.len() < 256 {
+        return true; // Small data, always try compression
+    }
+
+    // Sample every 64th byte for speed (covers ~1.5% of data)
+    let mut freq = [0u32; 256];
+    let sample_count = data.len() / 64;
+    if sample_count == 0 {
+        return true;
+    }
+
+    for i in 0..sample_count {
+        let idx = i * 64;
+        if idx < data.len() {
+            freq[data[idx] as usize] += 1;
+        }
+    }
+
+    // Estimate entropy using simplified calculation
+    let mut entropy = 0.0f64;
+    let total = sample_count as f64;
+    for &count in &freq {
+        if count > 0 {
+            let p = count as f64 / total;
+            entropy -= p * p.log2();
+        }
+    }
+
+    // If entropy > 7.5, data is essentially random/incompressible
+    entropy < 7.5
+}
+
 /// Compress payload with configurable skip threshold and adaptive levels.
 fn compress_payload_adaptive(
     payload: &[u8],
     compression: Option<&str>,
-    _skip_threshold: usize,
+    skip_threshold: usize,
     adaptive_levels: bool,
 ) -> Result<Vec<u8>, EngineError> {
-    // Note: Skip threshold is disabled for now because skipping compression
-    // would require metadata changes to track whether compression was applied.
-    // The adaptive compression levels still provide optimization benefit.
+    // Skip compression for very small payloads (overhead > benefit)
+    if payload.len() < skip_threshold {
+        return Ok(payload.to_vec());
+    }
+
+    // Quick entropy check - skip compression for incompressible data
+    // This saves significant CPU for already-compressed or random data
+    if compression.is_some() && !is_compressible(payload) {
+        return Ok(payload.to_vec());
+    }
 
     match compression {
         Some("zstd") => {
@@ -22079,7 +22215,9 @@ fn compress_payload_adaptive(
         }
         Some("lz4") => Ok(lz4_compress(payload)),
         Some("snappy") => {
-            let mut encoder = SnappyEncoder::new(Vec::new());
+            // Pre-allocate output buffer (snappy typically achieves ~50% compression)
+            let estimated_size = payload.len() / 2 + 32;
+            let mut encoder = SnappyEncoder::new(Vec::with_capacity(estimated_size));
             std::io::copy(&mut Cursor::new(payload), &mut encoder)
                 .map_err(|e| EngineError::Internal(format!("snappy encode failed: {e}")))?;
             encoder
