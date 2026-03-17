@@ -19,6 +19,16 @@ cargo run -p boyodb-bench --release -- \
 ```
 
 ## Latest run
+- Date: 2026-03-16
+- Host: local (macOS)
+- Command: `./target/release/boyodb-bench --rows 100000 --batch-size 10000 --query-iters 5`
+- Ingest: 100,000 rows in 247ms | ~403k rows/s | ~23.1 MiB/s
+- Query latency (5 iters each):
+  - Baseline (PK Filter): avg 6.87µs | p50 6.38µs | p90 9.00µs | p99 9.00µs
+  - Clustered (status_code=500): avg 6.17µs | p50 6.04µs | p90 6.88µs | p99 6.88µs
+  - Control (latency > 0.95): avg 13.98µs | p50 13.58µs | p90 15.92µs | p99 15.92µs
+
+## Previous run (1M rows)
 - Date: 2025-12-30
 - Host: local (macOS)
 - Command: `make bench-core`

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.7] - 2026-03-16
 
+### Fixed
+
+- **UInt64 event_time Column Statistics**: Fixed event_time stats not being collected for UInt64 columns in `validate_and_stats`. Previously, event_time min/max stats were only collected for TimestampMicrosecond columns, causing filtered queries on UInt64 event_time columns to incorrectly prune all segments.
+
+- **Cross-Type Numeric Comparison in Zone Maps**: Fixed `PrimitiveValue::partial_cmp_value` to handle cross-type comparisons between signed and unsigned integers (Int64 vs UInt64, Int32 vs UInt64, etc.). Zone-map pruning was incorrectly rejecting segments when comparing Int64 filter values against UInt64 column statistics.
+
+- **Write Buffer Time-Based Flush**: Fixed write buffer not flushing to disk by adding time-based flush check during ingest. The flush thread's separate Db instance had an empty buffer, so time-based flush is now handled synchronously during ingest.
+
+- **Query Result IPC Stream Concatenation**: Fixed SELECT * queries returning only 1 row when multiple segments match. IPC streams from parallel/sequential scans are now properly decoded to batches, collected, and re-encoded as a single valid IPC stream.
+
 ### Added
 
 #### Performance Optimizations
