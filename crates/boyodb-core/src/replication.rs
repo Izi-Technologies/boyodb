@@ -946,6 +946,33 @@ impl PrimitiveValue {
             (PrimitiveValue::Int32(a), PrimitiveValue::Int64(b)) => Some((*a as i64).cmp(b)),
             (PrimitiveValue::UInt64(a), PrimitiveValue::UInt32(b)) => Some((*a).cmp(&(*b as u64))),
             (PrimitiveValue::UInt32(a), PrimitiveValue::UInt64(b)) => Some((*a as u64).cmp(b)),
+            // Cross-type signed/unsigned comparisons (widening to i128 for safety)
+            (PrimitiveValue::Int64(a), PrimitiveValue::UInt64(b)) => {
+                // Widen both to i128 for safe comparison
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::UInt64(a), PrimitiveValue::Int64(b)) => {
+                // Widen both to i128 for safe comparison
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::Int32(a), PrimitiveValue::UInt64(b)) => {
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::UInt64(a), PrimitiveValue::Int32(b)) => {
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::Int64(a), PrimitiveValue::UInt32(b)) => {
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::UInt32(a), PrimitiveValue::Int64(b)) => {
+                Some((*a as i128).cmp(&(*b as i128)))
+            }
+            (PrimitiveValue::Int32(a), PrimitiveValue::UInt32(b)) => {
+                Some((*a as i64).cmp(&(*b as i64)))
+            }
+            (PrimitiveValue::UInt32(a), PrimitiveValue::Int32(b)) => {
+                Some((*a as i64).cmp(&(*b as i64)))
+            }
             _ => None, // Incompatible types
         }
     }

@@ -27516,8 +27516,16 @@ pub fn validate_and_stats<T>(
                                 stats.max = Some(new_max);
                             }
                         }
-                        // Legacy tenant_id/route_id handling
-                        if col_name == "tenant_id" {
+                        // Legacy event_time/tenant_id/route_id handling
+                        if col_name == "event_time" {
+                            for i in 0..arr.len() {
+                                if !arr.is_null(i) {
+                                    let v = arr.value(i);
+                                    event_time_min = Some(event_time_min.map_or(v, |m| m.min(v)));
+                                    event_time_max = Some(event_time_max.map_or(v, |m| m.max(v)));
+                                }
+                            }
+                        } else if col_name == "tenant_id" {
                             for i in 0..arr.len() {
                                 if !arr.is_null(i) {
                                     let v = arr.value(i);
