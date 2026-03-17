@@ -4022,7 +4022,13 @@ impl Db {
         recovery_mgr.recover_latest()
     }
 
+    /// Ingest an IPC payload into the engine
     pub fn ingest_ipc(&self, batch: IngestBatch) -> Result<(), EngineError> {
+        self.ingest_ipc_impl(batch, false)
+    }
+
+    /// Internal implementation with skip_buffer control
+    fn ingest_ipc_impl(&self, batch: IngestBatch, skip_buffer: bool) -> Result<(), EngineError> {
         self.require_writable()?;
 
         let current_segments = self.segment_count();
@@ -4068,7 +4074,7 @@ impl Db {
 
         // Write buffering: if enabled and payload is small, buffer it
         // Flush when buffer exceeds threshold or time expires
-        if self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes {
+        if !skip_buffer && self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes {
             let db_name = batch
                 .database
                 .as_deref()
@@ -4090,7 +4096,9 @@ impl Db {
                     batch.watermark_micros,
                     None, // Schema will be inferred when flushing
                 );
+                // Flush if size OR time threshold exceeded
                 buffer.should_flush(self.cfg.write_buffer_max_bytes)
+                    || buffer.should_flush_time(self.cfg.write_buffer_flush_interval_ms)
             };
 
             if should_flush {
@@ -4506,15 +4514,8 @@ impl Db {
 
     /// Direct ingest bypassing write buffer (used when flushing buffer)
     fn ingest_ipc_direct(&self, batch: IngestBatch) -> Result<(), EngineError> {
-        // Save original config and temporarily disable buffering
-        let was_buffering = self.cfg.write_buffer_enabled;
-        // We can't modify cfg, so we just proceed with normal ingest
-        // The check at the start of ingest_ipc will skip buffering for large payloads
-        // Since flushed payloads are combined to be large, they won't re-buffer
-
-        // Call the regular ingest - the combined payload will be >= min_segment_bytes
-        // so it won't be buffered again
-        self.ingest_ipc(batch)
+        // Call the implementation with skip_buffer=true to bypass buffering check
+        self.ingest_ipc_impl(batch, true)
     }
 
     /// Ingest multiple batches in a single call (optimized for frequent small updates)
