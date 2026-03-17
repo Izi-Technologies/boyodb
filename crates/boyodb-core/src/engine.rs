@@ -6153,11 +6153,35 @@ impl Db {
                     })
                     .collect();
 
+                // Collect all batches from parallel results, then merge into single IPC stream
+                let mut all_batches: Vec<RecordBatch> = Vec::new();
+                let mut first_schema: Option<Arc<Schema>> = None;
+                
                 for result in results {
                     check_timeout()?;
                     let (filtered, skipped) = result?;
                     data_skipped_bytes += skipped;
-                    records.extend_from_slice(&filtered);
+                    
+                    if filtered.is_empty() {
+                        continue;
+                    }
+                    
+                    // Decode IPC stream to get batches
+                    if let Ok(batches) = read_ipc_batches(&filtered) {
+                        if !batches.is_empty() {
+                            if first_schema.is_none() {
+                                first_schema = Some(batches[0].schema());
+                            }
+                            all_batches.extend(batches);
+                        }
+                    }
+                }
+                
+                // Re-encode all batches as single IPC stream
+                if !all_batches.is_empty() {
+                    if let Some(schema) = first_schema {
+                        records = record_batches_to_ipc(schema.as_ref(), &all_batches)?;
+                    }
                 }
             } else {
                 let limit = filter.limit.unwrap_or(usize::MAX);
@@ -6182,6 +6206,9 @@ impl Db {
                 } else {
                     None
                 };
+
+                // Collect all batches first, then merge into single IPC at the end
+                let mut all_batches: Vec<RecordBatch> = Vec::new();
 
                 let prefetch_interval = self.cfg.prefetch_segments / 2;
                 for (i, entry) in matching.iter().enumerate() {
@@ -6224,9 +6251,8 @@ impl Db {
                         if sliced.is_empty() {
                             continue;
                         }
-                        let ipc = record_batches_to_ipc(sliced[0].schema().as_ref(), &sliced)?;
                         estimated_rows += sliced.iter().map(|b| b.num_rows()).sum::<usize>();
-                        records.extend_from_slice(&ipc);
+                        all_batches.extend(sliced);
                     } else {
                         // Use projection pushdown when available
                         let filtered =
@@ -6234,22 +6260,18 @@ impl Db {
                         if filtered.is_empty() {
                             data_skipped_bytes += original_size;
                         } else {
-                            // Get actual row count from segment metadata or decode IPC
-                            let actual_rows = entry
-                                .column_stats
-                                .as_ref()
-                                .and_then(|cs| cs.values().next())
-                                .map(|s| s.row_count as usize)
-                                .unwrap_or_else(|| {
-                                    // Fall back to decoding IPC to get accurate row count
-                                    read_ipc_batches(&filtered)
-                                        .map(|batches| batches.iter().map(|b| b.num_rows()).sum())
-                                        .unwrap_or(1)
-                                });
-                            estimated_rows += actual_rows;
+                            // Decode IPC and add batches
+                            if let Ok(batches) = read_ipc_batches(&filtered) {
+                                estimated_rows += batches.iter().map(|b| b.num_rows()).sum::<usize>();
+                                all_batches.extend(batches);
+                            }
                         }
-                        records.extend_from_slice(&filtered);
                     }
+                }
+                
+                // Merge all batches into single IPC stream
+                if !all_batches.is_empty() {
+                    records = record_batches_to_ipc(all_batches[0].schema().as_ref(), &all_batches)?;
                 }
             }
 
