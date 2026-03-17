@@ -13,7 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Cross-Type Numeric Comparison in Zone Maps**: Fixed `PrimitiveValue::partial_cmp_value` to handle cross-type comparisons between signed and unsigned integers (Int64 vs UInt64, Int32 vs UInt64, etc.). Zone-map pruning was incorrectly rejecting segments when comparing Int64 filter values against UInt64 column statistics.
 
-- **Write Buffer Flush Thread Data Loss**: Fixed critical bug where the write buffer flush thread created a separate Db instance with its own empty buffer instead of sharing the original Db's buffer. This caused writes after the first batch to remain in memory and be lost on server restart. The fix introduces `start_write_buffer_flush_thread(Arc<Db>)` which must be called after wrapping Db in Arc, ensuring the flush thread operates on the shared write buffer.
+- **Background Thread Data Integrity**: Fixed critical bugs where background threads created separate Db instances instead of sharing the original. This affected:
+  - **Write buffer flush thread**: Writes after first batch remained in memory and were lost on restart
+  - **Compaction threads**: Operated on stale data, missing buffered writes
+  - **Column rename/schema rewrite**: Could cause inconsistencies with buffered data
+
+  The fix introduces new public functions (`start_compaction_threads`, `start_write_buffer_flush_thread`) that take `Arc<Db>` and must be called after wrapping Db in Arc. Background DDL operations now use a weak self-reference to share the Db instance.
 
 - **Query Result IPC Stream Concatenation**: Fixed SELECT * queries returning only 1 row when multiple segments match. IPC streams from parallel/sequential scans are now properly decoded to batches, collected, and re-encoded as a single valid IPC stream.
 

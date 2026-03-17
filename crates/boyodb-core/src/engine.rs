@@ -2806,6 +2806,9 @@ pub struct Db {
     stats_tracker: parking_lot::RwLock<StatsTracker>,
     /// Write buffer for coalescing small writes into larger segments (ClickHouse-style)
     write_buffer: parking_lot::Mutex<WriteBuffer>,
+    /// Weak self-reference for background tasks that need to share the Db instance.
+    /// Set after wrapping Db in Arc via `set_self_ref()`.
+    self_ref: parking_lot::RwLock<Option<std::sync::Weak<Db>>>,
 }
 
 /// Write buffer that accumulates small writes before flushing to segments
@@ -3753,13 +3756,16 @@ impl Db {
             stats_tracker: parking_lot::RwLock::new(StatsTracker::default()),
             // Initialize write buffer for coalescing small writes
             write_buffer: parking_lot::Mutex::new(WriteBuffer::new()),
+            // Self reference for background tasks - set after wrapping in Arc
+            self_ref: parking_lot::RwLock::new(None),
         };
 
-        db.spawn_background_compaction_loop();
-
-        // NOTE: Write buffer flush thread is NOT started here.
-        // Caller MUST call start_write_buffer_flush_thread(Arc<Db>) after wrapping in Arc.
-        // This ensures the flush thread shares the same write buffer as the main Db.
+        // NOTE: Background threads are NOT started here.
+        // After wrapping Db in Arc, caller MUST call:
+        //   1. db.set_self_ref(Arc::downgrade(&db)) - enables background tasks to share Db
+        //   2. start_compaction_threads(Arc::clone(&db)) - starts compaction threads
+        //   3. start_write_buffer_flush_thread(Arc::clone(&db)) - starts write buffer flush
+        // This ensures all background threads share the same Db instance.
 
         // Spawn Tiering Manager
         let tiering_mgr = std::sync::Arc::new(crate::tiering::TieringManager::new(
@@ -3779,6 +3785,22 @@ impl Db {
     pub fn set_cluster_manager(&self, cm: std::sync::Weak<crate::cluster::ClusterManager>) {
         let mut lock = self.cluster_manager.write();
         *lock = Some(cm);
+    }
+
+    /// Set the weak self-reference for background tasks.
+    /// Must be called after wrapping Db in Arc:
+    /// ```ignore
+    /// let db = Arc::new(Db::open(cfg)?);
+    /// db.set_self_ref(Arc::downgrade(&db));
+    /// ```
+    pub fn set_self_ref(&self, weak: std::sync::Weak<Db>) {
+        let mut lock = self.self_ref.write();
+        *lock = Some(weak);
+    }
+
+    /// Get a strong reference from the weak self-ref if available
+    fn get_self_arc(&self) -> Option<std::sync::Arc<Db>> {
+        self.self_ref.read().as_ref().and_then(|w| w.upgrade())
     }
 
     /// Get the transaction manager, creating it if necessary
@@ -17823,6 +17845,7 @@ impl Db {
     }
 
     /// Background task to rename column in all segment files.
+    /// Uses the shared Db instance via self_ref to avoid creating a separate Db.
     fn spawn_background_column_rename(
         &self,
         database: &str,
@@ -17830,32 +17853,39 @@ impl Db {
         old_column: &str,
         new_column: &str,
     ) {
-        let cfg = self.cfg.clone();
+        let db_arc = match self.get_self_arc() {
+            Some(arc) => arc,
+            None => {
+                // Fallback: run synchronously if self_ref not set
+                tracing::warn!("self_ref not set, running column rename synchronously");
+                if let Err(e) = self.rewrite_segments_rename_column(database, table, old_column, new_column) {
+                    tracing::warn!(
+                        database = %database,
+                        table = %table,
+                        old_column = %old_column,
+                        new_column = %new_column,
+                        error = %e,
+                        "synchronous column rename failed"
+                    );
+                }
+                return;
+            }
+        };
+
         let db_name = database.to_string();
         let tbl_name = table.to_string();
         let old_col = old_column.to_string();
         let new_col = new_column.to_string();
-        std::thread::spawn(move || match Db::open(cfg) {
-            Ok(db) => {
-                if let Err(e) =
-                    db.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col)
-                {
-                    tracing::warn!(
-                        database = %db_name,
-                        table = %tbl_name,
-                        old_column = %old_col,
-                        new_column = %new_col,
-                        error = %e,
-                        "background column rename failed"
-                    );
-                }
-            }
-            Err(e) => {
+
+        std::thread::spawn(move || {
+            if let Err(e) = db_arc.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col) {
                 tracing::warn!(
                     database = %db_name,
                     table = %tbl_name,
+                    old_column = %old_col,
+                    new_column = %new_col,
                     error = %e,
-                    "failed to start background column rename"
+                    "background column rename failed"
                 );
             }
         });
@@ -17943,92 +17973,59 @@ impl Db {
         Ok(())
     }
 
+    /// Background task to rewrite segments with new schema.
+    /// Uses the shared Db instance via self_ref to avoid creating a separate Db.
     fn spawn_background_schema_rewrite(&self, database: &str, table: &str, schema_json: &str) {
-        let cfg = self.cfg.clone();
+        let db_arc = match self.get_self_arc() {
+            Some(arc) => arc,
+            None => {
+                // Fallback: run synchronously if self_ref not set
+                tracing::warn!("self_ref not set, running schema rewrite synchronously");
+                if let Err(e) = self.rewrite_table_segments_to_schema(database, table, schema_json) {
+                    tracing::warn!(
+                        database = %database,
+                        table = %table,
+                        error = %e,
+                        "synchronous schema rewrite failed"
+                    );
+                }
+                return;
+            }
+        };
+
         let db_name = database.to_string();
         let tbl_name = table.to_string();
         let schema_json = schema_json.to_string();
-        std::thread::spawn(move || match Db::open(cfg) {
-            Ok(db) => {
-                if let Err(e) =
-                    db.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json)
-                {
-                    tracing::warn!(
-                        database = %db_name,
-                        table = %tbl_name,
-                        error = %e,
-                        "background schema rewrite failed"
-                    );
-                }
-            }
-            Err(e) => {
+
+        std::thread::spawn(move || {
+            if let Err(e) = db_arc.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json) {
                 tracing::warn!(
                     database = %db_name,
                     table = %tbl_name,
                     error = %e,
-                    "failed to start background schema rewrite"
+                    "background schema rewrite failed"
                 );
             }
         });
     }
 
+    /// DEPRECATED: Use `start_compaction_threads(Arc<Db>)` instead.
+    /// This method is now a no-op.
+    #[deprecated(note = "Use start_compaction_threads(Arc<Db>) instead")]
     fn spawn_background_compaction_loop(&self) {
-        if !self.cfg.enable_compaction {
-            return;
-        }
-
-        // Spawn continuous compaction threads if enabled (ClickHouse-style)
-        if self.cfg.continuous_compaction_enabled {
-            self.spawn_continuous_compaction_threads();
-        }
-
-        // Also spawn the interval-based loop as a fallback/supplement
-        if self.cfg.auto_compact_interval_secs == 0 {
-            return;
-        }
-
-        let mut cfg = self.cfg.clone();
-        let interval_secs = cfg.auto_compact_interval_secs;
-        cfg.auto_compact_interval_secs = 0;
-        cfg.continuous_compaction_enabled = false; // Don't spawn more continuous threads
-
-        std::thread::spawn(move || {
-            // Create a Tokio runtime for the background thread
-            // This is needed because TieredStorage requires a Tokio runtime handle
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to create tokio runtime for compaction loop");
-                    return;
-                }
-            };
-
-            let interval = std::time::Duration::from_secs(interval_secs);
-
-            // Open the Db within the runtime context
-            let db = match rt.block_on(async { Db::open(cfg) }) {
-                Ok(db) => db,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to start background compaction loop");
-                    return;
-                }
-            };
-
-            loop {
-                std::thread::sleep(interval);
-                if let Err(e) = db.run_background_compaction() {
-                    tracing::warn!(error = %e, "background compaction loop failed");
-                }
-            }
-        });
+        // No-op - compaction threads are now started via start_compaction_threads(Arc<Db>)
+        // which must be called after wrapping Db in Arc
     }
 
-    /// Spawn dedicated continuous compaction threads (ClickHouse-style)
-    /// These threads run compaction constantly with minimal sleep when idle
+    /// DEPRECATED: Use `start_compaction_threads(Arc<Db>)` instead.
+    #[deprecated(note = "Use start_compaction_threads(Arc<Db>) instead")]
     fn spawn_continuous_compaction_threads(&self) {
+        // No-op - see start_compaction_threads(Arc<Db>)
+    }
+
+    // Placeholder to skip the old code - actual implementation moved to start_compaction_threads
+    #[allow(dead_code)]
+    fn _old_spawn_continuous_compaction_threads_placeholder(&self) {
         let num_threads = self.cfg.compaction_threads.max(1);
         let idle_sleep_ms = self.cfg.compaction_idle_sleep_ms;
 
@@ -18060,41 +18057,6 @@ impl Db {
                     }
                 };
 
-                // Open the Db within the runtime context
-                let db = match rt.block_on(async { Db::open(cfg) }) {
-                    Ok(db) => db,
-                    Err(e) => {
-                        tracing::warn!(
-                            thread_id = thread_id,
-                            error = %e,
-                            "failed to open Db for continuous compaction thread"
-                        );
-                        return;
-                    }
-                };
-
-                let idle_timeout = std::time::Duration::from_millis(idle_sleep_ms);
-
-                loop {
-                    // Try leveled compaction first
-                    let leveled_work = if db.cfg.leveled_compaction_enabled {
-                        db.run_leveled_compaction().unwrap_or(0)
-                    } else {
-                        0
-                    };
-
-                    // Then try traditional compaction
-                    let traditional_work = db.run_background_compaction().unwrap_or(0);
-
-                    // If no work was done, wait for notification instead of busy-polling
-                    // This dramatically reduces CPU usage (60-80% reduction)
-                    if leveled_work == 0 && traditional_work == 0 {
-                        // Event-driven: wait for segment ingest to notify us
-                        // Falls back to timeout-based check for safety
-                        db.compaction_state.wait_for_work(idle_timeout);
-                    }
-                    // If work was done, immediately loop to check for more
-                }
             });
         }
     }
@@ -32631,6 +32593,82 @@ impl AutoRepairState {
     /// Check if shutdown has been requested
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+}
+
+/// Start the write buffer flush background thread.
+/// Start background compaction threads.
+///
+/// This function spawns compaction threads that share the Db instance. This MUST be
+/// called after wrapping Db in Arc to ensure compaction threads operate on the same
+/// manifest and segments as the main Db.
+///
+/// Starts both:
+/// - Continuous compaction threads (ClickHouse-style) if enabled
+/// - Interval-based compaction loop as fallback
+///
+/// # Arguments
+/// * `db` - Arc-wrapped Db instance to share with compaction threads
+pub fn start_compaction_threads(db: Arc<Db>) {
+    if !db.cfg.enable_compaction {
+        return;
+    }
+
+    // Spawn continuous compaction threads if enabled (ClickHouse-style)
+    if db.cfg.continuous_compaction_enabled {
+        let num_threads = db.cfg.compaction_threads.max(1);
+        let idle_sleep_ms = db.cfg.compaction_idle_sleep_ms;
+
+        tracing::info!(
+            threads = num_threads,
+            idle_sleep_ms = idle_sleep_ms,
+            "Starting continuous compaction threads"
+        );
+
+        for thread_id in 0..num_threads {
+            let db_clone = Arc::clone(&db);
+            let idle_timeout = std::time::Duration::from_millis(idle_sleep_ms);
+
+            std::thread::spawn(move || {
+                loop {
+                    // Try leveled compaction first
+                    let leveled_work = if db_clone.cfg.leveled_compaction_enabled {
+                        db_clone.run_leveled_compaction().unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    // Then try traditional compaction
+                    let traditional_work = db_clone.run_background_compaction().unwrap_or(0);
+
+                    // If no work was done, wait for notification instead of busy-polling
+                    if leveled_work == 0 && traditional_work == 0 {
+                        db_clone.compaction_state.wait_for_work(idle_timeout);
+                    }
+                }
+            });
+
+            tracing::debug!(thread_id = thread_id, "Spawned continuous compaction thread");
+        }
+    }
+
+    // Also spawn the interval-based loop as a fallback/supplement
+    if db.cfg.auto_compact_interval_secs > 0 {
+        let db_clone = Arc::clone(&db);
+        let interval_secs = db.cfg.auto_compact_interval_secs;
+
+        std::thread::spawn(move || {
+            let interval = std::time::Duration::from_secs(interval_secs);
+
+            loop {
+                std::thread::sleep(interval);
+                if let Err(e) = db_clone.run_background_compaction() {
+                    tracing::warn!(error = %e, "background compaction loop failed");
+                }
+            }
+        });
+
+        tracing::debug!(interval_secs = interval_secs, "Spawned interval-based compaction thread");
     }
 }
 

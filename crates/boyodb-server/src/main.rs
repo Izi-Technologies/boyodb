@@ -2006,8 +2006,12 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     engine_cfg.write_buffer_max_bytes = cfg.write_buffer_max_bytes;
     let db = Arc::new(Db::open(engine_cfg).map_err(|e| format!("db open failed: {e}"))?);
 
-    // Start write buffer flush thread AFTER wrapping Db in Arc
-    // This ensures the flush thread shares the same write buffer as the main Db
+    // Set self-reference for background tasks (column rename, schema rewrite, etc.)
+    db.set_self_ref(Arc::downgrade(&db));
+
+    // Start background threads AFTER wrapping Db in Arc
+    // This ensures all threads share the same Db instance
+    boyodb_core::start_compaction_threads(Arc::clone(&db));
     if cfg.write_buffer_enabled {
         boyodb_core::start_write_buffer_flush_thread(Arc::clone(&db));
     }

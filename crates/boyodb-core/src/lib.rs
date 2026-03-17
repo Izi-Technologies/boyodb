@@ -180,7 +180,7 @@ pub use auth::{
 };
 pub use engine::{
     apply_computed_columns, apply_window_functions, evaluate_expr, execute_query_with_ctes,
-    merge_cte_results, start_auto_repair_task, start_write_buffer_flush_thread, validate_identifier, AutoRepairConfig,
+    merge_cte_results, start_auto_repair_task, start_compaction_threads, start_write_buffer_flush_thread, validate_identifier, AutoRepairConfig,
     AutoRepairState, AutoRepairStats, ComputedValue, CteContext, Db, EngineConfig, EngineError,
     EvalContext, ExplainPlan, HealthStatus, IngestBatch, Metrics, QueryExecutionStats,
     QueryRequest, QueryResponse, ScalarValue, StreamDefinition, StreamRegistry, StreamState,
