@@ -3757,10 +3757,9 @@ impl Db {
 
         db.spawn_background_compaction_loop();
 
-        // Spawn write buffer flush thread if enabled
-        if db.cfg.write_buffer_enabled {
-            db.spawn_write_buffer_flush_thread();
-        }
+        // NOTE: Write buffer flush thread is NOT started here.
+        // Caller MUST call start_write_buffer_flush_thread(Arc<Db>) after wrapping in Arc.
+        // This ensures the flush thread shares the same write buffer as the main Db.
 
         // Spawn Tiering Manager
         let tiering_mgr = std::sync::Arc::new(crate::tiering::TieringManager::new(
@@ -18100,62 +18099,19 @@ impl Db {
         }
     }
 
-    /// Spawn background thread to flush write buffer based on time interval
+    /// Spawn background thread to flush write buffer based on time interval.
+    ///
+    /// IMPORTANT: This is now a no-op. Use `start_write_buffer_flush_thread(Arc<Db>)` instead,
+    /// which must be called AFTER wrapping Db in Arc to ensure the flush thread shares
+    /// the same write buffer as the main Db instance.
+    #[deprecated(note = "Use start_write_buffer_flush_thread(Arc<Db>) instead")]
     fn spawn_write_buffer_flush_thread(&self) {
-        if !self.cfg.write_buffer_enabled {
-            return;
-        }
-
-        let flush_interval_ms = self.cfg.write_buffer_flush_interval_ms;
-        if flush_interval_ms == 0 {
-            return;
-        }
-
-        let mut cfg = self.cfg.clone();
-        cfg.write_buffer_enabled = false; // Prevent recursive spawning
-
-        tracing::info!(
-            flush_interval_ms = flush_interval_ms,
-            max_bytes = cfg.write_buffer_max_bytes,
-            "Starting write buffer flush thread"
-        );
-
-        std::thread::spawn(move || {
-            // Create a Tokio runtime for the background thread
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to create tokio runtime for write buffer flush");
-                    return;
-                }
-            };
-
-            let db = match rt.block_on(async { Db::open(cfg) }) {
-                Ok(db) => db,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to open Db for write buffer flush thread");
-                    return;
-                }
-            };
-
-            let interval = std::time::Duration::from_millis(flush_interval_ms);
-
-            loop {
-                std::thread::sleep(interval);
-
-                // Flush buffer if time threshold exceeded
-                if let Err(e) = db.flush_write_buffer_if_needed() {
-                    tracing::warn!(error = %e, "write buffer flush failed");
-                }
-            }
-        });
+        // No-op - the proper function is start_write_buffer_flush_thread which takes Arc<Db>
+        // This method was buggy because it created a NEW Db instance with its own empty buffer
     }
 
     /// Flush write buffer if time threshold exceeded
-    fn flush_write_buffer_if_needed(&self) -> Result<(), EngineError> {
+    pub fn flush_write_buffer_if_needed(&self) -> Result<(), EngineError> {
         if !self.cfg.write_buffer_enabled {
             return Ok(());
         }
@@ -32676,6 +32632,50 @@ impl AutoRepairState {
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }
+}
+
+/// Start the write buffer flush background thread.
+///
+/// This function spawns a background thread that periodically flushes the write buffer
+/// to disk based on time interval. This MUST be called after wrapping Db in Arc to ensure
+/// the flush thread shares the same write buffer as the main Db instance.
+///
+/// # Arguments
+/// * `db` - Arc-wrapped Db instance to share with the flush thread
+///
+/// # Returns
+/// A JoinHandle for the spawned thread (can be ignored if shutdown isn't needed)
+pub fn start_write_buffer_flush_thread(db: Arc<Db>) -> Option<std::thread::JoinHandle<()>> {
+    if !db.cfg.write_buffer_enabled {
+        return None;
+    }
+
+    let flush_interval_ms = db.cfg.write_buffer_flush_interval_ms;
+    if flush_interval_ms == 0 {
+        return None;
+    }
+
+    tracing::info!(
+        flush_interval_ms = flush_interval_ms,
+        max_bytes = db.cfg.write_buffer_max_bytes,
+        "Starting write buffer flush thread"
+    );
+
+    let db_clone = Arc::clone(&db);
+    let handle = std::thread::spawn(move || {
+        let interval = std::time::Duration::from_millis(flush_interval_ms);
+
+        loop {
+            std::thread::sleep(interval);
+
+            // Flush buffer if time threshold exceeded
+            if let Err(e) = db_clone.flush_write_buffer_if_needed() {
+                tracing::warn!(error = %e, "write buffer flush failed");
+            }
+        }
+    });
+
+    Some(handle)
 }
 
 /// Start the auto-repair background task

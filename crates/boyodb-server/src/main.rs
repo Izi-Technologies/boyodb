@@ -1292,7 +1292,7 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut continuous_compaction_enabled: bool = true;
     let mut compaction_threads: usize = 2;
     let mut compaction_idle_sleep_ms: u64 = 100;
-    let mut write_buffer_enabled: bool = true;
+    let mut write_buffer_enabled: bool = true; // Fixed: flush thread now shares Arc<Db> for proper buffer sharing
     let mut write_buffer_max_bytes: u64 = 16 * 1024 * 1024;
 
     // LDAP/AD Authentication configuration
@@ -2005,6 +2005,12 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     engine_cfg.write_buffer_enabled = cfg.write_buffer_enabled;
     engine_cfg.write_buffer_max_bytes = cfg.write_buffer_max_bytes;
     let db = Arc::new(Db::open(engine_cfg).map_err(|e| format!("db open failed: {e}"))?);
+
+    // Start write buffer flush thread AFTER wrapping Db in Arc
+    // This ensures the flush thread shares the same write buffer as the main Db
+    if cfg.write_buffer_enabled {
+        boyodb_core::start_write_buffer_flush_thread(Arc::clone(&db));
+    }
 
     // Set up shutdown signal handler early so all spawned tasks can use it
     let shutdown = Arc::new(tokio::sync::Notify::new());
