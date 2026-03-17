@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Compaction Path Protection**: Compacted/merged segments are verified before manifest is updated and old segments are removed.
   - **Memtable Flush Verification**: Flushed segments are verified before being tracked in manifest.
   - **Safe Segment Persistence**: Replaced direct `std::fs::write` calls with `persist_segment_ipc` which uses atomic writes (write to .tmp, fsync, rename) for crash safety.
-  - New config options: `verify_segment_after_write`, `cleanup_orphaned_segments`, `auto_repair_missing_segments`
+  - All integrity features are always enabled by default (not configurable) to ensure data safety.
 
 - **UInt64 event_time Column Statistics**: Fixed event_time stats not being collected for UInt64 columns in `validate_and_stats`. Previously, event_time min/max stats were only collected for TimestampMicrosecond columns, causing filtered queries on UInt64 event_time columns to incorrectly prune all segments.
 

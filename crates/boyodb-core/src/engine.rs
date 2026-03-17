@@ -712,19 +712,6 @@ pub struct EngineConfig {
     /// Default: true
     pub parallel_compression: bool,
 
-    // --- Segment Integrity Prevention ---
-    /// Verify segment file exists and has correct checksum after writing
-    /// This prevents "table with missing segments" errors by ensuring the file
-    /// is fully persisted before adding to manifest
-    /// Default: true (safest, slight performance overhead)
-    pub verify_segment_after_write: bool,
-    /// Clean up orphaned segment files during startup
-    /// Orphaned files are segment files that exist on disk but are not in manifest
-    /// Default: true
-    pub cleanup_orphaned_segments: bool,
-    /// Auto-repair manifest by removing entries for missing segment files during startup
-    /// Default: true
-    pub auto_repair_missing_segments: bool,
 }
 
 impl EngineConfig {
@@ -932,10 +919,6 @@ impl EngineConfig {
             adaptive_bloom_fpp: true,
             // Parallel compression defaults
             parallel_compression: true,
-            // Segment integrity prevention defaults (CRITICAL for data safety)
-            verify_segment_after_write: true,   // Verify segment exists after write
-            cleanup_orphaned_segments: true,    // Clean up orphaned files on startup
-            auto_repair_missing_segments: true, // Remove entries for missing segments
         }
     }
 
@@ -3698,27 +3681,20 @@ impl Db {
                     );
                 }
 
-                // Auto-repair: remove entries for missing segments (if enabled)
-                if cfg.auto_repair_missing_segments {
-                    let removed = repair_manifest_missing_segments(&mut manifest, &cfg.segments_dir);
-                    if !removed.is_empty() {
-                        // Persist the repaired manifest
-                        persist_manifest(&cfg.manifest_path, &manifest)?;
-                        tracing::info!(
-                            "Manifest repaired: removed {} entries for missing segments",
-                            removed.len()
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        "INTEGRITY WARNING: {} segments are missing but auto_repair_missing_segments is disabled",
-                        integrity_report.missing_segments.len()
+                // Auto-repair: remove entries for missing segments (always enabled for data integrity)
+                let removed = repair_manifest_missing_segments(&mut manifest, &cfg.segments_dir);
+                if !removed.is_empty() {
+                    // Persist the repaired manifest
+                    persist_manifest(&cfg.manifest_path, &manifest)?;
+                    tracing::info!(
+                        "Manifest repaired: removed {} entries for missing segments",
+                        removed.len()
                     );
                 }
             }
 
-            // Optionally clean up orphaned segment files
-            if cfg.cleanup_orphaned_segments && !integrity_report.orphaned_files.is_empty() {
+            // Clean up orphaned segment files (always enabled for data integrity)
+            if !integrity_report.orphaned_files.is_empty() {
                 let deleted = cleanup_orphaned_segments(&manifest, &cfg.segments_dir);
                 if !deleted.is_empty() {
                     tracing::info!("Cleaned up {} orphaned segment files", deleted.len());
@@ -4453,28 +4429,26 @@ impl Db {
                 }
             }
 
-            // Double-check checksum by reading the file back (optional for extra safety)
-            if self.cfg.verify_segment_after_write {
-                match std::fs::read(&segment_path) {
-                    Ok(data) => {
-                        let actual_checksum = compute_checksum(&data);
-                        if actual_checksum != manifest_entry.checksum {
-                            // Clean up the corrupt file
-                            let _ = std::fs::remove_file(&segment_path);
-                            return Err(EngineError::Io(format!(
-                                "CRITICAL: Segment file {} checksum mismatch after write: expected {:016x}, got {:016x}",
-                                manifest_entry.segment_id, manifest_entry.checksum, actual_checksum
-                            )));
-                        }
-                    }
-                    Err(e) => {
-                        // Clean up possibly corrupt file
+            // Verify checksum by reading the file back (always enabled for data integrity)
+            match std::fs::read(&segment_path) {
+                Ok(data) => {
+                    let actual_checksum = compute_checksum(&data);
+                    if actual_checksum != manifest_entry.checksum {
+                        // Clean up the corrupt file
                         let _ = std::fs::remove_file(&segment_path);
                         return Err(EngineError::Io(format!(
-                            "CRITICAL: Failed to read segment file {} for verification: {}",
-                            manifest_entry.segment_id, e
+                            "CRITICAL: Segment file {} checksum mismatch after write: expected {:016x}, got {:016x}",
+                            manifest_entry.segment_id, manifest_entry.checksum, actual_checksum
                         )));
                     }
+                }
+                Err(e) => {
+                    // Clean up possibly corrupt file
+                    let _ = std::fs::remove_file(&segment_path);
+                    return Err(EngineError::Io(format!(
+                        "CRITICAL: Failed to read segment file {} for verification: {}",
+                        manifest_entry.segment_id, e
+                    )));
                 }
             }
         }
@@ -38627,10 +38601,8 @@ mod tests {
     fn test_manifest_integrity_validation_and_repair() {
         // Test: Create segments, delete some files, verify repair on restart
         let dir = tempdir().unwrap();
-        let mut cfg = EngineConfig::new(dir.path(), 1);
-        cfg.auto_repair_missing_segments = true;
-        cfg.cleanup_orphaned_segments = true;
-        cfg.verify_segment_after_write = true;
+        let cfg = EngineConfig::new(dir.path(), 1);
+        // Data integrity features are always enabled (not configurable)
 
         // Create database and ingest data
         let db = Db::open_for_test(cfg.clone()).unwrap();
@@ -38733,9 +38705,9 @@ mod tests {
     #[test]
     fn test_post_write_verification_detects_size_mismatch() {
         // Test: Verify that post-write verification catches size mismatches
+        // Post-write verification is always enabled (not configurable)
         let dir = tempdir().unwrap();
-        let mut cfg = EngineConfig::new(dir.path(), 1);
-        cfg.verify_segment_after_write = true;
+        let cfg = EngineConfig::new(dir.path(), 1);
 
         let db = Db::open_for_test(cfg.clone()).unwrap();
 
