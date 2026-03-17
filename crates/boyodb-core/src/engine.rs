@@ -3617,6 +3617,11 @@ impl Db {
         }
 
         wal.replay(&storage, &cfg.manifest_path)?;
+
+        // Clean up old rotated WAL files after successful replay
+        // Their data is now persisted in the manifest
+        let _ = wal.cleanup_old_rotated_files();
+
         let mut manifest = load_manifest(&cfg.manifest_path).or_else(|_| {
             if cfg.manifest_snapshot_path.exists() {
                 load_manifest(&cfg.manifest_snapshot_path)
@@ -10170,6 +10175,10 @@ impl Db {
         if self.cfg.enable_compaction {
             self.run_compaction_pass()?;
         }
+        // Clean up old rotated WAL files after manifest has been persisted
+        // This prevents WAL files from accumulating indefinitely
+        let wal = self.wal.lock();
+        let _ = wal.cleanup_old_rotated_files();
         Ok(())
     }
 

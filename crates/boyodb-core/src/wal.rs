@@ -941,6 +941,41 @@ impl Wal {
             path: self.path.clone(),
         }
     }
+
+    /// Clean up old rotated WAL files after manifest snapshot
+    /// This should be called after the manifest has been persisted and snapshotted,
+    /// as the data in old WAL files is now safely in the manifest.
+    pub fn cleanup_old_rotated_files(&self) -> Result<usize, EngineError> {
+        let parent = self.path
+            .parent()
+            .ok_or_else(|| EngineError::Internal("wal path missing parent".into()))?;
+
+        let entries: Vec<_> = std::fs::read_dir(parent)
+            .map_err(|e| EngineError::Io(format!("wal cleanup read_dir failed: {e}")))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                if let Some(name) = e.file_name().to_str() {
+                    // Match rotated WAL files (wal.log.TIMESTAMP)
+                    name.starts_with("wal.log.") && name.len() > 8
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        let count = entries.len();
+        for entry in entries {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                debug!("Failed to remove old WAL file {:?}: {}", entry.path(), e);
+            }
+        }
+
+        if count > 0 {
+            info!("Cleaned up {} old rotated WAL files", count);
+        }
+
+        Ok(count)
+    }
 }
 
 /// WAL status information
