@@ -37,7 +37,7 @@
 - **Sub-Second Queries** - Analyze billions of rows in milliseconds
 - **Streaming Ingestion** - 500K+ rows/second sustained write throughput
 - **Change Data Capture** - Debezium-compatible CDC with Delta Lake/Iceberg support
-- **Incremental Materialized Views** - Real-time aggregations with delta refresh
+- **Views & Materialized Views** - Virtual views and precomputed materialized views with incremental refresh
 
 ### Cloud-Native Architecture
 - **Tiered Storage** - Hot (SSD), Warm (compressed), Cold (S3/object storage)

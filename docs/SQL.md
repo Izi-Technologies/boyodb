@@ -15,6 +15,7 @@ Complete SQL reference for BoyoDB.
 - [Window Functions](#window-functions)
 - [Common Table Expressions](#common-table-expressions)
 - [Prepared Statements](#prepared-statements)
+- [Views](#views)
 - [Materialized Views](#materialized-views)
 - [Foreign Data Wrappers](#foreign-data-wrappers)
 - [Recovery Statements](#recovery-statements)
@@ -238,6 +239,62 @@ DROP INDEX IF EXISTS index_name ON [database.]table_name;
 ```sql
 DROP INDEX idx_email ON mydb.users;
 DROP INDEX IF EXISTS idx_old ON mydb.events;
+```
+
+### CREATE VIEW
+
+Views are virtual tables defined by a SQL query. They don't store data but execute the underlying query when accessed.
+
+```sql
+CREATE VIEW view_name AS
+SELECT ...;
+
+CREATE OR REPLACE VIEW view_name AS
+SELECT ...;
+```
+
+**Examples:**
+```sql
+-- Simple view for active users
+CREATE VIEW mydb.active_users AS
+SELECT user_id, username, email
+FROM mydb.users
+WHERE status = 'active';
+
+-- View with aggregation
+CREATE VIEW mydb.order_totals AS
+SELECT customer_id, COUNT(*) as order_count, SUM(total) as total_spent
+FROM mydb.orders
+GROUP BY customer_id;
+
+-- Replace existing view
+CREATE OR REPLACE VIEW mydb.active_users AS
+SELECT user_id, username, email, last_login
+FROM mydb.users
+WHERE status = 'active' AND last_login > NOW() - INTERVAL 30 DAY;
+```
+
+### DROP VIEW
+
+```sql
+DROP VIEW view_name;
+DROP VIEW IF EXISTS view_name;
+```
+
+### SHOW VIEWS
+
+```sql
+-- Show all views in all databases
+SHOW VIEWS;
+
+-- Show views in a specific database
+SHOW VIEWS FROM mydb;
+```
+
+### DESCRIBE VIEW
+
+```sql
+DESCRIBE VIEW mydb.view_name;
 ```
 
 ### CREATE MATERIALIZED VIEW
@@ -1673,6 +1730,39 @@ UNPIVOT (
 -- | A       | Q2      | 150    |
 -- | A       | Q3      | 200    |
 -- | A       | Q4      | 175    |
+```
+
+---
+
+## Views
+
+Views are virtual tables defined by SQL queries. They don't store data but execute the underlying query when accessed, making them useful for:
+
+- Simplifying complex queries
+- Providing a consistent interface to data
+- Restricting access to specific columns or rows
+- Abstracting underlying table structure changes
+
+See [CREATE VIEW](#create-view), [DROP VIEW](#drop-view), [SHOW VIEWS](#show-views), and [DESCRIBE VIEW](#describe-view) in DDL Statements for syntax.
+
+**Example Usage:**
+```sql
+-- Create a view
+CREATE VIEW mydb.high_value_orders AS
+SELECT order_id, customer_id, total, order_date
+FROM mydb.orders
+WHERE total > 1000;
+
+-- Query the view like a regular table
+SELECT * FROM mydb.high_value_orders WHERE order_date > '2024-01-01';
+
+-- Views are automatically expanded in queries
+-- The above query is equivalent to:
+SELECT * FROM (
+    SELECT order_id, customer_id, total, order_date
+    FROM mydb.orders
+    WHERE total > 1000
+) WHERE order_date > '2024-01-01';
 ```
 
 ---

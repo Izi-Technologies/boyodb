@@ -102,6 +102,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Concurrent loading across hot/warm/cold tiers
   - 64KB cache-friendly chunk copying for mmap
 
+- **Automatic WAL Cleanup**: Old rotated WAL files are automatically cleaned up
+  - Cleanup after successful WAL replay during startup
+  - Periodic cleanup during maintenance cycles
+  - Prevents accumulation of old WAL files that slow startup
+
+### Documentation
+
+- **Views Documentation**: Added comprehensive documentation for views
+  - CREATE VIEW, DROP VIEW, SHOW VIEWS, DESCRIBE VIEW syntax
+  - Examples and best practices for virtual views
+  - Updated SQL reference with Views section
+
+- **Materialized Views Documentation**: Enhanced documentation
+  - CREATE MATERIALIZED VIEW with examples
+  - REFRESH MATERIALIZED VIEW (full and incremental)
+  - Best practices for refresh strategies
+
 ## [0.9.6] - 2026-03-15
 
 ### Added
