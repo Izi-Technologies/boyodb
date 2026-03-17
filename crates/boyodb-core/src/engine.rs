@@ -11017,11 +11017,12 @@ impl Db {
                     // No compaction needed for this table
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    // Use debug level to avoid log flooding on repeated failures
+                    tracing::debug!(
                         database = %database,
                         table = %table,
                         error = %e,
-                        "failed to compact table"
+                        "compaction skipped for table"
                     );
                 }
             }
@@ -14278,7 +14279,7 @@ impl Db {
             match self.vacuum(&candidate.database, &candidate.table, false) {
                 Ok(result) => {
                     if result.segments_removed > 0 {
-                        tracing::info!(
+                        tracing::debug!(
                             "Background compaction on {}.{}: {} segments -> {} bytes reclaimed",
                             candidate.database,
                             candidate.table,
@@ -14289,8 +14290,9 @@ impl Db {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Background compaction failed on {}.{}: {}",
+                    // Use debug level to avoid log flooding
+                    tracing::debug!(
+                        "Background compaction skipped on {}.{}: {}",
                         candidate.database,
                         candidate.table,
                         e
@@ -14339,7 +14341,7 @@ impl Db {
                 &candidate.segment_ids,
             ) {
                 Ok(new_segment_id) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "Leveled compaction L{} -> L{}: {}.{} merged {} segments ({} bytes) -> {}",
                         candidate.level,
                         candidate.target_level,
@@ -14352,8 +14354,9 @@ impl Db {
                     merged += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Leveled compaction failed for {}.{} L{}: {}",
+                    // Use debug level to avoid log flooding on schema mismatch errors
+                    tracing::debug!(
+                        "Leveled compaction skipped for {}.{} L{}: {}",
                         candidate.database,
                         candidate.table,
                         candidate.level,
