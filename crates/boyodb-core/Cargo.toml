@@ -86,7 +86,7 @@ icu_normalizer = { version = "1.4", optional = true }
 icu_locid = { version = "1.4", optional = true }
 
 # LDAP/AD authentication
-ldap3 = { version = "0.11", optional = true, default-features = false, features = ["tls-rustls"] }
+ldap3 = { version = "0.12", optional = true, default-features = false, features = ["tls-rustls"] }
 
 # Metal GPU support (macOS)
 metal = { version = "0.27", optional = true }

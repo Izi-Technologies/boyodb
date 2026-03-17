@@ -1,23 +1,14 @@
 # Audit configuration for BoyoDB
-# This file configures cargo-audit to ignore certain advisories that are
-# either false positives or issues we've accepted the risk on.
-
 [advisories]
-# Ignore advisories that we've reviewed and accepted
 ignore = [
-    # Unmaintained crates (transitive dependencies, lower priority)
-    "RUSTSEC-2024-0384",  # instant crate unmaintained (transitive dep from object_store)
-    "RUSTSEC-2024-0436",  # paste crate unmaintained (transitive dep, proc-macro only)
-    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained (we use rustls-pemfile 2.x)
-    "RUSTSEC-2025-0141",  # bincode unmaintained (we use bincode 1.x for internal serialization)
-
-    # Issues that require upstream fixes (monitor and update when fixed)
-    "RUSTSEC-2024-0358",  # object_store race condition (low risk for our use case)
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2025-0134",
+    "RUSTSEC-2025-0141",
+    "RUSTSEC-2024-0358",
 ]
-
-# Allow informational advisories (not vulnerabilities)
 informational_warnings = ["unmaintained"]
 
 [database]
-# Fetch the advisory database from the default URL
 url = "https://github.com/RustSec/advisory-db"
+stale = false
