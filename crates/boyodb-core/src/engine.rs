@@ -14015,9 +14015,21 @@ impl Db {
             let fragmented_count = fragmented.len();
             let fragmented_bytes: u64 = fragmented.iter().map(|e| e.size_bytes).sum();
 
-            // Use existing compaction logic
-            if fragmented.len() >= 2 {
-                self.compact_entries(fragmented, table_meta)?;
+            // Process in batches to avoid OOM (max 50 segments per batch)
+            const VACUUM_BATCH_SIZE: usize = 50;
+            let mut remaining = fragmented;
+            while remaining.len() >= 2 {
+                let batch_size = remaining.len().min(VACUUM_BATCH_SIZE);
+                let batch: Vec<_> = remaining.drain(..batch_size).collect();
+                tracing::debug!(
+                    "VACUUM {}.{}: processing batch of {} segments",
+                    database,
+                    table,
+                    batch.len()
+                );
+                if batch.len() >= 2 {
+                    self.compact_entries(batch, table_meta.clone())?;
+                }
             }
 
             let new_bytes: u64 = {
