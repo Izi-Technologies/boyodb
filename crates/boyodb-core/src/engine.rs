@@ -10707,7 +10707,8 @@ impl Db {
         let mut best: Option<(Vec<ManifestEntry>, Option<TableMeta>)> = None;
         let mut best_bytes = 0u64;
 
-        // Group hot segments per table
+        // Group compactible segments per table (Hot and Warm tiers)
+        // Cold segments are typically archived and should not be compacted
         let mut grouped: HashMap<(String, String), Vec<ManifestEntry>> = HashMap::new();
         for entry in &manifest.entries {
             if let Some(ref filter) = filter_table {
@@ -10715,7 +10716,9 @@ impl Db {
                     continue;
                 }
             }
-            if !matches!(entry.tier, SegmentTier::Hot) {
+            // Include both Hot and Warm segments for compaction
+            // This ensures segments can be compacted multiple times to reduce total count
+            if !matches!(entry.tier, SegmentTier::Hot | SegmentTier::Warm) {
                 continue;
             }
             grouped
