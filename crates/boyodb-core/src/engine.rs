@@ -801,7 +801,7 @@ impl EngineConfig {
             scrubbing_batch_size: 1000, // 1000 segments per scan
             wal_recovery_enabled: true, // Try WAL recovery before deletion
             orphan_cleanup_enabled: true, // Clean up orphaned files
-            orphan_cleanup_age_secs: 86400, // 24 hours safety buffer
+            orphan_cleanup_age_secs: 3600, // 1 hour safety buffer (reduced from 24h)
             wal_skip_corrupt_records: true, // Skip corrupt WAL records by default
             // Rate limiting defaults (disabled by default for backward compatibility)
             ingest_rate_limit_per_sec: 0,         // Unlimited
