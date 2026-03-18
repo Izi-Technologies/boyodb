@@ -3698,11 +3698,11 @@ impl Db {
                 }
             }
 
-            // Clean up orphaned segment files (always enabled for data integrity)
+            // Detach orphaned segment files (ClickHouse-style: move to detached/, never delete)
             if !integrity_report.orphaned_files.is_empty() {
-                let deleted = cleanup_orphaned_segments(&manifest, &cfg.segments_dir);
-                if !deleted.is_empty() {
-                    tracing::info!("Cleaned up {} orphaned segment files", deleted.len());
+                let detached = detach_orphaned_segments(&manifest, &cfg.segments_dir);
+                if !detached.is_empty() {
+                    tracing::info!("Detached {} orphaned segment files (see segments/detached/)", detached.len());
                 }
             }
         } else {
@@ -20982,8 +20982,9 @@ impl Db {
         Ok((recovered_ids, removed_ids))
     }
 
-    /// Clean up orphaned segment files (files on disk not in manifest)
-    /// Only removes files older than orphan_cleanup_age_secs
+    /// Detach orphaned segment files (files on disk not in manifest)
+    /// Moves files to segments/detached/ instead of deleting (ClickHouse-style safety)
+    /// Only detaches files older than orphan_cleanup_age_secs
     pub fn cleanup_orphaned_files(&self) -> Result<Vec<String>, EngineError> {
         if !self.cfg.orphan_cleanup_enabled {
             return Ok(Vec::new());
@@ -20999,13 +21000,25 @@ impl Db {
 
         drop(manifest);
 
-        let mut cleaned = Vec::new();
+        // Create detached directory if needed
+        let detached_dir = self.cfg.segments_dir.join("detached");
+        if let Err(e) = std::fs::create_dir_all(&detached_dir) {
+            return Err(EngineError::Io(format!("Failed to create detached directory: {}", e)));
+        }
+
+        let mut detached = Vec::new();
         let min_age = std::time::Duration::from_secs(self.cfg.orphan_cleanup_age_secs);
         let now = std::time::SystemTime::now();
 
         if let Ok(entries) = std::fs::read_dir(&self.cfg.segments_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+
+                // Skip directories (including detached/)
+                if path.is_dir() {
+                    continue;
+                }
+
                 if !path.extension().map_or(false, |ext| ext == "ipc") {
                     continue;
                 }
@@ -21016,7 +21029,7 @@ impl Db {
                         continue; // Not orphaned
                     }
 
-                    // Check file age before removing
+                    // Check file age before detaching
                     let metadata = match std::fs::metadata(&path) {
                         Ok(m) => m,
                         Err(_) => continue,
@@ -21038,25 +21051,114 @@ impl Db {
                         continue;
                     }
 
-                    // Safe to remove
-                    match std::fs::remove_file(&path) {
+                    // Move to detached instead of deleting
+                    let detached_path = detached_dir.join(path.file_name().unwrap());
+                    match std::fs::rename(&path, &detached_path) {
                         Ok(_) => {
                             tracing::info!(
-                                "Cleaned up orphaned segment file {} (age {:?})",
+                                "Detached orphaned segment {} (age {:?}) -> {}",
                                 segment_id,
-                                age
+                                age,
+                                detached_path.display()
                             );
-                            cleaned.push(segment_id);
+                            detached.push(segment_id);
                         }
                         Err(e) => {
-                            tracing::warn!("Failed to remove orphaned file {:?}: {}", path, e);
+                            tracing::warn!("Failed to detach orphaned file {:?}: {}", path, e);
                         }
                     }
                 }
             }
         }
 
-        Ok(cleaned)
+        Ok(detached)
+    }
+
+    /// List all detached segments (orphaned segments moved to detached/ directory)
+    pub fn list_detached_segments(&self) -> Result<Vec<DetachedSegmentInfo>, EngineError> {
+        let detached_dir = self.cfg.segments_dir.join("detached");
+        let mut segments = Vec::new();
+
+        if !detached_dir.exists() {
+            return Ok(segments);
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&detached_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "ipc") {
+                    if let Some(stem) = path.file_stem() {
+                        let segment_id = stem.to_string_lossy().to_string();
+                        let metadata = std::fs::metadata(&path).ok();
+                        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let detached_at = metadata
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_micros() as u64)
+                            .unwrap_or(0);
+
+                        segments.push(DetachedSegmentInfo {
+                            segment_id,
+                            size_bytes,
+                            detached_at_micros: detached_at,
+                            path: path.to_string_lossy().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(segments)
+    }
+
+    /// Permanently delete a detached segment (requires explicit admin action)
+    pub fn drop_detached_segment(&self, segment_id: &str) -> Result<(), EngineError> {
+        let detached_dir = self.cfg.segments_dir.join("detached");
+        let path = detached_dir.join(format!("{}.ipc", segment_id));
+
+        if !path.exists() {
+            return Err(EngineError::NotFound(format!(
+                "Detached segment not found: {}",
+                segment_id
+            )));
+        }
+
+        std::fs::remove_file(&path).map_err(|e| {
+            EngineError::Io(format!("Failed to delete detached segment {}: {}", segment_id, e))
+        })?;
+
+        tracing::info!("Permanently deleted detached segment: {}", segment_id);
+        Ok(())
+    }
+
+    /// Reattach a detached segment back to the active segments directory
+    /// Note: This only moves the file - you may need to rebuild the manifest
+    /// or use repair_segments to add it back to the manifest
+    pub fn reattach_segment(&self, segment_id: &str) -> Result<(), EngineError> {
+        let detached_dir = self.cfg.segments_dir.join("detached");
+        let detached_path = detached_dir.join(format!("{}.ipc", segment_id));
+        let active_path = self.cfg.segments_dir.join(format!("{}.ipc", segment_id));
+
+        if !detached_path.exists() {
+            return Err(EngineError::NotFound(format!(
+                "Detached segment not found: {}",
+                segment_id
+            )));
+        }
+
+        if active_path.exists() {
+            return Err(EngineError::InvalidArgument(format!(
+                "Segment {} already exists in active directory",
+                segment_id
+            )));
+        }
+
+        std::fs::rename(&detached_path, &active_path).map_err(|e| {
+            EngineError::Io(format!("Failed to reattach segment {}: {}", segment_id, e))
+        })?;
+
+        tracing::info!("Reattached segment: {} -> {}", segment_id, active_path.display());
+        Ok(())
     }
 
     /// Scrub segments: validate checksums for a batch of segments
@@ -21720,6 +21822,19 @@ pub struct RetentionResult {
     pub cutoff_time_micros: u64,
 }
 
+/// Information about a detached segment (orphaned segment moved to detached/ directory)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DetachedSegmentInfo {
+    /// Segment ID (filename without .ipc extension)
+    pub segment_id: String,
+    /// Size of the segment file in bytes
+    pub size_bytes: u64,
+    /// When the segment was detached (Unix microseconds)
+    pub detached_at_micros: u64,
+    /// Full path to the detached file
+    pub path: String,
+}
+
 /// Information about a table partition
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PartitionInfo {
@@ -22107,34 +22222,52 @@ fn repair_manifest_missing_segments(
     removed
 }
 
-/// Delete orphaned segment files that are not referenced in the manifest.
-/// Returns the list of deleted files.
-/// SAFETY: Only deletes files older than 1 hour to prevent data loss from race conditions
-/// or manifest corruption. Recently written segments are preserved.
-fn cleanup_orphaned_segments(
+/// Handle orphaned segment files by moving them to a detached/ directory.
+/// Returns the list of detached segment IDs.
+///
+/// SAFETY: Like ClickHouse, we NEVER auto-delete segment files. Instead:
+/// 1. Orphaned segments are moved to segments/detached/
+/// 2. Admins can inspect detached segments and recover data if needed
+/// 3. Explicit API call required to permanently delete detached segments
+///
+/// This protects against:
+/// - Race conditions where segment is written but manifest not yet persisted
+/// - Manifest corruption/reset that would cause all segments to appear orphaned
+/// - Replication lag where segments arrive before manifest updates
+/// - Human error in manifest manipulation
+fn detach_orphaned_segments(
     manifest: &Manifest,
     segments_dir: &Path,
 ) -> Vec<String> {
     let manifest_segment_ids: std::collections::HashSet<&str> =
         manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
 
-    let mut deleted = Vec::new();
+    let mut detached = Vec::new();
 
-    // CRITICAL: Always check file age before deletion to prevent data loss
-    // This protects against:
-    // 1. Race conditions where segment is written but manifest not yet persisted
-    // 2. Manifest corruption/reset that would cause all segments to appear orphaned
-    // 3. Replication lag where segments arrive before manifest updates
-    let min_age = std::time::Duration::from_secs(3600); // 1 hour safety buffer
+    // Create detached directory if it doesn't exist
+    let detached_dir = segments_dir.join("detached");
+    if let Err(e) = std::fs::create_dir_all(&detached_dir) {
+        tracing::warn!("Failed to create detached directory: {}", e);
+        return detached;
+    }
+
+    // Only detach files older than 1 hour to avoid race conditions with in-flight writes
+    let min_age = std::time::Duration::from_secs(3600);
     let now = std::time::SystemTime::now();
 
     if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
         for entry in dir_entries.flatten() {
             let path = entry.path();
+
+            // Skip the detached directory itself
+            if path.is_dir() {
+                continue;
+            }
+
             if path.extension().map_or(false, |ext| ext == "ipc") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if !manifest_segment_ids.contains(stem) {
-                        // Check file age before removing - CRITICAL for data safety
+                        // Check file age before detaching
                         let metadata = match std::fs::metadata(&path) {
                             Ok(m) => m,
                             Err(_) => continue,
@@ -22156,19 +22289,24 @@ fn cleanup_orphaned_segments(
                             continue;
                         }
 
-                        // This is an orphaned file old enough to safely delete
-                        if let Err(e) = std::fs::remove_file(&path) {
-                            tracing::warn!(
-                                "Failed to delete orphaned segment file {}: {}",
-                                path.display(),
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                "Deleted orphaned segment file: {}",
-                                path.display()
-                            );
-                            deleted.push(stem.to_string());
+                        // Move to detached directory instead of deleting
+                        let detached_path = detached_dir.join(path.file_name().unwrap());
+                        match std::fs::rename(&path, &detached_path) {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "Detached orphaned segment: {} -> {}",
+                                    path.display(),
+                                    detached_path.display()
+                                );
+                                detached.push(stem.to_string());
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to detach orphaned segment {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -22176,7 +22314,7 @@ fn cleanup_orphaned_segments(
         }
     }
 
-    deleted
+    detached
 }
 
 /// Parse a string value (from ANALYZE stats) into an optimizer StatValue

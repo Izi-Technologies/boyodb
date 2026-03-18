@@ -573,6 +573,17 @@ enum Request {
         sql: String,
     },
     HealthDetailed,
+    // Detached segment operations (ClickHouse-style orphan handling)
+    #[serde(rename = "listdetached")]
+    ListDetached,
+    #[serde(rename = "dropdetached")]
+    DropDetached {
+        segment_id: String,
+    },
+    #[serde(rename = "reattach")]
+    Reattach {
+        segment_id: String,
+    },
     // Authentication operations
     Login {
         username: String,
@@ -679,6 +690,9 @@ impl Request {
             Request::WalStats => "wal_stats",
             Request::Explain { .. } => "explain",
             Request::HealthDetailed => "health_detailed",
+            Request::ListDetached => "list_detached",
+            Request::DropDetached { .. } => "drop_detached",
+            Request::Reattach { .. } => "reattach",
             Request::Login { .. } => "login",
             Request::Logout => "logout",
             Request::CreateUser { .. } => "create_user",
@@ -945,6 +959,8 @@ struct Response {
     explain_plan: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     health_status: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detached_segments: Option<serde_json::Value>,
     // Auth response fields
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
@@ -987,6 +1003,7 @@ impl Default for Response {
             wal_stats: None,
             explain_plan: None,
             health_status: None,
+            detached_segments: None,
             session_id: None,
             users: None,
             roles: None,
@@ -4571,6 +4588,44 @@ async fn process_request(
                 health_status: Some(status_json),
                 ..Default::default()
             })
+        }
+        // Detached segment operations (ClickHouse-style orphan handling)
+        Request::ListDetached => {
+            let db = db.clone();
+            let segments = blocking(move || {
+                db.list_detached_segments().map_err(|e| ServerError::Db(e.to_string()))
+            }).await?;
+            let segments_json = serde_json::to_value(&segments).map_err(|e| {
+                ServerError::Encode(format!("failed to serialize detached segments: {e}"))
+            })?;
+            Ok(Response {
+                status: "ok",
+                message: Some(format!("{} detached segments", segments.len())),
+                detached_segments: Some(segments_json),
+                ..Default::default()
+            })
+        }
+        Request::DropDetached { segment_id } => {
+            let db = db.clone();
+            let seg_id = segment_id.clone();
+            blocking(move || {
+                db.drop_detached_segment(&seg_id).map_err(|e| ServerError::Db(e.to_string()))
+            }).await?;
+            Ok(Response::ok_message(&format!(
+                "detached segment '{}' permanently deleted",
+                segment_id
+            )))
+        }
+        Request::Reattach { segment_id } => {
+            let db = db.clone();
+            let seg_id = segment_id.clone();
+            blocking(move || {
+                db.reattach_segment(&seg_id).map_err(|e| ServerError::Db(e.to_string()))
+            }).await?;
+            Ok(Response::ok_message(&format!(
+                "segment '{}' reattached (run repair_segments to add to manifest)",
+                segment_id
+            )))
         }
         // Login/Logout are handled in handle_conn before process_request is called
         Request::Login { .. } | Request::Logout => Ok(Response::error(
