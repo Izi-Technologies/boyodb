@@ -22109,6 +22109,8 @@ fn repair_manifest_missing_segments(
 
 /// Delete orphaned segment files that are not referenced in the manifest.
 /// Returns the list of deleted files.
+/// SAFETY: Only deletes files older than 1 hour to prevent data loss from race conditions
+/// or manifest corruption. Recently written segments are preserved.
 fn cleanup_orphaned_segments(
     manifest: &Manifest,
     segments_dir: &Path,
@@ -22118,13 +22120,43 @@ fn cleanup_orphaned_segments(
 
     let mut deleted = Vec::new();
 
+    // CRITICAL: Always check file age before deletion to prevent data loss
+    // This protects against:
+    // 1. Race conditions where segment is written but manifest not yet persisted
+    // 2. Manifest corruption/reset that would cause all segments to appear orphaned
+    // 3. Replication lag where segments arrive before manifest updates
+    let min_age = std::time::Duration::from_secs(3600); // 1 hour safety buffer
+    let now = std::time::SystemTime::now();
+
     if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
         for entry in dir_entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |ext| ext == "ipc") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if !manifest_segment_ids.contains(stem) {
-                        // This is an orphaned file - delete it
+                        // Check file age before removing - CRITICAL for data safety
+                        let metadata = match std::fs::metadata(&path) {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+
+                        let modified = match metadata.modified() {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+
+                        let age = now.duration_since(modified).unwrap_or_default();
+                        if age < min_age {
+                            tracing::debug!(
+                                "Skipping recent orphaned file {} (age {:?} < {:?})",
+                                path.display(),
+                                age,
+                                min_age
+                            );
+                            continue;
+                        }
+
+                        // This is an orphaned file old enough to safely delete
                         if let Err(e) = std::fs::remove_file(&path) {
                             tracing::warn!(
                                 "Failed to delete orphaned segment file {}: {}",
