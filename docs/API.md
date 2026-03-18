@@ -557,6 +557,80 @@ Flush memtables + manifest and truncate WAL segments (superuser only).
 }
 ```
 
+### List Detached Segments
+
+List orphaned segments that have been moved to the detached directory.
+
+**Request:**
+```json
+{
+  "op": "listdetached",
+  "database": "analytics"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "3 detached segments",
+  "detached_segments": [
+    {
+      "segment_id": "seg-0-12345",
+      "size_bytes": 1048576,
+      "detached_at_micros": 1710000000000000,
+      "path": "/var/lib/boyodb/segments/detached/seg-0-12345.ipc"
+    }
+  ]
+}
+```
+
+### Drop Detached Segment
+
+Permanently delete a detached segment (admin action, cannot be undone).
+
+**Request:**
+```json
+{
+  "op": "dropdetached",
+  "database": "analytics",
+  "segment_id": "seg-0-12345"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "dropped detached segment: seg-0-12345"
+}
+```
+
+### Reattach Segment
+
+Move a detached segment back to the active segments directory for recovery.
+
+**Request:**
+```json
+{
+  "op": "reattach",
+  "database": "analytics",
+  "segment_id": "seg-0-12345"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "message": "reattached segment: seg-0-12345"
+}
+```
+
+> **Note:** After reattaching, you may need to rebuild the manifest or restart the server for the segment to be recognized.
+
+---
+
 ### WAL Stats
 
 Get WAL trimming stats (superuser only).

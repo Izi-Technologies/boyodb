@@ -5,6 +5,23 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.8] - 2026-03-18
+
+### Added
+
+- **ClickHouse-style Orphan Segment Handling**: Orphaned segments are now moved to `segments/detached/` instead of being deleted. This prevents data loss from race conditions, manifest corruption, replication lag, or human error.
+  - New API operations: `listdetached`, `dropdetached`, `reattach`
+  - Segments can be recovered by moving them back from the detached directory
+  - Matches ClickHouse's safe orphan handling approach
+
+### Fixed
+
+- **GROUP BY Type Mismatch**: Fixed "batch creation error: Invalid argument error" when using GROUP BY on string columns. The query engine now creates appropriate builder types (StringBuilder for string columns, UInt64Builder for numeric columns) to match schema expectations.
+
+- **LIMIT in Parallel Queries**: Fixed "response too large" error when using LIMIT with parallel query execution. The parallel query path now properly applies offset/limit to collected batches, matching the behavior of the sequential path.
+
+- **Fast Startup for Large Manifests**: Skips orphan file detection at startup when manifest has 1000+ segments to avoid slow directory scans. This prevents startup hangs with large segment directories (9,000+ files). Orphan detection can still be run via `cleanup_orphaned_files()`.
+
 ## [0.9.7] - 2026-03-16
 
 ### Fixed
