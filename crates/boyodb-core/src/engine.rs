@@ -22173,20 +22173,29 @@ fn validate_manifest_integrity(
     }
 
     // Find orphaned segment files (files not in manifest)
-    let manifest_segment_ids: std::collections::HashSet<&str> =
-        manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
+    // Skip this check if there are many segments to avoid slow startup
+    // Orphan detection can be run later via cleanup_orphaned_files()
+    if manifest.entries.len() < 1000 {
+        let manifest_segment_ids: std::collections::HashSet<&str> =
+            manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
 
-    if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
-        for entry in dir_entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "ipc") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if !manifest_segment_ids.contains(stem) {
-                        report.orphaned_files.push(stem.to_string());
+        if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
+            for entry in dir_entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "ipc") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if !manifest_segment_ids.contains(stem) {
+                            report.orphaned_files.push(stem.to_string());
+                        }
                     }
                 }
             }
         }
+    } else {
+        tracing::info!(
+            "Skipping orphan file detection at startup ({} segments in manifest). Use cleanup_orphaned_files() to detect orphans.",
+            manifest.entries.len()
+        );
     }
 
     report
