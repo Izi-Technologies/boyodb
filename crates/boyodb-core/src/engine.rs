@@ -14412,12 +14412,50 @@ impl Db {
             return Ok(None); // Need at least 2 segments to merge
         }
 
-        // Load and concatenate all batches
+        // Load and concatenate all batches, skipping corrupted segments
         let mut all_batches = Vec::new();
+        let mut corrupted_segments = Vec::new();
+
         for entry in &entries_to_merge {
-            let payload = self.load_segment_cached(entry)?;
-            let batches = read_ipc_batches(&payload)?;
-            all_batches.extend(batches);
+            match self.load_segment_cached(entry) {
+                Ok(payload) => {
+                    match read_ipc_batches(&payload) {
+                        Ok(batches) => all_batches.extend(batches),
+                        Err(e) => {
+                            tracing::warn!(
+                                segment_id = %entry.segment_id,
+                                error = %e,
+                                "Skipping corrupted segment during merge (IPC read failed)"
+                            );
+                            corrupted_segments.push(entry.segment_id.clone());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        segment_id = %entry.segment_id,
+                        error = %e,
+                        "Skipping corrupted segment during merge (load failed)"
+                    );
+                    corrupted_segments.push(entry.segment_id.clone());
+                }
+            }
+        }
+
+        // Remove corrupted segments from manifest
+        if !corrupted_segments.is_empty() {
+            tracing::warn!(
+                count = corrupted_segments.len(),
+                "Removing corrupted segments from manifest"
+            );
+            let mut manifest = self.manifest.write();
+            manifest.entries.retain(|e| !corrupted_segments.contains(&e.segment_id));
+            manifest.bump_version();
+            drop(manifest);
+
+            // Persist updated manifest
+            let manifest = self.manifest.read();
+            let _ = persist_manifest(&self.cfg.manifest_path, &manifest);
         }
 
         if all_batches.is_empty() {
