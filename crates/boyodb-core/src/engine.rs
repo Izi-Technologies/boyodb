@@ -6305,27 +6305,43 @@ impl Db {
                 // Collect all batches from parallel results, then merge into single IPC stream
                 let mut all_batches: Vec<RecordBatch> = Vec::new();
                 let mut first_schema: Option<Arc<Schema>> = None;
-                
+
+                // Track offset/limit for proper LIMIT handling in parallel path
+                let mut remaining_offset = filter.offset.unwrap_or(0);
+                let mut remaining_limit = filter.limit.unwrap_or(usize::MAX);
+
                 for result in results {
                     check_timeout()?;
+
+                    // Stop early if we've collected enough rows
+                    if remaining_limit == 0 {
+                        break;
+                    }
+
                     let (filtered, skipped) = result?;
                     data_skipped_bytes += skipped;
-                    
+
                     if filtered.is_empty() {
                         continue;
                     }
-                    
+
                     // Decode IPC stream to get batches
                     if let Ok(batches) = read_ipc_batches(&filtered) {
                         if !batches.is_empty() {
                             if first_schema.is_none() {
                                 first_schema = Some(batches[0].schema());
                             }
-                            all_batches.extend(batches);
+                            // Apply offset/limit to batches before collecting
+                            let sliced = apply_offset_limit_to_batches(
+                                batches,
+                                &mut remaining_offset,
+                                &mut remaining_limit,
+                            );
+                            all_batches.extend(sliced);
                         }
                     }
                 }
-                
+
                 // Re-encode all batches as single IPC stream
                 if !all_batches.is_empty() {
                     if let Some(schema) = first_schema {
@@ -30377,10 +30393,61 @@ impl Aggregator {
         let group_cols = self.get_group_column_names();
         let num_group_cols = group_cols.len();
 
-        // Build group key columns
-        let mut key_builders: Vec<UInt64Builder> = (0..num_group_cols)
-            .map(|_| UInt64Builder::with_capacity(num_groups))
-            .collect();
+        // Determine builder types based on GroupByColumn types
+        // Named columns use Utf8 (string), TenantId/RouteId use UInt64
+        enum KeyBuilder {
+            UInt64(UInt64Builder),
+            String(StringBuilder),
+        }
+
+        let mut key_builders: Vec<KeyBuilder> = match &self.plan.group_by {
+            GroupBy::Columns(cols) => cols
+                .iter()
+                .map(|col| match col {
+                    GroupByColumn::Named(_) => {
+                        KeyBuilder::String(StringBuilder::with_capacity(num_groups, num_groups * 32))
+                    }
+                    _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
+                })
+                .collect(),
+            GroupBy::Tenant | GroupBy::Route => {
+                vec![KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups))]
+            }
+            GroupBy::Rollup(cols) | GroupBy::Cube(cols) => cols
+                .iter()
+                .map(|col| match col {
+                    GroupByColumn::Named(_) => {
+                        KeyBuilder::String(StringBuilder::with_capacity(num_groups, num_groups * 32))
+                    }
+                    _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
+                })
+                .collect(),
+            GroupBy::GroupingSets(sets) => {
+                let mut builders = Vec::new();
+                let mut added = std::collections::HashSet::new();
+                for set in sets {
+                    for col in set {
+                        let name = match col {
+                            GroupByColumn::TenantId => "tenant_id",
+                            GroupByColumn::RouteId => "route_id",
+                            GroupByColumn::Named(n) => n.as_str(),
+                        };
+                        if added.insert(name.to_string()) {
+                            builders.push(match col {
+                                GroupByColumn::Named(_) => KeyBuilder::String(
+                                    StringBuilder::with_capacity(num_groups, num_groups * 32),
+                                ),
+                                _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
+                            });
+                        }
+                    }
+                }
+                builders
+            }
+            _ => (0..num_group_cols)
+                .map(|_| KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)))
+                .collect(),
+        };
 
         // Build aggregate columns
         let mut agg_columns: Vec<Vec<f64>> = self
@@ -30392,14 +30459,24 @@ impl Aggregator {
         let mut count_star_values: Vec<i64> = Vec::with_capacity(num_groups);
 
         for (key, state) in &self.grouped_state {
-            // Add key values
+            // Add key values based on builder type
             for (i, kv) in key.iter().enumerate() {
                 if i < key_builders.len() {
-                    match kv {
-                        GroupKeyValue::UInt64(v) => key_builders[i].append_value(*v),
-                        GroupKeyValue::Int64(v) => key_builders[i].append_value(*v as u64),
-                        GroupKeyValue::Null => key_builders[i].append_null(),
-                        _ => key_builders[i].append_null(),
+                    match (&mut key_builders[i], kv) {
+                        (KeyBuilder::UInt64(b), GroupKeyValue::UInt64(v)) => b.append_value(*v),
+                        (KeyBuilder::UInt64(b), GroupKeyValue::Int64(v)) => {
+                            b.append_value(*v as u64)
+                        }
+                        (KeyBuilder::UInt64(b), GroupKeyValue::Null) => b.append_null(),
+                        (KeyBuilder::UInt64(b), GroupKeyValue::String(_)) => b.append_null(),
+                        (KeyBuilder::String(b), GroupKeyValue::String(v)) => b.append_value(v),
+                        (KeyBuilder::String(b), GroupKeyValue::Null) => b.append_null(),
+                        (KeyBuilder::String(b), GroupKeyValue::UInt64(v)) => {
+                            b.append_value(v.to_string())
+                        }
+                        (KeyBuilder::String(b), GroupKeyValue::Int64(v)) => {
+                            b.append_value(v.to_string())
+                        }
                     }
                 }
             }
@@ -30448,9 +30525,13 @@ impl Aggregator {
         // Build final columns
         let mut columns: Vec<ArrayRef> = Vec::new();
 
-        // Add group key columns
-        for mut builder in key_builders {
-            columns.push(Arc::new(builder.finish()));
+        // Add group key columns (handle different builder types)
+        for builder in key_builders {
+            let arr: ArrayRef = match builder {
+                KeyBuilder::UInt64(mut b) => Arc::new(b.finish()),
+                KeyBuilder::String(mut b) => Arc::new(b.finish()),
+            };
+            columns.push(arr);
         }
 
         // Add aggregate columns
