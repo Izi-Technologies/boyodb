@@ -22588,14 +22588,15 @@ fn get_available_disk_space(path: &Path) -> Result<u64, EngineError> {
     {
         use std::os::windows::ffi::OsStrExt;
         use winapi::um::fileapi::GetDiskFreeSpaceExW;
+        use winapi::um::winnt::ULARGE_INTEGER;
 
         let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let mut free_bytes_available: u64 = 0;
+        let mut free_bytes_available: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
 
         let result = unsafe {
             GetDiskFreeSpaceExW(
                 wide_path.as_ptr(),
-                &mut free_bytes_available as *mut _,
+                &mut free_bytes_available,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             )
@@ -22605,7 +22606,7 @@ fn get_available_disk_space(path: &Path) -> Result<u64, EngineError> {
             return Err(EngineError::Io("GetDiskFreeSpaceExW failed".into()));
         }
 
-        Ok(free_bytes_available)
+        Ok(unsafe { *free_bytes_available.QuadPart() })
     }
 
     #[cfg(not(any(unix, windows)))]

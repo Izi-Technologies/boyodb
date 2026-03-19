@@ -69,7 +69,7 @@ memmap2 = "0.9"                                              # Memory-mapped fil
 nix = { version = "0.28", features = ["fs", "uio"] }         # Unix system calls for vectored I/O
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "minwindef"] }  # Windows disk space checking
+winapi = { version = "0.3", features = ["fileapi", "minwindef", "winnt"] }  # Windows disk space checking
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6", optional = true }              # Real io_uring support on Linux
