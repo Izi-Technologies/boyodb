@@ -164,7 +164,10 @@ fn sum_i64_avx2(values: &[i64]) -> i64 {
         sum3 = sum3.wrapping_add(chunk[3]);
     }
 
-    let mut sum = sum0.wrapping_add(sum1).wrapping_add(sum2).wrapping_add(sum3);
+    let mut sum = sum0
+        .wrapping_add(sum1)
+        .wrapping_add(sum2)
+        .wrapping_add(sum3);
 
     for &v in remainder {
         sum = sum.wrapping_add(v);

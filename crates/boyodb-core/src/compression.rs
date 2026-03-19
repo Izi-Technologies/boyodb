@@ -627,7 +627,12 @@ impl Lz4Codec {
     }
 
     /// O(1) hash-table based match finding - ClickHouse-style optimization
-    fn find_match_with_table(&self, data: &[u8], pos: usize, hash_table: &mut [u32; 4096]) -> (usize, usize) {
+    fn find_match_with_table(
+        &self,
+        data: &[u8],
+        pos: usize,
+        hash_table: &mut [u32; 4096],
+    ) -> (usize, usize) {
         if pos < 4 || pos + 4 > data.len() {
             return (0, 0);
         }

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Segments can be recovered by moving them back from the detached directory
   - Matches ClickHouse's safe orphan handling approach
 
+- **High-Concurrency Connection Handling**: Increased default max connections from 64 to 256 for better production scalability.
+  - New `--query-queue-timeout` option (default: 1000ms) for configurable backpressure behavior
+  - Queries now wait in queue for up to 1 second before being rejected, improving throughput under load
+  - Existing query concurrency limiting (2x worker threads) prevents CPU overload
+
 ### Fixed
 
 - **GROUP BY Type Mismatch**: Fixed "batch creation error: Invalid argument error" when using GROUP BY on string columns. The query engine now creates appropriate builder types (StringBuilder for string columns, UInt64Builder for numeric columns) to match schema expectations.

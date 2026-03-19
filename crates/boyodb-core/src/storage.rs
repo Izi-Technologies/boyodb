@@ -168,7 +168,8 @@ impl TieredStorage {
         let file = File::open(path)
             .map_err(|e| EngineError::Io(format!("open segment for mmap failed: {}", e)))?;
 
-        let file_len = file.metadata()
+        let file_len = file
+            .metadata()
             .map_err(|e| EngineError::Io(format!("get file metadata failed: {}", e)))?
             .len() as usize;
 

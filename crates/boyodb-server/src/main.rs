@@ -812,6 +812,8 @@ struct ServerConfig {
     idle_timeout_secs: u64,
     /// Maximum connection lifetime in seconds (default: 3600)
     conn_max_lifetime_secs: u64,
+    /// Query queue timeout in milliseconds (default: 1000)
+    query_queue_timeout_ms: u64,
     tls_acceptor: Option<TlsAcceptor>,
     log_requests: bool,
     client_auth: bool,
@@ -1230,7 +1232,7 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut max_ipc_bytes: usize = 512 * 1024 * 1024;
     let mut max_frame_len: usize = DEFAULT_MAX_FRAME_LEN;
     let mut max_query_len: usize = DEFAULT_MAX_QUERY_LEN;
-    let mut max_connections: usize = 64;
+    let mut max_connections: usize = 256;
     // Auto-detect worker threads based on CPU count (default to available CPUs, min 4)
     let mut worker_threads: usize = std::thread::available_parallelism()
         .map(|p| p.get())
@@ -1239,6 +1241,7 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
     let mut io_timeout_ms: u64 = DEFAULT_IO_TIMEOUT_MILLIS;
     let mut idle_timeout_secs: u64 = 300; // 5 minutes
     let mut conn_max_lifetime_secs: u64 = 3600; // 1 hour
+    let mut query_queue_timeout_ms: u64 = 1000; // 1 second queue timeout for backpressure
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
     let mut tls_ca: Option<PathBuf> = None;
@@ -1449,6 +1452,14 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
                 if let Some(val) = args.get(i + 1) {
                     if let Ok(v) = val.parse::<u64>() {
                         conn_max_lifetime_secs = v;
+                    }
+                    i += 1;
+                }
+            }
+            "--query-queue-timeout" => {
+                if let Some(val) = args.get(i + 1) {
+                    if let Ok(v) = val.parse::<u64>() {
+                        query_queue_timeout_ms = v.max(100);
                     }
                     i += 1;
                 }
@@ -1904,6 +1915,7 @@ fn parse_config(args: Vec<String>) -> Result<ServerConfig, Box<dyn std::error::E
         io_timeout: Duration::from_millis(io_timeout_ms.max(1)),
         idle_timeout_secs,
         conn_max_lifetime_secs,
+        query_queue_timeout_ms,
         tls_acceptor,
         log_requests,
         client_auth,
@@ -2598,6 +2610,7 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     ));
     info!(
         max_concurrent_queries = max_concurrent_queries,
+        query_queue_timeout_ms = cfg.query_queue_timeout_ms,
         "Query concurrency limit configured"
     );
 
@@ -3030,9 +3043,10 @@ async fn handle_conn(
         );
 
         let _query_permit = if is_heavy_operation {
-            // Try to acquire a permit, waiting briefly if system is loaded
+            // Try to acquire a permit, waiting up to query_queue_timeout_ms if system is loaded
+            // This provides better queueing behavior under high concurrency
             match conn_stats
-                .try_acquire_query_with_timeout(Duration::from_millis(100))
+                .try_acquire_query_with_timeout(Duration::from_millis(cfg.query_queue_timeout_ms))
                 .await
             {
                 Some(permit) => {
@@ -4593,8 +4607,10 @@ async fn process_request(
         Request::ListDetached => {
             let db = db.clone();
             let segments = blocking(move || {
-                db.list_detached_segments().map_err(|e| ServerError::Db(e.to_string()))
-            }).await?;
+                db.list_detached_segments()
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             let segments_json = serde_json::to_value(&segments).map_err(|e| {
                 ServerError::Encode(format!("failed to serialize detached segments: {e}"))
             })?;
@@ -4609,8 +4625,10 @@ async fn process_request(
             let db = db.clone();
             let seg_id = segment_id.clone();
             blocking(move || {
-                db.drop_detached_segment(&seg_id).map_err(|e| ServerError::Db(e.to_string()))
-            }).await?;
+                db.drop_detached_segment(&seg_id)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             Ok(Response::ok_message(&format!(
                 "detached segment '{}' permanently deleted",
                 segment_id
@@ -4620,8 +4638,10 @@ async fn process_request(
             let db = db.clone();
             let seg_id = segment_id.clone();
             blocking(move || {
-                db.reattach_segment(&seg_id).map_err(|e| ServerError::Db(e.to_string()))
-            }).await?;
+                db.reattach_segment(&seg_id)
+                    .map_err(|e| ServerError::Db(e.to_string()))
+            })
+            .await?;
             Ok(Response::ok_message(&format!(
                 "segment '{}' reattached (run repair_segments to add to manifest)",
                 segment_id

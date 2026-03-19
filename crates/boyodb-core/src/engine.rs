@@ -711,7 +711,6 @@ pub struct EngineConfig {
     /// Enable parallel compression for batch ingestion
     /// Default: true
     pub parallel_compression: bool,
-
 }
 
 impl EngineConfig {
@@ -3671,8 +3670,10 @@ impl Db {
 
             // Log details about missing segments grouped by table
             if !integrity_report.missing_segments.is_empty() {
-                let mut missing_by_table: std::collections::HashMap<String, Vec<&MissingSegmentInfo>> =
-                    std::collections::HashMap::new();
+                let mut missing_by_table: std::collections::HashMap<
+                    String,
+                    Vec<&MissingSegmentInfo>,
+                > = std::collections::HashMap::new();
                 for info in &integrity_report.missing_segments {
                     let key = format!("{}.{}", info.database, info.table);
                     missing_by_table.entry(key).or_default().push(info);
@@ -3702,7 +3703,10 @@ impl Db {
             if !integrity_report.orphaned_files.is_empty() {
                 let detached = detach_orphaned_segments(&manifest, &cfg.segments_dir);
                 if !detached.is_empty() {
-                    tracing::info!("Detached {} orphaned segment files (see segments/detached/)", detached.len());
+                    tracing::info!(
+                        "Detached {} orphaned segment files (see segments/detached/)",
+                        detached.len()
+                    );
                 }
             }
         } else {
@@ -4155,7 +4159,8 @@ impl Db {
 
         // Write buffering: if enabled and payload is small, buffer it
         // Flush when buffer exceeds threshold or time expires
-        if !skip_buffer && self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes {
+        if !skip_buffer && self.cfg.write_buffer_enabled && payload_len < self.cfg.min_segment_bytes
+        {
             let db_name = batch
                 .database
                 .as_deref()
@@ -4413,7 +4418,10 @@ impl Db {
             // CRITICAL: Verify segment file exists and has correct checksum BEFORE adding to manifest
             // This prevents "table with missing segments" errors by ensuring data integrity
             // before the manifest references the segment
-            let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", manifest_entry.segment_id));
+            let segment_path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", manifest_entry.segment_id));
             if !segment_path.exists() {
                 return Err(EngineError::Io(format!(
                     "CRITICAL: Segment file {} was not persisted correctly - file does not exist after write",
@@ -5198,7 +5206,10 @@ impl Db {
             )?;
 
             // CRITICAL: Verify segment file exists after write (prevents missing segments)
-            let segment_path = self.cfg.segments_dir.join(format!("{}.ipc", mem_entry.entry.segment_id));
+            let segment_path = self
+                .cfg
+                .segments_dir
+                .join(format!("{}.ipc", mem_entry.entry.segment_id));
             if !segment_path.exists() {
                 return Err(EngineError::Io(format!(
                     "CRITICAL: Memtable flush - segment file {} was not persisted correctly",
@@ -6427,16 +6438,18 @@ impl Db {
                         } else {
                             // Decode IPC and add batches
                             if let Ok(batches) = read_ipc_batches(&filtered) {
-                                estimated_rows += batches.iter().map(|b| b.num_rows()).sum::<usize>();
+                                estimated_rows +=
+                                    batches.iter().map(|b| b.num_rows()).sum::<usize>();
                                 all_batches.extend(batches);
                             }
                         }
                     }
                 }
-                
+
                 // Merge all batches into single IPC stream
                 if !all_batches.is_empty() {
-                    records = record_batches_to_ipc(all_batches[0].schema().as_ref(), &all_batches)?;
+                    records =
+                        record_batches_to_ipc(all_batches[0].schema().as_ref(), &all_batches)?;
                 }
             }
 
@@ -6800,7 +6813,8 @@ impl Db {
         }
 
         // Separate cached from uncached entries
-        let mut results: Vec<(usize, Result<Arc<Vec<u8>>, EngineError>)> = Vec::with_capacity(entries.len());
+        let mut results: Vec<(usize, Result<Arc<Vec<u8>>, EngineError>)> =
+            Vec::with_capacity(entries.len());
         let mut uncached: Vec<(usize, &ManifestEntry)> = Vec::new();
 
         for (idx, entry) in entries.iter().enumerate() {
@@ -6829,11 +6843,10 @@ impl Db {
             let loaded: Vec<_> = uncached
                 .par_iter()
                 .map(|(idx, entry)| {
-                    let result = load_segment(storage, entry)
-                        .map(|data| {
-                            // Insert into cache and return Arc
-                            self.segment_cache.insert(entry.segment_id.clone(), data)
-                        });
+                    let result = load_segment(storage, entry).map(|data| {
+                        // Insert into cache and return Arc
+                        self.segment_cache.insert(entry.segment_id.clone(), data)
+                    });
                     (*idx, result)
                 })
                 .collect();
@@ -6866,7 +6879,11 @@ impl Db {
             if next_prefetch_start < entries.len() {
                 let next_prefetch_end = (next_prefetch_start + prefetch_count).min(entries.len());
                 // Non-blocking prefetch hint
-                if self.segment_cache.get(&entries[next_prefetch_start].segment_id).is_none() {
+                if self
+                    .segment_cache
+                    .get(&entries[next_prefetch_start].segment_id)
+                    .is_none()
+                {
                     // Only prefetch if not already cached
                     let entries_to_prefetch = &entries[next_prefetch_start..next_prefetch_end];
                     self.prefetch_segments(entries_to_prefetch);
@@ -14449,19 +14466,17 @@ impl Db {
 
         for entry in &entries_to_merge {
             match self.load_segment_cached(entry) {
-                Ok(payload) => {
-                    match read_ipc_batches(&payload) {
-                        Ok(batches) => all_batches.extend(batches),
-                        Err(e) => {
-                            tracing::warn!(
-                                segment_id = %entry.segment_id,
-                                error = %e,
-                                "Skipping corrupted segment during merge (IPC read failed)"
-                            );
-                            corrupted_segments.push(entry.segment_id.clone());
-                        }
+                Ok(payload) => match read_ipc_batches(&payload) {
+                    Ok(batches) => all_batches.extend(batches),
+                    Err(e) => {
+                        tracing::warn!(
+                            segment_id = %entry.segment_id,
+                            error = %e,
+                            "Skipping corrupted segment during merge (IPC read failed)"
+                        );
+                        corrupted_segments.push(entry.segment_id.clone());
                     }
-                }
+                },
                 Err(e) => {
                     tracing::warn!(
                         segment_id = %entry.segment_id,
@@ -14480,7 +14495,9 @@ impl Db {
                 "Removing corrupted segments from manifest"
             );
             let mut manifest = self.manifest.write();
-            manifest.entries.retain(|e| !corrupted_segments.contains(&e.segment_id));
+            manifest
+                .entries
+                .retain(|e| !corrupted_segments.contains(&e.segment_id));
             manifest.bump_version();
             drop(manifest);
 
@@ -18197,7 +18214,9 @@ impl Db {
             None => {
                 // Fallback: run synchronously if self_ref not set
                 tracing::warn!("self_ref not set, running column rename synchronously");
-                if let Err(e) = self.rewrite_segments_rename_column(database, table, old_column, new_column) {
+                if let Err(e) =
+                    self.rewrite_segments_rename_column(database, table, old_column, new_column)
+                {
                     tracing::warn!(
                         database = %database,
                         table = %table,
@@ -18217,7 +18236,9 @@ impl Db {
         let new_col = new_column.to_string();
 
         std::thread::spawn(move || {
-            if let Err(e) = db_arc.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col) {
+            if let Err(e) =
+                db_arc.rewrite_segments_rename_column(&db_name, &tbl_name, &old_col, &new_col)
+            {
                 tracing::warn!(
                     database = %db_name,
                     table = %tbl_name,
@@ -18320,7 +18341,8 @@ impl Db {
             None => {
                 // Fallback: run synchronously if self_ref not set
                 tracing::warn!("self_ref not set, running schema rewrite synchronously");
-                if let Err(e) = self.rewrite_table_segments_to_schema(database, table, schema_json) {
+                if let Err(e) = self.rewrite_table_segments_to_schema(database, table, schema_json)
+                {
                     tracing::warn!(
                         database = %database,
                         table = %table,
@@ -18337,7 +18359,9 @@ impl Db {
         let schema_json = schema_json.to_string();
 
         std::thread::spawn(move || {
-            if let Err(e) = db_arc.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json) {
+            if let Err(e) =
+                db_arc.rewrite_table_segments_to_schema(&db_name, &tbl_name, &schema_json)
+            {
                 tracing::warn!(
                     database = %db_name,
                     table = %tbl_name,
@@ -18395,7 +18419,6 @@ impl Db {
                         return;
                     }
                 };
-
             });
         }
     }
@@ -21019,7 +21042,10 @@ impl Db {
         // Create detached directory if needed
         let detached_dir = self.cfg.segments_dir.join("detached");
         if let Err(e) = std::fs::create_dir_all(&detached_dir) {
-            return Err(EngineError::Io(format!("Failed to create detached directory: {}", e)));
+            return Err(EngineError::Io(format!(
+                "Failed to create detached directory: {}",
+                e
+            )));
         }
 
         let mut detached = Vec::new();
@@ -21140,7 +21166,10 @@ impl Db {
         }
 
         std::fs::remove_file(&path).map_err(|e| {
-            EngineError::Io(format!("Failed to delete detached segment {}: {}", segment_id, e))
+            EngineError::Io(format!(
+                "Failed to delete detached segment {}: {}",
+                segment_id, e
+            ))
         })?;
 
         tracing::info!("Permanently deleted detached segment: {}", segment_id);
@@ -21173,7 +21202,11 @@ impl Db {
             EngineError::Io(format!("Failed to reattach segment {}: {}", segment_id, e))
         })?;
 
-        tracing::info!("Reattached segment: {} -> {}", segment_id, active_path.display());
+        tracing::info!(
+            "Reattached segment: {} -> {}",
+            segment_id,
+            active_path.display()
+        );
         Ok(())
     }
 
@@ -22176,8 +22209,11 @@ fn validate_manifest_integrity(
     // Skip this check if there are many segments to avoid slow startup
     // Orphan detection can be run later via cleanup_orphaned_files()
     if manifest.entries.len() < 1000 {
-        let manifest_segment_ids: std::collections::HashSet<&str> =
-            manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
+        let manifest_segment_ids: std::collections::HashSet<&str> = manifest
+            .entries
+            .iter()
+            .map(|e| e.segment_id.as_str())
+            .collect();
 
         if let Ok(dir_entries) = std::fs::read_dir(segments_dir) {
             for entry in dir_entries.flatten() {
@@ -22260,12 +22296,12 @@ fn repair_manifest_missing_segments(
 /// - Manifest corruption/reset that would cause all segments to appear orphaned
 /// - Replication lag where segments arrive before manifest updates
 /// - Human error in manifest manipulation
-fn detach_orphaned_segments(
-    manifest: &Manifest,
-    segments_dir: &Path,
-) -> Vec<String> {
-    let manifest_segment_ids: std::collections::HashSet<&str> =
-        manifest.entries.iter().map(|e| e.segment_id.as_str()).collect();
+fn detach_orphaned_segments(manifest: &Manifest, segments_dir: &Path) -> Vec<String> {
+    let manifest_segment_ids: std::collections::HashSet<&str> = manifest
+        .entries
+        .iter()
+        .map(|e| e.segment_id.as_str())
+        .collect();
 
     let mut detached = Vec::new();
 
@@ -30410,27 +30446,29 @@ impl Aggregator {
         }
 
         let mut key_builders: Vec<KeyBuilder> = match &self.plan.group_by {
-            GroupBy::Columns(cols) => cols
-                .iter()
-                .map(|col| match col {
-                    GroupByColumn::Named(_) => {
-                        KeyBuilder::String(StringBuilder::with_capacity(num_groups, num_groups * 32))
-                    }
-                    _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
-                })
-                .collect(),
+            GroupBy::Columns(cols) => {
+                cols.iter()
+                    .map(|col| match col {
+                        GroupByColumn::Named(_) => KeyBuilder::String(
+                            StringBuilder::with_capacity(num_groups, num_groups * 32),
+                        ),
+                        _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
+                    })
+                    .collect()
+            }
             GroupBy::Tenant | GroupBy::Route => {
                 vec![KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups))]
             }
-            GroupBy::Rollup(cols) | GroupBy::Cube(cols) => cols
-                .iter()
-                .map(|col| match col {
-                    GroupByColumn::Named(_) => {
-                        KeyBuilder::String(StringBuilder::with_capacity(num_groups, num_groups * 32))
-                    }
-                    _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
-                })
-                .collect(),
+            GroupBy::Rollup(cols) | GroupBy::Cube(cols) => {
+                cols.iter()
+                    .map(|col| match col {
+                        GroupByColumn::Named(_) => KeyBuilder::String(
+                            StringBuilder::with_capacity(num_groups, num_groups * 32),
+                        ),
+                        _ => KeyBuilder::UInt64(UInt64Builder::with_capacity(num_groups)),
+                    })
+                    .collect()
+            }
             GroupBy::GroupingSets(sets) => {
                 let mut builders = Vec::new();
                 let mut added = std::collections::HashSet::new();
@@ -33432,7 +33470,10 @@ pub fn start_compaction_threads(db: Arc<Db>) {
                 }
             });
 
-            tracing::debug!(thread_id = thread_id, "Spawned continuous compaction thread");
+            tracing::debug!(
+                thread_id = thread_id,
+                "Spawned continuous compaction thread"
+            );
         }
     }
 
@@ -33452,7 +33493,10 @@ pub fn start_compaction_threads(db: Arc<Db>) {
             }
         });
 
-        tracing::debug!(interval_secs = interval_secs, "Spawned interval-based compaction thread");
+        tracing::debug!(
+            interval_secs = interval_secs,
+            "Spawned interval-based compaction thread"
+        );
     }
 }
 
@@ -39124,7 +39168,10 @@ mod tests {
         // Delete one segment file to simulate crash/corruption
         let segment_to_delete = &segment_ids[1];
         let segment_path = cfg.segments_dir.join(format!("{}.ipc", segment_to_delete));
-        assert!(segment_path.exists(), "Segment file should exist before deletion");
+        assert!(
+            segment_path.exists(),
+            "Segment file should exist before deletion"
+        );
         std::fs::remove_file(&segment_path).unwrap();
         assert!(!segment_path.exists(), "Segment file should be deleted");
 
@@ -39368,6 +39415,9 @@ mod tests {
         assert_eq!(removed[0].segment_id, "seg-remove");
         assert_eq!(manifest.entries.len(), 1);
         assert_eq!(manifest.entries[0].segment_id, "seg-keep");
-        assert!(manifest.version > 10, "Version should be bumped after repair");
+        assert!(
+            manifest.version > 10,
+            "Version should be bumped after repair"
+        );
     }
 }

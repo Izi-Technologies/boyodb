@@ -30,9 +30,9 @@ use parking_lot::Mutex;
 #[cfg(all(target_os = "linux", feature = "io-uring-async"))]
 mod real_uring {
     use io_uring::{opcode, types, IoUring as RealIoUring};
+    use parking_lot::Mutex;
     use std::os::unix::io::AsRawFd;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use parking_lot::Mutex;
 
     /// Real io_uring wrapper for high-performance I/O
     pub struct LinuxIoUring {
@@ -52,12 +52,7 @@ mod real_uring {
             })
         }
 
-        pub fn submit_read(
-            &self,
-            fd: i32,
-            buf: &mut [u8],
-            offset: u64,
-        ) -> io::Result<u64> {
+        pub fn submit_read(&self, fd: i32, buf: &mut [u8], offset: u64) -> io::Result<u64> {
             let user_data = self.next_user_data.fetch_add(1, Ordering::SeqCst);
 
             let read_op = opcode::Read::new(types::Fd(fd), buf.as_mut_ptr(), buf.len() as u32)
@@ -76,12 +71,7 @@ mod real_uring {
             Ok(user_data)
         }
 
-        pub fn submit_write(
-            &self,
-            fd: i32,
-            buf: &[u8],
-            offset: u64,
-        ) -> io::Result<u64> {
+        pub fn submit_write(&self, fd: i32, buf: &[u8], offset: u64) -> io::Result<u64> {
             let user_data = self.next_user_data.fetch_add(1, Ordering::SeqCst);
 
             let write_op = opcode::Write::new(types::Fd(fd), buf.as_ptr(), buf.len() as u32)
@@ -155,7 +145,7 @@ impl Default for IoUringConfig {
             ring_size: 256,
             direct_io: false,
             fixed_buffers: true,
-            num_fixed_buffers: 128, // Increased from 64
+            num_fixed_buffers: 128,        // Increased from 64
             fixed_buffer_size: 128 * 1024, // 128KB for better throughput
             polling_mode: false,
             batch_size: 64, // Increased from 32
@@ -927,7 +917,9 @@ impl Prefetcher {
     /// Hint that we will read from this offset soon
     pub fn prefetch(&self, fd: i32, offset: u64) {
         let request_id = self.engine.submit_read(fd, offset, self.prefetch_size, 0);
-        self.pending_prefetches.lock().push_back((fd, offset, request_id));
+        self.pending_prefetches
+            .lock()
+            .push_back((fd, offset, request_id));
     }
 
     /// Check if prefetch is complete and get data

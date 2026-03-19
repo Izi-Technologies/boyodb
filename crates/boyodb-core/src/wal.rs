@@ -782,7 +782,8 @@ impl Wal {
 
                 // CRITICAL: Verify segment file was actually written before adding to manifest
                 // This prevents crash recovery from creating manifest entries for missing segments
-                let segment_path = storage.local_segments_dir()
+                let segment_path = storage
+                    .local_segments_dir()
                     .join(format!("{}.ipc", entry.segment_id));
                 if !segment_path.exists() {
                     warn!(
@@ -946,7 +947,8 @@ impl Wal {
     /// This should be called after the manifest has been persisted and snapshotted,
     /// as the data in old WAL files is now safely in the manifest.
     pub fn cleanup_old_rotated_files(&self) -> Result<usize, EngineError> {
-        let parent = self.path
+        let parent = self
+            .path
             .parent()
             .ok_or_else(|| EngineError::Internal("wal path missing parent".into()))?;
 
