@@ -5,7 +5,15 @@ All notable changes to BoyoDB will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.8] - 2026-03-18
+## [0.9.8] - 2026-03-19
+
+### Added
+
+- **Zero-Copy Distributed Query Streaming**: Eliminated JSON Base64 string encoding for inter-node query IPC streams, launching a raw trailing binary network protocol that drastically cuts memory footprints, CPU utilization, and reduces distributed network sizes by ~33%.
+
+### Fixed
+
+- **Materialized View & Index Durability**: Fixed materialized views and indexes suffering data loss upon abrupt restarts by replacing `fs::write` with durable `TieredStorage::persist_segment_local` flush synchronization. `.ipc` file extension support is now fully integrated with engine CRUD tests to prevent missing files.
 
 ### Added
 

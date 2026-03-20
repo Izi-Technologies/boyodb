@@ -4341,7 +4341,8 @@ impl Db {
             existing_table.as_ref().and_then(|t| t.schema_json.as_ref()),
         )?;
         let encoded_payload = apply_column_encodings(&sorted_payload, &encodings)?;
-        let stored_payload = compress_payload(&encoded_payload, table_compression.as_deref())?;
+        let (stored_payload, actual_compression) =
+            compress_payload(&encoded_payload, table_compression.as_deref())?;
         let existing_schema = existing_table
             .as_ref()
             .and_then(|t| t.schema_json.as_ref())
@@ -4390,7 +4391,7 @@ impl Db {
             tier: SegmentTier::Hot,
             database: db_name.to_string(),
             table: table_name.to_string(),
-            compression: table_compression.clone(),
+            compression: actual_compression,
             watermark_micros: batch.watermark_micros,
             event_time_min: stats.event_time_min,
             event_time_max: stats.event_time_max,
@@ -4789,7 +4790,7 @@ impl Db {
                                 .and_then(|t| t.compression.clone())
                                 .or_else(|| tier_compression.clone()),
                         )?;
-                        let stored_payload = compress_payload_adaptive(
+                        let (stored_payload, actual_compression) = compress_payload_adaptive(
                             &batch.payload_ipc,
                             table_compression.as_deref(),
                             compression_skip,
@@ -4816,7 +4817,7 @@ impl Db {
                             tier: SegmentTier::Hot,
                             database: db_name.to_string(),
                             table: table_name.to_string(),
-                            compression: table_compression,
+                            compression: actual_compression,
                             watermark_micros: *watermark,
                             event_time_min: stats.event_time_min,
                             event_time_max: stats.event_time_max,
@@ -4904,7 +4905,7 @@ impl Db {
                         .and_then(|t| t.compression.clone())
                         .or_else(|| self.cfg.tier_hot_compression.clone()),
                 )?;
-                let stored_payload = compress_payload_adaptive(
+                let (stored_payload, actual_compression) = compress_payload_adaptive(
                     &batch.payload_ipc,
                     table_compression.as_deref(),
                     self.cfg.compression_skip_threshold_bytes,
@@ -4931,7 +4932,7 @@ impl Db {
                     tier: SegmentTier::Hot,
                     database: db_name.to_string(),
                     table: table_name.to_string(),
-                    compression: table_compression.clone(),
+                    compression: actual_compression,
                     watermark_micros: batch.watermark_micros,
                     event_time_min: stats.event_time_min,
                     event_time_max: stats.event_time_max,
@@ -10662,13 +10663,14 @@ impl Db {
             for (entry, new_compression) in recompress_jobs {
                 let raw = load_segment_raw(&self.storage, &entry)?;
                 let decoded = decompress_payload(raw, entry.compression.as_deref())?;
-                let stored = compress_payload(&decoded, new_compression.as_deref())?;
+                let (stored, actual_compression) =
+                    compress_payload(&decoded, new_compression.as_deref())?;
                 persist_segment_ipc(&self.storage, &entry.segment_id, &stored)?;
                 updates.push((
                     entry.segment_id.clone(),
                     stored.len() as u64,
                     compute_checksum(&stored),
-                    new_compression,
+                    actual_compression,
                 ));
             }
 
@@ -11157,7 +11159,8 @@ impl Db {
             table_meta.as_ref().and_then(|t| t.schema_json.as_ref()),
         )?;
         let encoded_payload = apply_column_encodings(&sorted_ipc, &encodings)?;
-        let stored_payload = compress_payload(&encoded_payload, compression.as_deref())?;
+        let (stored_payload, actual_compression) =
+            compress_payload(&encoded_payload, compression.as_deref())?;
 
         let seq = self.segment_seq.fetch_add(1, Ordering::SeqCst);
         let shard_id = (seq % (self.shards.len() as u64)) as usize;
@@ -11171,7 +11174,7 @@ impl Db {
             tier: SegmentTier::Warm,
             database: db_name.clone(),
             table: table_name.clone(),
-            compression: compression.clone(),
+            compression: actual_compression,
             watermark_micros: max_watermark,
             event_time_min: validated.stats.event_time_min,
             event_time_max: validated.stats.event_time_max,
@@ -12148,11 +12151,9 @@ impl Db {
 
         // Store the result data as a segment
         if !response.records_ipc.is_empty() {
-            // Write the IPC data to a segment file
-            let segment_path = self.cfg.segments_dir.join(&segment_id);
+            // Write the IPC data to a segment file durably
             let payload = &response.records_ipc;
-            fs::write(&segment_path, payload)
-                .map_err(|e| EngineError::Io(format!("write mv segment failed: {e}")))?;
+            self.storage.persist_segment_local(&segment_id, payload)?;
 
             // Update the manifest
             let mut manifest = self.manifest.write();
@@ -12333,10 +12334,8 @@ impl Db {
 
         // Store the merged result
         if !merged_data.is_empty() {
-            let segment_path = self.cfg.segments_dir.join(&segment_id);
             let payload = &merged_data;
-            fs::write(&segment_path, payload)
-                .map_err(|e| EngineError::Io(format!("write mv segment failed: {e}")))?;
+            self.storage.persist_segment_local(&segment_id, payload)?;
 
             let mut manifest = self.manifest.write();
 
@@ -12438,7 +12437,11 @@ impl Db {
         match mv {
             Some(mv) => {
                 if let Some(segment_id) = &mv.data_segment_id {
-                    let segment_path = self.cfg.segments_dir.join(segment_id);
+                    let mut segment_path =
+                        self.cfg.segments_dir.join(format!("{}.ipc", segment_id));
+                    if !segment_path.exists() {
+                        segment_path = self.cfg.segments_dir.join(segment_id);
+                    }
                     if segment_path.exists() {
                         let data = fs::read(&segment_path)
                             .map_err(|e| EngineError::Io(format!("read mv segment failed: {e}")))?;
@@ -12469,6 +12472,34 @@ impl Db {
     fn index_segment_path(&self, index: &IndexMeta, segment_id: &str) -> PathBuf {
         self.index_dir(&index.database, &index.table, &index.name)
             .join(format!("{segment_id}.idx"))
+    }
+
+    /// Atomically write to a file and fsync it to disk (used for index segments)
+    fn persist_file_atomic(path: &Path, data: &[u8]) -> Result<(), EngineError> {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        let tmp_path = path.with_extension("tmp");
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .map_err(|e| EngineError::Io(format!("open tmp failed: {}", e)))?;
+            file.write_all(data)
+                .map_err(|e| EngineError::Io(format!("write tmp failed: {}", e)))?;
+            file.sync_all()
+                .map_err(|e| EngineError::Io(format!("fsync tmp failed: {}", e)))?;
+        }
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| EngineError::Io(format!("rename failed: {}", e)))?;
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| EngineError::Io(format!("open dir failed: {}", e)))?;
+            dir.sync_all()
+                .map_err(|e| EngineError::Io(format!("fsync dir failed: {}", e)))?;
+        }
+        Ok(())
     }
 
     fn table_schema_map(
@@ -12811,7 +12842,7 @@ impl Db {
         match index.index_type {
             crate::sql::IndexType::Bloom => {
                 let bytes = crate::bloom_utils::serialize_bloom(&bloom)?;
-                fs::write(&path, bytes)
+                Self::persist_file_atomic(&path, &bytes)
                     .map_err(|e| EngineError::Io(format!("write bloom index failed: {e}")))?;
             }
             crate::sql::IndexType::Hash => {
@@ -12822,13 +12853,13 @@ impl Db {
                 for v in values {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
-                fs::write(&path, out)
+                Self::persist_file_atomic(&path, &out)
                     .map_err(|e| EngineError::Io(format!("write hash index failed: {e}")))?;
             }
             crate::sql::IndexType::Fulltext => {
                 if let Some(builder) = fulltext_builder {
                     let bytes = builder.build()?;
-                    fs::write(&path, bytes).map_err(|e| {
+                    Self::persist_file_atomic(&path, &bytes).map_err(|e| {
                         EngineError::Io(format!("write fulltext index failed: {e}"))
                     })?;
                 }
@@ -14540,7 +14571,7 @@ impl Db {
         );
 
         let ipc = record_batches_to_ipc(&schema, &[sorted.clone()])?;
-        let compressed = compress_payload(&ipc, compression.as_deref())?;
+        let (compressed, actual_compression) = compress_payload(&ipc, compression.as_deref())?;
         let checksum = compute_checksum(&compressed);
         let size_bytes = compressed.len() as u64;
 
@@ -14608,7 +14639,7 @@ impl Db {
             size_bytes,
             checksum,
             tier: SegmentTier::Warm,
-            compression,
+            compression: actual_compression,
             database: database.to_string(),
             table: table.to_string(),
             watermark_micros,
@@ -18568,7 +18599,7 @@ impl Db {
         }
 
         let compression = normalize_compression(table_meta.compression.clone())?;
-        let mut rewritten: Vec<(String, Vec<u8>, u64, u64)> = Vec::new();
+        let mut rewritten: Vec<(String, Vec<u8>, u64, u64, Option<String>)> = Vec::new();
         for entry in &entries {
             let data = load_segment(&self.storage, entry)?;
             let batches = read_ipc_batches(&data)?;
@@ -18579,15 +18610,21 @@ impl Db {
             }
             if !new_batches.is_empty() {
                 let ipc = record_batches_to_ipc(new_batches[0].schema().as_ref(), &new_batches)?;
-                let stored = compress_payload(&ipc, compression.as_deref())?;
+                let (stored, actual_compression) = compress_payload(&ipc, compression.as_deref())?;
                 let checksum = compute_checksum(&stored);
                 let schema_hash =
-                    compute_schema_hash_from_payload(&stored, compression.as_deref())?;
-                rewritten.push((entry.segment_id.clone(), stored, checksum, schema_hash));
+                    compute_schema_hash_from_payload(&stored, actual_compression.as_deref())?;
+                rewritten.push((
+                    entry.segment_id.clone(),
+                    stored,
+                    checksum,
+                    schema_hash,
+                    actual_compression,
+                ));
             }
         }
 
-        for (segment_id, stored, _, _) in &rewritten {
+        for (segment_id, stored, _, _, _) in &rewritten {
             persist_segment_ipc(&self.storage, segment_id, stored)?;
             // Invalidate sharded segment cache (each shard locks independently)
             self.segment_cache.invalidate(segment_id);
@@ -18601,13 +18638,13 @@ impl Db {
                 .iter_mut()
                 .filter(|e| e.database == database && e.table == table)
             {
-                if let Some((_, stored, checksum, schema_hash)) = rewritten
+                if let Some((_, stored, checksum, schema_hash, actual_compression)) = rewritten
                     .iter()
-                    .find(|(id, _, _, _)| id == &entry.segment_id)
+                    .find(|(id, _, _, _, _)| id == &entry.segment_id)
                 {
                     entry.size_bytes = stored.len() as u64;
                     entry.checksum = *checksum;
-                    entry.compression = compression.clone();
+                    entry.compression = actual_compression.clone();
                     entry.schema_hash = Some(*schema_hash);
                 }
             }
@@ -22433,7 +22470,12 @@ fn normalize_compression(opt: Option<String>) -> Result<Option<String>, EngineEr
 /// Optimizations:
 /// - Skips compression for payloads below skip_threshold (default: 4KB)
 /// - Uses adaptive ZSTD levels: level 1 for <1MB, level 3 for >=1MB
-fn compress_payload(payload: &[u8], compression: Option<&str>) -> Result<Vec<u8>, EngineError> {
+///
+/// Returns `(compressed_data, actual_compression_used)` - compression may be None if skipped.
+fn compress_payload(
+    payload: &[u8],
+    compression: Option<&str>,
+) -> Result<(Vec<u8>, Option<String>), EngineError> {
     compress_payload_adaptive(payload, compression, 4 * 1024, true)
 }
 
@@ -22474,21 +22516,22 @@ fn is_compressible(data: &[u8]) -> bool {
 }
 
 /// Compress payload with configurable skip threshold and adaptive levels.
+/// Returns (compressed_data, actual_compression_used) - compression may be None if skipped.
 fn compress_payload_adaptive(
     payload: &[u8],
     compression: Option<&str>,
     skip_threshold: usize,
     adaptive_levels: bool,
-) -> Result<Vec<u8>, EngineError> {
+) -> Result<(Vec<u8>, Option<String>), EngineError> {
     // Skip compression for very small payloads (overhead > benefit)
     if payload.len() < skip_threshold {
-        return Ok(payload.to_vec());
+        return Ok((payload.to_vec(), None));
     }
 
     // Quick entropy check - skip compression for incompressible data
     // This saves significant CPU for already-compressed or random data
     if compression.is_some() && !is_compressible(payload) {
-        return Ok(payload.to_vec());
+        return Ok((payload.to_vec(), None));
     }
 
     match compression {
@@ -22506,24 +22549,26 @@ fn compress_payload_adaptive(
             } else {
                 1 // Small segments: fast
             };
-            zstd_encode_all(Cursor::new(payload), level)
-                .map_err(|e| EngineError::Internal(format!("zstd encode failed: {e}")))
+            let compressed = zstd_encode_all(Cursor::new(payload), level)
+                .map_err(|e| EngineError::Internal(format!("zstd encode failed: {e}")))?;
+            Ok((compressed, Some("zstd".to_string())))
         }
-        Some("lz4") => Ok(lz4_compress(payload)),
+        Some("lz4") => Ok((lz4_compress(payload), Some("lz4".to_string()))),
         Some("snappy") => {
             // Pre-allocate output buffer (snappy typically achieves ~50% compression)
             let estimated_size = payload.len() / 2 + 32;
             let mut encoder = SnappyEncoder::new(Vec::with_capacity(estimated_size));
             std::io::copy(&mut Cursor::new(payload), &mut encoder)
                 .map_err(|e| EngineError::Internal(format!("snappy encode failed: {e}")))?;
-            encoder
+            let compressed = encoder
                 .into_inner()
-                .map_err(|e| EngineError::Internal(format!("snappy finalize failed: {e}")))
+                .map_err(|e| EngineError::Internal(format!("snappy finalize failed: {e}")))?;
+            Ok((compressed, Some("snappy".to_string())))
         }
         Some(other) => Err(EngineError::InvalidArgument(format!(
             "unsupported compression: {other}"
         ))),
-        None => Ok(payload.to_vec()),
+        None => Ok((payload.to_vec(), None)),
     }
 }
 
@@ -35093,7 +35138,9 @@ mod tests {
         let manifest: Manifest = serde_json::from_slice(&db.export_manifest().unwrap()).unwrap();
         let entry = manifest.entries.last().unwrap();
         assert!(matches!(entry.tier, SegmentTier::Warm));
-        assert_eq!(entry.compression.as_deref(), Some("zstd"));
+        // Note: compression may be None for small segments (< 4KB skip threshold)
+        // The important thing is the data can still be read correctly
+        assert!(entry.compression.is_none() || entry.compression.as_deref() == Some("zstd"));
 
         let result = db
             .query(QueryRequest {
@@ -35152,7 +35199,9 @@ mod tests {
         let manifest: Manifest = serde_json::from_slice(&db.export_manifest().unwrap()).unwrap();
         let entry = manifest.entries.last().unwrap();
         assert!(matches!(entry.tier, SegmentTier::Cold));
-        assert_eq!(entry.compression.as_deref(), Some("zstd"));
+        // Note: compression may be None for small segments (< 4KB skip threshold)
+        // The important thing is the data can still be read correctly
+        assert!(entry.compression.is_none() || entry.compression.as_deref() == Some("zstd"));
 
         let result = db
             .query(QueryRequest {
@@ -38569,48 +38618,56 @@ mod tests {
         let original_data = b"Hello, World! This is test data for compression. ".repeat(100);
 
         // Test LZ4 compression
-        let lz4_compressed = compress_payload(&original_data, Some("lz4")).unwrap();
+        let (lz4_compressed, lz4_actual) = compress_payload(&original_data, Some("lz4")).unwrap();
         assert!(
             lz4_compressed.len() < original_data.len(),
             "LZ4 should compress data"
         );
-        let lz4_decompressed = decompress_payload(lz4_compressed, Some("lz4")).unwrap();
+        assert_eq!(lz4_actual.as_deref(), Some("lz4"));
+        let lz4_decompressed = decompress_payload(lz4_compressed, lz4_actual.as_deref()).unwrap();
         assert_eq!(
             lz4_decompressed, original_data,
             "LZ4 roundtrip should preserve data"
         );
 
         // Test Snappy compression
-        let snappy_compressed = compress_payload(&original_data, Some("snappy")).unwrap();
+        let (snappy_compressed, snappy_actual) =
+            compress_payload(&original_data, Some("snappy")).unwrap();
         assert!(
             snappy_compressed.len() < original_data.len(),
             "Snappy should compress data"
         );
-        let snappy_decompressed = decompress_payload(snappy_compressed, Some("snappy")).unwrap();
+        assert_eq!(snappy_actual.as_deref(), Some("snappy"));
+        let snappy_decompressed =
+            decompress_payload(snappy_compressed, snappy_actual.as_deref()).unwrap();
         assert_eq!(
             snappy_decompressed, original_data,
             "Snappy roundtrip should preserve data"
         );
 
         // Test ZSTD compression
-        let zstd_compressed = compress_payload(&original_data, Some("zstd")).unwrap();
+        let (zstd_compressed, zstd_actual) =
+            compress_payload(&original_data, Some("zstd")).unwrap();
         assert!(
             zstd_compressed.len() < original_data.len(),
             "ZSTD should compress data"
         );
-        let zstd_decompressed = decompress_payload(zstd_compressed, Some("zstd")).unwrap();
+        assert_eq!(zstd_actual.as_deref(), Some("zstd"));
+        let zstd_decompressed =
+            decompress_payload(zstd_compressed, zstd_actual.as_deref()).unwrap();
         assert_eq!(
             zstd_decompressed, original_data,
             "ZSTD roundtrip should preserve data"
         );
 
         // Test no compression
-        let no_compress = compress_payload(&original_data, None).unwrap();
+        let (no_compress, no_actual) = compress_payload(&original_data, None).unwrap();
         assert_eq!(
             no_compress, original_data,
             "No compression should preserve data"
         );
-        let no_decompress = decompress_payload(no_compress, None).unwrap();
+        assert_eq!(no_actual, None);
+        let no_decompress = decompress_payload(no_compress, no_actual.as_deref()).unwrap();
         assert_eq!(
             no_decompress, original_data,
             "No decompression should preserve data"
@@ -38651,29 +38708,29 @@ mod tests {
 
         // Benchmark LZ4
         let start = Instant::now();
-        let lz4_compressed = compress_payload(&data, Some("lz4")).unwrap();
+        let (lz4_compressed, lz4_actual) = compress_payload(&data, Some("lz4")).unwrap();
         let lz4_compress_time = start.elapsed();
 
         let start = Instant::now();
-        let _ = decompress_payload(lz4_compressed.clone(), Some("lz4")).unwrap();
+        let _ = decompress_payload(lz4_compressed.clone(), lz4_actual.as_deref()).unwrap();
         let lz4_decompress_time = start.elapsed();
 
         // Benchmark Snappy
         let start = Instant::now();
-        let snappy_compressed = compress_payload(&data, Some("snappy")).unwrap();
+        let (snappy_compressed, snappy_actual) = compress_payload(&data, Some("snappy")).unwrap();
         let snappy_compress_time = start.elapsed();
 
         let start = Instant::now();
-        let _ = decompress_payload(snappy_compressed.clone(), Some("snappy")).unwrap();
+        let _ = decompress_payload(snappy_compressed.clone(), snappy_actual.as_deref()).unwrap();
         let snappy_decompress_time = start.elapsed();
 
         // Benchmark ZSTD
         let start = Instant::now();
-        let zstd_compressed = compress_payload(&data, Some("zstd")).unwrap();
+        let (zstd_compressed, zstd_actual) = compress_payload(&data, Some("zstd")).unwrap();
         let zstd_compress_time = start.elapsed();
 
         let start = Instant::now();
-        let _ = decompress_payload(zstd_compressed.clone(), Some("zstd")).unwrap();
+        let _ = decompress_payload(zstd_compressed.clone(), zstd_actual.as_deref()).unwrap();
         let zstd_decompress_time = start.elapsed();
 
         // Print comparison (visible in test output with --nocapture)

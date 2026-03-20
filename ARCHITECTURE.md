@@ -739,6 +739,19 @@ let compressed: Vec<_> = batches
 - Better CPU utilization during bulk loads
 - Maintains sequential ordering for writes
 
+### Zero-Copy Distributed Streaming
+
+For massive inter-node queries (scatter-gather), the network protocol completely skips serialization overheads for large Arrow partitions:
+
+```
+[4-byte Length][JSON Response Metadata][Raw Binary Arrow IPC Payload]
+```
+
+**Benefits**:
+- Bypasses Base64 allocation, eliminating massive string duplications for multi-hundred megabyte payloads
+- Eradicates CPU decode/encode overhead loops entirely
+- Trims network payload size strictly by ~33% exactly matching native raw sizes
+
 ### Configuration Options
 
 ```rust

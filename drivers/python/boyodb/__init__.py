@@ -80,7 +80,7 @@ from .external import (
     S3Config,
 )
 
-__version__ = "0.9.6"
+__version__ = "0.9.8"
 __all__ = [
     # Core client
     "Client",

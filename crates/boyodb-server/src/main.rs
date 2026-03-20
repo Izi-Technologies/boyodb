@@ -982,6 +982,8 @@ struct Response {
     view_description: Option<boyodb_core::engine::ViewDescription>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prepared_id: Option<String>,
+    #[serde(skip)]
+    raw_ipc_payload: Option<Vec<u8>>,
 }
 
 impl Default for Response {
@@ -1015,6 +1017,7 @@ impl Default for Response {
             table_description: None,
             view_description: None,
             prepared_id: None,
+            raw_ipc_payload: None,
         }
     }
 }
@@ -3382,9 +3385,18 @@ async fn handle_conn(
                 .await;
 
                 match result {
-                    Ok(resp) => {
+                    Ok(mut resp) => {
+                        let payload = resp.raw_ipc_payload.take();
                         write_response(&mut stream, &resp, cfg.io_timeout, cfg.max_frame_len)
                             .await?;
+                        if let Some(bytes) = payload {
+                            timeout(cfg.io_timeout, async { stream.write_all(&bytes).await })
+                                .await
+                                .map_err(|_| ServerError::Timeout("write payload timeout".into()))?
+                                .map_err(|e| {
+                                    ServerError::Io(format!("write payload failed: {e}"))
+                                })?;
+                        }
                     }
                     Err(e) => {
                         let _ = write_response(
@@ -3661,7 +3673,7 @@ async fn process_request(
                         zstd::stream::encode_all(std::io::Cursor::new(&response.records_ipc), 3)
                             .map_err(|e| ServerError::Encode(format!("compression failed: {e}")))?;
                     Ok(Response {
-                        ipc_base64: Some(general_purpose::STANDARD.encode(&compressed)),
+                        raw_ipc_payload: Some(compressed),
                         ipc_len: Some(response.records_ipc.len() as u64),
                         compression: Some("zstd".to_string()),
                         data_skipped_bytes: Some(response.data_skipped_bytes),
@@ -3670,7 +3682,7 @@ async fn process_request(
                     })
                 } else {
                     Ok(Response {
-                        ipc_base64: Some(general_purpose::STANDARD.encode(&response.records_ipc)),
+                        raw_ipc_payload: Some(response.records_ipc.clone()),
                         ipc_len: Some(response.records_ipc.len() as u64),
                         data_skipped_bytes: Some(response.data_skipped_bytes),
                         segments_scanned: Some(response.segments_scanned),

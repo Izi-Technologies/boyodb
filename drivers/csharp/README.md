@@ -1,6 +1,6 @@
 # boyodb C#/.NET Driver
 
-[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.8-green.svg)](../../CHANGELOG.md)
 [![.NET](https://img.shields.io/badge/.NET-6.0+-512BD4.svg)](https://dotnet.microsoft.com/)
 
 A C#/.NET client library for connecting to boyodb-server.

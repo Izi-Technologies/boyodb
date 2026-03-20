@@ -121,6 +121,8 @@ struct RawResponse {
     message: Option<String>,
     execution_stats: Option<QueryExecutionStats>,
     ipc_base64: Option<String>,
+    ipc_len: Option<u64>,
+    compression: Option<String>,
 }
 
 // ============================================================================
@@ -406,12 +408,33 @@ impl DistributedExecutor {
         }
 
         // Decode IPC
-        let records_ipc = if let Some(b64) = raw.ipc_base64 {
+        let mut raw_records_ipc = if let Some(ipc_len) = raw.ipc_len {
+            if ipc_len > 0 {
+                let mut ipc_buf = vec![0u8; ipc_len as usize];
+                stream
+                    .read_exact(&mut ipc_buf)
+                    .map_err(|e| EngineError::Io(format!("read ipc payload: {}", e)))?;
+                ipc_buf
+            } else {
+                vec![]
+            }
+        } else if let Some(b64) = raw.ipc_base64 {
             general_purpose::STANDARD
                 .decode(b64)
                 .map_err(|e| EngineError::Internal(format!("base64 decode: {}", e)))?
         } else {
             vec![]
+        };
+
+        let records_ipc = if let Some(ref comp) = raw.compression {
+            if comp == "zstd" {
+                zstd::stream::decode_all(std::io::Cursor::new(&raw_records_ipc))
+                    .map_err(|e| EngineError::Internal(format!("zstd decode failed: {}", e)))?
+            } else {
+                raw_records_ipc
+            }
+        } else {
+            raw_records_ipc
         };
 
         Ok(QueryResponse {

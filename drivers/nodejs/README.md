@@ -1,6 +1,6 @@
 # BoyoDB Node.js Driver
 
-[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.8-green.svg)](../../CHANGELOG.md)
 [![Node.js](https://img.shields.io/badge/node.js-14+-blue.svg)](https://nodejs.org/)
 
 High-performance Node.js client for BoyoDB analytical database with support for transactions, async inserts, pub/sub, CDC, analytics, and more.

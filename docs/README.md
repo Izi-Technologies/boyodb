@@ -2,7 +2,7 @@
 
 Welcome to the official documentation for **BoyoDB**, an open-source columnar database engine built in Rust for real-time analytics, time-series data, and OLAP workloads.
 
-**Current Version: 0.9.7** | [View Changelog](../CHANGELOG.md)
+**Current Version: 0.9.8** | [View Changelog](../CHANGELOG.md)
 
 ## Documentation Index
 
@@ -29,7 +29,7 @@ Welcome to the official documentation for **BoyoDB**, an open-source columnar da
 
 ## Feature Overview
 
-### Enterprise Analytics (v0.9.6)
+### Enterprise Analytics (v0.9.8)
 | Feature | Description |
 |---------|-------------|
 | Query Result Caching | Distributed cache with Redis-compatible protocol |

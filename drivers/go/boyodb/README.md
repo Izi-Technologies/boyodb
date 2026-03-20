@@ -1,6 +1,6 @@
 # boyodb Go Driver
 
-[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../../CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.8-green.svg)](../../../CHANGELOG.md)
 [![Go](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://go.dev/)
 
 A Go client library for connecting to boyodb-server with support for transactions, analytics, external tables, and vector search.

@@ -1,7 +1,7 @@
 {
     "name": "boyodb/boyodb",
     "description": "PHP client driver for boyodb-server - a high-performance columnar database",
-    "version": "0.9.6",
+    "version": "0.9.8",
     "type": "library",
     "license": "Apache-2.0",
     "keywords": [

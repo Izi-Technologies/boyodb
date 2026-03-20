@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-bench"
-version = "0.9.6"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "arrow 54.2.1",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-cli"
-version = "0.9.6"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "arrow-array 54.2.1",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-core"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-node"
-version = "0.9.6"
+version = "0.9.8"
 dependencies = [
  "boyodb-core",
  "napi",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "boyodb-server"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "arrow-array 54.2.1",
  "arrow-csv 54.2.1",

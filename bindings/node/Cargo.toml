@@ -1,6 +1,6 @@
 [package]
 name = "boyodb-node"
-version = "0.9.6"
+version = "0.9.8"
 edition = "2021"
 publish = false
 

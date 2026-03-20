@@ -1,6 +1,6 @@
 # boyodb Rust Driver
 
-[![Version](https://img.shields.io/badge/version-0.9.6-green.svg)](../../CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.8-green.svg)](../../CHANGELOG.md)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 
 A high-performance native Rust client for BoyoDB with connection pooling, batch inserts, transactions, and native Arrow support.

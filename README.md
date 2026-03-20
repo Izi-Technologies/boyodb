@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/Izi-Technologies/boyodb/workflows/CI/badge.svg)](https://github.com/Izi-Technologies/boyodb/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.9.7-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.8-green.svg)](CHANGELOG.md)
 
 **BoyoDB** is an open-source, high-performance columnar database engine built in Rust. Designed for real-time analytics, time-series data, and high-throughput OLAP workloads, BoyoDB combines the best features of ClickHouse and PostgreSQL with modern AI/ML capabilities. Query billions of rows in milliseconds with GPU acceleration, vector search, and machine learning built-in.
 
