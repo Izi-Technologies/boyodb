@@ -138,6 +138,26 @@ console.log(buffer.stats);
 // { totalRows: 100000, totalFlushes: 10, ... }
 ```
 
+## Zero-Copy Arrow IPC Ingestion
+
+With Native Zero-Copy Binary streaming, applications can skip translating objects into JSON completely. By serializing data to an Apache Arrow IPC memory buffer, the Node.js SDK streams raw bytes asynchronously to BoyoDB for the absolute highest ingestion speed.
+
+```javascript
+const { Client } = require('boyodb');
+const fs = require('fs');
+
+const client = new Client('localhost:8765');
+await client.connect();
+
+// rawArrowBuffer should be a Node.js Buffer containing a valid Arrow IPC stream
+const rawArrowBuffer = fs.readFileSync('data.ipc');
+
+// Native Zero-Copy ingestion straight to the BoyoDB engine
+await client.ingestIPC('mydb', 'users', rawArrowBuffer);
+
+await client.close();
+```
+
 ## Pub/Sub Messaging
 
 Real-time messaging:

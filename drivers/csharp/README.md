@@ -190,6 +190,26 @@ await client.IngestCsvAsync("mydb", "users", csvData, hasHeader: true);
 client.Close();
 ```
 
+## Zero-Copy Arrow IPC Ingestion
+
+For maximum throughput analytics insertion, BoyoDB supports streaming binary Apache Arrow IPC memory buffers natively over the TCP socket. This skips all string-parsing bottlenecks.
+
+```csharp
+using Boyodb;
+using System.IO;
+
+var client = new Client("localhost:8765");
+await client.ConnectAsync();
+
+// Load your Arrow IPC memory buffer (from FlatBuffers/Arrow stream)
+byte[] rawArrowBytes = File.ReadAllBytes("data.ipc");
+
+// Native Zero-Copy ingestion straight to the BoyoDB engine
+await client.IngestIpcAsync("mydb", "users", rawArrowBytes);
+
+client.Close();
+```
+
 ## Supported Data Types
 
 BoyoDB supports the following data types in SQL queries:

@@ -264,6 +264,29 @@ if err := client.IngestCSV("mydb", "users", csvData, true, ""); err != nil {
 }
 ```
 
+## Zero-Copy Arrow IPC Ingestion
+
+For the highest throughput analytical workloads, BoyoDB supports streaming raw Apache Arrow IPC buffers natively over the TCP socket, completely bypassing JSON string serialization overhead.
+
+```go
+client, err := boyodb.NewClient("localhost:8765", nil)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+// rawArrowBytes should be an in-memory byte slice representing a valid Arrow IPC stream
+rawArrowBytes, err := os.ReadFile("data.ipc")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Native Zero-Copy ingestion straight to the BoyoDB engine
+if err := client.IngestIPC("mydb", "users", rawArrowBytes); err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Supported Data Types
 
 BoyoDB supports the following data types in SQL queries:

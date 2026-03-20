@@ -124,6 +124,34 @@ buffer.stop()
 print(buffer.stats)  # {'total_rows': 100000, 'total_flushes': 10, ...}
 ```
 
+## Zero-Copy Arrow IPC Ingestion
+
+For absolute maximum throughput, you can bypass Python dictionaries entirely and ingest raw Apache Arrow IPC memory buffers directly into BoyoDB. This skips all serialization overhead and streams natively over the TCP socket.
+
+```python
+from boyodb import Client
+import pyarrow as pa
+
+client = Client("localhost:8765")
+client.connect()
+
+# Create Arrow RecordBatch
+data = [
+    pa.array([1, 2, 3]),
+    pa.array(['Alice', 'Bob', 'Charlie'])
+]
+batch = pa.RecordBatch.from_arrays(data, names=['id', 'name'])
+
+# Serialize to IPC stream in memory
+sink = pa.BufferOutputStream()
+with pa.RecordBatchStreamWriter(sink, batch.schema) as writer:
+    writer.write_batch(batch)
+ipc_bytes = sink.getvalue().to_pybytes()
+
+# Native Zero-Copy ingestion straight to the BoyoDB engine
+client.ingest_ipc("mydb", "users", ipc_bytes)
+```
+
 ## Pub/Sub Messaging
 
 Real-time messaging:
