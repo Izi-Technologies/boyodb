@@ -272,6 +272,26 @@ class ConnectionPool {
   }
 
   /**
+   * Send a binary request using a pooled connection.
+   * @param {Object} request
+   * @param {Buffer} payload
+   * @returns {Promise<Object>}
+   */
+  async sendRequestBinary(request, payload) {
+    const conn = await this._borrow();
+
+    try {
+      const response = await this._sendBinaryOnConnection(conn, request, payload);
+      this._return(conn);
+      return response;
+    } catch (err) {
+      conn.invalidate();
+      this._return(conn);
+      throw err;
+    }
+  }
+
+  /**
    * Send a request on a specific connection.
    * @private
    */
@@ -369,6 +389,81 @@ class ConnectionPool {
               return;
             }
             ipcChunks.push(frameData);
+          }
+        }
+      };
+
+      const onError = (err) => {
+        cleanup();
+        reject(err);
+      };
+
+      socket.on('data', onData);
+      socket.on('error', onError);
+      socket.write(frame);
+    });
+  }
+
+  /**
+   * Send a binary request on a specific connection.
+   * @private
+   */
+  async _sendBinaryOnConnection(conn, request, payload) {
+    const socket = conn.socket;
+
+    if (this._sessionId) {
+      request.auth = this._sessionId;
+    } else if (this._config.token) {
+      request.auth = this._config.token;
+    }
+
+    const json = JSON.stringify(request);
+    const header = Buffer.from(json, 'utf8');
+
+    const headerFrame = Buffer.alloc(4 + header.length);
+    headerFrame.writeUInt32BE(header.length, 0);
+    header.copy(headerFrame, 4);
+
+    const payloadFrame = Buffer.alloc(4 + payload.length);
+    payloadFrame.writeUInt32BE(payload.length, 0);
+    payload.copy(payloadFrame, 4);
+
+    const frame = Buffer.concat([headerFrame, payloadFrame]);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Request timeout'));
+      }, this._config.readTimeout);
+
+      let responseBuffer = Buffer.alloc(0);
+      let expectedLength = null;
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        socket.removeListener('data', onData);
+        socket.removeListener('error', onError);
+      };
+
+      const onData = (data) => {
+        responseBuffer = Buffer.concat([responseBuffer, data]);
+
+        if (expectedLength === null && responseBuffer.length >= 4) {
+          expectedLength = responseBuffer.readUInt32BE(0);
+          responseBuffer = responseBuffer.slice(4);
+        }
+
+        if (expectedLength !== null && responseBuffer.length >= expectedLength) {
+          cleanup();
+          try {
+            const responseJson = responseBuffer.slice(0, expectedLength).toString('utf8');
+            const response = JSON.parse(responseJson);
+            if (response.status !== 'ok') {
+              reject(new Error(response.message || 'Ingest IPC failed'));
+              return;
+            }
+            resolve(response);
+          } catch (err) {
+            reject(new Error(`Failed to parse response: ${err.message}`));
           }
         }
       };
@@ -750,6 +845,18 @@ class PooledClient {
    */
   async ingestIpc(database, table, ipcData) {
     if (!this._initialized) await this.connect();
+
+    try {
+      await this._pool.sendRequestBinary({
+        op: 'ingest_ipc_binary',
+        database,
+        table,
+      }, ipcData);
+      return;
+    } catch (err) {
+      // Fall back to base64
+    }
+
     const response = await this._pool.sendRequest({
       op: 'ingestipc',
       database,

@@ -16,7 +16,7 @@ To evolve BoyoDB into a general-purpose Big Data engine capable of Petabyte-scal
 *   **Foreign Key CASCADE Actions**: ON DELETE/UPDATE CASCADE, SET NULL, SET DEFAULT
 
 ## 1. Distributed Query Engine (Sharding)
-**Status**: Implemented (Phase 2 Completed)
+**Status**: Implemented (Phase 3 Zero-Copy IPC Completed)
 **Priority**: High
 
 Currently, `cluster` supports HA but not distributed query execution.

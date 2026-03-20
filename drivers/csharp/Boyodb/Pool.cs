@@ -332,6 +332,37 @@ public class ConnectionPool : IDisposable
         }
     }
 
+    internal async Task SendRequestBinaryAsync(
+        Dictionary<string, object?> request,
+        byte[] payload,
+        CancellationToken cancellationToken = default)
+    {
+        lock (_lock)
+        {
+            if (!string.IsNullOrEmpty(_sessionId))
+            {
+                request["auth"] = _sessionId;
+            }
+            else if (!string.IsNullOrEmpty(_config.Token))
+            {
+                request["auth"] = _config.Token;
+            }
+        }
+
+        var conn = await BorrowAsync(cancellationToken);
+        try
+        {
+            await SendOnConnectionBinaryAsync(conn, request, payload, cancellationToken);
+            Return(conn);
+        }
+        catch
+        {
+            conn.Invalidate();
+            Return(conn);
+            throw;
+        }
+    }
+
     private async Task<JsonDocument> SendOnConnectionAsync(
         PooledConnection conn,
         Dictionary<string, object?> request,
@@ -401,6 +432,43 @@ public class ConnectionPool : IDisposable
         }
 
         return (jsonDoc, ipcBytes);
+    }
+
+    private async Task SendOnConnectionBinaryAsync(
+        PooledConnection conn,
+        Dictionary<string, object?> request,
+        byte[] payload,
+        CancellationToken cancellationToken)
+    {
+        var stream = conn.Stream ?? throw new ConnectionException("Connection closed");
+
+        var json = JsonSerializer.Serialize(request, JsonOptions);
+        var header = Encoding.UTF8.GetBytes(json);
+
+        var headerLenBuffer = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(headerLenBuffer, (uint)header.Length);
+
+        var payloadLenBuffer = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(payloadLenBuffer, (uint)payload.Length);
+
+        await stream.WriteAsync(headerLenBuffer, cancellationToken);
+        await stream.WriteAsync(header, cancellationToken);
+        await stream.WriteAsync(payloadLenBuffer, cancellationToken);
+        await stream.WriteAsync(payload, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
+
+        var respLenBuffer = new byte[4];
+        await ReadExactAsync(stream, respLenBuffer, cancellationToken);
+        var respLen = BinaryPrimitives.ReadUInt32BigEndian(respLenBuffer);
+        if (respLen > 100 * 1024 * 1024)
+        {
+            throw new QueryException($"Response too large: {respLen} bytes");
+        }
+
+        var respBuffer = new byte[respLen];
+        await ReadExactAsync(stream, respBuffer, cancellationToken);
+        using var response = JsonDocument.Parse(respBuffer);
+        CheckStatus(response, "Ingest IPC failed");
     }
 
     private static async Task ReadExactAsync(Stream stream, byte[] buffer, CancellationToken ct)
@@ -815,6 +883,25 @@ public class PooledClient : IDisposable
     public async Task IngestIpcAsync(string database, string table, byte[] ipcData, CancellationToken cancellationToken = default)
     {
         if (!_initialized) await ConnectAsync(cancellationToken);
+
+        try
+        {
+            await _pool.SendRequestBinaryAsync(
+                new Dictionary<string, object?>
+                {
+                    ["op"] = "ingest_ipc_binary",
+                    ["database"] = database,
+                    ["table"] = table,
+                },
+                ipcData,
+                cancellationToken);
+            return;
+        }
+        catch
+        {
+            // Fall back to base64 on older servers.
+        }
+
         using var response = await _pool.SendRequestAsync(
             new Dictionary<string, object?>
             {

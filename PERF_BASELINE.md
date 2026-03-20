@@ -28,6 +28,17 @@ cargo run -p boyodb-bench --release -- \
   - Clustered (status_code=500): avg 6.17µs | p50 6.04µs | p90 6.88µs | p99 6.88µs
   - Control (latency > 0.95): avg 13.98µs | p50 13.58µs | p90 15.92µs | p99 15.92µs
 
+## Network IPC Streaming (Zero-Copy)
+- Date: 2026-03-20
+- Host: local (macOS)
+- Command: `cargo bench -p boyodb-core`
+- Distributed Query Payload Parsing (100,000 rows / 2.7 MB):
+  - Legacy Base64: 1.50 ms | 1.87 GiB/s
+  - Zero-Copy Binary: 0.19 ms | 14.7 GiB/s  (8x faster)
+- Distributed Query Payload Parsing (10,000 rows / 270 KB):
+  - Legacy Base64: 117 µs | 2.33 GiB/s
+  - Zero-Copy Binary: 6.31 µs | 43.2 GiB/s  (18x faster)
+
 ## Previous run (1M rows)
 - Date: 2025-12-30
 - Host: local (macOS)

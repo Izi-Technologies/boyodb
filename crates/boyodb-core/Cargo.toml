@@ -123,3 +123,10 @@ ldap-auth = ["ldap3"]
 workspace = true
 
 [dev-dependencies]
+tempfile = "3"
+criterion = "0.5"
+tokio-test = "0.4"
+
+[[bench]]
+name = "ipc_streaming_bench"
+harness = false

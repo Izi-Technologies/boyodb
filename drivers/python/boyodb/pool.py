@@ -248,6 +248,46 @@ class ConnectionPool:
             conn.invalidate()
             raise TimeoutError("Read timeout")
 
+    def _send_request_binary(self, conn: PooledConnection, request: Dict[str, Any], payload: bytes) -> None:
+        """Send a binary request on a pooled connection."""
+        sock = conn.socket
+
+        if self._session_id:
+            request["auth"] = self._session_id
+        elif self._config.token:
+            request["auth"] = self._config.token
+
+        data = json.dumps(request).encode("utf-8")
+        frame = struct.pack(">I", len(data)) + data
+        payload_frame = struct.pack(">I", len(payload)) + payload
+
+        sock.settimeout(self._config.write_timeout)
+        try:
+            sock.sendall(frame + payload_frame)
+        except socket.timeout:
+            conn.invalidate()
+            raise TimeoutError("Write timeout")
+
+        sock.settimeout(self._config.read_timeout)
+        try:
+            length_data = self._recv_exact(sock, 4)
+            if not length_data:
+                conn.invalidate()
+                raise ConnectionError("Connection closed")
+            length = struct.unpack(">I", length_data)[0]
+            if length > 100 * 1024 * 1024:
+                raise QueryError(f"Response too large: {length} bytes")
+            response_data = self._recv_exact(sock, length)
+            if not response_data:
+                conn.invalidate()
+                raise ConnectionError("Connection closed")
+            response = json.loads(response_data.decode("utf-8"))
+            if response.get("status") != "ok":
+                raise QueryError(response.get("message", "Ingest IPC failed"))
+        except socket.timeout:
+            conn.invalidate()
+            raise TimeoutError("Read timeout")
+
     def _recv_exact(self, sock: socket.socket, n: int) -> bytes:
         """Receive exactly n bytes."""
         data = b""
@@ -320,6 +360,12 @@ class PooledConnectionContext:
         if not self._conn:
             raise ConnectionError("No connection")
         return self._pool._send_request(self._conn, request)
+
+    def _send_binary(self, request: Dict[str, Any], payload: bytes) -> None:
+        """Send a binary request."""
+        if not self._conn:
+            raise ConnectionError("No connection")
+        self._pool._send_request_binary(self._conn, request, payload)
 
 
 class PooledClient:
@@ -539,6 +585,17 @@ class PooledClient:
 
     def ingest_ipc(self, database: str, table: str, ipc_data: bytes) -> None:
         """Ingest Arrow IPC data into a table."""
+        try:
+            with self._pool.connection() as ctx:
+                ctx._send_binary({
+                    "op": "ingest_ipc_binary",
+                    "database": database,
+                    "table": table,
+                }, ipc_data)
+            return
+        except Exception:
+            pass
+        
         import base64
         with self._pool.connection() as ctx:
             response = ctx._send({

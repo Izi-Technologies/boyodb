@@ -725,6 +725,127 @@ func (p *ConnectionPool) sendOnConnection(pc *pooledConn, data []byte) (*respons
 	return &resp, nil
 }
 
+func (p *ConnectionPool) sendRequestBinary(req map[string]interface{}, payload []byte) error {
+	// Check circuit breaker
+	if p.circuitBreaker != nil && !p.circuitBreaker.canExecute() {
+		p.stats.Lock()
+		p.stats.circuitBreakerTrips++
+		p.stats.Unlock()
+		return errors.New("circuit breaker is open - server appears unavailable")
+	}
+
+	// Add auth
+	p.mu.Lock()
+	if p.sessionID != "" {
+		req["auth"] = p.sessionID
+	} else if p.config.Token != "" {
+		req["auth"] = p.config.Token
+	}
+	p.mu.Unlock()
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	conn, err := p.borrow()
+	if err != nil {
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.recordFailure()
+		}
+		p.stats.Lock()
+		p.stats.failedRequests++
+		p.stats.Unlock()
+		return err
+	}
+
+	err = p.sendOnConnectionBinary(conn, data, payload)
+	if err != nil {
+		conn.invalidate()
+		p.returnConn(conn)
+		if p.circuitBreaker != nil {
+			p.circuitBreaker.recordFailure()
+		}
+		p.stats.Lock()
+		p.stats.failedRequests++
+		p.stats.Unlock()
+		return err
+	}
+
+	// Success
+	if p.circuitBreaker != nil {
+		p.circuitBreaker.recordSuccess()
+	}
+	p.stats.Lock()
+	p.stats.successfulRequests++
+	p.stats.Unlock()
+
+	p.returnConn(conn)
+	return nil
+}
+
+func (p *ConnectionPool) sendOnConnectionBinary(pc *pooledConn, data []byte, payload []byte) error {
+	conn := pc.conn
+
+	// Set write timeout
+	if p.config.WriteTimeout > 0 {
+		conn.SetWriteDeadline(time.Now().Add(p.config.WriteTimeout))
+	}
+
+	// Write length prefix
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(data)))
+	if _, err := conn.Write(lenBuf); err != nil {
+		return fmt.Errorf("failed to write length: %w", err)
+	}
+
+	// Write request and payload in frames
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("failed to write payload: %w", err)
+	}
+
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(payload)))
+	if _, err := conn.Write(lenBuf); err != nil {
+		return fmt.Errorf("failed to write IPC length: %w", err)
+	}
+
+	if _, err := conn.Write(payload); err != nil {
+		return fmt.Errorf("failed to write IPC payload: %w", err)
+	}
+
+	// Set read timeout
+	if p.config.ReadTimeout > 0 {
+		conn.SetReadDeadline(time.Now().Add(p.config.ReadTimeout))
+	}
+
+	// Read response length
+	if _, err := io.ReadFull(conn, lenBuf); err != nil {
+		return fmt.Errorf("failed to read response length: %w", err)
+	}
+	respLen := binary.BigEndian.Uint32(lenBuf)
+
+	if respLen > 100*1024*1024 {
+		return fmt.Errorf("response too large: %d bytes", respLen)
+	}
+
+	// Read response body
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBuf); err != nil {
+		return fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var resp response
+	if err := json.Unmarshal(respBuf, &resp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if resp.Status != "ok" {
+		return fmt.Errorf("ingest IPC failed: %s", resp.Message)
+	}
+
+	return nil
+}
+
 // Health checks server health.
 func (p *ConnectionPool) Health() error {
 	resp, err := p.sendRequest(map[string]interface{}{"op": "health"})
@@ -1006,6 +1127,14 @@ func (c *PooledClient) IngestCSV(database, table string, csvData []byte, hasHead
 
 // IngestIPC ingests Arrow IPC data into a table.
 func (c *PooledClient) IngestIPC(database, table string, ipcData []byte) error {
+	if err := c.pool.sendRequestBinary(map[string]interface{}{
+		"op":       "ingest_ipc_binary",
+		"database": database,
+		"table":    table,
+	}, ipcData); err == nil {
+		return nil
+	}
+
 	resp, err := c.pool.sendRequest(map[string]interface{}{
 		"op":             "ingestipc",
 		"database":       database,
