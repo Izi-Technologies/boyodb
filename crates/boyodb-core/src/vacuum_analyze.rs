@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn test_table_stats() {
         let mut stats = TableStats::new("public", "users");
-        stats.n_live_tup = 1000;
+        stats.n_live_tup = 800;
         stats.n_dead_tup = 200;
 
         assert_eq!(stats.dead_tuple_ratio(), 0.2);

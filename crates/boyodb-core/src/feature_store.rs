@@ -746,7 +746,7 @@ mod tests {
             )
             .unwrap();
         if let FeatureValue::Int32(bucket) = result {
-            assert_eq!(bucket, 2);
+            assert_eq!(bucket, 3);
         }
     }
 

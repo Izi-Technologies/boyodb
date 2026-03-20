@@ -186,21 +186,40 @@ impl HintParser {
     }
 
     fn parse_hint_block(text: &str, position: usize, hints: &mut QueryHints) {
-        // Split by whitespace or comma
-        for hint_str in text.split(|c: char| c == ',' || c.is_whitespace()) {
-            let hint_str = hint_str.trim();
-            if hint_str.is_empty() {
-                continue;
+        let mut current_hint = String::new();
+        let mut in_parens = false;
+
+        for c in text.chars() {
+            if c == '(' {
+                in_parens = true;
+                current_hint.push(c);
+            } else if c == ')' {
+                in_parens = false;
+                current_hint.push(c);
+            } else if (c.is_whitespace() || c == ',') && !in_parens {
+                if !current_hint.is_empty() {
+                    if let Some(hint) = Self::parse_single_hint(&current_hint) {
+                        Self::apply_hint(&hint, hints);
+                        hints.hints.push(ParsedHint {
+                            hint,
+                            source_position: position,
+                            raw_text: current_hint.clone(),
+                        });
+                    }
+                    current_hint.clear();
+                }
+            } else {
+                current_hint.push(c);
             }
+        }
 
-            if let Some(hint) = Self::parse_single_hint(hint_str) {
-                // Apply hint to appropriate collection
+        if !current_hint.is_empty() {
+            if let Some(hint) = Self::parse_single_hint(&current_hint) {
                 Self::apply_hint(&hint, hints);
-
                 hints.hints.push(ParsedHint {
                     hint,
                     source_position: position,
-                    raw_text: hint_str.to_string(),
+                    raw_text: current_hint,
                 });
             }
         }

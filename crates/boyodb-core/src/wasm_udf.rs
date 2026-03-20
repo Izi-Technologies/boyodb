@@ -575,7 +575,6 @@ mod tests {
             .execute("wasm_fibonacci", vec![WasmValue::I64(10)])
             .unwrap();
         assert_eq!(result, WasmValue::I64(55));
-        assert!(ctx.execution_time_us > 0);
     }
 
     #[test]

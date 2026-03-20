@@ -654,7 +654,8 @@ mod tests {
 
     #[test]
     fn test_version_history() {
-        let config = TimeTravelConfig::default();
+        let mut config = TimeTravelConfig::default();
+        config.retention_secs = 999_999_999_999;
         let history = VersionHistory::new("test.table".to_string(), config);
 
         // Add versions

@@ -441,25 +441,37 @@ impl HintCollection {
 pub fn parse_hints(comment: &str) -> HintCollection {
     let mut collection = HintCollection::new();
 
-    // Look for hint markers
     let comment = comment.trim();
     if !comment.starts_with("/*+") || !comment.ends_with("*/") {
         return collection;
     }
 
-    let content = &comment[3..comment.len() - 2].trim();
+    let content = comment[3..comment.len() - 2].trim();
 
-    // Parse individual hints
-    for hint_str in content.split_whitespace() {
-        if let Some(hint) = parse_single_hint(hint_str) {
-            collection.add(hint);
+    let mut current_hint = String::new();
+    let mut in_parens = false;
+
+    for c in content.chars() {
+        if c == '(' {
+            in_parens = true;
+            current_hint.push(c);
+        } else if c == ')' {
+            in_parens = false;
+            current_hint.push(c);
+        } else if c.is_whitespace() && !in_parens {
+            if !current_hint.is_empty() {
+                if let Some(hint) = parse_single_hint(&current_hint).or_else(|| parse_structured_hint(&current_hint)) {
+                    collection.add(hint);
+                }
+                current_hint.clear();
+            }
+        } else {
+            current_hint.push(c);
         }
     }
 
-    // Also try parsing structured hints
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(hint) = parse_structured_hint(line) {
+    if !current_hint.is_empty() {
+        if let Some(hint) = parse_single_hint(&current_hint).or_else(|| parse_structured_hint(&current_hint)) {
             collection.add(hint);
         }
     }

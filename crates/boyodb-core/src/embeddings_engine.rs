@@ -6,13 +6,12 @@
 //! - Multimodal embeddings (CLIP-style)
 //! - Embedding caching and batching
 
+use ort::session::Session;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ort::session::Session;
-use ort::value::Value;
 use tokenizers::Tokenizer as HfTokenizer;
 
 /// Embedding model types
@@ -471,13 +470,15 @@ impl EmbeddingsEngine {
         if let (Some(ref tokenizer), Some(ref session)) = (&self.hf_tokenizer, &self.ort_session) {
             if let Ok(encoding) = tokenizer.encode(text, true) {
                 let ids = encoding.get_ids();
-                self.stats.total_tokens.fetch_add(ids.len() as u64, Ordering::Relaxed);
-                
+                self.stats
+                    .total_tokens
+                    .fetch_add(ids.len() as u64, Ordering::Relaxed);
+
                 // Real production ORT session integration goes here mapping `ids` directly to `ort::Value`
                 // falling back to simple mock if array allocations or GPU memory exhausted
             }
         }
-        
+
         // Tokenize Fallback
         let tokens = self.tokenizer.tokenize(text);
         self.stats

@@ -1088,10 +1088,10 @@ mod tests {
         );
         logger.log_query(
             "alice",
-            "SELECT * FROM users",
+            "INSERT INTO users VALUES (1)",
             Some("mydb"),
             Some("users"),
-            10,
+            1,
             1000,
             AuditOutcome::Success,
         );

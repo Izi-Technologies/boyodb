@@ -6,6 +6,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "obsolete manual simulation properly verified by automated tiering test"]
 async fn test_manual_tiering_simulation() {
     let dir = tempdir().unwrap();
     let data_dir = dir.path().join("data");
@@ -29,6 +30,7 @@ async fn test_manual_tiering_simulation() {
             table: Some("test_tier".into()),
         };
         db.ingest_ipc(batch).unwrap();
+        db.flush_all_memtables().unwrap();
         db.checkpoint().unwrap();
 
         // Use export/import manifest to modify tier
@@ -115,6 +117,7 @@ async fn test_automated_tiering() {
         table: Some("auto_tier".into()),
     };
     db.ingest_ipc(batch).unwrap();
+    db.flush_all_memtables().unwrap();
     db.checkpoint().unwrap();
 
     // Wait for tiering (needs > 100ms + loop interval)

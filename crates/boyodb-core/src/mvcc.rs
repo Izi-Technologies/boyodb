@@ -381,6 +381,7 @@ impl MvccManager {
     pub fn abort_transaction(&self, txn_id: TransactionId) {
         let mut active = self.active_transactions.write();
         active.remove(&txn_id);
+        drop(active);
 
         self.update_min_retained_version();
     }

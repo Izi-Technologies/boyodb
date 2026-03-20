@@ -114,10 +114,9 @@ impl PartialOrd for SearchResult {
 
 impl Ord for SearchResult {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse order for min-heap behavior
-        other
-            .distance
-            .partial_cmp(&self.distance)
+        // Standard order for max-heap behavior
+        self.distance
+            .partial_cmp(&other.distance)
             .unwrap_or(Ordering::Equal)
     }
 }
@@ -812,7 +811,9 @@ mod tests {
 
     #[test]
     fn test_hnsw_insert_search() {
-        let mut index = HnswIndex::new(HnswConfig::default());
+        let mut config = HnswConfig::default();
+        config.metric = DistanceMetric::Euclidean;
+        let mut index = HnswIndex::new(config);
 
         // Insert some vectors
         for i in 0..10 {

@@ -265,18 +265,25 @@ async fn test_btree_index_creation() {
 async fn test_wal_lsn_persistence() {
     let dir = tempdir().unwrap();
 
-    // Open and close database
+    // Open and close database, writing to WAL
     {
         let db = Db::open(make_config(dir.path())).unwrap();
-        db.create_database("test").unwrap();
-        // The WAL should have incremented LSN
+        setup_bank_table(&db);
+        let payload = build_accounts_payload(&[1001], &[10000], &["Alice"]);
+        db.ingest_ipc(IngestBatch {
+            payload_ipc: payload,
+            watermark_micros: 1000000,
+            shard_override: None,
+            database: Some("bank".to_string()),
+            table: Some("accounts".to_string()),
+        })
+        .unwrap();
     }
 
-    // Reopen database - LSN should be recovered
+    // Reopen database - WAL LSN should be preserved and recover data
     {
         let db = Db::open(make_config(dir.path())).unwrap();
-        // Database should be intact
-        let result = query_sql(&db, "SHOW DATABASES");
+        let result = query_sql(&db, "SELECT * FROM bank.accounts");
         assert!(!result.records_ipc.is_empty());
     }
 }

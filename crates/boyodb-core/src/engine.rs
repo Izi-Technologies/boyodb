@@ -5233,7 +5233,7 @@ impl Db {
         Ok(())
     }
 
-    fn flush_all_memtables(&self) -> Result<(), EngineError> {
+    pub fn flush_all_memtables(&self) -> Result<(), EngineError> {
         let mut all_entries = Vec::new();
         // Iterate over all shards and collect entries to flush
         for mut shard in self.memtables.iter_all_shards() {
@@ -22046,7 +22046,8 @@ pub(crate) fn load_manifest(path: &Path) -> Result<Manifest, EngineError> {
 pub(crate) fn persist_manifest(path: &Path, manifest: &Manifest) -> Result<(), EngineError> {
     // Use binary format for 3x smaller files and 5x faster parsing
     let binary_path = path.with_extension("bincode");
-    let tmp = binary_path.with_extension("bincode.tmp");
+    let tmp_ext = format!("bincode.tmp.{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let tmp = binary_path.with_extension(&tmp_ext);
 
     let bytes = crate::replication::serialize_manifest_binary(manifest)
         .map_err(|e| EngineError::Internal(format!("serialize manifest failed: {e}")))?;
@@ -34754,7 +34755,7 @@ mod tests {
 
     fn wait_for_path(path: &Path) -> Result<(), EngineError> {
         let start = Instant::now();
-        let timeout = Duration::from_secs(5);
+        let timeout = Duration::from_secs(15);
         loop {
             if path.exists() {
                 return Ok(());

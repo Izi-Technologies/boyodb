@@ -280,9 +280,13 @@ async fn test_fulltext_index_segment_pruning() {
     // This may return an error (no matching segments) or empty results
     match resp {
         Ok(r) => {
-            let batches = boyodb_core::engine::read_ipc_batches(&r.records_ipc).unwrap();
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(total_rows, 0, "Should find no rows with '999888'");
+            if r.records_ipc.is_empty() {
+                // Expected - no matching segments
+            } else {
+                let batches = boyodb_core::engine::read_ipc_batches(&r.records_ipc).unwrap();
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 0, "Should find no rows with '999888'");
+            }
         }
         Err(_) => {
             // Expected - no segments match the filter

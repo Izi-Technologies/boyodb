@@ -2014,7 +2014,8 @@ async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         .with_cache_cold_segments(cfg.cache_cold_segments)
         .with_read_only(cfg.replica_mode)
         .with_replica_sync_interval_ms(cfg.replica_sync_interval_ms)
-        .with_replica_primary_addr(cfg.replica_primary_addr.clone());
+        .with_replica_primary_addr(cfg.replica_primary_addr.clone())
+        .with_transactions_enabled(true);
     engine_cfg.allow_manifest_import = cfg.allow_manifest_import;
     engine_cfg.retention_watermark_micros = cfg.retention_watermark;
     engine_cfg.compact_min_segments = cfg.compact_min_segments;

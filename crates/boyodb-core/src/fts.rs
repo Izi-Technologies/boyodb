@@ -1277,7 +1277,7 @@ mod tests {
 
         index.index_document(1, "The quick brown fox");
         index.index_document(2, "The lazy brown dog");
-        index.index_document(3, "Quick foxes are fast");
+        index.index_document(3, "Quick foxes are very incredibly fast");
 
         let results = index.search("quick fox", 10);
         assert!(!results.is_empty());
