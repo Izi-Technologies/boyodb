@@ -352,6 +352,66 @@ class ConnectionPool
     }
 
     /**
+     * Send a request with a binary payload on a connection.
+     */
+    public function sendBinaryRequest(PooledConnection $conn, array $request, string $payload): void
+    {
+        $socket = $conn->getSocket();
+
+        // Add auth
+        if ($this->sessionId !== null) {
+            $request['auth'] = $this->sessionId;
+        } elseif ($this->config->token !== null) {
+            $request['auth'] = $this->config->token;
+        }
+
+        $json = json_encode($request);
+        if ($json === false) {
+            throw new QueryException("Failed to encode request");
+        }
+
+        $headerLenBytes = pack('N', strlen($json));
+        $payloadLenBytes = pack('N', strlen($payload));
+
+        stream_set_timeout($socket, (int)$this->config->writeTimeout);
+        $frame = $headerLenBytes . $json . $payloadLenBytes . $payload;
+        $written = @fwrite($socket, $frame);
+
+        if ($written === false || $written < strlen($frame)) {
+            $conn->invalidate();
+            throw new ConnectionException("Write failed");
+        }
+        fflush($socket);
+
+        stream_set_timeout($socket, (int)$this->config->readTimeout);
+        $lengthData = $this->readExact($socket, 4);
+        if ($lengthData === null) {
+            $conn->invalidate();
+            throw new ConnectionException("Connection closed");
+        }
+
+        $length = unpack('N', $lengthData)[1];
+        if ($length > 100 * 1024 * 1024) {
+            throw new QueryException("Response too large: {$length} bytes");
+        }
+
+        $responseData = $this->readExact($socket, $length);
+        if ($responseData === null) {
+            $conn->invalidate();
+            throw new ConnectionException("Connection closed");
+        }
+
+        $response = json_decode($responseData, true);
+        if ($response === null) {
+            throw new QueryException("Failed to decode response");
+        }
+
+        if (($response['status'] ?? '') !== 'ok') {
+            throw new QueryException($response['message'] ?? 'Ingest IPC failed');
+        }
+    }
+
+    /**
      * Read exactly n bytes from socket.
      *
      * @param resource $socket
@@ -659,6 +719,67 @@ class PooledClient
             }
 
             return $response['tables'] ?? [];
+        } finally {
+            $this->pool->return($conn);
+        }
+    }
+
+    /**
+     * Ingest CSV data into a table.
+     */
+    public function ingestCsv(string $database, string $table, string $csvData, bool $hasHeader = true, ?string $delimiter = null): void
+    {
+        $request = [
+            'op' => 'ingestcsv',
+            'database' => $database,
+            'table' => $table,
+            'payload_base64' => base64_encode($csvData),
+            'has_header' => $hasHeader,
+        ];
+
+        if ($delimiter !== null) {
+            $request['delimiter'] = $delimiter;
+        }
+
+        $conn = $this->pool->borrow();
+        try {
+            $response = $this->pool->sendRequest($conn, $request);
+            if (($response['status'] ?? '') !== 'ok') {
+                throw new QueryException($response['message'] ?? 'Ingest CSV failed');
+            }
+        } finally {
+            $this->pool->return($conn);
+        }
+    }
+
+    /**
+     * Ingest Arrow IPC data into a table using optimal binary transmission.
+     */
+    public function ingestIpc(string $database, string $table, string $ipcData): void
+    {
+        $conn = $this->pool->borrow();
+        try {
+            try {
+                $this->pool->sendBinaryRequest($conn, [
+                    'op' => 'ingest_ipc_binary',
+                    'database' => $database,
+                    'table' => $table,
+                ], $ipcData);
+                return;
+            } catch (\Throwable $e) {
+                // Ignore failure and fallback to base64
+            }
+
+            $response = $this->pool->sendRequest($conn, [
+                'op' => 'ingestipc',
+                'database' => $database,
+                'table' => $table,
+                'payload_base64' => base64_encode($ipcData),
+            ]);
+
+            if (($response['status'] ?? '') !== 'ok') {
+                throw new QueryException($response['message'] ?? 'Ingest IPC failed');
+            }
         } finally {
             $this->pool->return($conn);
         }

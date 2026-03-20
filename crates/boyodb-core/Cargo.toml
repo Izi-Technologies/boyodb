@@ -68,6 +68,10 @@ libc = "0.2"                                                 # For disk space ch
 memmap2 = "0.9"                                              # Memory-mapped file access for large segments
 nix = { version = "0.28", features = ["fs", "uio"] }         # Unix system calls for vectored I/O
 
+# Machine Learning & AI
+ort = { version = "2.0.0-rc.12", features = ["fetch-models"] }     # ONNX Runtime for ML inference
+tokenizers = "0.19.1"                                        # HuggingFace tokenizers for text embeddings
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "minwindef", "winnt"] }  # Windows disk space checking
 

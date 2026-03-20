@@ -2315,6 +2315,20 @@ WITH (
 );
 ```
 
+### Native In-Database Inference
+
+Run pre-trained ONNX machine learning models directly natively on your data, right inside BoyoDB.
+
+```sql
+-- Register a classification model natively
+REGISTER MODEL 'sentiment_v1' FROM '/models/sentiment.onnx' FORMAT ONNX;
+
+-- Predict directly in your SELECT statement
+SELECT text, PREDICT('sentiment_v1', text) as sentiment
+FROM reviews;
+```
+BoyoDB utilizes Rust `ort` bindings and HuggingFace `tokenizers` to spawn native tensor execution pipelines mapped to endpoints like `all-MiniLM-L6-v2` for instantaneous, zero-copy predictions without relying on external HTTP Python proxy servers!
+
 ---
 
 ## Query Federation

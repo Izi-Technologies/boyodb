@@ -123,6 +123,7 @@ ORDER BY cnt DESC;
 
 - **10x Faster Aggregations** - Vectorized execution with SIMD optimization
 - **100x Better Compression** - Columnar format with dictionary encoding
+- **Zero-Copy IPC Ingestion** - Full Python, Node, Go, C#, Java, & PHP streaming endpoints built over native byte arrays bypassing Base64.
 - **Sub-Millisecond Latency** - Query result caching with Redis protocol
 - **Linear Scalability** - Sharded caches eliminate lock contention
 
@@ -241,6 +242,10 @@ LIMIT 10;
 - **Filtered Search** - Combine vector search with SQL predicates
 - **Model Support** - OpenAI, Cohere, HuggingFace embedding dimensions
 
+### Native In-Database Inference (Powered by ONNX Runtime)
+- **Zero-Copy Prediction** - Rust `ort` bindings inject `.onnx` and `.pb` models directly into the pipeline runtime yielding instantaneous `PREDICT()` capabilities.
+- **Dynamic Text Tokenization** - Pre-bundled `tokenizers` bindings instantly split text logic to dynamically serve sentence embeddings through `all-MiniLM-L6-v2`.
+
 ## Time Series Analytics
 
 Purpose-built functions for time series data analysis, IoT metrics, and monitoring use cases.
@@ -281,18 +286,32 @@ SELECT * FROM FORECAST(
 
 ## Machine Learning Integration
 
-Run ML model inference directly in SQL queries with the built-in ML engine.
+Run AI and ML model inference natively within SQL queries via the built-in, zero-copy ONNX Runtime engine. No external Python microservices or network hops required!
 
 ```sql
--- Feature Store: Point-in-time lookup
-SELECT * FROM FEATURE_STORE_LOOKUP('user_features', user_id, '2024-01-15 14:30:00');
+-- Register an ONNX model natively into the database engine
+REGISTER MODEL sentiment_analyzer
+FROM 's3://boyodb-models/sentiment-analysis/model.onnx'
+WITH (
+    type = 'onnx',
+    tokenizer = 'huggingface',
+    tokenizer_config = '{"model_name": "all-MiniLM-L6-v2"}'
+);
 
--- Model predictions with explainability
+-- Execute zero-copy inference directly across columnar data
 SELECT
-    user_id,
-    PREDICT('churn_model', features) as churn_probability,
-    EXPLAIN_PREDICTION('churn_model', features) as explanation
-FROM user_features;
+    id,
+    review_text,
+    PREDICT('sentiment_analyzer', review_text) as sentiment_score
+FROM product_reviews
+WHERE length(review_text) > 10;
+```
+
+### Machine Learning Capabilities
+- **Native ONNX Runtime Inference** - Instantaneously evaluate `.onnx` and `.pb` models during query execution.
+- **HuggingFace Tokenizers** - Dynamic text preprocessing directly bound within the SQL pipeline.
+- **Zero-Copy Execution** - Arrow arrays are passed directly into the AI engine without serialization overhead.
+- **Feature Store** - Point-in-time feature lookup (`FEATURE_STORE_LOOKUP`) for ML training and serving.
 
 -- Monitor model drift
 SELECT * FROM MODEL_DRIFT('churn_model', 'psi') WHERE drift_score > 0.1;

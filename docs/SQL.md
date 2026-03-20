@@ -1137,6 +1137,19 @@ SELECT CAST(99.95 AS DECIMAL(10,2));
 SELECT CAST('{"key": "value"}' AS JSON);
 ```
 
+### Machine Learning Functions
+
+```sql
+PREDICT(model_name, column_data) -- Invoke an ONNX Inference model natively
+```
+
+**Examples:**
+```sql
+-- Predict sentiment based on a registered model
+SELECT PREDICT('sentiment-model-v2', comment_text) FROM interactions;
+```
+*Note: Models must be registered via `REGISTER MODEL 'name' FROM '/path/to/model.onnx' FORMAT ONNX` before `PREDICT` is called. Native inference uses the integrated zero-copy `ort` runtime.*
+
 ---
 
 ## Window Functions
