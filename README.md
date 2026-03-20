@@ -438,6 +438,25 @@ PROCESS DATA SUBJECT REQUEST
 | Distributed Streaming | 40+ GiB/s Zero-Copy IPC |
 | Concurrent Queries | Linear scaling |
 
+### BoyoDB vs PostgreSQL (160K rows)
+
+Real-world benchmark on CDR (Call Detail Records) data:
+
+| Query Type | PostgreSQL 16 | BoyoDB | Speedup |
+|------------|---------------|--------|---------|
+| COUNT(*) | 95 ms | **14 ms** | **6.8x faster** |
+| GROUP BY (single) | 102 ms | **67 ms** | **1.5x faster** |
+| GROUP BY (category) | 98 ms | **68 ms** | **1.4x faster** |
+| Filtered COUNT | **84 ms** | 109 ms | PG 1.3x faster |
+| SUM aggregation | 132 ms | **85 ms** | **1.6x faster** |
+| Multi-aggregate | 125 ms | 128 ms | Comparable |
+
+**Test Environment:** 12 vCPU, 32GB RAM, Ubuntu 24.04, SSD storage
+
+BoyoDB excels at analytical queries (COUNT, GROUP BY, aggregations) due to columnar storage and metadata-based optimizations. PostgreSQL performs better on filtered point lookups with B-tree indexes.
+
+See [full benchmark results](docs/BENCHMARK_RESULTS.md) for detailed analysis.
+
 ### Optimization Features
 - **Adaptive Cache Sharding** - Dynamic shard count based on CPU cores and cache size
 - **Zero-Copy Network Streaming** - Bypasses serialization overhead for 18x faster distributed sub-queries
