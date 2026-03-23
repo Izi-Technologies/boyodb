@@ -1360,7 +1360,7 @@ public class BoyoDBClient implements AutoCloseable {
         String sql;
         String order;
         if ("cosine".equals(metric)) {
-            sql = String.format("SELECT %s, vector_similarity(%s, %s) AS score FROM %s",
+            sql = String.format("SELECT %s, similarity(%s, %s) AS score FROM %s",
                     selectCols, vectorColumn, vectorStr, table);
             order = "DESC";
         } else {
@@ -1425,9 +1425,9 @@ public class BoyoDBClient implements AutoCloseable {
 
         String sql = String.format("""
                 SELECT %s,
-                       vector_similarity(%s, %s) * %.2f AS vector_score,
+                       similarity(%s, %s) * %.2f AS vector_score,
                        COALESCE(match_score(%s, '%s'), 0) * %.2f AS text_score,
-                       vector_similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
+                       similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
                 FROM %s
                 """,
                 selectCols,

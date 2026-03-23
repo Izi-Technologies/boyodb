@@ -1135,7 +1135,7 @@ class Client:
 
         # Build query
         if metric == "cosine":
-            sql = f"SELECT {select_list}, vector_similarity({vector_column}, {vector_str}) AS score FROM {table}"
+            sql = f"SELECT {select_list}, similarity({vector_column}, {vector_str}) AS score FROM {table}"
             order = "DESC"
         else:
             sql = f"SELECT {select_list}, vector_distance({vector_column}, {vector_str}, '{metric}') AS score FROM {table}"
@@ -1192,9 +1192,9 @@ class Client:
 
         sql = f"""
             SELECT {select_list},
-                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} AS vector_score,
+                   similarity({vector_column}, {vector_str}) * {vector_weight} AS vector_score,
                    COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS text_score,
-                   vector_similarity({vector_column}, {vector_str}) * {vector_weight} +
+                   similarity({vector_column}, {vector_str}) * {vector_weight} +
                    COALESCE(match_score({text_column}, '{escaped_text}'), 0) * {text_weight} AS combined_score
             FROM {table}
         """

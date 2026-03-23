@@ -2265,7 +2265,7 @@ class Client {
         break;
       case 'cosine':
       default:
-        distanceFunc = 'vector_similarity';
+        distanceFunc = 'similarity';
         break;
     }
 

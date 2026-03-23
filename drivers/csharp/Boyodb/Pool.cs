@@ -1112,7 +1112,7 @@ public class PooledClient : IDisposable
         string order;
         if (metric == "cosine")
         {
-            sql = $"SELECT {selectList}, vector_similarity({vectorColumn}, {vectorStr}) AS score FROM {table}";
+            sql = $"SELECT {selectList}, similarity({vectorColumn}, {vectorStr}) AS score FROM {table}";
             order = "DESC";
         }
         else
@@ -1157,9 +1157,9 @@ public class PooledClient : IDisposable
 
         var sql = $@"
             SELECT {selectList},
-                   vector_similarity({vectorColumn}, {vectorStr}) * {vectorWeight} AS vector_score,
+                   similarity({vectorColumn}, {vectorStr}) * {vectorWeight} AS vector_score,
                    COALESCE(match_score({textColumn}, '{escapedText}'), 0) * {textWeight} AS text_score,
-                   vector_similarity({vectorColumn}, {vectorStr}) * {vectorWeight} +
+                   similarity({vectorColumn}, {vectorStr}) * {vectorWeight} +
                    COALESCE(match_score({textColumn}, '{escapedText}'), 0) * {textWeight} AS combined_score
             FROM {table}
         ";

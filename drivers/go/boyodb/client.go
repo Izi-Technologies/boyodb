@@ -1535,7 +1535,7 @@ func (c *Client) VectorSearch(queryVector []float32, opts *VectorSearchOptions) 
 	var sql string
 	if metric == "cosine" {
 		sql = fmt.Sprintf(
-			"SELECT %s, vector_similarity(%s, %s) AS score FROM %s",
+			"SELECT %s, similarity(%s, %s) AS score FROM %s",
 			selectCols, vectorCol, vectorStr, opts.Table,
 		)
 	} else {
@@ -1629,9 +1629,9 @@ func (c *Client) HybridSearch(queryVector []float32, textQuery string, opts *Hyb
 	// Build hybrid search query using weighted combination
 	sql := fmt.Sprintf(`
 		SELECT %s,
-		       vector_similarity(%s, %s) * %.2f AS vector_score,
+		       similarity(%s, %s) * %.2f AS vector_score,
 		       COALESCE(match_score(%s, '%s'), 0) * %.2f AS text_score,
-		       vector_similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
+		       similarity(%s, %s) * %.2f + COALESCE(match_score(%s, '%s'), 0) * %.2f AS combined_score
 		FROM %s
 	`, selectCols,
 		vectorCol, vectorStr, vectorWeight,
