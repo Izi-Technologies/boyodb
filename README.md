@@ -165,6 +165,14 @@ SELECT
 FROM user_stats
 LIMIT 100;
 
+-- Extract, Conditionals, and Coalescing natively compiled
+SELECT 
+    user_id,
+    EXTRACT(year FROM timestamp) as login_year,
+    COALESCE(phone_number, 'Unknown') as contact,
+    CASE WHEN status = 1 THEN 'Active' ELSE 'Inactive' END as state
+FROM users;
+
 -- Upserts with conflict handling
 INSERT INTO users (id, email, name)
 VALUES (1, 'alice@example.com', 'Alice')
@@ -223,7 +231,7 @@ CREATE TABLE documents (
 
 -- Semantic similarity search
 SELECT id, content,
-       COSINE_SIMILARITY(embedding, $query_vector) as score
+       similarity(embedding, $query_vector) as score
 FROM documents
 ORDER BY score DESC
 LIMIT 10;
@@ -231,7 +239,7 @@ LIMIT 10;
 -- Hybrid search (vector + keyword)
 SELECT * FROM documents
 WHERE content LIKE '%machine learning%'
-ORDER BY COSINE_SIMILARITY(embedding, $query_vector) DESC
+ORDER BY similarity(embedding, $query_vector) DESC
 LIMIT 10;
 ```
 

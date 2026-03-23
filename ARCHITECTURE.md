@@ -175,6 +175,8 @@ Ensures durability for ingest operations:
 Uses `sqlparser-rs` with custom extensions:
 - Standard SELECT/INSERT/UPDATE/DELETE
 - DDL (CREATE/DROP/ALTER DATABASE/TABLE)
+- **Analytical Constraints**: Native scalar mapping and projection evaluation over `EXTRACT`, `COALESCE`, and `CASE WHEN` blocks
+- **Vector Mathematics**: Embedded Cosine Similarity algebra exposed via `similarity(vec1, vec2)`
 - Window functions (ROW_NUMBER, RANK, LAG, LEAD)
 - CTEs (WITH clauses)
 - Prepared statements
