@@ -7691,16 +7691,22 @@ fn parse_select_items(
                         agg_expr.filter = filter;
                         aggs.push(agg_expr);
                     } else {
-                        return Err(EngineError::NotImplemented(format!(
-                            "unsupported function: {}",
-                            func.name
-                        )));
+                        // Not an aggregate, try parsing as scalar scalar function
+                        extract_ast_columns(expr, &mut columns);
+                        let se = parse_expr(expr)?;
+                        computed_columns.push(SelectColumn {
+                            expr: se,
+                            alias: None,
+                        });
                     }
                 }
                 _ => {
-                    return Err(EngineError::NotImplemented(format!(
-                        "unsupported expression in SELECT: {expr}"
-                    )));
+                    extract_ast_columns(expr, &mut columns);
+                    let se = parse_expr(expr)?;
+                    computed_columns.push(SelectColumn {
+                        expr: se,
+                        alias: None,
+                    });
                 }
             },
             SelectItem::ExprWithAlias { expr, alias } => match expr {
@@ -7736,16 +7742,21 @@ fn parse_select_items(
                         agg_expr.filter = filter;
                         aggs.push(agg_expr);
                     } else {
-                        return Err(EngineError::NotImplemented(format!(
-                            "unsupported function: {}",
-                            func.name
-                        )));
+                        extract_ast_columns(expr, &mut columns);
+                        let se = parse_expr(expr)?;
+                        computed_columns.push(SelectColumn {
+                            expr: se,
+                            alias: Some(alias.value.clone()),
+                        });
                     }
                 }
                 _ => {
-                    return Err(EngineError::NotImplemented(format!(
-                        "unsupported expression in SELECT: {expr}"
-                    )));
+                    extract_ast_columns(expr, &mut columns);
+                    let se = parse_expr(expr)?;
+                    computed_columns.push(SelectColumn {
+                        expr: se,
+                        alias: Some(alias.value.clone()),
+                    });
                 }
             },
             _ => {
@@ -7782,6 +7793,59 @@ fn parse_select_items(
             None,
             computed_columns,
         ))
+    }
+}
+
+/// Recursively extract physical columns needed for an AST expression
+fn extract_ast_columns(expr: &Expr, cols: &mut Vec<String>) {
+    match expr {
+        Expr::Identifier(ident) => {
+            if !cols.contains(&ident.value) {
+                cols.push(ident.value.clone());
+            }
+        }
+        Expr::CompoundIdentifier(parts) => {
+            if let Some(last) = parts.last() {
+                if !cols.contains(&last.value) {
+                    cols.push(last.value.clone());
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            extract_ast_columns(left, cols);
+            extract_ast_columns(right, cols);
+        }
+        Expr::UnaryOp { expr: inner, .. } => extract_ast_columns(inner, cols),
+        Expr::Nested(inner) => extract_ast_columns(inner, cols),
+        Expr::Function(func) => {
+            for arg in &func.args {
+                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner)) = arg {
+                    extract_ast_columns(inner, cols);
+                }
+            }
+        }
+        Expr::Case { operand, conditions, results, else_result } => {
+            if let Some(op) = operand { extract_ast_columns(op, cols); }
+            for cond in conditions { extract_ast_columns(cond, cols); }
+            for res in results { extract_ast_columns(res, cols); }
+            if let Some(er) = else_result { extract_ast_columns(er, cols); }
+        }
+        Expr::Cast { expr: inner, .. } => extract_ast_columns(inner, cols),
+        Expr::InList { expr: inner, list, .. } => {
+            extract_ast_columns(inner, cols);
+            for e in list { extract_ast_columns(e, cols); }
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => extract_ast_columns(inner, cols),
+        Expr::Like { expr: inner, pattern, .. } => {
+            extract_ast_columns(inner, cols);
+            extract_ast_columns(pattern, cols);
+        }
+        Expr::Between { expr: inner, low, high, .. } => {
+            extract_ast_columns(inner, cols);
+            extract_ast_columns(low, cols);
+            extract_ast_columns(high, cols);
+        }
+        _ => {}
     }
 }
 
@@ -9737,6 +9801,14 @@ pub fn parse_expr(expr: &Expr) -> Result<SelectExpr, EngineError> {
             }
         }
 
+        Expr::Extract { field, expr } => {
+            let parsed_expr = parse_expr(expr)?;
+            Ok(SelectExpr::Function(ScalarFunction::Extract {
+                field: field.to_string(),
+                expr: Box::new(parsed_expr),
+            }))
+        }
+
         _ => Err(EngineError::NotImplemented(format!(
             "unsupported expression: {expr}"
         ))),
@@ -10255,7 +10327,7 @@ fn parse_function_expr(func: &sqlparser::ast::Function) -> Result<SelectExpr, En
                 metric,
             }
         }
-        "vector_similarity" | "vec_similarity" | "cosine_similarity" => {
+        "vector_similarity" | "vec_similarity" | "cosine_similarity" | "similarity" => {
             // Convenience function that returns similarity (1 - distance for cosine)
             let vec1 = get_arg(&args, 0, "VECTOR_SIMILARITY")?;
             let vec2 = get_arg(&args, 1, "VECTOR_SIMILARITY")?;

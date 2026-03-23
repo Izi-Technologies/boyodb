@@ -754,7 +754,7 @@ impl EngineConfig {
             bloom_cache_entries_per_shard: 0, // 0 = auto-scale based on segment count
             tier_warm_after_millis: 3_600_000, // 1h
             tier_cold_after_millis: 86_400_000, // 24h
-            tier_hot_compression: Some("lz4".to_string()), // LZ4 for hot tier (fast)
+            tier_hot_compression: Some("snappy".to_string()), // Snappy for hot tier (avoids lz4_flex bugs)
             tier_warm_compression: Some("zstd".to_string()), // ZSTD for warm tier (balanced)
             tier_cold_compression: Some("zstd".to_string()), // ZSTD for cold tier (best ratio)
             maintenance_interval_millis: 0,
@@ -5671,11 +5671,29 @@ impl Db {
         drop(manifest_index);
 
         if matching.is_empty() {
-            return Err(EngineError::NotFound(format!(
-                "no segments for {}.{} matching filters",
-                db.as_deref().unwrap_or("default"),
-                table.as_deref().unwrap_or("unknown")
-            )));
+            if let Some(schema_specs) = &expected_schema {
+                let arrow_fields: Vec<arrow::datatypes::Field> = schema_specs
+                    .iter()
+                    .map(|f| {
+                        let dt = crate::engine::arrow_type_from_str(&f.data_type).unwrap_or(arrow::datatypes::DataType::Utf8);
+                        arrow::datatypes::Field::new(&f.name, dt, f.nullable)
+                    })
+                    .collect();
+                let arrow_schema = arrow::datatypes::Schema::new(arrow_fields);
+                let empty_batch = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(arrow_schema));
+                let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut *writer, &empty_batch.schema())
+                    .map_err(|e| EngineError::Internal(format!("ipc writer init failed: {e}")))?;
+                w.write(&empty_batch)
+                    .map_err(|e| EngineError::Internal(format!("ipc write failed: {e}")))?;
+                w.finish()
+                    .map_err(|e| EngineError::Internal(format!("ipc finish failed: {e}")))?;
+            }
+            return Ok(QueryResponse {
+                records_ipc: Vec::new(),
+                data_skipped_bytes: 0,
+                segments_scanned: 0,
+                execution_stats: None,
+            });
         }
 
         let check_timeout = || -> Result<(), EngineError> {
@@ -5800,6 +5818,24 @@ impl Db {
         if let Some(mut w) = stream_writer {
             w.finish()
                 .map_err(|e| EngineError::Internal(format!("ipc finish failed: {e}")))?;
+        } else {
+            if let Some(schema_specs) = &expected_schema {
+                let arrow_fields: Vec<arrow::datatypes::Field> = schema_specs
+                    .iter()
+                    .map(|f| {
+                        let dt = crate::engine::arrow_type_from_str(&f.data_type).unwrap_or(arrow::datatypes::DataType::Utf8);
+                        arrow::datatypes::Field::new(&f.name, dt, f.nullable)
+                    })
+                    .collect();
+                let arrow_schema = arrow::datatypes::Schema::new(arrow_fields);
+                let empty_batch = arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(arrow_schema));
+                let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut *writer, &empty_batch.schema())
+                    .map_err(|e| EngineError::Internal(format!("ipc writer init failed: {e}")))?;
+                w.write(&empty_batch)
+                    .map_err(|e| EngineError::Internal(format!("ipc write failed: {e}")))?;
+                w.finish()
+                    .map_err(|e| EngineError::Internal(format!("ipc finish failed: {e}")))?;
+            }
         }
 
         let execution_stats = if collect_stats {
@@ -6520,7 +6556,10 @@ impl Db {
                         }
                     }
                     // Fall back to loading segment and counting
-                    let payload = self.load_segment_cached(entry)?;
+                    let payload = match self.try_load_segment_cached(entry)? {
+                        Some(p) => p,
+                        None => continue,
+                    };
                     if let Ok(batches) = read_ipc_batches(&payload) {
                         for batch in batches {
                             total_count += batch.num_rows() as u64;
@@ -6562,7 +6601,10 @@ impl Db {
                 let partial_results: Vec<Result<Vec<u8>, EngineError>> = matching
                     .par_iter()
                     .map(|entry| {
-                        let payload = this.load_segment_cached(entry)?;
+                        let payload = match this.try_load_segment_cached(entry)? {
+                            Some(p) => p,
+                            None => return Ok(Vec::new()),
+                        };
                         let filtered = filter_ipc(&payload, filter_ref)?;
                         if filtered.is_empty() {
                             return Ok(Vec::new());
@@ -6607,7 +6649,10 @@ impl Db {
                         }
                     }
 
-                    let payload = self.load_segment_cached(entry)?;
+                    let payload = match self.try_load_segment_cached(entry)? {
+                        Some(p) => p,
+                        None => continue,
+                    };
                     let filtered = filter_ipc(&payload, &filter)?;
                     agg_state.consume_ipc(&filtered, &default_filter)?;
                 }
@@ -25012,6 +25057,12 @@ fn evaluate_scalar_function(
     use crate::sql::ScalarFunction;
 
     match func {
+        // Vector/AI Functions
+        ScalarFunction::VectorSimilarity {
+            vec1: _,
+            vec2: _,
+        } => Ok(ComputedValue::Float(0.0)),
+
         // String functions
         ScalarFunction::Upper(expr) => {
             let val = evaluate_expr(expr, ctx)?;

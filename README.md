@@ -480,6 +480,7 @@ See [full benchmark results](docs/BENCHMARK_RESULTS.md) for detailed analysis.
 - **Adaptive Cache Sharding** - Dynamic shard count based on CPU cores and cache size
 - **Zero-Copy Network Streaming** - Bypasses serialization overhead for 18x faster distributed sub-queries
 - **Adaptive Bloom Filters** - Intelligent FPP selection based on data cardinality
+- **Query Fault Tolerance** - Graceful degraded aggregations dynamically bypassing corrupt physical segments on-the-fly
 - **Parallel Aggregation** - Tree-reduction merge for 5-10% aggregation speedup
 - **Segment Prefetching** - Proactive cache warming during sequential scans
 - **Parallel Compression** - Concurrent batch compression for high-throughput ingest

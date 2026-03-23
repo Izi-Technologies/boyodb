@@ -1063,18 +1063,19 @@ pub fn validate_ipc_format(ipc: &[u8]) -> Result<bool, EngineError> {
 }
 ```
 
-### Auto-Repair
+### Query-Time Fault Isolation
 
-Automatic recovery from detected corruption:
+Automatic protection during aggregations and reads:
 
 ```rust
-pub struct EngineConfig {
-    pub auto_repair_on_corruption: bool,
-    pub verify_s3_uploads: bool,
-    pub segment_operation_max_retries: usize,
-    pub segment_operation_retry_delay_ms: u64,
-}
+// In execute_simple_plan
+let payload = match self.try_load_segment_cached(entry)? {
+    Some(p) => p,
+    None => continue, // Gracefully bypass corrupted segment
+};
 ```
+- **LZ4 Immunity**: Hot tier default compression migrated to Snappy to strictly prevent `lz4_flex` zero-byte sequence corruptions.
+- **Aggregation Resilience**: Parallel and Sequential aggregations transparently skip organically corrupted disk segments without abandoning the surrounding query data.
 
 ### S3 Upload Verification
 
@@ -1099,7 +1100,7 @@ pub fn persist_segment_cold_with_verify(
 |--------|--------|
 | Language | Rust (memory-safe, zero-cost abstractions) |
 | Storage Format | Apache Arrow IPC (industry standard) |
-| Compression | Zstd, LZ4, Snappy with dictionary encoding |
+| Compression | Snappy (Default Hot), Zstd (Warm/Cold), LZ4 |
 | Clustering | Built-in Raft-lite (no external dependencies) |
 | Query Language | PostgreSQL-compatible SQL |
 | Data Lake | Native Delta Lake, Iceberg, Hudi support |

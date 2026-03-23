@@ -68,4 +68,4 @@ Status: complete
     - Configurable granularity for pruning tradeoffs.
 
 14) Tiered storage
-    - Hot, warm, cold tiers with different compression and caching policies.
+    - Hot (Snappy), warm (Zstd), cold (Zstd) tiers with varying caching and decompression fault-tolerance policies.

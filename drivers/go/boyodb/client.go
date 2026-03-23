@@ -108,6 +108,18 @@ type Config struct {
 	// QueryTimeout is the default query timeout in milliseconds.
 	// Default: 30000 (30 seconds)
 	QueryTimeout uint32
+
+	// DisableStreaming disables streaming mode for query_binary operations.
+	// When true, queries use the non-streaming response path which may be
+	// more compatible with some server versions.
+	// Default: false
+	DisableStreaming bool
+
+	// DisableBinaryIngest disables binary IPC ingestion and uses base64 encoding instead.
+	// When true, ingestion uses the JSON-based ingestipc operation with base64-encoded
+	// payloads instead of the binary ingest_ipc_binary operation.
+	// Default: false
+	DisableBinaryIngest bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -518,7 +530,8 @@ func (c *Client) QueryContext(sql, database string, timeoutMillis uint32) (*Resu
 		"sql":            sql,
 		"timeout_millis": timeoutMillis,
 	}
-	if op == "query_binary" {
+	// Only enable streaming if DisableStreaming is false
+	if op == "query_binary" && !c.config.DisableStreaming {
 		req["stream"] = true
 	}
 	if database != "" {
@@ -781,18 +794,35 @@ func (c *Client) IngestCSV(database, table string, csvData []byte, hasHeader boo
 
 // IngestIPC ingests Arrow IPC data into a table.
 func (c *Client) IngestIPC(database, table string, ipcData []byte) error {
-	if err := c.sendRequestBinary(map[string]interface{}{
-		"op":       "ingest_ipc_binary",
-		"database": database,
-		"table":    table,
-	}, ipcData); err == nil {
-		return nil
+	// Try binary ingest first unless disabled
+	if !c.config.DisableBinaryIngest {
+		if err := c.sendRequestBinary(map[string]interface{}{
+			"op":               "ingestipbinary",
+			"database":         database,
+			"table":            table,
+			"watermark_micros": time.Now().UnixMicro(),
+		}, ipcData); err == nil {
+			return nil
+		}
+		// Binary failed, reconnect before trying base64 fallback
+		c.mu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+			c.conn = nil
+		}
+		c.mu.Unlock()
+		if err := c.connect(); err != nil {
+			return fmt.Errorf("reconnect failed after binary ingest error: %w", err)
+		}
 	}
+
+	// Use base64-encoded JSON ingest (op is lowercase per serde rename_all)
 	resp, err := c.sendRequest(map[string]interface{}{
-		"op":             "ingestipc",
-		"database":       database,
-		"table":          table,
-		"payload_base64": base64.StdEncoding.EncodeToString(ipcData),
+		"op":               "ingestipc",
+		"database":         database,
+		"table":            table,
+		"payload_base64":   base64.StdEncoding.EncodeToString(ipcData),
+		"watermark_micros": time.Now().UnixMicro(),
 	})
 	if err != nil {
 		return err
