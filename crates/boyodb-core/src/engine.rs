@@ -22618,7 +22618,7 @@ fn compress_payload_adaptive(
     }
 }
 
-fn decompress_payload(payload: Vec<u8>, compression: Option<&str>) -> Result<Vec<u8>, EngineError> {
+pub fn decompress_payload(payload: Vec<u8>, compression: Option<&str>) -> Result<Vec<u8>, EngineError> {
     match compression {
         Some("zstd") => zstd_decode_all(Cursor::new(payload))
             .map_err(|e| EngineError::InvalidArgument(format!("zstd decode failed: {e}"))),
@@ -25058,10 +25058,71 @@ fn evaluate_scalar_function(
 
     match func {
         // Vector/AI Functions
-        ScalarFunction::VectorSimilarity {
-            vec1: _,
-            vec2: _,
-        } => Ok(ComputedValue::Float(0.0)),
+        ScalarFunction::VectorSimilarity { vec1, vec2 } => {
+            let val1 = evaluate_expr(vec1, ctx)?;
+            let val2 = evaluate_expr(vec2, ctx)?;
+
+            if matches!(val1, ComputedValue::Null) || matches!(val2, ComputedValue::Null) {
+                return Ok(ComputedValue::Null);
+            }
+
+            let parse_vector = |v: &ComputedValue| -> Result<Vec<f64>, EngineError> {
+                match v {
+                    ComputedValue::String(s) | ComputedValue::Json(s) => {
+                        let clean = s.trim().trim_start_matches('[').trim_end_matches(']');
+                        let mut vec = Vec::new();
+                        for part in clean.split(',') {
+                            let part = part.trim();
+                            if !part.is_empty() {
+                                let f = part.parse::<f64>().map_err(|e| {
+                                    EngineError::InvalidArgument(format!("Invalid vector string format: {e}"))
+                                })?;
+                                vec.push(f);
+                            }
+                        }
+                        Ok(vec)
+                    }
+                    ComputedValue::Binary(b) => {
+                        if b.len() % 4 != 0 {
+                            return Err(EngineError::InvalidArgument("Binary vector length not a multiple of 4".to_string()));
+                        }
+                        let mut vec = Vec::with_capacity(b.len() / 4);
+                        for chunk in b.chunks_exact(4) {
+                            let bytes: [u8; 4] = chunk.try_into().unwrap();
+                            vec.push(f32::from_le_bytes(bytes) as f64);
+                        }
+                        Ok(vec)
+                    }
+                    _ => Err(EngineError::InvalidArgument("Vector similarity requires String, Json, or Binary payload types".to_string())),
+                }
+            };
+
+            let v1 = parse_vector(&val1)?;
+            let v2 = parse_vector(&val2)?;
+
+            if v1.len() != v2.len() {
+                return Err(EngineError::InvalidArgument("Vector dimensions do not match for similarity computation".to_string()));
+            }
+            if v1.is_empty() {
+                return Ok(ComputedValue::Float(0.0));
+            }
+
+            let mut dot_product = 0.0;
+            let mut norm1 = 0.0;
+            let mut norm2 = 0.0;
+
+            for (a, b) in v1.iter().zip(v2.iter()) {
+                dot_product += a * b;
+                norm1 += a * a;
+                norm2 += b * b;
+            }
+
+            if norm1 == 0.0 || norm2 == 0.0 {
+                Ok(ComputedValue::Float(0.0))
+            } else {
+                Ok(ComputedValue::Float(dot_product / (norm1.sqrt() * norm2.sqrt())))
+            }
+        }
 
         // String functions
         ScalarFunction::Upper(expr) => {
